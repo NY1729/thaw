@@ -843,6 +843,72 @@ fn escape_ts_string_literal(source: &str) -> String {
     out
 }
 
+/// One registry package's bundled JS to auto-load, for
+/// `generate_module_init`.
+pub struct ModuleBundle<'a> {
+    pub package_name: &'a str,
+    pub js_source: &'a str,
+    /// This package's Fallback function names (from its `.d.ts`,
+    /// `Classification::Fallback { function, .. }`) -- used by
+    /// `wrap_as_commonjs_module` to bind a bare `module.exports = fn`
+    /// default export (very common for small single-function utility
+    /// packages, e.g. `left-pad`) to the name `callDynamic` will look it
+    /// up by.
+    pub fallback_names: &'a [String],
+}
+
+/// Wraps a real npm package's CommonJS source so it can run inside
+/// QuickJS-NG's bare global scope: defines `module`/`exports`/`require`
+/// as *globals* before the source runs (real CommonJS/UMD source
+/// references them unconditionally, and QuickJS-NG's global scope has
+/// none of them), runs the source completely unwrapped/at top level
+/// (deliberately -- nesting it inside a function scope would break the
+/// existing simple case of a hand-authored bundle using bare top-level
+/// `function` declarations, which rely on top-level scope becoming
+/// global properties directly, the same way `loadScript` already worked
+/// before this), then copies whatever the source assigned to
+/// `module.exports` onto the global scope too, so `callDynamic`'s
+/// by-name lookup (`thaw_js_call`, which only ever looks up *global*
+/// functions) can find it either way.
+///
+/// Validated by running real, unmodified npm packages through the
+/// Fallback path: `left-pad` (`module.exports = leftPad`) and `slugify`
+/// (a UMD wrapper that takes the CommonJS branch once `module`/`exports`
+/// exist) both load and run correctly, and a plain hand-authored bundle
+/// with no `module.exports` at all keeps working exactly as before.
+/// `is-odd` -- which calls `require('is-number')` at load time -- fails
+/// with a clear error instead of the pre-existing opaque
+/// `ReferenceError: module is not defined`, correctly surfacing a real,
+/// documented limitation (see below) rather than silently misbehaving.
+///
+/// `require` is a stub that throws immediately: resolving a real
+/// inter-package dependency graph inside QuickJS-NG remains out of scope
+/// (docs/design/bridge.md section 7's "未解決の論点"/"unresolved
+/// questions"). This only unblocks packages with no runtime dependencies
+/// of their own, which covers plenty of real small utility packages.
+fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String {
+    // `name` is always a valid JS identifier here: it's a function name
+    // SWC already parsed out of a `.d.ts` `declare function` statement,
+    // not arbitrary text, so splicing it directly as a property-access
+    // identifier (not a bracketed string) is safe.
+    let bind_default_exports: String = fallback_names
+        .iter()
+        .map(|name| {
+            format!(
+                "if (typeof module.exports === 'function') {{ globalThis.{name} = module.exports; }}\n"
+            )
+        })
+        .collect();
+    format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported in the Fallback path yet\"); }};\n\
+         {js_source}\n\
+         if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
+         {bind_default_exports}"
+    )
+}
+
 /// Generates the `__thaw_module_init` function that loads each registry
 /// package's bundled JS source via `loadScript`, once, before user code
 /// runs (thaw-llvm's `MODULE_INIT_SYMBOL`/`call_module_init_if_present`
@@ -850,22 +916,24 @@ fn escape_ts_string_literal(source: &str) -> String {
 /// registry package's Fallback functions (see `generate_shim`) callable
 /// without the *user* having to call `loadScript` themselves -- they still
 /// need to `--use` the package (thaw-cli), but not hand-write the load.
+/// Each bundle's JS is passed through `wrap_as_commonjs_module` first, so
+/// a real npm package's actual CommonJS/UMD source works unmodified.
 ///
-/// `bundles` is `(package_name, js_source)` pairs, in the order they
-/// should load (later packages can rely on earlier ones already being
-/// loaded into the shared QuickJS-NG global scope). Returns an empty
-/// string -- no function emitted at all -- when `bundles` is empty, since
-/// there would be nothing for it to do.
-pub fn generate_module_init(bundles: &[(&str, &str)]) -> String {
+/// `bundles` is in the order packages should load (later packages can
+/// rely on earlier ones already being loaded into the shared QuickJS-NG
+/// global scope). Returns an empty string -- no function emitted at all
+/// -- when `bundles` is empty, since there would be nothing for it to do.
+pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
     if bundles.is_empty() {
         return String::new();
     }
     let mut out = String::from("function __thaw_module_init(): void {\n");
-    for (name, source) in bundles {
-        out.push_str(&format!("    // {name}\n"));
+    for bundle in bundles {
+        out.push_str(&format!("    // {}\n", bundle.package_name));
+        let wrapped = wrap_as_commonjs_module(bundle.js_source, bundle.fallback_names);
         out.push_str(&format!(
             "    loadScript(\"{}\");\n",
-            escape_ts_string_literal(source)
+            escape_ts_string_literal(&wrapped)
         ));
     }
     out.push_str("}\n");
@@ -1210,22 +1278,64 @@ mod tests {
     #[test]
     fn generates_load_script_call_per_bundle() {
         let bundles = [
-            ("left-pad", "function pad(s) { return s; }"),
-            ("is-odd", "function isOdd(n) { return n % 2 === 1; }"),
+            ModuleBundle {
+                package_name: "left-pad",
+                js_source: "function pad(s) { return s; }",
+                fallback_names: &[],
+            },
+            ModuleBundle {
+                package_name: "is-odd",
+                js_source: "function isOdd(n) { return n % 2 === 1; }",
+                fallback_names: &[],
+            },
         ];
         let init = generate_module_init(&bundles);
         assert!(init.starts_with("function __thaw_module_init(): void {\n"));
-        assert!(init.contains(r#"loadScript("function pad(s) { return s; }");"#));
-        assert!(init.contains(r#"loadScript("function isOdd(n) { return n % 2 === 1; }");"#));
+        assert!(init.contains("function pad(s) { return s; }"));
+        assert!(init.contains("function isOdd(n) { return n % 2 === 1; }"));
         // Loaded in the given order.
         assert!(init.find("left-pad").unwrap() < init.find("is-odd").unwrap());
     }
 
     #[test]
     fn escapes_quotes_and_newlines_in_bundled_source() {
-        let bundles = [("pkg", "function f() {\n  return \"a\\b\";\n}")];
+        let bundles = [ModuleBundle {
+            package_name: "pkg",
+            js_source: "function f() {\n  return \"a\\b\";\n}",
+            fallback_names: &[],
+        }];
         let init = generate_module_init(&bundles);
-        assert!(init.contains(r#"loadScript("function f() {\n  return \"a\\b\";\n}");"#));
+        // The wrapper adds its own quotes/backslashes/newlines too; this
+        // just confirms the *bundle's own* problematic characters survived
+        // escaping correctly once embedded inside the wrapped script.
+        assert!(init.contains(r#"return \"a\\b\";\n"#));
+    }
+
+    #[test]
+    fn wraps_real_commonjs_source_and_binds_default_export() {
+        // The exact shape of left-pad's actual published `index.js`:
+        // `module.exports = leftPad;`, no named exports object.
+        let js_source = "module.exports = function leftPad(str) { return str; };";
+        let wrapped = wrap_as_commonjs_module(js_source, &["leftPad".to_string()]);
+        assert!(wrapped.contains("globalThis.module = { exports: {} };"));
+        assert!(wrapped.contains("globalThis.require ="));
+        assert!(wrapped.contains(js_source));
+        assert!(wrapped.contains("globalThis.leftPad = module.exports;"));
+    }
+
+    #[test]
+    fn bare_global_function_bundle_is_unaffected_by_commonjs_wrapping() {
+        // A hand-authored bundle with no `module.exports` at all (this
+        // session's registry examples before real npm packages were
+        // tested) must keep defining a plain global function, not get
+        // hidden inside a nested scope.
+        let wrapped = wrap_as_commonjs_module(
+            "function greet(name) { return 'hi, ' + name; }",
+            &["greet".to_string()],
+        );
+        assert!(wrapped.contains("function greet(name) { return 'hi, ' + name; }"));
+        // Not wrapped in an extra IIFE/function around the source itself.
+        assert!(!wrapped.contains("(function(module, exports, require)"));
     }
 
     /// Same bar as `generated_shim_round_trips_through_real_lowering`: the
@@ -1233,7 +1343,12 @@ mod tests {
     /// Thaw source, not just plausible text.
     #[test]
     fn generated_module_init_round_trips_through_real_lowering() {
-        let init = generate_module_init(&[("greeter", "function greet(){return 'hi';}")]);
+        let fallback_names = vec!["greet".to_string()];
+        let init = generate_module_init(&[ModuleBundle {
+            package_name: "greeter",
+            js_source: "function greet(){return 'hi';}",
+            fallback_names: &fallback_names,
+        }]);
         let program_source = format!(
             "{init}\nfunction main(): void {{\n    console.log(String(callDynamic(\"greet\", JSON.parse(\"[]\"))));\n}}\n"
         );
