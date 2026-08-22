@@ -1,0 +1,10 @@
+[package]
+name = "thaw-quickjs"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+rquickjs = "0.12.2"

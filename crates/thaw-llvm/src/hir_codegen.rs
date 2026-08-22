@@ -198,6 +198,16 @@ impl<'ctx> HirCompiler<'ctx> {
             json_as_bool_type,
             Some(Linkage::External),
         );
+
+        // thaw-quickjs: the QuickJS-NG fallback path (docs/design/bridge.md
+        // section 7). Same i8-not-i1 reasoning as `thaw_json_as_bool`.
+        let js_load_type = self.context.i8_type().fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_js_load", js_load_type, Some(Linkage::External));
+
+        let js_call_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_js_call", js_call_type, Some(Linkage::External));
     }
 
     fn llvm_symbol_for(name: &str) -> String {
@@ -900,6 +910,71 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())
     }
 
+    /// `loadScript(source): boolean`, via thaw-quickjs's `thaw_js_load`.
+    /// Same `i8` -> `i1` conversion as `compile_json_as_bool` and for the
+    /// same reason (the extern function avoids relying on `bool`'s C ABI
+    /// shape).
+    fn compile_load_script(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("loadScript expects exactly one argument".to_string());
+        };
+        let source_val = self.compile_expr(source)?;
+        let function = self.module.get_function("thaw_js_load").unwrap();
+        let call = self
+            .builder
+            .build_call(function, &[source_val.into()], "load_script_u8")
+            .map_err(|e| e.to_string())?;
+        let u8_val = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_load did not return a value")?
+            .into_int_value();
+        let zero = self.context.i8_type().const_int(0, false);
+        self.builder
+            .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "load_script_ok")
+            .map(Into::into)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `callDynamic(name, args): Json` -- the QuickJS-NG fallback path
+    /// (docs/design/bridge.md section 7). Composes thaw-std's
+    /// `thaw_json_stringify`/`thaw_json_parse` with thaw-quickjs's
+    /// `thaw_js_call` so a `Json` value flows in and out without this
+    /// module needing to know thaw-quickjs's internals (or vice versa).
+    fn compile_call_dynamic(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [name, call_args] = args else {
+            return Err("callDynamic expects exactly two arguments (name, args)".to_string());
+        };
+        let name_val = self.compile_expr(name)?;
+        let args_json_val = self.compile_expr(call_args)?;
+
+        let stringify_fn = self.module.get_function("thaw_json_stringify").unwrap();
+        let args_json_str = self
+            .builder
+            .build_call(stringify_fn, &[args_json_val.into()], "call_dynamic_args_json")
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_stringify did not return a value")?;
+
+        let call_fn = self.module.get_function("thaw_js_call").unwrap();
+        let result_json_str = self
+            .builder
+            .build_call(call_fn, &[name_val.into(), args_json_str.into()], "call_dynamic_result_json")
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_call did not return a value")?;
+
+        let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
+        self.builder
+            .build_call(parse_fn, &[result_json_str.into()], "call_dynamic_result")
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse did not return a value".to_string())
+    }
+
     fn compile_env_var(&mut self, name: &str) -> Result<BasicValueEnum<'ctx>, String> {
         let name_global = self
             .builder
@@ -1013,6 +1088,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "JSON.stringify" => {
                 return self.compile_single_arg_call("thaw_json_stringify", args, "JSON.stringify")
             }
+            "loadScript" => return self.compile_load_script(args),
+            "callDynamic" => return self.compile_call_dynamic(args),
             _ => {}
         }
 
@@ -1262,15 +1339,21 @@ mod tests {
 
         compiler.write_object_file(&obj_path).unwrap();
 
-        // Always link both -- an unreferenced static archive member is
+        // Always link all three -- an unreferenced static archive member is
         // simply never pulled in, same reasoning as thaw-cli's build().
         let arena_lib = build_staticlib("thaw-arena");
         let std_lib = build_staticlib("thaw-std");
+        let quickjs_lib = build_staticlib("thaw-quickjs");
 
         let link_status = Command::new("cc")
             .arg(&obj_path)
             .arg(&arena_lib)
             .arg(&std_lib)
+            .arg(&quickjs_lib)
+            // QuickJS-NG's C code calls libm math functions directly;
+            // `rustc` normally adds `-lm` automatically when it does the
+            // final link, but this is a manual `cc` invocation instead.
+            .arg("-lm")
             .arg("-o")
             .arg(&exe_path)
             .status()
@@ -1525,6 +1608,34 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "generic_interfaces"), "42\nhi\n");
+    }
+
+    /// The QuickJS-NG fallback path (docs/design/bridge.md section 7): a
+    /// compiled Thaw program loads real JS source and calls into it,
+    /// round-tripping arguments/results through `Json`.
+    #[test]
+    fn compiles_quickjs_fallback_path() {
+        let source = r#"
+            function main(): void {
+                const ok: boolean = loadScript(
+                    "function add(a, b) { return a + b; } function greet(name) { return 'hello, ' + name; } function later(x) { return Promise.resolve(x * 2); }"
+                );
+                console.log(ok);
+
+                const sum = callDynamic("add", JSON.parse("[2, 3]"));
+                console.log(Number(sum));
+
+                const greeting = callDynamic("greet", JSON.parse("[\"thaw\"]"));
+                console.log(String(greeting));
+
+                const doubled = callDynamic("later", JSON.parse("[21]"));
+                console.log(Number(doubled));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "quickjs_fallback"),
+            "true\n5\nhello, thaw\n42\n"
+        );
     }
 
     /// V1 async/await (docs/design/async-await.md): `async`/`await` are
