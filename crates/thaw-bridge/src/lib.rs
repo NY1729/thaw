@@ -149,41 +149,80 @@ fn resolve_interface(
         resolved.insert(name.to_string(), ty.clone());
         return ty;
     }
-    if !iface.extends.is_empty() {
-        let ty = DtsType::Unsupported(format!("`extends` on interface `{name}` is not classified yet"));
-        resolved.insert(name.to_string(), ty.clone());
-        return ty;
-    }
 
     in_progress.push(name.to_string());
 
-    let mut fields = Vec::with_capacity(iface.body.body.len());
+    // `extends`: same rule as thaw-hir's `resolve_interface` -- base
+    // fields first (in `extends`-list, then declaration, order), then this
+    // interface's own fields; any name collision degrades the whole
+    // interface to `Unsupported` rather than guessing an override rule.
+    let mut fields: Vec<(String, HirType)> = Vec::new();
     let mut failure = None;
-    for member in &iface.body.body {
-        let TsTypeElement::TsPropertySignature(prop) = member else {
-            failure = Some("has a non-property member (method/index signature)".to_string());
+    'extends: for base in &iface.extends {
+        if base.type_args.is_some() {
+            failure = Some(
+                "extends a base with type arguments, which is not classified yet".to_string(),
+            );
+            break;
+        }
+        let Expr::Ident(base_ident) = base.expr.as_ref() else {
+            failure = Some("has an unsupported `extends` target (only a plain interface name)".to_string());
             break;
         };
-        let field_name = match prop.key.as_ref() {
-            Expr::Ident(ident) => ident.sym.to_string(),
-            _ => {
-                failure = Some("has an unsupported property key".to_string());
+        let base_name = base_ident.sym.to_string();
+        match resolve_interface(&base_name, raw, resolved, in_progress) {
+            DtsType::Native(HirType::Object(base_fields)) => {
+                for (field_name, field_ty) in base_fields {
+                    if fields.iter().any(|(n, _)| *n == field_name) {
+                        failure = Some(format!(
+                            "inherits field `{field_name}` from `{base_name}`, which collides with an earlier field"
+                        ));
+                        break 'extends;
+                    }
+                    fields.push((field_name, field_ty));
+                }
+            }
+            DtsType::Native(_) => unreachable!("resolve_interface always returns an Object or Unsupported"),
+            DtsType::Unsupported(reason) => {
+                failure = Some(format!("extends unresolvable base `{base_name}`: {reason}"));
                 break;
             }
-        };
-        let field_ty = match &prop.type_ann {
-            Some(ann) => resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress),
-            None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
-        };
-        match field_ty {
-            // Any type hir_codegen's `basic_type` can represent is fine as
-            // a field now (fields are word-sized regardless of their own
-            // type -- see hir_codegen.rs's `basic_type` for the
-            // `HirType::Object` case), including a nested object.
-            DtsType::Native(ty) => fields.push((field_name, ty)),
-            DtsType::Unsupported(reason) => {
-                failure = Some(format!("field `{field_name}`: {reason}"));
+        }
+    }
+
+    if failure.is_none() {
+        for member in &iface.body.body {
+            let TsTypeElement::TsPropertySignature(prop) = member else {
+                failure = Some("has a non-property member (method/index signature)".to_string());
                 break;
+            };
+            let field_name = match prop.key.as_ref() {
+                Expr::Ident(ident) => ident.sym.to_string(),
+                _ => {
+                    failure = Some("has an unsupported property key".to_string());
+                    break;
+                }
+            };
+            if fields.iter().any(|(n, _)| *n == field_name) {
+                failure = Some(format!(
+                    "declares field `{field_name}`, which collides with an inherited field"
+                ));
+                break;
+            }
+            let field_ty = match &prop.type_ann {
+                Some(ann) => resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress),
+                None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+            };
+            match field_ty {
+                // Any type hir_codegen's `basic_type` can represent is fine
+                // as a field now (fields are word-sized regardless of
+                // their own type -- see hir_codegen.rs's `basic_type` for
+                // the `HirType::Object` case), including a nested object.
+                DtsType::Native(ty) => fields.push((field_name, ty)),
+                DtsType::Unsupported(reason) => {
+                    failure = Some(format!("field `{field_name}`: {reason}"));
+                    break;
+                }
             }
         }
     }
@@ -562,6 +601,42 @@ mod tests {
                 value: T;
             }
             export declare function unwrap(b: Box<number>): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+    }
+
+    #[test]
+    fn classifies_extends_as_fast_path_with_base_fields_prepended() {
+        let source = r#"
+            export interface Shape {
+                color: number;
+            }
+            export interface Circle extends Shape {
+                radius: number;
+            }
+            export declare function area(c: Circle): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(
+            classify(&funcs[0]),
+            Classification::FastPath(FfiSignature {
+                symbol: "area".into(),
+                params: vec![HirType::Object(vec![
+                    ("color".into(), HirType::F64),
+                    ("radius".into(), HirType::F64),
+                ])],
+                ret: HirType::F64,
+            })
+        );
+    }
+
+    #[test]
+    fn falls_back_on_extends_field_collision() {
+        let source = r#"
+            export interface A { x: number; }
+            export interface B extends A { x: number; }
+            export declare function f(b: B): number;
         "#;
         let funcs = parse_dts(source).unwrap();
         assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
