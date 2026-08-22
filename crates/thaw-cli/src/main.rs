@@ -66,8 +66,11 @@ fn build(input: &Path, output: &Path) -> Result<(), String> {
     let obj_path = output.with_extension("o");
     compiler.write_object_file(&obj_path)?;
 
+    let arena_lib = build_thaw_arena_staticlib()?;
+
     let link_status = Command::new("cc")
         .arg(&obj_path)
+        .arg(&arena_lib)
         .arg("-o")
         .arg(output)
         .status()
@@ -81,4 +84,38 @@ fn build(input: &Path, output: &Path) -> Result<(), String> {
 
     println!("built `{}`", output.display());
     Ok(())
+}
+
+/// Builds thaw-arena as a staticlib (backing Phase 1 array allocation; see
+/// `thaw-llvm::hir_codegen`) and returns the path to the resulting `.a`
+/// file, parsed out of `cargo build`'s JSON artifact output. That's robust
+/// to `CARGO_TARGET_DIR` overrides, unlike guessing a relative path.
+fn build_thaw_arena_staticlib() -> Result<PathBuf, String> {
+    let output = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "thaw-arena",
+            "--message-format=json",
+        ])
+        .output()
+        .map_err(|e| format!("failed to invoke `cargo build -p thaw-arena`: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building thaw-arena failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(idx) = line.find("\"filenames\":[\"") {
+            let rest = &line[idx + "\"filenames\":[\"".len()..];
+            if let Some(end) = rest.find(".a\"") {
+                return Ok(PathBuf::from(&rest[..end + 2]));
+            }
+        }
+    }
+    Err("could not find libthaw_arena.a in `cargo build` output".to_string())
 }

@@ -75,6 +75,21 @@ pub enum HirExpr {
     Block(Vec<HirStmt>),
     FfiCall(FfiSignature, Vec<HirExpr>),
     DynamicCall(Box<HirExpr>, Vec<HirExpr>),
+    /// `name = value` (and desugared compound assignments / `++`/`--`).
+    /// Evaluates to `value`.
+    Assign(Symbol, Box<HirExpr>),
+    /// Phase 1 arrays are number-only at codegen time (see hir_codegen);
+    /// the HIR shape itself doesn't enforce that.
+    ArrayLit(Vec<HirExpr>),
+    /// `array[index]`
+    Index(Box<HirExpr>, Box<HirExpr>),
+    /// `array[index] = value` (and desugared compound forms). Evaluates to
+    /// `value`.
+    IndexAssign(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>),
+    /// `array.length`. Not a general property-access node -- Phase 1 has no
+    /// object/member model yet, so this is special-cased at lowering time
+    /// the same way `console.log` is.
+    ArrayLen(Box<HirExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +97,15 @@ pub enum HirStmt {
     Expr(HirExpr),
     Return(Option<HirExpr>),
     Let(Symbol, HirType, HirExpr),
+    If(HirExpr, Vec<HirStmt>, Vec<HirStmt>),
+    While(HirExpr, Vec<HirStmt>),
+    Throw(HirExpr),
+    /// Phase 1 try/catch is intentionally limited: a `throw` only unwinds to
+    /// the nearest lexically-enclosing `try` *in the same HIR function* --
+    /// there is no real stack unwinding across function calls yet (that
+    /// needs either LLVM's invoke/landingpad machinery or a setjmp/longjmp
+    /// runtime, both deferred). `catch` binds the thrown value as a string.
+    Try(Vec<HirStmt>, Symbol, Vec<HirStmt>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
