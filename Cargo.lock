@@ -1088,6 +1088,7 @@ name = "thaw-registry"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "thaw-quickjs",
 ]
 
 [[package]]

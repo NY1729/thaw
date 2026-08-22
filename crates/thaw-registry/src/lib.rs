@@ -80,11 +80,15 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
 /// Where a freshly `add`ed package's declarations/JS entry came from,
 /// inside the fetched package itself -- informational only, since the
 /// scratch directory these were read from is deleted before `add`
-/// returns.
+/// returns. `bundled_file_count` is how many of the package's own files
+/// (`main` plus everything it reaches via same-package relative
+/// `require`s) got folded into `bundle.js` -- 1 for a package that's
+/// just a single file.
 #[derive(Debug, PartialEq)]
 pub struct AddedPackage {
     pub dts_relative_path: String,
     pub js_relative_path: String,
+    pub bundled_file_count: usize,
 }
 
 /// Fetches `package` via `npm install` (into a throwaway scratch
@@ -132,9 +136,8 @@ fn fetch_and_copy(
     let manifest = read_manifest(&package_dir)?;
 
     let main_field = manifest.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
-    let (js_relative_path, js_abs_path) = resolve_main_js_path(&package_dir, main_field)?;
-    let js_source = fs::read_to_string(&js_abs_path)
-        .map_err(|e| format!("failed to read `{js_relative_path}`: {e}"))?;
+    let (js_source, js_relative_path, bundled_file_count) =
+        bundle_commonjs_package(&package_dir, main_field)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
         Some((rel, abs)) => {
@@ -156,6 +159,7 @@ fn fetch_and_copy(
     Ok(AddedPackage {
         dts_relative_path,
         js_relative_path,
+        bundled_file_count,
     })
 }
 
@@ -241,31 +245,261 @@ fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(Str
 }
 
 /// Approximates enough of Node's CommonJS resolution algorithm to read a
-/// `main` field's actual file: try the path exactly as written, then
-/// with a `.js` extension appended, then as a directory containing
-/// `index.js`. Real packages commonly write `"main": "./index"` (no
-/// extension, resolved by Node at require-time) or `"main": "./lib"` (a
-/// directory) -- reading the literal `main` string as a path fails for
-/// both. Doesn't attempt the rest of Node's real algorithm (`package.json`
+/// module path relative to `package_dir`: try the path exactly as
+/// written, then with a `.js` extension appended, then as a directory
+/// containing `index.js`. Real packages commonly write `"main": "./index"`
+/// (no extension, resolved by Node at require-time) or `"main": "./lib"`
+/// (a directory) -- reading the literal string as a path fails for both.
+/// Also used, the same way, to resolve a same-package relative `require`
+/// spec against the requiring file's directory (`bundle_commonjs_package`).
+/// Doesn't attempt the rest of Node's real algorithm (`package.json`
 /// `exports` maps, `.json`/`.node` candidates, etc.) -- just these two
 /// common shapes.
-fn resolve_main_js_path(package_dir: &Path, main: &str) -> Result<(String, PathBuf), String> {
-    let trimmed = main.trim_end_matches('/');
+fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBuf), String> {
+    let trimmed = path.trim_end_matches('/');
     let candidates = [
-        main.to_string(),
+        path.to_string(),
         format!("{trimmed}.js"),
         format!("{trimmed}/index.js"),
     ];
     for candidate in &candidates {
-        let path = package_dir.join(candidate);
-        if path.is_file() {
-            return Ok((candidate.clone(), path));
+        let resolved = package_dir.join(candidate);
+        if resolved.is_file() {
+            return Ok((candidate.clone(), resolved));
         }
     }
     Err(format!(
-        "couldn't find a JS entry point for `main: \"{main}\"` (tried `{}`)",
+        "couldn't find a JS module for `\"{path}\"` (tried `{}`)",
         candidates.join("`, `")
     ))
+}
+
+/// One file pulled into a `bundle_commonjs_package` bundle. `key` is the
+/// path `resolve_module_path` resolved it to (relative to the package
+/// root) -- used both as the emitted module map's key and, resolved
+/// against `package_dir`, to read the file. `requires` is every
+/// same-package relative `require` spec this file's source contains,
+/// each already resolved to its own target `key`.
+struct BundledModule {
+    key: String,
+    source: String,
+    requires: Vec<(String, String)>,
+}
+
+/// Bundles a package's own internal CommonJS module graph -- starting
+/// from `main_relative` (the `main` field, or a default) -- into a
+/// single self-contained JS string with a small embedded module-system
+/// emulation, so `thaw-bridge`'s `wrap_as_commonjs_module` (which only
+/// ever sees one JS string per package) can still run it correctly.
+///
+/// Found necessary by running a real npm package (`qs`) through `add`:
+/// its `main` (`lib/index.js`) does `require('./stringify')`,
+/// `require('./parse')`, `require('./formats')` -- same-package relative
+/// requires, nothing to do with an external dependency. The previous
+/// single-file `bundle.js` (thaw-bridge's global `require` stub throws
+/// unconditionally) failed at load time for *any* package split across
+/// more than one file, which is the common case for anything beyond a
+/// trivial one-file utility.
+///
+/// A `require` call to a *bare* specifier (another npm package, e.g.
+/// `require('is-number')`) is left completely alone in the emitted
+/// code -- at runtime it still resolves to whatever `require` is in
+/// scope, i.e. thaw-bridge's global stub that throws a clear "not
+/// supported" error. Real inter-package dependency resolution stays out
+/// of scope (docs/design/registry.md); only a package's *own* internal
+/// file layout is handled here.
+///
+/// Returns the bundle text, the resolved key of `main_relative` (the
+/// bundle's entry point, for `AddedPackage` reporting), and the total
+/// number of files folded in.
+fn bundle_commonjs_package(
+    package_dir: &Path,
+    main_relative: &str,
+) -> Result<(String, String, usize), String> {
+    let (main_key, main_abs) = resolve_module_path(package_dir, main_relative)?;
+
+    let mut modules: Vec<BundledModule> = Vec::new();
+    let mut visited: Vec<String> = vec![main_key.clone()];
+    let mut worklist: Vec<(String, PathBuf)> = vec![(main_key.clone(), main_abs)];
+
+    while let Some((key, abs_path)) = worklist.pop() {
+        let source = fs::read_to_string(&abs_path)
+            .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+
+        let requiring_dir = Path::new(&key).parent().unwrap_or(Path::new(""));
+        let mut requires = Vec::new();
+        for spec in find_relative_require_specs(&source) {
+            let combined = if requiring_dir.as_os_str().is_empty() {
+                spec.clone()
+            } else {
+                format!("{}/{spec}", requiring_dir.display())
+            };
+            let normalized = normalize_path_string(&combined);
+            // An unresolvable relative require (e.g. it targets a
+            // `.json` file, which `resolve_module_path`'s candidates
+            // don't cover) is left out of the map on purpose -- that one
+            // call falls through to the external-require stub at
+            // runtime instead of aborting the whole bundle.
+            if let Ok((resolved_key, resolved_abs)) = resolve_module_path(package_dir, &normalized) {
+                requires.push((spec, resolved_key.clone()));
+                if !visited.contains(&resolved_key) {
+                    visited.push(resolved_key.clone());
+                    worklist.push((resolved_key, resolved_abs));
+                }
+            }
+        }
+
+        modules.push(BundledModule { key, source, requires });
+    }
+
+    let file_count = modules.len();
+    Ok((render_bundle(&main_key, &modules), main_key, file_count))
+}
+
+/// Finds `require('./x')`/`require("../y")` call specs in raw JS text --
+/// deliberately just a text scan, not a real parser (this project has no
+/// general JS/CommonJS parser, only thaw-parser's TS-oriented one for
+/// `.d.ts`/`.ts`). Only *relative* specs (starting with `./` or `../`)
+/// are returned; a bare specifier (another npm package) is intentionally
+/// left alone -- see `bundle_commonjs_package`'s doc comment. A dynamic
+/// `require(someVariable)` or a template-literal spec simply won't be
+/// found, which just means that one call falls through to whatever
+/// runtime `require` is in scope -- no worse than every `require` call
+/// failing outright, which is what happened before this existed.
+fn find_relative_require_specs(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut specs = Vec::new();
+    let mut i = 0;
+    while let Some(offset) = source[i..].find("require") {
+        let start = i + offset + "require".len();
+        i = start;
+
+        let mut j = start;
+        while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        if bytes.get(j) != Some(&b'(') {
+            continue;
+        }
+        j += 1;
+        while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        let Some(&quote) = bytes.get(j).filter(|b| **b == b'\'' || **b == b'"') else {
+            continue;
+        };
+        j += 1;
+        let content_start = j;
+        while bytes.get(j).is_some_and(|b| *b != quote) {
+            j += 1;
+        }
+        if bytes.get(j) != Some(&quote) {
+            continue;
+        }
+
+        let spec = &source[content_start..j];
+        if spec.starts_with("./") || spec.starts_with("../") {
+            specs.push(spec.to_string());
+        }
+    }
+    specs
+}
+
+/// Collapses `.`/`..` segments in a `/`-separated path string (npm
+/// `require` specs always use `/`, regardless of host OS). No crate
+/// dependency needed for this -- e.g. `"lib/./../lib/parse"` ->
+/// `"lib/parse"`.
+fn normalize_path_string(path: &str) -> String {
+    let mut stack: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.join("/")
+}
+
+/// Renders `modules` into one JS string: a small embedded CommonJS
+/// module-system emulation (a factory + a per-module require-spec-to-key
+/// map, both precomputed statically -- no runtime path resolution needed
+/// in the emitted JS at all), then a final `module.exports = ...` that
+/// invokes `main_key`. The result is exactly the kind of single JS
+/// string thaw-bridge's `wrap_as_commonjs_module` already knows how to
+/// run: it doesn't need to know or care that this is a bundle rather
+/// than one file.
+fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
+    let mut out = String::new();
+
+    out.push_str("var __thaw_bundle_cache = {};\n");
+    out.push_str("var __thaw_bundle_factories = {\n");
+    for module in modules {
+        out.push_str(&format!(
+            "{}: function(module, exports, require) {{\n{}\n}},\n",
+            js_string_literal(&module.key),
+            module.source
+        ));
+    }
+    out.push_str("};\n");
+
+    out.push_str("var __thaw_bundle_require_maps = {\n");
+    for module in modules {
+        out.push_str(&format!("{}: {{", js_string_literal(&module.key)));
+        for (spec, target) in &module.requires {
+            out.push_str(&format!(
+                "{}: {}, ",
+                js_string_literal(spec),
+                js_string_literal(target)
+            ));
+        }
+        out.push_str("},\n");
+    }
+    out.push_str("};\n");
+
+    out.push_str(
+        "function __thaw_bundle_require(key) {\n\
+         \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
+         \x20\x20\x20\x20var mod = { exports: {} };\n\
+         \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
+         \x20\x20\x20\x20var map = __thaw_bundle_require_maps[key] || {};\n\
+         \x20\x20\x20\x20__thaw_bundle_factories[key](mod, mod.exports, function(spec) {\n\
+         \x20\x20\x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(map, spec)) {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20return __thaw_bundle_require(map[spec]);\n\
+         \x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20\x20return require(spec);\n\
+         \x20\x20\x20\x20});\n\
+         \x20\x20}\n\
+         \x20\x20return __thaw_bundle_cache[key].exports;\n\
+         }\n",
+    );
+
+    out.push_str(&format!(
+        "module.exports = __thaw_bundle_require({});\n",
+        js_string_literal(main_key)
+    ));
+
+    out
+}
+
+/// A double-quoted JS string literal for `s` -- used for module-map keys
+/// and require specs, which in practice are always simple path-like
+/// strings, but escaped properly regardless.
+fn js_string_literal(s: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -419,7 +653,7 @@ mod tests {
     fn resolves_main_field_missing_its_extension() {
         let dir = temp_registry("main_no_extension");
         fs::write(dir.join("index.js"), "module.exports = 1;").unwrap();
-        let (rel, abs) = resolve_main_js_path(&dir, "./index").unwrap();
+        let (rel, abs) = resolve_module_path(&dir, "./index").unwrap();
         assert_eq!(rel, "./index.js");
         assert_eq!(abs, dir.join("index.js"));
         let _ = fs::remove_dir_all(&dir);
@@ -430,7 +664,7 @@ mod tests {
         let dir = temp_registry("main_directory");
         fs::create_dir_all(dir.join("lib")).unwrap();
         fs::write(dir.join("lib/index.js"), "module.exports = 1;").unwrap();
-        let (rel, abs) = resolve_main_js_path(&dir, "./lib").unwrap();
+        let (rel, abs) = resolve_module_path(&dir, "./lib").unwrap();
         assert_eq!(rel, "./lib/index.js");
         assert_eq!(abs, dir.join("lib/index.js"));
         let _ = fs::remove_dir_all(&dir);
@@ -440,7 +674,7 @@ mod tests {
     fn resolves_main_field_written_exactly() {
         let dir = temp_registry("main_exact");
         fs::write(dir.join("main.js"), "module.exports = 1;").unwrap();
-        let (rel, abs) = resolve_main_js_path(&dir, "main.js").unwrap();
+        let (rel, abs) = resolve_module_path(&dir, "main.js").unwrap();
         assert_eq!(rel, "main.js");
         assert_eq!(abs, dir.join("main.js"));
         let _ = fs::remove_dir_all(&dir);
@@ -449,10 +683,162 @@ mod tests {
     #[test]
     fn errors_with_all_tried_candidates_when_main_cannot_be_resolved() {
         let dir = temp_registry("main_missing");
-        let err = resolve_main_js_path(&dir, "./index").unwrap_err();
+        let err = resolve_module_path(&dir, "./index").unwrap_err();
         assert!(err.contains("./index"));
         assert!(err.contains("./index.js"));
         assert!(err.contains("./index/index.js"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_single_and_double_quoted_relative_requires() {
+        let specs = find_relative_require_specs(
+            r#"var a = require('./a'); var b = require("../lib/b");"#,
+        );
+        assert_eq!(specs, vec!["./a".to_string(), "../lib/b".to_string()]);
+    }
+
+    #[test]
+    fn ignores_bare_specifier_requires() {
+        let specs = find_relative_require_specs(r#"var x = require('is-number');"#);
+        assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn ignores_dynamic_and_malformed_require_calls() {
+        // `require(name)` (a variable, not a literal) and a stray
+        // "require" that isn't actually a call must not confuse the scan
+        // -- and must not stop it from still finding a real one after.
+        let specs = find_relative_require_specs(
+            "var x = require(name); var note = 'requirements'; var y = require('./y');",
+        );
+        assert_eq!(specs, vec!["./y".to_string()]);
+    }
+
+    #[test]
+    fn normalizes_dot_and_dot_dot_segments() {
+        assert_eq!(normalize_path_string("lib/./stringify"), "lib/stringify");
+        assert_eq!(normalize_path_string("lib/../parse"), "parse");
+        assert_eq!(normalize_path_string("a/b/../../c"), "c");
+    }
+
+    /// The exact shape found in a real npm package (`qs`): `main` requires
+    /// two sibling files by relative path, each with no further requires
+    /// of their own.
+    #[test]
+    fn bundles_a_multi_file_package_reachable_from_main() {
+        let dir = temp_registry("bundle_multi_file");
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(
+            dir.join("lib/index.js"),
+            "var parse = require('./parse');\nvar stringify = require('./stringify');\n\
+             module.exports = { parse: parse, stringify: stringify };",
+        )
+        .unwrap();
+        fs::write(dir.join("lib/parse.js"), "module.exports = function parse(s) { return s; };").unwrap();
+        fs::write(
+            dir.join("lib/stringify.js"),
+            "module.exports = function stringify(s) { return s; };",
+        )
+        .unwrap();
+
+        let (bundle, main_key, file_count) = bundle_commonjs_package(&dir, "lib/index.js").unwrap();
+        assert_eq!(main_key, "lib/index.js");
+        assert_eq!(file_count, 3, "main + parse.js + stringify.js");
+        assert!(bundle.contains("lib/parse.js"));
+        assert!(bundle.contains("lib/stringify.js"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_of_a_single_file_package_still_has_one_module() {
+        let dir = temp_registry("bundle_single_file");
+        fs::write(dir.join("index.js"), "module.exports = function f() { return 1; };").unwrap();
+
+        let (_, main_key, file_count) = bundle_commonjs_package(&dir, "index.js").unwrap();
+        assert_eq!(main_key, "index.js");
+        assert_eq!(file_count, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An unresolvable relative require (here: a `.json` target, which
+    /// `resolve_module_path`'s candidates don't cover) must not abort
+    /// bundling the rest of the package -- it's just left for the
+    /// external-require stub to report clearly if actually called.
+    #[test]
+    fn unresolvable_relative_require_does_not_abort_bundling() {
+        let dir = temp_registry("bundle_unresolvable_require");
+        fs::write(
+            dir.join("index.js"),
+            "var pkg = require('./package.json');\nmodule.exports = function f() { return 1; };",
+        )
+        .unwrap();
+        // Deliberately no package.json written -- this require can never
+        // resolve via resolve_module_path's .js/index.js candidates.
+
+        let (_, _, file_count) = bundle_commonjs_package(&dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The bundle isn't just plausible-looking text -- it must actually
+    /// run correctly through the real QuickJS-NG engine, including a
+    /// same-package relative require resolving to the right sibling
+    /// module and an external bare-specifier require still reaching
+    /// whatever `require` thaw-bridge's `wrap_as_commonjs_module` set up
+    /// (simulated here directly, without depending on thaw-bridge).
+    #[test]
+    fn bundle_actually_runs_through_quickjs() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("bundle_runs_through_quickjs");
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(
+            dir.join("lib/index.js"),
+            // The external require is deliberately inside a function
+            // that's never called: a real, eager, top-level external
+            // require (like `is-odd`'s `require('is-number')`) throws
+            // immediately when the module loads -- already covered by
+            // this session's `is-odd` end-to-end verification. This test
+            // is specifically about the internal `./double` require
+            // resolving correctly, so the external one must not fire.
+            "var double = require('./double');\n\
+             function unused() { return require('an-external-package'); }\n\
+             module.exports = function run(n) { return double(n); };",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("lib/double.js"),
+            "module.exports = function (n) { return n * 2; };",
+        )
+        .unwrap();
+
+        let (bundle, _, file_count) = bundle_commonjs_package(&dir, "lib/index.js").unwrap();
+        assert_eq!(file_count, 2);
+
+        // Same environment thaw-bridge's `wrap_as_commonjs_module` sets
+        // up: global `module`/`exports`/`require` before running the
+        // source, then bind the default export by name afterward.
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.run = module.exports;\n"
+        );
+
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "bundle failed to load");
+
+        let func = CString::new("run").unwrap();
+        let args = CString::new("[21]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "42", "same-package relative require didn't resolve correctly");
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
