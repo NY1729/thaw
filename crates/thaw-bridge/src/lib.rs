@@ -714,6 +714,54 @@ pub fn generate_shim(functions: &[DtsFunction]) -> String {
     out
 }
 
+/// Escapes JS source for embedding as a double-quoted TS string literal
+/// (backslash, `"`, and newlines/carriage-returns -- the characters that
+/// would otherwise terminate or corrupt the literal). `generate_module_init`
+/// is the only caller; a package's real `bundle.js` can contain any of
+/// these.
+fn escape_ts_string_literal(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for ch in source.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Generates the `__thaw_module_init` function that loads each registry
+/// package's bundled JS source via `loadScript`, once, before user code
+/// runs (thaw-llvm's `MODULE_INIT_SYMBOL`/`call_module_init_if_present`
+/// call this automatically from both entry points). This is what makes a
+/// registry package's Fallback functions (see `generate_shim`) callable
+/// without the *user* having to call `loadScript` themselves -- they still
+/// need to `--use` the package (thaw-cli), but not hand-write the load.
+///
+/// `bundles` is `(package_name, js_source)` pairs, in the order they
+/// should load (later packages can rely on earlier ones already being
+/// loaded into the shared QuickJS-NG global scope). Returns an empty
+/// string -- no function emitted at all -- when `bundles` is empty, since
+/// there would be nothing for it to do.
+pub fn generate_module_init(bundles: &[(&str, &str)]) -> String {
+    if bundles.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("function __thaw_module_init(): void {\n");
+    for (name, source) in bundles {
+        out.push_str(&format!("    // {name}\n"));
+        out.push_str(&format!(
+            "    loadScript(\"{}\");\n",
+            escape_ts_string_literal(source)
+        ));
+    }
+    out.push_str("}\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,6 +1089,52 @@ mod tests {
         assert_eq!(program.extern_functions[0].symbol, "add");
         assert_eq!(program.functions.len(), 2);
         assert!(program.functions.iter().any(|f| f.name == "identity"));
+        assert!(program.functions.iter().any(|f| f.name == "main"));
+    }
+
+    #[test]
+    fn generate_module_init_is_empty_for_no_bundles() {
+        assert_eq!(generate_module_init(&[]), "");
+    }
+
+    #[test]
+    fn generates_load_script_call_per_bundle() {
+        let bundles = [
+            ("left-pad", "function pad(s) { return s; }"),
+            ("is-odd", "function isOdd(n) { return n % 2 === 1; }"),
+        ];
+        let init = generate_module_init(&bundles);
+        assert!(init.starts_with("function __thaw_module_init(): void {\n"));
+        assert!(init.contains(r#"loadScript("function pad(s) { return s; }");"#));
+        assert!(init.contains(r#"loadScript("function isOdd(n) { return n % 2 === 1; }");"#));
+        // Loaded in the given order.
+        assert!(init.find("left-pad").unwrap() < init.find("is-odd").unwrap());
+    }
+
+    #[test]
+    fn escapes_quotes_and_newlines_in_bundled_source() {
+        let bundles = [("pkg", "function f() {\n  return \"a\\b\";\n}")];
+        let init = generate_module_init(&bundles);
+        assert!(init.contains(r#"loadScript("function f() {\n  return \"a\\b\";\n}");"#));
+    }
+
+    /// Same bar as `generated_shim_round_trips_through_real_lowering`: the
+    /// generated `__thaw_module_init` must actually be valid, lowerable
+    /// Thaw source, not just plausible text.
+    #[test]
+    fn generated_module_init_round_trips_through_real_lowering() {
+        let init = generate_module_init(&[("greeter", "function greet(){return 'hi';}")]);
+        let program_source = format!(
+            "{init}\nfunction main(): void {{\n    console.log(String(callDynamic(\"greet\", JSON.parse(\"[]\"))));\n}}\n"
+        );
+
+        let module = thaw_parser::parse_typescript(&program_source)
+            .unwrap_or_else(|e| panic!("generated module_init did not parse: {e}\n---\n{program_source}"));
+        let program = thaw_hir::lower_module(&module)
+            .unwrap_or_else(|e| panic!("generated module_init did not lower: {e}\n---\n{program_source}"));
+
+        assert_eq!(program.functions.len(), 2);
+        assert!(program.functions.iter().any(|f| f.name == "__thaw_module_init"));
         assert!(program.functions.iter().any(|f| f.name == "main"));
     }
 }

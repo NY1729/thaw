@@ -51,6 +51,15 @@ use thaw_hir::{BinOp, FfiSignature, HirExpr, HirFunction, HirLit, HirProgram, Hi
 /// `main` so we can wrap it in a proper `i32 main(void)` C entry point
 /// rather than exposing a `void`-returning function as the process entry.
 const USER_MAIN_SYMBOL: &str = "thaw_user_main";
+/// Magic function name a registry-generated shim can define (see
+/// thaw-bridge's `generate_module_init` and thaw-cli's `--use`) to run
+/// code once before user code -- currently just `loadScript` calls for
+/// each package's bundled JS, so Fallback-path functions are callable
+/// without the user writing `loadScript` themselves. An ordinary
+/// `HirFunction` like any other; the only special treatment is that
+/// `compile_program` calls it first, if present, from both possible
+/// entry points (`main` and `handler`).
+const MODULE_INIT_SYMBOL: &str = "__thaw_module_init";
 
 /// Byte size of an array's length header (a single `i64`) that precedes its
 /// elements in the arena-allocated buffer. See the module doc for the layout.
@@ -1218,10 +1227,22 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let (_main_fn, entry) = self.new_c_main();
         self.builder.position_at_end(entry);
+        self.call_module_init_if_present();
         self.builder
             .build_call(user_main, &[], "call_thaw_user_main")
             .unwrap();
         self.finish_c_main();
+    }
+
+    /// Calls `__thaw_module_init` before user code, if the program defines
+    /// one (see `MODULE_INIT_SYMBOL`). A no-op for programs with no
+    /// registry packages that ship a `bundle.js`.
+    fn call_module_init_if_present(&self) {
+        if let Some(init_fn) = self.module.get_function(MODULE_INIT_SYMBOL) {
+            self.builder
+                .build_call(init_fn, &[], "call_thaw_module_init")
+                .unwrap();
+        }
     }
 
     /// Emits `int main(void) { thaw_runtime_run(&handler); return 0; }` for
@@ -1247,6 +1268,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let (_main_fn, entry) = self.new_c_main();
         self.builder.position_at_end(entry);
+        self.call_module_init_if_present();
         let handler_ptr = handler_fn.as_global_value().as_pointer_value();
         self.builder
             .build_call(run_fn, &[handler_ptr.into()], "call_thaw_runtime_run")
@@ -1635,6 +1657,126 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "quickjs_fallback"),
             "true\n5\nhello, thaw\n42\n"
+        );
+    }
+
+    /// Module auto-initialization: a registry-generated `__thaw_module_init`
+    /// (thaw-bridge's `generate_module_init`, wired in via thaw-cli's
+    /// `--use`) must run before `main`'s body, with no `loadScript` call
+    /// written by the user -- that's the whole point of automating it.
+    #[test]
+    fn runs_module_init_before_main_body() {
+        let source = r#"
+            function __thaw_module_init(): void {
+                loadScript("function greet() { return 'hi from registry'; }");
+            }
+
+            function main(): void {
+                const result = callDynamic("greet", JSON.parse("[]"));
+                console.log(String(result));
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "module_init_main"), "hi from registry\n");
+    }
+
+    /// Same mechanism, but through the Lambda `handler` entry point instead
+    /// of `main` (`emit_lambda_entry` has its own copy of the
+    /// `call_module_init_if_present` call, see hir_codegen.rs).
+    #[test]
+    fn runs_module_init_before_lambda_handler() {
+        let source = r#"
+            function __thaw_module_init(): void {
+                loadScript("function greet() { return 'hi from registry'; }");
+            }
+
+            function handler(event: string): string {
+                const result = callDynamic("greet", JSON.parse("[]"));
+                return String(result);
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "module_init_lambda");
+        compiler.compile_program(&program).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-module_init_lambda-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        compiler.write_object_file(&obj_path).unwrap();
+
+        let arena_lib = build_staticlib("thaw-arena");
+        let runtime_lib = build_staticlib("thaw-runtime");
+        let std_lib = build_staticlib("thaw-std");
+        let quickjs_lib = build_staticlib("thaw-quickjs");
+
+        let link_status = Command::new("cc")
+            .arg(&obj_path)
+            .arg(&arena_lib)
+            .arg(&runtime_lib)
+            .arg(&std_lib)
+            .arg(&quickjs_lib)
+            .arg("-lm")
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .expect("failed to invoke system `cc` linker");
+        assert!(link_status.success(), "linking failed");
+
+        // Same mock Lambda Runtime API protocol as
+        // `compiles_and_runs_a_lambda_handler_against_a_mock_runtime_api`:
+        // bind a real TCP listener, tell the binary about it via
+        // `AWS_LAMBDA_RUNTIME_API`, and check the response it posts back.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).unwrap();
+            let body = "\"ping\"";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: test-req-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            conn.read_to_end(&mut buf).unwrap();
+            tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
+
+            let response = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            conn.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut child = Command::new(&exe_path)
+            .env("AWS_LAMBDA_RUNTIME_API", &addr)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn compiled Lambda handler binary");
+
+        let post_request = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("handler never posted a response to the mock runtime API");
+        server.join().unwrap();
+
+        let _ = child.kill();
+        let _ = child.wait_with_output();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/response"));
+        assert!(
+            post_request.ends_with("hi from registry"),
+            "response body should be the module-init-loaded function's result, got: {post_request}"
         );
     }
 
