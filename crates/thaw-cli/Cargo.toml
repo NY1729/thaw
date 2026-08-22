@@ -1,0 +1,14 @@
+[package]
+name = "thaw-cli"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "thaw"
+path = "src/main.rs"
+
+[dependencies]
+inkwell = { version = "0.10.0", features = ["llvm22-1"] }
+thaw-hir = { version = "0.1.0", path = "../thaw-hir" }
+thaw-llvm = { version = "0.1.0", path = "../thaw-llvm" }
+thaw-parser = { version = "0.1.0", path = "../thaw-parser" }

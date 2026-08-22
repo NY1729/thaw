@@ -1,11 +1,10 @@
 [package]
-name = "thaw-llvm"
+name = "thaw-hir"
 version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-inkwell = { version = "0.10", features = ["llvm22-1"] }
-thaw-hir = { version = "0.1.0", path = "../thaw-hir" }
+swc_ecma_ast = "29.0.0"
 
 [dev-dependencies]
 thaw-parser = { path = "../thaw-parser" }

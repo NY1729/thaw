@@ -1,10 +1,12 @@
 pub mod ast;
 pub mod codegen;
+pub mod hir_codegen;
 pub mod lexer;
 pub mod parser;
 
 pub use ast::{Expr, Function, Prototype, TopLevel};
 pub use codegen::Compiler;
+pub use hir_codegen::HirCompiler;
 
 #[cfg(test)]
 mod tests {
