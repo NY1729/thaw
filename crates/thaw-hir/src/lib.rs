@@ -114,6 +114,27 @@ pub enum HirExpr {
     /// `object.field = value` (and desugared compound forms). Evaluates to
     /// `value`. Same `HirType` bookkeeping as `PropAccess`.
     PropAssign(Box<HirExpr>, HirType, Symbol, Box<HirExpr>),
+    /// `json.field` where `json: HirType::Json` (a *dynamic* value, e.g.
+    /// from `JSON.parse`) -- unlike `PropAccess`, there's no static field
+    /// list to validate against or bake in; any name is accepted and
+    /// resolved at runtime by thaw-std's `thaw_json_get`, returning
+    /// another `Json` value (never a concrete type).
+    JsonGet(Box<HirExpr>, Symbol),
+    /// `json[index]` where `json: HirType::Json`. Same story as
+    /// `JsonGet`, via `thaw_json_index`.
+    JsonIndex(Box<HirExpr>, Box<HirExpr>),
+    /// `Number(json)`: converts a `Json` leaf to `f64` (`0.0` if it isn't
+    /// numeric -- there's no exception channel wired to this yet). Only
+    /// valid on a `Json`-typed argument; lowering rejects anything else,
+    /// since `Str`/`Array`/`Object`/`Json` all share the same pointer
+    /// representation and codegen can't otherwise tell them apart.
+    JsonAsNumber(Box<HirExpr>),
+    /// `String(json)`: converts a `Json` leaf to `Str`. Same restriction
+    /// as `JsonAsNumber`.
+    JsonAsString(Box<HirExpr>),
+    /// `Boolean(json)`: converts a `Json` leaf to `Bool`. Same restriction
+    /// as `JsonAsNumber`.
+    JsonAsBool(Box<HirExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
