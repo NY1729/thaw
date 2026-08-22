@@ -160,15 +160,42 @@ fn resolve_interface(
     if iface.type_params.is_some() {
         return Err(format!("generic interfaces are not supported yet (`{name}`)"));
     }
-    if !iface.extends.is_empty() {
-        return Err(format!(
-            "`extends` is not supported yet on interfaces (`{name}`)"
-        ));
-    }
 
     in_progress.push(name.to_string());
 
-    let mut fields = Vec::with_capacity(iface.body.body.len());
+    // `extends`: each base's fields come first, in `extends`-list order,
+    // each base's own fields in its own declared order, followed by this
+    // interface's own fields. A colliding field name (between two bases,
+    // or between a base and this interface's own body) is rejected rather
+    // than guessing an override/merge rule.
+    let mut fields: Vec<(Symbol, HirType)> = Vec::new();
+    for base in &iface.extends {
+        if base.type_args.is_some() {
+            return Err(format!(
+                "interface `{name}` extends a base with type arguments, which is not supported yet"
+            ));
+        }
+        let Expr::Ident(base_ident) = base.expr.as_ref() else {
+            return Err(format!(
+                "interface `{name}` has an unsupported `extends` target (only a plain interface name is supported)"
+            ));
+        };
+        let base_name = base_ident.sym.to_string();
+        let HirType::Object(base_fields) =
+            resolve_interface(&base_name, raw, resolved, in_progress)?
+        else {
+            unreachable!("resolve_interface always returns HirType::Object or an Err")
+        };
+        for (field_name, field_ty) in base_fields {
+            if fields.iter().any(|(n, _)| *n == field_name) {
+                return Err(format!(
+                    "interface `{name}` inherits field `{field_name}` from `{base_name}`, which collides with an earlier field of the same name"
+                ));
+            }
+            fields.push((field_name, field_ty));
+        }
+    }
+
     for member in &iface.body.body {
         let TsTypeElement::TsPropertySignature(prop) = member else {
             return Err(format!(
@@ -179,6 +206,11 @@ fn resolve_interface(
             Expr::Ident(ident) => ident.sym.to_string(),
             _ => return Err(format!("interface `{name}` has an unsupported property key")),
         };
+        if fields.iter().any(|(n, _)| *n == field_name) {
+            return Err(format!(
+                "interface `{name}` declares field `{field_name}`, which collides with an inherited field of the same name"
+            ));
+        }
         let ann = prop.type_ann.as_ref().ok_or_else(|| {
             format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
         })?;
@@ -1577,5 +1609,100 @@ mod tests {
         )
         .unwrap();
         assert!(lower_module(&module).is_err());
+    }
+
+    #[test]
+    fn interface_extends_prepends_base_fields() {
+        let program = lower(
+            r#"interface Shape {
+                color: number;
+            }
+            interface Circle extends Shape {
+                radius: number;
+            }
+            function main(): void {
+                const c: Circle = { color: 1, radius: 2 };
+                console.log(c.radius);
+            }"#,
+        );
+
+        let circle_ty = HirType::Object(vec![
+            ("color".into(), HirType::F64),
+            ("radius".into(), HirType::F64),
+        ]);
+        assert_eq!(
+            program.functions[0].body[0],
+            HirStmt::Let(
+                "c".into(),
+                circle_ty,
+                HirExpr::ObjectLit(vec![
+                    ("color".into(), HirExpr::Lit(HirLit::F64(1.0))),
+                    ("radius".into(), HirExpr::Lit(HirLit::F64(2.0))),
+                ]),
+            )
+        );
+    }
+
+    #[test]
+    fn interface_can_extend_multiple_bases_in_order() {
+        let program = lower(
+            r#"interface A { a: number; }
+            interface B { b: number; }
+            interface C extends A, B {
+                c: number;
+            }
+            function main(): void {
+                const v: C = { a: 1, b: 2, c: 3 };
+                console.log(v.a);
+            }"#,
+        );
+        let c_ty = HirType::Object(vec![
+            ("a".into(), HirType::F64),
+            ("b".into(), HirType::F64),
+            ("c".into(), HirType::F64),
+        ]);
+        assert_eq!(
+            program.functions[0].body[0],
+            HirStmt::Let(
+                "v".into(),
+                c_ty,
+                HirExpr::ObjectLit(vec![
+                    ("a".into(), HirExpr::Lit(HirLit::F64(1.0))),
+                    ("b".into(), HirExpr::Lit(HirLit::F64(2.0))),
+                    ("c".into(), HirExpr::Lit(HirLit::F64(3.0))),
+                ]),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_extends_field_name_collision() {
+        let module = thaw_parser::parse_typescript(
+            r#"interface A { x: number; }
+            interface B extends A { x: number; }
+            function main(): void {}"#,
+        )
+        .unwrap();
+        let err = lower_module(&module).unwrap_err();
+        assert!(err.contains("collides"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn extends_chains_work_transitively() {
+        let program = lower(
+            r#"interface A { a: number; }
+            interface B extends A { b: number; }
+            interface C extends B { c: number; }
+            function main(): void {
+                const v: C = { a: 1, b: 2, c: 3 };
+                console.log(v.a);
+            }"#,
+        );
+        let c_ty = HirType::Object(vec![
+            ("a".into(), HirType::F64),
+            ("b".into(), HirType::F64),
+            ("c".into(), HirType::F64),
+        ]);
+        assert!(matches!(&program.functions[0].body[0], HirStmt::Let(_, ty, _) if *ty == c_ty));
     }
 }
