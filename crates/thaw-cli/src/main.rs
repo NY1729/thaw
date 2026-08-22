@@ -15,7 +15,9 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: thaw build <input.ts> [-o <output>] [--link <path>]...");
+            eprintln!(
+                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]..."
+            );
             std::process::exit(1);
         }
     }
@@ -25,6 +27,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut extra_links: Vec<PathBuf> = Vec::new();
+    let mut bridge_dts: Vec<PathBuf> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -38,6 +41,11 @@ fn run_build(args: &[String]) -> Result<(), String> {
                 i += 1;
                 let value = args.get(i).ok_or("--link requires a path argument")?;
                 extra_links.push(PathBuf::from(value));
+            }
+            "--bridge" => {
+                i += 1;
+                let value = args.get(i).ok_or("--bridge requires a path argument")?;
+                bridge_dts.push(PathBuf::from(value));
             }
             other => {
                 if input.is_some() {
@@ -55,12 +63,40 @@ fn run_build(args: &[String]) -> Result<(), String> {
         PathBuf::from(stem)
     });
 
-    build(&input, &output, &extra_links)
+    build(&input, &output, &extra_links, &bridge_dts)
 }
 
-fn build(input: &Path, output: &Path, extra_links: &[PathBuf]) -> Result<(), String> {
-    let source = std::fs::read_to_string(input)
+/// Reads each `.d.ts` in `bridge_dts`, classifies its functions (thaw-bridge,
+/// docs/design/bridge.md sections 3-4), and generates the corresponding
+/// callable surface (section 6: an ambient `declare function` per fast-path
+/// function; section 7: a `callDynamic` wrapper per fallback function) --
+/// concatenated ahead of the user's own source. Thaw has no real module/
+/// import system yet, so "prepend the generated text" is the whole
+/// integration; there's nothing to separately compile or link at this step
+/// (fast-path symbols still need `--link`, fallback functions still need
+/// `loadScript` called with the package's actual JS source, per
+/// `generate_shim`'s doc comment).
+fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
+    let mut shim = String::new();
+    for path in bridge_dts {
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read `{}`: {e}", path.display()))?;
+        let functions = thaw_bridge::parse_dts(&source)
+            .map_err(|e| format!("failed to parse `{}`: {e}", path.display()))?;
+        shim.push_str(&thaw_bridge::generate_shim(&functions));
+    }
+    Ok(shim)
+}
+
+fn build(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+) -> Result<(), String> {
+    let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
+    let source = generate_bridge_shims(bridge_dts)? + &user_source;
 
     let module = thaw_parser::parse_typescript(&source)?;
     let program = thaw_hir::lower_module(&module)?;

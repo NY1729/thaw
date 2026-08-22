@@ -641,6 +641,79 @@ pub fn classify(func: &DtsFunction) -> Classification {
     })
 }
 
+/// Renders a `HirType` back into the TS syntax `thaw_hir::lower::lower_ts_type`
+/// accepts, for `generate_shim`'s ambient declarations. Only ever called on
+/// types that actually came from a successful classification (primitives,
+/// `number[]`, and flat/nested objects), so the `Json`/`Union`/`Dynamic`
+/// arms are just defensive completeness, not expected to be exercised.
+fn render_ts_type(ty: &HirType) -> String {
+    match ty {
+        HirType::F64 | HirType::I64 => "number".to_string(),
+        HirType::Bool => "boolean".to_string(),
+        HirType::Void => "void".to_string(),
+        HirType::Str => "string".to_string(),
+        HirType::Json => "Json".to_string(),
+        HirType::Array(elem) => format!("{}[]", render_ts_type(elem)),
+        HirType::Promise(inner) => format!("Promise<{}>", render_ts_type(inner)),
+        HirType::Object(fields) => {
+            let rendered = fields
+                .iter()
+                .map(|(name, ty)| format!("{name}: {}", render_ts_type(ty)))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("{{ {rendered} }}")
+        }
+        HirType::Union(_) | HirType::Dynamic => "any".to_string(),
+    }
+}
+
+/// Generates a Thaw-compilable TypeScript "shim" for a `.d.ts`'s functions,
+/// per their classification (docs/design/bridge.md section 6/7): a
+/// `FastPath` function becomes a plain ambient `declare function` (so
+/// calling it compiles to a direct FFI call, resolved at link time --
+/// still requires `thaw build --link <path>` today, until thaw-registry
+/// can fetch/build that library automatically); a `Fallback` function
+/// becomes a thin wrapper wired to the QuickJS-NG path (`callDynamic`).
+///
+/// This only generates the *callable surface* -- for `Fallback` functions,
+/// something still has to `loadScript(...)` the package's actual JS source
+/// before the wrapper is called (not generated here: there's no
+/// module-level initialization mechanism in Thaw yet to hook that up
+/// automatically, so it stays the caller's explicit responsibility, e.g.
+/// as the first statement in `main`/`handler`).
+pub fn generate_shim(functions: &[DtsFunction]) -> String {
+    let mut out = String::new();
+    for func in functions {
+        match classify(func) {
+            Classification::FastPath(sig) => {
+                let params = func
+                    .params
+                    .iter()
+                    .zip(&sig.params)
+                    .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "declare function {}({params}): {};\n",
+                    sig.symbol,
+                    render_ts_type(&sig.ret)
+                ));
+            }
+            Classification::Fallback { function, reason } => {
+                out.push_str(&format!("// Fallback (QuickJS-NG): {reason}\n"));
+                // `argsArray` (not `args`): `callDynamic` expects a JSON
+                // *array* of positional arguments, e.g.
+                // `identity(JSON.parse("[42]"))`, not `identity(JSON.parse("42"))` --
+                // named to make that convention hard to miss at the call site.
+                out.push_str(&format!("function {function}(argsArray: Json): Json {{\n"));
+                out.push_str(&format!("    return callDynamic(\"{function}\", argsArray);\n"));
+                out.push_str("}\n");
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +979,68 @@ mod tests {
         "#;
         let funcs = parse_dts(source).unwrap();
         assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+    }
+
+    #[test]
+    fn generates_ambient_declaration_for_fast_path_function() {
+        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        assert_eq!(
+            generate_shim(&funcs),
+            "declare function add(a: number, b: number): number;\n"
+        );
+    }
+
+    #[test]
+    fn generates_object_typed_ambient_declaration() {
+        let funcs = parse_dts(
+            r#"export interface Point { x: number; y: number; }
+            export declare function dist(p: Point): number;"#,
+        )
+        .unwrap();
+        assert_eq!(
+            generate_shim(&funcs),
+            "declare function dist(p: { x: number; y: number }): number;\n"
+        );
+    }
+
+    #[test]
+    fn generates_call_dynamic_wrapper_for_fallback_function() {
+        let funcs = parse_dts("export declare function identity<T>(x: T): T;").unwrap();
+        let shim = generate_shim(&funcs);
+        assert!(shim.contains("// Fallback (QuickJS-NG):"));
+        assert!(shim.contains("function identity(argsArray: Json): Json {"));
+        assert!(shim.contains(r#"return callDynamic("identity", argsArray);"#));
+    }
+
+    /// The generated shim isn't just plausible-looking text -- it must
+    /// actually be valid, lowerable Thaw source. Compiles a realistic
+    /// mixed `.d.ts` (fast path + fallback functions) into a shim, appends
+    /// a `main` that calls both, and runs it through the real
+    /// `thaw-parser`/`thaw-hir` pipeline used everywhere else.
+    #[test]
+    fn generated_shim_round_trips_through_real_lowering() {
+        let dts = r#"
+            export declare function add(a: number, b: number): number;
+            export declare function identity<T>(x: T): T;
+        "#;
+        let funcs = parse_dts(dts).unwrap();
+        let shim = generate_shim(&funcs);
+
+        let program_source = format!(
+            "{shim}\nfunction main(): void {{\n    console.log(add(2, 3));\n    const r = identity(JSON.parse(\"[1]\"));\n    console.log(Number(r));\n}}\n"
+        );
+
+        let module = thaw_parser::parse_typescript(&program_source)
+            .unwrap_or_else(|e| panic!("generated shim did not parse: {e}\n---\n{program_source}"));
+        let program = thaw_hir::lower_module(&module)
+            .unwrap_or_else(|e| panic!("generated shim did not lower: {e}\n---\n{program_source}"));
+
+        // `add` is ambient (fast path) -> extern_functions; `identity`'s
+        // wrapper and `main` both have real bodies -> functions.
+        assert_eq!(program.extern_functions.len(), 1);
+        assert_eq!(program.extern_functions[0].symbol, "add");
+        assert_eq!(program.functions.len(), 2);
+        assert!(program.functions.iter().any(|f| f.name == "identity"));
+        assert!(program.functions.iter().any(|f| f.name == "main"));
     }
 }
