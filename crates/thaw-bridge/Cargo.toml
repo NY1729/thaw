@@ -1,0 +1,9 @@
+[package]
+name = "thaw-bridge"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+swc_ecma_ast = "29.0.0"
+thaw-hir = { path = "../thaw-hir" }
+thaw-parser = { path = "../thaw-parser" }

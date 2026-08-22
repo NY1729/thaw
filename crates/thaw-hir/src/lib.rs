@@ -55,8 +55,10 @@ pub struct HirParam {
     pub ty: HirType,
 }
 
-/// A native function signature, used by `HirExpr::FfiCall` once thaw-bridge
-/// starts generating these from `.d.ts` files. Unused by Phase 0's lowering.
+/// A native function signature, used by `HirExpr::FfiCall`. Built today
+/// from ambient `declare function` statements (see docs/design/bridge.md);
+/// thaw-bridge will eventually also generate these from `.d.ts` files for
+/// whole npm packages, via the same type-classification rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FfiSignature {
     pub symbol: Symbol,
@@ -171,4 +173,11 @@ pub struct HirFunction {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HirProgram {
     pub functions: Vec<HirFunction>,
+    /// Ambient function declarations (`declare function foo(...): T;`, no
+    /// body) -- see docs/design/bridge.md section 6. Calls to one of these
+    /// names lower to `HirExpr::FfiCall` instead of `HirExpr::Call`;
+    /// codegen declares each as an `extern "C"` symbol that the final link
+    /// step must resolve from elsewhere (a real native library today; a
+    /// thaw-registry-fetched one eventually).
+    pub extern_functions: Vec<FfiSignature>,
 }
