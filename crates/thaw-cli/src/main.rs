@@ -72,15 +72,18 @@ fn build(input: &Path, output: &Path, extra_links: &[PathBuf]) -> Result<(), Str
     let obj_path = output.with_extension("o");
     compiler.write_object_file(&obj_path)?;
 
-    // Always link all three: thaw-arena backs array/object allocation
+    // Always link all four: thaw-arena backs array/object allocation
     // (Phase 1/2), thaw-runtime backs the Lambda event loop for
-    // `handler`-based programs (Phase 2), thaw-std backs `fetch`/`JSON.*`.
-    // An unreferenced static archive member is simply never pulled into
-    // the final binary, so linking all of them unconditionally is
-    // harmless and keeps this simple.
+    // `handler`-based programs (Phase 2), thaw-std backs `fetch`/`JSON.*`,
+    // thaw-quickjs backs `loadScript`/`callDynamic` (the QuickJS-NG
+    // fallback path, docs/design/bridge.md section 7). An unreferenced
+    // static archive member is simply never pulled into the final binary,
+    // so linking all of them unconditionally is harmless and keeps this
+    // simple.
     let arena_lib = build_staticlib("thaw-arena")?;
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
+    let quickjs_lib = build_staticlib("thaw-quickjs")?;
 
     // `--link <path>` lets a program using `declare function` (see
     // docs/design/bridge.md section 6) actually resolve at link time,
@@ -90,6 +93,11 @@ fn build(input: &Path, output: &Path, extra_links: &[PathBuf]) -> Result<(), Str
         .arg(&arena_lib)
         .arg(&runtime_lib)
         .arg(&std_lib)
+        .arg(&quickjs_lib)
+        // QuickJS-NG's C code calls libm math functions directly; `rustc`
+        // normally adds `-lm` automatically when it does the final link,
+        // but this is a manual `cc` invocation instead.
+        .arg("-lm")
         .args(extra_links)
         .arg("-o")
         .arg(output)

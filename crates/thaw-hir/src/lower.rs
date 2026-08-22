@@ -941,6 +941,13 @@ impl<'a> FnLowerer<'a> {
                     "fetch" => return Ok(HirType::Str),
                     "JSON.parse" => return Ok(HirType::Json),
                     "JSON.stringify" => return Ok(HirType::Str),
+                    // QuickJS-NG fallback path (docs/design/bridge.md
+                    // section 7): `loadScript` evaluates JS source into
+                    // the global engine context; `callDynamic` calls a
+                    // top-level function it defined, by name, with `Json`
+                    // args in and a `Json` result out.
+                    "loadScript" => return Ok(HirType::Bool),
+                    "callDynamic" => return Ok(HirType::Json),
                     _ => {}
                 }
                 self.signatures
@@ -1687,6 +1694,46 @@ mod tests {
                     )),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                 ))),
+            )
+        );
+    }
+
+    #[test]
+    fn lowers_load_script_and_call_dynamic() {
+        let program = lower(
+            r#"function main(): void {
+                const ok: boolean = loadScript("function add(a,b){return a+b;}");
+                const args = JSON.parse("[1,2]");
+                const result = callDynamic("add", args);
+                console.log(Number(result));
+            }"#,
+        );
+        let f = &program.functions[0];
+        assert_eq!(
+            f.body[0],
+            HirStmt::Let(
+                "ok".into(),
+                HirType::Bool,
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("loadScript".into())),
+                    vec![HirExpr::Lit(HirLit::Str(
+                        "function add(a,b){return a+b;}".into()
+                    ))],
+                ),
+            )
+        );
+        assert_eq!(
+            f.body[2],
+            HirStmt::Let(
+                "result".into(),
+                HirType::Json,
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("callDynamic".into())),
+                    vec![
+                        HirExpr::Lit(HirLit::Str("add".into())),
+                        HirExpr::Var("args".into()),
+                    ],
+                ),
             )
         );
     }

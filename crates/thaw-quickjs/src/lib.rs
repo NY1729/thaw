@@ -1,0 +1,225 @@
+//! QuickJS-NG integration for the Fallback path (docs/design/bridge.md
+//! section 7): runs arbitrary JS (e.g. an npm package's actual source, once
+//! thaw-registry can fetch one) in an embedded engine, exchanging values
+//! with compiled Thaw code as JSON text.
+//!
+//! `rquickjs` (which bundles QuickJS-NG -- the bnoordhuis/saghul fork the
+//! design doc names, not Bellard's original) does the real work; this
+//! crate is a thin C ABI shim around it, in the same spirit as
+//! thaw-std/thaw-runtime.
+//!
+//! Argument/result marshaling goes through JSON both at the Rust/QuickJS
+//! boundary (`thaw_js_call`'s `args_json`/return) and, one level up, at the
+//! HIR/codegen boundary (`callDynamic`, see hir_codegen.rs), which
+//! composes this crate's `thaw_js_call` with thaw-std's
+//! `thaw_json_stringify`/`thaw_json_parse` so a `Json` value flows in and
+//! out without this crate needing to know thaw-std's internal
+//! representation. A Promise-returning call is driven to completion by
+//! polling QuickJS's job queue (`Promise::finish`) rather than true
+//! non-blocking integration -- the same "poll until resolved" shortcut V1
+//! async/await already takes (docs/design/async-await.md), consistent
+//! rather than a special case.
+//!
+//! There is no exception channel wired from here into Thaw's `try`/`catch`
+//! yet: a failure (unknown function, thrown JS exception, malformed args)
+//! comes back as a JSON error object (`{"__thaw_error__": "..."}`) instead
+//! of aborting, so the caller can at least inspect what happened.
+
+use std::cell::RefCell;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+
+use rquickjs::function::Args;
+use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
+
+thread_local! {
+    static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
+}
+
+fn to_str(ptr: *const c_char) -> String {
+    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+}
+
+fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
+    JS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let (_, context) = slot.get_or_insert_with(|| {
+            let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
+            let context = Context::full(&runtime).expect("failed to create a QuickJS context");
+            (runtime, context)
+        });
+        context.with(f)
+    })
+}
+
+/// Evaluates `source` in the (per-thread) global QuickJS context. Top-level
+/// function declarations become callable afterwards via `thaw_js_call`.
+/// Returns `1` on success, `0` on failure (syntax error, thrown exception).
+#[no_mangle]
+pub extern "C" fn thaw_js_load(source: *const c_char) -> u8 {
+    let source = to_str(source);
+    with_context(|ctx| match ctx.eval::<(), _>(source) {
+        Ok(()) => 1,
+        Err(e) => {
+            eprintln!("thaw-quickjs: failed to load script: {e}");
+            0
+        }
+    })
+}
+
+/// Calls a top-level function (previously loaded via `thaw_js_load`) named
+/// `func_name`, with `args_json` a JSON-encoded array of arguments.
+/// Returns the JSON-encoded result (or an error object -- see the module
+/// doc comment).
+#[no_mangle]
+pub extern "C" fn thaw_js_call(func_name: *const c_char, args_json: *const c_char) -> *const c_char {
+    let func_name = to_str(func_name);
+    let args_json = to_str(args_json);
+
+    let text = with_context(|ctx| match call_impl(ctx, &func_name, &args_json) {
+        Ok(text) => text,
+        Err(reason) => format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason)),
+    });
+
+    CString::new(text).unwrap_or_default().into_raw() as *const c_char
+}
+
+fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, String> {
+    let to_string_err = |e: rquickjs::Error| e.to_string();
+
+    let json: Object = ctx.globals().get("JSON").map_err(to_string_err)?;
+    let parse: Function = json.get("parse").map_err(to_string_err)?;
+    let stringify: Function = json.get("stringify").map_err(to_string_err)?;
+
+    let args_array: Array = parse
+        .call((args_json,))
+        .map_err(|e| format!("args_json is not a valid JSON array: {e}"))?;
+
+    let mut call_args = Args::new_unsized(ctx.clone());
+    for i in 0..args_array.len() {
+        let arg: Value = args_array.get(i).map_err(to_string_err)?;
+        call_args.push_arg(arg).map_err(to_string_err)?;
+    }
+
+    let target: Function = ctx
+        .globals()
+        .get(func_name)
+        .map_err(|_| format!("no such function `{func_name}` (was it loaded via loadScript?)"))?;
+    let result: Value = target.call_arg(call_args).map_err(|e| match e {
+        rquickjs::Error::Exception => format!("`{func_name}` threw: {}", describe_exception(&ctx)),
+        e => format!("`{func_name}` threw: {e}"),
+    })?;
+
+    // V1: drive a returned Promise to completion by polling the job queue,
+    // same shortcut as V1 async/await -- see the module doc comment.
+    let result = match result.as_promise() {
+        Some(promise) => promise.finish::<Value>().map_err(|e| match e {
+            rquickjs::Error::Exception => format!(
+                "`{func_name}`'s promise rejected: {}",
+                describe_exception(&ctx)
+            ),
+            e => format!("`{func_name}`'s promise rejected or stalled: {e}"),
+        })?,
+        None => result,
+    };
+
+    stringify
+        .call((result,))
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))
+}
+
+/// `rquickjs::Error::Exception` doesn't carry the thrown value itself
+/// (just a generic placeholder message) -- the real value has to be
+/// fetched separately via `Ctx::catch`.
+fn describe_exception(ctx: &Ctx<'_>) -> String {
+    let exc = ctx.catch();
+    if let Some(obj) = exc.as_object() {
+        if let Ok(msg) = obj.get::<_, String>("message") {
+            return msg;
+        }
+    }
+    if let Some(s) = exc.as_string() {
+        if let Ok(s) = s.to_string() {
+            return s;
+        }
+    }
+    format!("{exc:?}")
+}
+
+fn json_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(func_name: &str, args_json: &str) -> String {
+        let func_name = CString::new(func_name).unwrap();
+        let args_json = CString::new(args_json).unwrap();
+        let result_ptr = thaw_js_call(func_name.as_ptr(), args_json.as_ptr());
+        unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned()
+    }
+
+    fn load(source: &str) -> u8 {
+        let source = CString::new(source).unwrap();
+        thaw_js_load(source.as_ptr())
+    }
+
+    #[test]
+    fn loads_and_calls_a_simple_function() {
+        assert_eq!(load("function add(a, b) { return a + b; }"), 1);
+        assert_eq!(call("add", "[2, 3]"), "5");
+    }
+
+    #[test]
+    fn round_trips_objects_and_arrays() {
+        assert_eq!(load("function identity(x) { return x; }"), 1);
+        assert_eq!(
+            call("identity", r#"[{"a": 1, "b": [true, "x"]}]"#),
+            r#"{"a":1,"b":[true,"x"]}"#
+        );
+    }
+
+    #[test]
+    fn resolves_a_returned_promise() {
+        assert_eq!(
+            load("function later(x) { return Promise.resolve(x * 2); }"),
+            1
+        );
+        assert_eq!(call("later", "[21]"), "42");
+    }
+
+    #[test]
+    fn unknown_function_reports_an_error_object_instead_of_crashing() {
+        let result = call("doesNotExist", "[]");
+        assert!(result.contains("__thaw_error__"), "unexpected result: {result}");
+    }
+
+    #[test]
+    fn thrown_exception_reports_an_error_object_instead_of_crashing() {
+        assert_eq!(load("function boom() { throw new Error('kaboom'); }"), 1);
+        let result = call("boom", "[]");
+        assert!(result.contains("__thaw_error__"), "unexpected result: {result}");
+        assert!(result.contains("kaboom"), "unexpected result: {result}");
+    }
+
+    #[test]
+    fn syntax_error_fails_to_load_instead_of_crashing() {
+        assert_eq!(load("function( this is not valid js"), 0);
+    }
+}
