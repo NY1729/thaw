@@ -190,6 +190,9 @@ fn generate_registry_shims(
     // data so the borrowed `ModuleBundle`s built from it below can outlive
     // this loop.
     let mut bundles: Vec<(String, String, Vec<String>)> = Vec::new();
+    // Every top-level name generated so far, and which `--use`d package
+    // declared it first -- see the collision check below.
+    let mut declared_by: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for name in use_packages {
         let package = thaw_registry::resolve(registry_dir, name)?;
@@ -203,6 +206,36 @@ fn generate_registry_shims(
         // implementation is sitting right there in `bundle.js`. See
         // `thaw_bridge::effective_classifications`'s doc comment.
         let native_lib_available = package.native_lib.is_some();
+        let classifications = thaw_bridge::effective_classifications(&functions, native_lib_available);
+
+        // Every generated top-level name -- FastPath ambient declaration
+        // or Fallback wrapper alike -- lands in the *same* flat global
+        // scope (QuickJS-NG globals for Fallback, the LLVM module's own
+        // symbol table for FastPath). Two different packages exporting
+        // the same name (e.g. `qs` and `@hapi/hoek` both export
+        // `stringify`) would otherwise silently collide: whichever
+        // package's shim/binding runs last wins, with no error --
+        // exactly the kind of order-dependent surprise this project has
+        // treated as a bug to catch loudly every other time it showed up
+        // (see thaw-bridge's `classify_all`, for the same problem one
+        // level down, *within* one `.d.ts`'s own overloads). Found via
+        // this session's own combined multi-package verification:
+        // `stringify` silently resolved to whichever of `qs`/`@hapi/hoek`
+        // was `--use`d last.
+        for (declared_name, _) in &classifications {
+            if let Some(existing_package) = declared_by.get(declared_name) {
+                if existing_package != name {
+                    return Err(format!(
+                        "`{declared_name}` is declared by both `{existing_package}` and `{name}` -- \
+                         using multiple --use packages that export the same top-level name isn't \
+                         supported yet"
+                    ));
+                }
+            } else {
+                declared_by.insert(declared_name.clone(), name.clone());
+            }
+        }
+
         shim.push_str(&thaw_bridge::generate_shim(&functions, native_lib_available));
 
         if let Some(native_lib) = package.native_lib {
@@ -212,11 +245,8 @@ fn generate_registry_shims(
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
-            // QuickJS-NG at all. Uses the same `effective_classifications`
-            // (not raw `classify`/`classify_all`) that `generate_shim`
-            // itself used, so this can't disagree with what was actually
-            // emitted for a given name.
-            let fallback_names = thaw_bridge::effective_classifications(&functions, native_lib_available)
+            // QuickJS-NG at all.
+            let fallback_names = classifications
                 .into_iter()
                 .filter_map(|(name, classification)| match classification {
                     thaw_bridge::Classification::Fallback { .. } => Some(name),
