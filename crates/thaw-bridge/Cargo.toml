@@ -7,3 +7,6 @@ edition.workspace = true
 swc_ecma_ast = "29.0.0"
 thaw-hir = { path = "../thaw-hir" }
 thaw-parser = { path = "../thaw-parser" }
+
+[dev-dependencies]
+thaw-quickjs = { path = "../thaw-quickjs" }
