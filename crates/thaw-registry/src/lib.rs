@@ -384,17 +384,33 @@ fn bundle_commonjs_package(
         }
 
         for spec in find_bare_require_specs(&source) {
-            let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
+            if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
                 resolve_bare_require(node_modules_dir, &spec)
-            else {
+            {
+                let dep_key = format!("{dep_name}/{dep_relative}");
+                requires.push((spec, dep_key.clone()));
+                if !visited.contains(&dep_key) {
+                    visited.push(dep_key.clone());
+                    worklist.push((dep_key, dep_abs, dep_name, dep_dir));
+                }
                 continue;
-            };
-            let dep_key = format!("{dep_name}/{dep_relative}");
-            requires.push((spec, dep_key.clone()));
-            if !visited.contains(&dep_key) {
-                visited.push(dep_key.clone());
-                worklist.push((dep_key, dep_abs, dep_name, dep_dir));
             }
+            // Not a real npm package under `node_modules_dir` -- maybe a
+            // Node core builtin Thaw has a polyfill for.
+            if let Some(builtin_source) = builtin_module_source(&spec) {
+                let builtin_key = format!("node:{spec}");
+                requires.push((spec, builtin_key.clone()));
+                if !visited.contains(&builtin_key) {
+                    visited.push(builtin_key.clone());
+                    modules.push(BundledModule {
+                        key: builtin_key,
+                        source: builtin_source.to_string(),
+                        requires: Vec::new(),
+                    });
+                }
+            }
+            // Otherwise left unresolved -- falls through to the runtime
+            // external-require stub, same as always.
         }
 
         modules.push(BundledModule { key, source, requires });
@@ -497,6 +513,34 @@ fn split_bare_spec(spec: &str) -> (&str, Option<&str>) {
 /// installed under `node_modules_dir`, or -- rare -- the subpath itself
 /// doesn't exist) -- left for the runtime external-require stub to
 /// report, same as any other unresolvable require.
+/// A tiny, hand-maintained polyfill for a Node.js core builtin module --
+/// *not* a real re-implementation of Node's standard library, just
+/// enough surface for whatever a real npm package's dependency chain
+/// has actually been found to touch unconditionally at load time, added
+/// one module (and one function) at a time the same way every other gap
+/// in this file was: hit a real error against a real package, fix
+/// exactly that. A Node builtin has no `package.json`/`node_modules`
+/// entry at all, so `resolve_bare_require` correctly never finds it;
+/// this is the fallback checked only after that lookup fails.
+///
+/// `util`: found necessary by `qs`'s real dependency chain --
+/// `object-inspect` (pulled in via `side-channel`) does `require('util')`
+/// unconditionally at the top of `util.inspect.js`, only to read
+/// `.inspect`/`.inspect.custom` off the result (as a fallback/symbol
+/// source, not for `util.inspect`'s actual pretty-printing behavior,
+/// which `object-inspect` itself reimplements) -- a real
+/// `util.inspect`-quality implementation is unnecessary for that.
+fn builtin_module_source(name: &str) -> Option<&'static str> {
+    match name {
+        "util" => Some(
+            "function inspect(value) { return String(value); }\n\
+             inspect.custom = Symbol.for('nodejs.util.inspect.custom');\n\
+             module.exports = { inspect: inspect };\n",
+        ),
+        _ => None,
+    }
+}
+
 fn resolve_bare_require(
     node_modules_dir: &Path,
     spec: &str,
@@ -1128,5 +1172,71 @@ mod tests {
         let _ = fs::remove_dir_all(&dir_a);
         let _ = fs::remove_dir_all(&dir_b);
         let _ = fs::remove_dir_all(&node_modules_dir);
+    }
+
+    /// The exact shape found in `qs`'s real dependency chain:
+    /// `object-inspect` (pulled in transitively) does
+    /// `require('util').inspect.custom` unconditionally at load time,
+    /// with no matching `node_modules/util` -- must resolve via the
+    /// `util` builtin polyfill instead of falling through to the
+    /// external-require stub.
+    #[test]
+    fn bundles_the_util_builtin_polyfill_when_required() {
+        let dir = temp_registry("builtin_util");
+        fs::write(
+            dir.join("index.js"),
+            "var inspect = require('util').inspect;\n\
+             module.exports = function () { return typeof inspect.custom; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_util_node_modules");
+
+        let (bundle, _, file_count) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2, "pkg's index.js + the util polyfill");
+        assert!(bundle.contains("node:util"));
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    /// Not just plausible text -- runs through the real QuickJS-NG
+    /// engine, confirming `util.inspect.custom` actually comes back as a
+    /// real `Symbol` (what `object-inspect` needs it to be), not merely
+    /// present.
+    #[test]
+    fn util_polyfill_actually_runs_through_quickjs() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_util_runs");
+        fs::write(
+            dir.join("index.js"),
+            "var inspect = require('util').inspect;\n\
+             module.exports = function () { return typeof inspect.custom; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_util_runs_node_modules");
+
+        let (bundle, _, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.checkInspectCustom = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "bundle failed to load");
+
+        let func = CString::new("checkInspectCustom").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "\"symbol\"");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
     }
 }
