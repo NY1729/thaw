@@ -229,11 +229,20 @@ impl<'ctx> HirCompiler<'ctx> {
             // to an arena-allocated buffer of contiguous `f64` fields (see
             // `compile_object_lit`). Unlike arrays there's no length
             // header -- field count/order is static, part of the type.
+            // Every field is one word (8 bytes on this target) regardless
+            // of its own type: `f64`/`bool`/pointer values (Str/Array/
+            // Object/Json) are all word-sized, so a field can be any type
+            // `basic_type` itself accepts -- including another `Object`,
+            // recursively. This call validates each field is representable
+            // at all (erroring on e.g. `Promise`); it doesn't need to
+            // guard against cycles itself since a self-referential
+            // interface is already rejected at lowering time
+            // (`thaw_hir::lower::resolve_interface`), so a genuinely
+            // cyclic `HirType::Object` should never reach codegen.
             HirType::Object(fields) => {
-                if let Some((name, ty)) = fields.iter().find(|(_, ty)| *ty != HirType::F64) {
-                    return Err(format!(
-                        "Phase 2 only supports number-valued object fields, but `{name}` has type {ty:?}"
-                    ));
+                for (name, ty) in fields {
+                    self.basic_type(ty)
+                        .map_err(|e| format!("object field `{name}`: {e}"))?;
                 }
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
@@ -614,9 +623,11 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirExpr::ObjectLit(fields) => self.compile_object_lit(fields),
             HirExpr::PropAccess(obj, object_ty, field) => {
+                let field_ty = self.field_type(object_ty, field)?;
+                let llvm_ty = self.basic_type(&field_ty)?;
                 let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
                 self.builder
-                    .build_load(self.context.f64_type(), field_ptr, "field")
+                    .build_load(llvm_ty, field_ptr, "field")
                     .map_err(|e| e.to_string())
             }
             HirExpr::PropAssign(obj, object_ty, field, value) => {
@@ -743,6 +754,21 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         Ok(base_ptr.into())
+    }
+
+    /// Looks up `field`'s declared type within `object_ty`, so a read
+    /// knows whether to load an `f64`, a pointer (nested object/array/
+    /// string/json), etc. -- fields are no longer assumed to all be `f64`
+    /// now that nested objects are supported.
+    fn field_type(&self, object_ty: &HirType, field: &str) -> Result<HirType, String> {
+        let HirType::Object(fields) = object_ty else {
+            return Err(format!("`.{field}` used on a non-object type {object_ty:?}"));
+        };
+        fields
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, ty)| ty.clone())
+            .ok_or_else(|| format!("object has no field `{field}`"))
     }
 
     /// Computes the address of `object.field`, from `object_ty`'s
@@ -1423,6 +1449,37 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "interfaces"), "3\n11\n");
+    }
+
+    #[test]
+    fn compiles_nested_object_fields() {
+        let source = r#"
+            interface Point {
+                x: number;
+                y: number;
+            }
+            interface Line {
+                start: Point;
+                length: number;
+            }
+
+            function main(): void {
+                const l: Line = { length: 5, start: { x: 1, y: 2 } };
+                console.log(l.start.x);
+                console.log(l.start.y);
+                console.log(l.length);
+
+                l.start.x = l.start.x + 100;
+                console.log(l.start.x);
+
+                l.start = { x: 9, y: 9 };
+                console.log(l.start.x);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "nested_objects"),
+            "1\n2\n5\n101\n9\n"
+        );
     }
 
     /// V1 async/await (docs/design/async-await.md): `async`/`await` are

@@ -892,13 +892,22 @@ impl<'a> FnLowerer<'a> {
             ));
         };
 
-        let value = if let Target::Var(name) = &target {
-            match self.scope.get(name).cloned() {
+        // Reorder/typecheck an object literal against the target's
+        // declared shape, same as a `let`/call-argument assignment --
+        // needed now that a field can itself be an object (`p.corner =
+        // { y: 2, x: 1 }`), not just a plain variable.
+        let value = match &target {
+            Target::Var(name) => match self.scope.get(name).cloned() {
                 Some(ty) => self.coerce_to_declared(&ty, value)?,
                 None => value,
+            },
+            Target::Prop(_, HirType::Object(fields), field) => {
+                match fields.iter().find(|(n, _)| n == field) {
+                    Some((_, ty)) => self.coerce_to_declared(&ty.clone(), value)?,
+                    None => value,
+                }
             }
-        } else {
-            value
+            _ => value,
         };
 
         Ok(build_assign(target, value))
