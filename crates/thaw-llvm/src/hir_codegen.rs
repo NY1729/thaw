@@ -20,6 +20,16 @@
 //! needs a memory slot; nothing runs LLVM's mem2reg pass yet; correctness
 //! doesn't depend on it, so the extra loads/stores are left for a later
 //! optimization pass.
+//!
+//! Phase 2 additionally adds `handler(event: string): string` as an
+//! alternate process entry point (see `emit_lambda_entry`), `process.env`,
+//! and object types: `{ x: number; y: number }`-style records, `f64`
+//! fields only, arena-allocated as a flat `[f64 field0]...[f64 fieldN-1]`
+//! buffer with no length header (field order is static, part of the type
+//! -- see `thaw_hir::HirExpr::PropAccess`, which bakes in the resolved
+//! field layout so codegen never needs its own type inference pass).
+//! async/await is designed but not implemented yet -- see
+//! `docs/design/async-await.md`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -47,6 +57,9 @@ const USER_MAIN_SYMBOL: &str = "thaw_user_main";
 const ARRAY_HEADER_BYTES: u64 = 8;
 /// Phase 1 arrays only ever hold `f64` elements (see module doc).
 const ARRAY_ELEM_BYTES: u64 = 8;
+/// Phase 2 objects only ever hold `f64` fields (see module doc); no header
+/// (field count/order is static, part of the type, not a runtime value).
+const OBJECT_FIELD_BYTES: u64 = 8;
 
 pub struct HirCompiler<'ctx> {
     context: &'ctx Context,
@@ -159,7 +172,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
-            other => Err(format!("Phase 1 codegen does not support type {other:?} yet")),
+            // Objects are represented the same way: a single opaque pointer
+            // to an arena-allocated buffer of contiguous `f64` fields (see
+            // `compile_object_lit`). Unlike arrays there's no length
+            // header -- field count/order is static, part of the type.
+            HirType::Object(fields) => {
+                if let Some((name, ty)) = fields.iter().find(|(_, ty)| *ty != HirType::F64) {
+                    return Err(format!(
+                        "Phase 2 only supports number-valued object fields, but `{name}` has type {ty:?}"
+                    ));
+                }
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
+            other => Err(format!("Phase 1/2 codegen does not support type {other:?} yet")),
         }
     }
 
@@ -495,6 +520,22 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirExpr::EnvVar(name) => self.compile_env_var(name),
 
+            HirExpr::ObjectLit(fields) => self.compile_object_lit(fields),
+            HirExpr::PropAccess(obj, object_ty, field) => {
+                let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
+                self.builder
+                    .build_load(self.context.f64_type(), field_ptr, "field")
+                    .map_err(|e| e.to_string())
+            }
+            HirExpr::PropAssign(obj, object_ty, field, value) => {
+                let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
+                let val = self.compile_expr(value)?;
+                self.builder
+                    .build_store(field_ptr, val)
+                    .map_err(|e| e.to_string())?;
+                Ok(val)
+            }
+
             other => Err(format!("Phase 1/2 codegen does not support {other:?} yet")),
         }
     }
@@ -567,6 +608,76 @@ impl<'ctx> HirCompiler<'ctx> {
         unsafe {
             self.builder
                 .build_in_bounds_gep(self.context.i8_type(), arr_ptr, &[byte_offset], "elem_ptr")
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    /// Allocates `[f64 field0]...[f64 fieldN-1]` from the arena, in the
+    /// order `fields` lists them (thaw-hir's lowering already reordered
+    /// the literal to match its declared type, so this order is always the
+    /// declared one, not whatever order the user happened to write). No
+    /// length header: field count/order is static, part of the type, so
+    /// unlike arrays there's nothing to record at runtime.
+    fn compile_object_lit(&mut self, fields: &[(String, HirExpr)]) -> Result<BasicValueEnum<'ctx>, String> {
+        let field_vals = fields
+            .iter()
+            .map(|(_, expr)| self.compile_expr(expr))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let size = OBJECT_FIELD_BYTES * field_vals.len() as u64;
+        let i64_type = self.context.i64_type();
+        let size_val = i64_type.const_int(size.max(1), false);
+        let align_val = i64_type.const_int(OBJECT_FIELD_BYTES, false);
+
+        let alloc_fn = self.module.get_function("thaw_arena_alloc").unwrap();
+        let call = self
+            .builder
+            .build_call(alloc_fn, &[size_val.into(), align_val.into()], "obj_alloc")
+            .map_err(|e| e.to_string())?;
+        let base_ptr = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a value")?
+            .into_pointer_value();
+
+        for (i, val) in field_vals.into_iter().enumerate() {
+            let offset = i64_type.const_int(OBJECT_FIELD_BYTES * i as u64, false);
+            let field_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "field_ptr")
+                    .map_err(|e| e.to_string())?
+            };
+            self.builder.build_store(field_ptr, val).map_err(|e| e.to_string())?;
+        }
+
+        Ok(base_ptr.into())
+    }
+
+    /// Computes the address of `object.field`, from `object_ty`'s
+    /// (statically known, per `HirExpr::PropAccess`'s payload) field order.
+    fn compile_field_ptr(
+        &mut self,
+        object: &HirExpr,
+        object_ty: &HirType,
+        field: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let HirType::Object(fields) = object_ty else {
+            return Err(format!("`.{field}` used on a non-object type {object_ty:?}"));
+        };
+        let index = fields
+            .iter()
+            .position(|(name, _)| name == field)
+            .ok_or_else(|| format!("object has no field `{field}`"))?;
+
+        let obj_ptr = self.compile_expr(object)?.into_pointer_value();
+        let offset = self
+            .context
+            .i64_type()
+            .const_int(OBJECT_FIELD_BYTES * index as u64, false);
+
+        unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), obj_ptr, &[offset], "field_ptr")
                 .map_err(|e| e.to_string())
         }
     }
@@ -1016,6 +1127,30 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "trycatch"),
             "before\nboom\nafter\n"
+        );
+    }
+
+    #[test]
+    fn compiles_object_literals_field_access_and_mutation() {
+        let source = r#"
+            function dist(p: { x: number; y: number }): number {
+                return p.x + p.y;
+            }
+
+            function main(): void {
+                const p: { x: number; y: number } = { y: 2, x: 1 };
+                console.log(p.x);
+                console.log(dist(p));
+
+                p.x = p.x + 10;
+                console.log(p.x);
+
+                console.log(dist({ x: 3, y: 4 }));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "objects"),
+            "1\n3\n11\n7\n"
         );
     }
 
