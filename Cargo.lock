@@ -1042,6 +1042,7 @@ name = "thaw-cli"
 version = "0.1.0"
 dependencies = [
  "inkwell",
+ "thaw-bridge",
  "thaw-hir",
  "thaw-llvm",
  "thaw-parser",
