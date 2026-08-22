@@ -422,6 +422,16 @@ fn lower_ts_type(
                 }
             }
 
+            // `Json`, with no type arguments -- the annotation spelling for
+            // `HirType::Json` (a dynamic value, e.g. from `JSON.parse`).
+            // Without this there was no way to *write* a `Json`-typed
+            // parameter/`let` annotation; it could only ever be inferred
+            // as an expression's type. Needed for e.g. thaw-bridge's
+            // generated Fallback wrappers (`function f(args: Json): Json`).
+            if ref_name == Some("Json") && ty_ref.type_params.is_none() {
+                return Ok(HirType::Json);
+            }
+
             // Otherwise, accept `Array<T>` / `Promise<T>` as the two
             // other built-in generic spellings we recognize.
             let single_type_param = ty_ref
@@ -1736,6 +1746,19 @@ mod tests {
                 ),
             )
         );
+    }
+
+    #[test]
+    fn lowers_json_type_annotation() {
+        let program = lower(
+            r#"function wrap(args: Json): Json {
+                return args;
+            }
+            function main(): void {}"#,
+        );
+        let f = &program.functions[0];
+        assert_eq!(f.params, vec![HirParam { name: "args".into(), ty: HirType::Json }]);
+        assert_eq!(f.ret, HirType::Json);
     }
 
     #[test]
