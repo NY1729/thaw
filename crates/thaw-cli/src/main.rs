@@ -66,18 +66,21 @@ fn build(input: &Path, output: &Path) -> Result<(), String> {
     let obj_path = output.with_extension("o");
     compiler.write_object_file(&obj_path)?;
 
-    // Always link both: thaw-arena backs array allocation (Phase 1),
-    // thaw-runtime backs the Lambda event loop for `handler`-based programs
-    // (Phase 2). An unreferenced static archive member is simply never
-    // pulled into the final binary, so linking both unconditionally is
+    // Always link all three: thaw-arena backs array/object allocation
+    // (Phase 1/2), thaw-runtime backs the Lambda event loop for
+    // `handler`-based programs (Phase 2), thaw-std backs `fetch`/`JSON.*`.
+    // An unreferenced static archive member is simply never pulled into
+    // the final binary, so linking all of them unconditionally is
     // harmless and keeps this simple.
     let arena_lib = build_staticlib("thaw-arena")?;
     let runtime_lib = build_staticlib("thaw-runtime")?;
+    let std_lib = build_staticlib("thaw-std")?;
 
     let link_status = Command::new("cc")
         .arg(&obj_path)
         .arg(&arena_lib)
         .arg(&runtime_lib)
+        .arg(&std_lib)
         .arg("-o")
         .arg(output)
         .status()
