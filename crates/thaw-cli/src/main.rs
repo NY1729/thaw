@@ -67,8 +67,13 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
 
     println!("fetching `{package}`...");
     let added = thaw_registry::add(&registry_dir, &package)?;
+    let bundle_note = if added.bundled_file_count > 1 {
+        format!(" (bundled {} files)", added.bundled_file_count)
+    } else {
+        String::new()
+    };
     println!(
-        "added `{package}` to `{}`\n  types: {}\n  main:  {}",
+        "added `{package}` to `{}`\n  types: {}\n  main:  {}{bundle_note}",
         registry_dir.join(&package).display(),
         added.dts_relative_path,
         added.js_relative_path
