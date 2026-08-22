@@ -131,12 +131,9 @@ fn fetch_and_copy(
     let package_dir = scratch.join("node_modules").join(package);
     let manifest = read_manifest(&package_dir)?;
 
-    let js_relative_path = manifest
-        .get("main")
-        .and_then(|v| v.as_str())
-        .unwrap_or("index.js")
-        .to_string();
-    let js_source = fs::read_to_string(package_dir.join(&js_relative_path))
+    let main_field = manifest.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
+    let (js_relative_path, js_abs_path) = resolve_main_js_path(&package_dir, main_field)?;
+    let js_source = fs::read_to_string(&js_abs_path)
         .map_err(|e| format!("failed to read `{js_relative_path}`: {e}"))?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
@@ -241,6 +238,34 @@ fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(Str
         return Some(("index.d.ts".to_string(), index));
     }
     None
+}
+
+/// Approximates enough of Node's CommonJS resolution algorithm to read a
+/// `main` field's actual file: try the path exactly as written, then
+/// with a `.js` extension appended, then as a directory containing
+/// `index.js`. Real packages commonly write `"main": "./index"` (no
+/// extension, resolved by Node at require-time) or `"main": "./lib"` (a
+/// directory) -- reading the literal `main` string as a path fails for
+/// both. Doesn't attempt the rest of Node's real algorithm (`package.json`
+/// `exports` maps, `.json`/`.node` candidates, etc.) -- just these two
+/// common shapes.
+fn resolve_main_js_path(package_dir: &Path, main: &str) -> Result<(String, PathBuf), String> {
+    let trimmed = main.trim_end_matches('/');
+    let candidates = [
+        main.to_string(),
+        format!("{trimmed}.js"),
+        format!("{trimmed}/index.js"),
+    ];
+    for candidate in &candidates {
+        let path = package_dir.join(candidate);
+        if path.is_file() {
+            return Ok((candidate.clone(), path));
+        }
+    }
+    Err(format!(
+        "couldn't find a JS entry point for `main: \"{main}\"` (tried `{}`)",
+        candidates.join("`, `")
+    ))
 }
 
 #[cfg(test)]
@@ -384,5 +409,50 @@ mod tests {
     #[test]
     fn types_package_name_for_a_scoped_package() {
         assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
+    }
+
+    /// Found by running a real npm package (`ms`, `"main": "./index"`)
+    /// through `add`: reading the literal `main` string as a path fails
+    /// since Node resolves the missing `.js` extension at require-time,
+    /// which we don't get for free.
+    #[test]
+    fn resolves_main_field_missing_its_extension() {
+        let dir = temp_registry("main_no_extension");
+        fs::write(dir.join("index.js"), "module.exports = 1;").unwrap();
+        let (rel, abs) = resolve_main_js_path(&dir, "./index").unwrap();
+        assert_eq!(rel, "./index.js");
+        assert_eq!(abs, dir.join("index.js"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolves_main_field_pointing_at_a_directory() {
+        let dir = temp_registry("main_directory");
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(dir.join("lib/index.js"), "module.exports = 1;").unwrap();
+        let (rel, abs) = resolve_main_js_path(&dir, "./lib").unwrap();
+        assert_eq!(rel, "./lib/index.js");
+        assert_eq!(abs, dir.join("lib/index.js"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolves_main_field_written_exactly() {
+        let dir = temp_registry("main_exact");
+        fs::write(dir.join("main.js"), "module.exports = 1;").unwrap();
+        let (rel, abs) = resolve_main_js_path(&dir, "main.js").unwrap();
+        assert_eq!(rel, "main.js");
+        assert_eq!(abs, dir.join("main.js"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn errors_with_all_tried_candidates_when_main_cannot_be_resolved() {
+        let dir = temp_registry("main_missing");
+        let err = resolve_main_js_path(&dir, "./index").unwrap_err();
+        assert!(err.contains("./index"));
+        assert!(err.contains("./index.js"));
+        assert!(err.contains("./index/index.js"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

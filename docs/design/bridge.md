@@ -120,6 +120,33 @@ Fallback。
 たびに変換が要る）。V1 は「全部ネイティブ」か「全部 QuickJS」の
 二択にすることで、生成コードを単純に保つ。
 
+### 4.3 オーバーロードは名前単位で判定する
+
+実際の npm パッケージ（`ms` など）を registry 経由で試して見つかった
+ケース: 同じ関数名に対して `.d.ts` が複数のシグネチャ（オーバーロード）
+を持ち、それぞれが**別々に**分類すると異なる判定になることがある
+（例: `ms(value: number, options?): string` は Fast path、
+`ms(value: string): number` は Fallback）。
+
+各シグネチャを独立に `classify` してそのまま `generate_shim` に渡すと、
+同じ名前に対して `declare function ms(...)`（ambient FFI 宣言）と
+`function ms(argsArray: Json): Json { ... }`（Fallback wrapper）という
+**矛盾する2つのトップレベル宣言**が生成されてしまう。thaw-hir は
+同名関数の重複を検出しないため、これはコンパイルエラーにも
+リンクエラーにもならず、後に書かれた方が黙って勝つ -- 生成順序
+（`.d.ts` 内の記述順）にのみ依存する、誰も意図していない挙動になる。
+
+対策として `classify_all(functions)` を追加した: 名前ごとにグループ化し、
+**そのグループにシグネチャが1つしかない場合のみ** `classify` の結果を
+そのまま使う。2つ以上あれば（個々の判定結果に関わらず）**必ず
+Fallback**に倒す -- Fast path は1つの固定シグネチャを1つのネイティブ
+シンボルに対応させる仕組みなので、複数の呼び出し形を持つ名前を表現
+できない。一方 Fallback (`callDynamic`) は引数の形を問わず JSON を
+そのまま JS 側に渡すだけなので、JS 側の関数が自分でオーバーロードを
+処理する限り問題なく動く（実際 `ms` はこれで両方の呼び出し形が動く
+ことを確認済み）。`generate_shim`/thaw-cli の Fallback 名前収集は
+どちらもこの `classify_all` を使うよう統一した。
+
 ## 5. Marshal/Unmarshal コード生成
 
 Fast path に分類された関数は、[HirExpr::FfiCall](../../crates/thaw-hir/src/lib.rs)
