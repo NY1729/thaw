@@ -193,11 +193,14 @@ fn generate_registry_shims(
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
-            // QuickJS-NG at all.
-            let fallback_names = functions
-                .iter()
-                .filter_map(|f| match thaw_bridge::classify(f) {
-                    thaw_bridge::Classification::Fallback { function, .. } => Some(function),
+            // QuickJS-NG at all. `classify_all` (not per-function
+            // `classify`) so an overloaded name that's a mix of FastPath/
+            // Fallback signatures is counted once, consistently with
+            // what `generate_shim` actually emitted for it.
+            let fallback_names = thaw_bridge::classify_all(&functions)
+                .into_iter()
+                .filter_map(|(name, classification)| match classification {
+                    thaw_bridge::Classification::Fallback { .. } => Some(name),
                     thaw_bridge::Classification::FastPath(_) => None,
                 })
                 .collect();
