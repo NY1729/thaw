@@ -1505,6 +1505,28 @@ mod tests {
         assert_eq!(compile_and_run(source, "interface_extends"), "1\n9\n");
     }
 
+    #[test]
+    fn compiles_generic_interface_instantiation() {
+        let source = r#"
+            interface Box<T> {
+                value: T;
+            }
+
+            function unwrapNumber(b: Box<number>): number {
+                return b.value;
+            }
+
+            function main(): void {
+                const b: Box<number> = { value: 42 };
+                console.log(unwrapNumber(b));
+
+                const s: Box<string> = { value: "hi" };
+                console.log(s.value);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "generic_interfaces"), "42\nhi\n");
+    }
+
     /// V1 async/await (docs/design/async-await.md): `async`/`await` are
     /// pure sugar over synchronous calls, including `main` itself being
     /// `async` -- the entry-point detection in `compile_program` doesn't
