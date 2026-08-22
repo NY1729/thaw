@@ -1,0 +1,11 @@
+[package]
+name = "thaw-runtime"
+version = "0.1.0"
+edition.workspace = true
+
+# Linked into compiled Thaw Lambda handlers as a static archive by thaw-cli,
+# the same way thaw-arena is -- not used as a normal Rust dependency.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]

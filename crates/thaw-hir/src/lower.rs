@@ -301,6 +301,20 @@ fn lower_expr(expr: &Expr) -> Result<HirExpr, String> {
 }
 
 fn lower_member_read(member: &swc_ecma_ast::MemberExpr) -> Result<HirExpr, String> {
+    // `process.env.NAME` -- checked before the general cases since it's a
+    // fixed two-level member chain, not a general property access.
+    if let MemberProp::Ident(name_prop) = &member.prop {
+        if let Expr::Member(inner) = member.obj.as_ref() {
+            if let (Expr::Ident(obj), MemberProp::Ident(env_prop)) =
+                (inner.obj.as_ref(), &inner.prop)
+            {
+                if obj.sym == *"process" && env_prop.sym == *"env" {
+                    return Ok(HirExpr::EnvVar(name_prop.sym.to_string()));
+                }
+            }
+        }
+    }
+
     match &member.prop {
         MemberProp::Computed(computed) => {
             let obj = lower_expr(&member.obj)?;
@@ -311,7 +325,10 @@ fn lower_member_read(member: &swc_ecma_ast::MemberExpr) -> Result<HirExpr, Strin
             let obj = lower_expr(&member.obj)?;
             Ok(HirExpr::ArrayLen(Box::new(obj)))
         }
-        _ => Err("unsupported property access (Phase 1 only supports `arr[i]` and `arr.length`)".into()),
+        _ => Err(
+            "unsupported property access (Phase 1/2 support `arr[i]`, `arr.length`, and `process.env.NAME`)"
+                .into(),
+        ),
     }
 }
 
@@ -577,6 +594,20 @@ mod tests {
                 Box::new(HirExpr::Var("console.log".into())),
                 vec![HirExpr::ArrayLen(Box::new(HirExpr::Var("xs".into())))],
             ))
+        );
+    }
+
+    #[test]
+    fn lowers_process_env_access() {
+        let program =
+            lower(r#"function main(): void { console.log(process.env.STAGE); }"#);
+        let f = &program.functions[0];
+        assert_eq!(
+            f.body,
+            vec![HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("console.log".into())),
+                vec![HirExpr::EnvVar("STAGE".into())],
+            ))]
         );
     }
 

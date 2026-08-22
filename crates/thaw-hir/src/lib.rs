@@ -90,6 +90,9 @@ pub enum HirExpr {
     /// object/member model yet, so this is special-cased at lowering time
     /// the same way `console.log` is.
     ArrayLen(Box<HirExpr>),
+    /// `process.env.NAME`. Same story as `ArrayLen`: no general member
+    /// model yet, just this one special-cased builtin (Phase 2).
+    EnvVar(Symbol),
 }
 
 #[derive(Debug, Clone, PartialEq)]
