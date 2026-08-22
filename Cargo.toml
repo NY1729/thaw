@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/thaw-llvm"]
+members = ["crates/thaw-llvm", "crates/thaw-parser", "crates/thaw-hir", "crates/thaw-cli"]
 
 [workspace.package]
 edition = "2021"
