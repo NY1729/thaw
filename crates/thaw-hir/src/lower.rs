@@ -49,7 +49,7 @@ struct FnSignature {
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
-    let interfaces = resolve_interfaces(module)?;
+    let (interfaces, generic_interfaces) = resolve_interfaces(module)?;
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
@@ -66,9 +66,15 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 let params = func
                     .params
                     .iter()
-                    .map(|p| lower_param(&p.pat, &interfaces).map(|p| p.ty))
+                    .map(|p| lower_param(&p.pat, &interfaces, &generic_interfaces).map(|p| p.ty))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ret = lower_fn_return_type(func.is_async, &func.return_type, &name, &interfaces)?;
+                let ret = lower_fn_return_type(
+                    func.is_async,
+                    &func.return_type,
+                    &name,
+                    &interfaces,
+                    &generic_interfaces,
+                )?;
                 signatures.insert(
                     name,
                     FnSignature {
@@ -107,7 +113,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let functions = fn_decls
         .into_iter()
-        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures, &interfaces))
+        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures, &interfaces, &generic_interfaces))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(HirProgram {
@@ -116,17 +122,43 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     })
 }
 
-/// Resolves every top-level `interface` declaration into a
-/// `HirType::Object`, so `lower_ts_type` can treat a `TsTypeRef` naming an
-/// interface exactly like an inline `{ ... }` type literal. Interfaces may
-/// be declared in any order and may reference each other; a true cycle (an
-/// interface whose field chain refers back to itself) is rejected, since
-/// Thaw's flat, fixed-size object layout has no way to represent one.
-fn resolve_interfaces(module: &Module) -> Result<HashMap<Symbol, HirType>, String> {
+/// Non-generic interfaces (fully resolved up front into `HirType::Object`,
+/// the first map) plus generic interfaces (kept raw, resolved on demand via
+/// substitution at each `Name<ConcreteArgs>` use site -- see
+/// `resolve_generic_interface`, second map). No instantiation cache is
+/// needed: `HirType::Object` equality is structural, so resolving the same
+/// `Box<number>` twice just produces two equal values, not two different
+/// ones.
+///
+/// Scope note: a generic interface may only be referenced directly from a
+/// function signature/`let` annotation/etc. (wherever `lower_ts_type` is
+/// normally called) -- not from *inside another interface's field* (e.g.
+/// `interface Wrapper { box: Box<number>; }` is not resolved specially;
+/// `resolve_interface`/`resolve_type_with_interfaces` below never consult
+/// the generic map). Supporting that needs the eager resolution pass
+/// itself to be substitution-aware, deferred until a real use case asks
+/// for it.
+type GenericInterfaces<'a> = HashMap<Symbol, &'a TsInterfaceDecl>;
+
+/// Resolves every top-level `interface` declaration, so `lower_ts_type` can
+/// treat a `TsTypeRef` naming one exactly like an inline `{ ... }` type
+/// literal. Interfaces may be declared in any order and may reference each
+/// other; a true cycle (an interface whose field chain refers back to
+/// itself) is rejected, since Thaw's flat, fixed-size object layout has no
+/// way to represent one.
+fn resolve_interfaces(
+    module: &Module,
+) -> Result<(HashMap<Symbol, HirType>, GenericInterfaces<'_>), String> {
     let mut raw: HashMap<Symbol, &TsInterfaceDecl> = HashMap::new();
+    let mut generic: GenericInterfaces = HashMap::new();
     for item in &module.body {
         if let ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) = item {
-            raw.insert(iface.id.sym.to_string(), iface.as_ref());
+            let name = iface.id.sym.to_string();
+            if iface.type_params.is_some() {
+                generic.insert(name, iface.as_ref());
+            } else {
+                raw.insert(name, iface.as_ref());
+            }
         }
     }
 
@@ -135,7 +167,7 @@ fn resolve_interfaces(module: &Module) -> Result<HashMap<Symbol, HirType>, Strin
     for name in names {
         resolve_interface(&name, &raw, &mut resolved, &mut Vec::new())?;
     }
-    Ok(resolved)
+    Ok((resolved, generic))
 }
 
 fn resolve_interface(
@@ -244,16 +276,19 @@ fn resolve_type_with_interfaces(
         }
     }
     // Not an interface reference -- fall through to the ordinary rules.
-    // Any nested `TsTypeRef` to another interface inside e.g. an object
-    // type literal's field is still caught, since `lower_ts_type` also
-    // consults `resolved` for `TsTypeRef` lookups.
-    lower_ts_type(ty, resolved)
+    // Any nested `TsTypeRef` to another (non-generic) interface inside
+    // e.g. an object type literal's field is still caught, since
+    // `lower_ts_type` also consults `resolved` for `TsTypeRef` lookups.
+    // No generic interfaces here by design -- see the scope note on
+    // `GenericInterfaces`.
+    lower_ts_type(ty, resolved, &GenericInterfaces::new())
 }
 
 fn lower_fn_decl(
     fn_decl: &FnDecl,
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
 ) -> Result<HirFunction, String> {
     let name = fn_decl.ident.sym.to_string();
     let func = &fn_decl.function;
@@ -261,17 +296,23 @@ fn lower_fn_decl(
     let params = func
         .params
         .iter()
-        .map(|param| lower_param(&param.pat, interfaces))
+        .map(|param| lower_param(&param.pat, interfaces, generic_interfaces))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let ret = lower_fn_return_type(func.is_async, &func.return_type, &name, interfaces)?;
+    let ret = lower_fn_return_type(
+        func.is_async,
+        &func.return_type,
+        &name,
+        interfaces,
+        generic_interfaces,
+    )?;
 
     let body_block = func
         .body
         .as_ref()
         .ok_or_else(|| format!("function `{name}` has no body (ambient/overload decl?)"))?;
 
-    let mut lowerer = FnLowerer::new(signatures, interfaces, ret.clone());
+    let mut lowerer = FnLowerer::new(signatures, interfaces, generic_interfaces, ret.clone());
     for param in &params {
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
     }
@@ -295,9 +336,10 @@ fn lower_fn_return_type(
     return_type: &Option<Box<swc_ecma_ast::TsTypeAnn>>,
     fn_name: &str,
     interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
 ) -> Result<HirType, String> {
     let declared = match return_type {
-        Some(ann) => lower_ts_type(&ann.type_ann, interfaces)?,
+        Some(ann) => lower_ts_type(&ann.type_ann, interfaces, generic_interfaces)?,
         None => HirType::Void,
     };
     if !is_async {
@@ -311,13 +353,17 @@ fn lower_fn_return_type(
     }
 }
 
-fn lower_param(pat: &Pat, interfaces: &HashMap<Symbol, HirType>) -> Result<HirParam, String> {
+fn lower_param(
+    pat: &Pat,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<HirParam, String> {
     let Pat::Ident(binding) = pat else {
         return Err("only simple identifier parameters are supported".into());
     };
     let name = binding.id.sym.to_string();
     let ty = match &binding.type_ann {
-        Some(ann) => lower_ts_type(&ann.type_ann, interfaces)?,
+        Some(ann) => lower_ts_type(&ann.type_ann, interfaces, generic_interfaces)?,
         None => {
             return Err(format!(
                 "parameter `{name}` needs an explicit type annotation (no type inference for params)"
@@ -327,7 +373,11 @@ fn lower_param(pat: &Pat, interfaces: &HashMap<Symbol, HirType>) -> Result<HirPa
     Ok(HirParam { name, ty })
 }
 
-fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<HirType, String> {
+fn lower_ts_type(
+    ty: &TsType,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<HirType, String> {
     match ty {
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => Ok(HirType::F64),
@@ -341,6 +391,7 @@ fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<H
         TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(lower_ts_type(
             &arr.elem_type,
             interfaces,
+            generic_interfaces,
         )?))),
         TsType::TsTypeRef(ty_ref) => {
             let ref_name = match &ty_ref.type_name {
@@ -348,18 +399,31 @@ fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<H
                 swc_ecma_ast::TsEntityName::TsQualifiedName(_) => None,
             };
 
-            // A name matching a resolved `interface` -- treated exactly
-            // like an inline `{ ... }` type literal from here on.
+            // A name matching a resolved (non-generic) `interface` --
+            // treated exactly like an inline `{ ... }` type literal.
             if let Some(name) = ref_name {
                 if let Some(resolved) = interfaces.get(name) {
                     return Ok(resolved.clone());
                 }
+                // A generic interface, referenced with concrete type
+                // arguments -- resolved on demand via substitution. See
+                // `resolve_generic_interface`'s doc comment for scope
+                // limits (no nested-inside-another-interface use, no
+                // `extends` on the generic interface itself).
+                if let Some(decl) = generic_interfaces.get(name) {
+                    return resolve_generic_interface(
+                        name,
+                        decl,
+                        ty_ref,
+                        interfaces,
+                        generic_interfaces,
+                        &mut Vec::new(),
+                    );
+                }
             }
 
             // Otherwise, accept `Array<T>` / `Promise<T>` as the two
-            // built-in generic spellings we recognize. This is not general
-            // generics support (still deferred per the roadmap) -- just
-            // these two names.
+            // other built-in generic spellings we recognize.
             let single_type_param = ty_ref
                 .type_params
                 .as_ref()
@@ -369,12 +433,16 @@ fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<H
                 });
 
             match (ref_name, single_type_param) {
-                (Some("Array"), Some(elem)) => {
-                    Ok(HirType::Array(Box::new(lower_ts_type(elem, interfaces)?)))
-                }
-                (Some("Promise"), Some(inner)) => {
-                    Ok(HirType::Promise(Box::new(lower_ts_type(inner, interfaces)?)))
-                }
+                (Some("Array"), Some(elem)) => Ok(HirType::Array(Box::new(lower_ts_type(
+                    elem,
+                    interfaces,
+                    generic_interfaces,
+                )?))),
+                (Some("Promise"), Some(inner)) => Ok(HirType::Promise(Box::new(lower_ts_type(
+                    inner,
+                    interfaces,
+                    generic_interfaces,
+                )?))),
                 _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
         }
@@ -396,7 +464,7 @@ fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<H
                     let ann = prop.type_ann.as_ref().ok_or_else(|| {
                         format!("field `{name}` needs an explicit type annotation")
                     })?;
-                    Ok((name, lower_ts_type(&ann.type_ann, interfaces)?))
+                    Ok((name, lower_ts_type(&ann.type_ann, interfaces, generic_interfaces)?))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(HirType::Object(fields))
@@ -404,6 +472,189 @@ fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<H
         other => Err(format!(
             "unsupported type annotation {other:?} (supports primitive keywords, T[]/Array<T>, interfaces, and object type literals)"
         )),
+    }
+}
+
+/// Resolves `Name<ConcreteArg, ...>` for a generic interface `Name`, by
+/// substituting each type parameter with its corresponding concrete
+/// argument's `HirType` throughout the interface's field types (see
+/// `resolve_ts_type_with_substitution`). `in_progress` guards against a
+/// generic interface that references itself (directly, or through another
+/// generic interface) -- freshly created at each top-level `lower_ts_type`
+/// call, so it only needs to catch a cycle within one such call tree.
+///
+/// Scope limits (see `GenericInterfaces`'s doc comment for the broader
+/// one): the generic interface itself cannot use `extends`; a field type
+/// that references *another* generic interface using one of *this*
+/// interface's own type parameters as an argument (e.g. `interface
+/// Wrapper<T> { boxed: Box<T>; }` where `Box` is also generic) is not
+/// substituted into -- only `T` used directly, in `T[]`/`Array<T>`/
+/// `Promise<T>`, or as an object type literal field is.
+fn resolve_generic_interface(
+    name: &str,
+    decl: &TsInterfaceDecl,
+    ty_ref: &swc_ecma_ast::TsTypeRef,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    if in_progress.iter().any(|n| n == name) {
+        return Err(format!(
+            "generic interface `{name}` is (indirectly) self-referential, which Thaw's fixed-size object layout can't represent"
+        ));
+    }
+    if !decl.extends.is_empty() {
+        return Err(format!("generic interface `{name}` cannot use `extends` yet"));
+    }
+
+    let type_param_decl = decl
+        .type_params
+        .as_ref()
+        .expect("caller only reaches here for a generic interface");
+    let type_param_names: Vec<Symbol> = type_param_decl
+        .params
+        .iter()
+        .map(|p| p.name.sym.to_string())
+        .collect();
+
+    let type_args: &[Box<TsType>] = ty_ref
+        .type_params
+        .as_ref()
+        .map(|params| params.params.as_slice())
+        .unwrap_or(&[]);
+    if type_args.len() != type_param_names.len() {
+        return Err(format!(
+            "interface `{name}` expects {} type argument(s), got {}",
+            type_param_names.len(),
+            type_args.len()
+        ));
+    }
+    let resolved_args = type_args
+        .iter()
+        .map(|arg| lower_ts_type(arg, interfaces, generic_interfaces))
+        .collect::<Result<Vec<_>, String>>()?;
+    let substitution: HashMap<Symbol, HirType> =
+        type_param_names.into_iter().zip(resolved_args).collect();
+
+    in_progress.push(name.to_string());
+
+    let mut fields = Vec::with_capacity(decl.body.body.len());
+    for member in &decl.body.body {
+        let TsTypeElement::TsPropertySignature(prop) = member else {
+            return Err(format!(
+                "interface `{name}` has an unsupported member (only plain properties are supported, no methods/index signatures)"
+            ));
+        };
+        let field_name = match prop.key.as_ref() {
+            Expr::Ident(ident) => ident.sym.to_string(),
+            _ => return Err(format!("interface `{name}` has an unsupported property key")),
+        };
+        let ann = prop.type_ann.as_ref().ok_or_else(|| {
+            format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
+        })?;
+        let field_ty = resolve_ts_type_with_substitution(
+            &ann.type_ann,
+            &substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        )?;
+        fields.push((field_name, field_ty));
+    }
+
+    in_progress.pop();
+
+    Ok(HirType::Object(fields))
+}
+
+/// Like `lower_ts_type`, but a bare `TsTypeRef` matching one of `Name`'s
+/// type parameters resolves to the corresponding concrete `HirType`
+/// instead of erroring as an unknown reference. Recurses into itself (not
+/// plain `lower_ts_type`) for `T[]`/`Array<T>`/`Promise<T>`/object type
+/// literal sub-parts, so a type parameter used deeper inside those still
+/// gets substituted.
+fn resolve_ts_type_with_substitution(
+    ty: &TsType,
+    substitution: &HashMap<Symbol, HirType>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    if let TsType::TsTypeRef(ty_ref) = ty {
+        if let swc_ecma_ast::TsEntityName::Ident(id) = &ty_ref.type_name {
+            let ref_name = id.sym.as_str();
+            if let Some(concrete) = substitution.get(ref_name) {
+                return Ok(concrete.clone());
+            }
+            if let Some(decl) = generic_interfaces.get(ref_name) {
+                return resolve_generic_interface(
+                    ref_name,
+                    decl,
+                    ty_ref,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+            }
+            if let Some(params) = &ty_ref.type_params {
+                if let [elem] = params.params.as_slice() {
+                    let resolved_elem = resolve_ts_type_with_substitution(
+                        elem,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
+                    match ref_name {
+                        "Array" => return Ok(HirType::Array(Box::new(resolved_elem))),
+                        "Promise" => return Ok(HirType::Promise(Box::new(resolved_elem))),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return lower_ts_type(ty, interfaces, generic_interfaces);
+    }
+
+    match ty {
+        TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(resolve_ts_type_with_substitution(
+            &arr.elem_type,
+            substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        )?))),
+        TsType::TsTypeLit(type_lit) => {
+            let fields = type_lit
+                .members
+                .iter()
+                .map(|member| {
+                    let TsTypeElement::TsPropertySignature(prop) = member else {
+                        return Err(
+                            "only plain properties are supported in object type literals (no methods/index signatures)"
+                                .to_string(),
+                        );
+                    };
+                    let name = match prop.key.as_ref() {
+                        Expr::Ident(ident) => ident.sym.to_string(),
+                        _ => return Err("unsupported object type literal key".to_string()),
+                    };
+                    let ann = prop.type_ann.as_ref().ok_or_else(|| {
+                        format!("field `{name}` needs an explicit type annotation")
+                    })?;
+                    let field_ty = resolve_ts_type_with_substitution(
+                        &ann.type_ann,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
+                    Ok((name, field_ty))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(HirType::Object(fields))
+        }
+        other => lower_ts_type(other, interfaces, generic_interfaces),
     }
 }
 
@@ -468,6 +719,7 @@ struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     signatures: &'a HashMap<Symbol, FnSignature>,
     interfaces: &'a HashMap<Symbol, HirType>,
+    generic_interfaces: &'a GenericInterfaces<'a>,
     ret_type: HirType,
 }
 
@@ -475,12 +727,14 @@ impl<'a> FnLowerer<'a> {
     fn new(
         signatures: &'a HashMap<Symbol, FnSignature>,
         interfaces: &'a HashMap<Symbol, HirType>,
+        generic_interfaces: &'a GenericInterfaces<'a>,
         ret_type: HirType,
     ) -> Self {
         Self {
             scope: HashMap::new(),
             signatures,
             interfaces,
+            generic_interfaces,
             ret_type,
         }
     }
@@ -605,7 +859,7 @@ impl<'a> FnLowerer<'a> {
                 let value = self.lower_expr(init)?;
 
                 let ty = match &binding.type_ann {
-                    Some(ann) => lower_ts_type(&ann.type_ann, self.interfaces)?,
+                    Some(ann) => lower_ts_type(&ann.type_ann, self.interfaces, self.generic_interfaces)?,
                     None => self.infer_expr_type(&value).map_err(|e| {
                         format!(
                             "cannot infer the type of `{name}`: {e} \
@@ -1600,15 +1854,99 @@ mod tests {
     }
 
     #[test]
-    fn rejects_generic_interface() {
-        let module = thaw_parser::parse_typescript(
+    fn lowers_generic_interface_instantiated_with_a_concrete_type() {
+        let program = lower(
             r#"interface Box<T> {
                 value: T;
             }
+            function unwrap(b: Box<number>): number {
+                return b.value;
+            }
+            function main(): void {
+                const b: Box<number> = { value: 5 };
+                console.log(unwrap(b));
+            }"#,
+        );
+
+        let box_number_ty = HirType::Object(vec![("value".into(), HirType::F64)]);
+        assert_eq!(
+            program.functions[0].params,
+            vec![HirParam {
+                name: "b".into(),
+                ty: box_number_ty.clone()
+            }]
+        );
+        assert_eq!(
+            program.functions[1].body[0],
+            HirStmt::Let(
+                "b".into(),
+                box_number_ty,
+                HirExpr::ObjectLit(vec![("value".into(), HirExpr::Lit(HirLit::F64(5.0)))]),
+            )
+        );
+    }
+
+    #[test]
+    fn generic_interface_instantiations_with_different_arguments_are_distinct_shapes() {
+        let program = lower(
+            r#"interface Box<T> { value: T; }
+            function f(a: Box<number>, b: Box<string>): void {}
+            function main(): void {}"#,
+        );
+        assert_eq!(
+            program.functions[0].params[0].ty,
+            HirType::Object(vec![("value".into(), HirType::F64)])
+        );
+        assert_eq!(
+            program.functions[0].params[1].ty,
+            HirType::Object(vec![("value".into(), HirType::Str)])
+        );
+    }
+
+    #[test]
+    fn generic_interface_field_can_be_an_array_or_object_literal_of_the_type_parameter() {
+        let program = lower(
+            r#"interface Box<T> {
+                items: T[];
+            }
+            function main(): void {
+                const b: Box<number> = { items: [1, 2, 3] };
+                console.log(b.items.length);
+            }"#,
+        );
+        let box_ty = HirType::Object(vec![("items".into(), HirType::Array(Box::new(HirType::F64)))]);
+        assert!(matches!(&program.functions[0].body[0], HirStmt::Let(_, ty, _) if *ty == box_ty));
+    }
+
+    #[test]
+    fn rejects_wrong_number_of_generic_type_arguments() {
+        let module = thaw_parser::parse_typescript(
+            r#"interface Pair<A, B> { first: A; second: B; }
+            function main(): void {
+                const p: Pair<number> = { first: 1, second: 2 };
+            }"#,
+        )
+        .unwrap();
+        let err = lower_module(&module).unwrap_err();
+        assert!(err.contains("type argument"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_self_referential_generic_interface() {
+        // Triggered via a parameter type (not a `let`) so the error comes
+        // from resolving `Node<number>` itself, not from lowering some
+        // initializer expression first.
+        let module = thaw_parser::parse_typescript(
+            r#"interface Node<T> {
+                value: T;
+                next: Node<T>;
+            }
+            function f(n: Node<number>): void {}
             function main(): void {}"#,
         )
         .unwrap();
-        assert!(lower_module(&module).is_err());
+        let err = lower_module(&module).unwrap_err();
+        assert!(err.contains("self-referential"), "unexpected error: {err}");
     }
 
     #[test]
