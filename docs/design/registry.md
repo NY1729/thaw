@@ -110,7 +110,45 @@ thaw-cli はここで解決したパッケージごとに:
   ユーザーコードに `loadScript` 記述なし）を1つのプログラムに混在させて
   ビルド・実行し、両方とも正しい出力を得た。
 
-## 6. 今回やらなかったこと（意図的なスコープ外）
+## 6. Fallback 側の実行を実物の npm パッケージで検証、CommonJS 対応
+
+上記5章の検証は自作の `bundle.js`（素のグローバル関数宣言）でしか
+行っていなかった。実際に `npm install left-pad slugify is-odd` して
+本物の公開済み JS をそのまま `loadScript` に流し込んだところ、
+`ReferenceError: module is not defined` で即座に落ちた -- 実際の npm
+パッケージはほぼ例外なく CommonJS（`module.exports = ...`）か UMD
+（`typeof exports === 'object'` 分岐）で書かれており、QuickJS-NG の
+素のグローバルスコープには `module`/`exports`/`require` が存在しない
+ため。bridge.md 7章が「別途大きい課題」として保留していたモジュール
+解決問題の、最小限の一角を埋めた：
+
+- `thaw_bridge::wrap_as_commonjs_module`: パッケージの JS ソースを
+  `loadScript` に渡す前に、`module`/`exports`/`require` を**グローバル
+  変数として**定義してから、ソース自体は一切ラップせずそのまま
+  トップレベルで実行する（関数スコープで囲むと、素のグローバル関数
+  宣言に依存する既存の自作 `bundle.js` が壊れるため、意図的にこの形）。
+  実行後、`module.exports` がオブジェクトならその各プロパティを、
+  関数なら `.d.ts` から分かっている Fallback 関数名
+  （`ModuleBundle::fallback_names`）でグローバルに束縛し直す。
+- `require` はスタブで、呼ばれた瞬間に例外を投げる。実際のパッケージ間
+  依存解決（`is-number` を要求する `is-odd` のようなケース）は
+  引き続きスコープ外だが、以前は `module is not defined` という
+  無関係なエラーで落ちていたのが、`require('is-number') is not
+  supported in the Fallback path yet` という実際の原因を示す
+  エラーになった（thaw-quickjs 側の `thaw_js_load` も、投げられた
+  例外の実メッセージ（`describe_exception`）を使うよう修正 --
+  以前は `rquickjs::Error::Exception` の汎用プレースホルダしか
+  表示されなかった）。
+
+**検証**: 依存を持たない実物の npm パッケージ（`left-pad`、`slugify`）
+を無改造のまま `--use` 経由でロード・実行し、正しい結果を得た
+（`leftPad("5", 4, "0")` → `"0005"`、`slugify("Hello World!")` →
+`"Hello-World!"`）。依存を持つパッケージ（`is-odd` が要求する
+`is-number`）は、`require` スタブにより読み込み時点で明確なエラーに
+なることを確認した -- これはバグではなく、上記の通り意図的な
+未対応領域。
+
+## 7. 今回やらなかったこと（意図的なスコープ外）
 
 - **ネットワーク経由の取得**: `npm install` 相当のダウンロードは存在しない。
   `<registry-dir>` は事前に用意されている前提。
@@ -121,6 +159,12 @@ thaw-cli はここで解決したパッケージごとに:
   Thaw 向けにビルドする」パイプラインはまだない。
 - **依存関係グラフ**: パッケージ間の依存は `--use` を書いた順序が
   そのまま `loadScript` の呼び出し順序になるだけで、循環検出や
-  自動的な依存解決はない。
+  自動的な依存解決はない。`require(...)` は常にエラーになる
+  （6章）。
+- **ESM (`import`/`export`) パッケージ**: 6章の CommonJS/UMD 対応は
+  `module.exports`/`exports` を書くパッケージのみが対象。`export
+  default`/`export { ... }` 構文をそのまま使う ESM 専用パッケージは
+  依然として未対応（構文自体が QuickJS-NG のスクリプト評価モードでは
+  そのままでは動かない）。
 - bridge.md 5章で述べた実際の C ABI（`(ptr, len)` 分割など）に合わせた
   Marshal アダプタ生成は引き続きスコープ外。

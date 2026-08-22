@@ -122,7 +122,10 @@ fn generate_registry_shims(
 ) -> Result<(String, Vec<PathBuf>), String> {
     let mut shim = String::new();
     let mut native_libs = Vec::new();
-    let mut bundles: Vec<(String, String)> = Vec::new();
+    // (package_name, js_source, fallback_function_names) -- kept as owned
+    // data so the borrowed `ModuleBundle`s built from it below can outlive
+    // this loop.
+    let mut bundles: Vec<(String, String, Vec<String>)> = Vec::new();
 
     for name in use_packages {
         let package = thaw_registry::resolve(registry_dir, name)?;
@@ -134,15 +137,30 @@ fn generate_registry_shims(
             native_libs.push(native_lib);
         }
         if let Some(bundle_js) = package.bundle_js {
-            bundles.push((package.name.clone(), bundle_js));
+            // Only Fallback functions need binding inside the loaded
+            // script (see `ModuleBundle::fallback_names`'s doc comment);
+            // FastPath functions are real FFI calls and never touch
+            // QuickJS-NG at all.
+            let fallback_names = functions
+                .iter()
+                .filter_map(|f| match thaw_bridge::classify(f) {
+                    thaw_bridge::Classification::Fallback { function, .. } => Some(function),
+                    thaw_bridge::Classification::FastPath(_) => None,
+                })
+                .collect();
+            bundles.push((package.name.clone(), bundle_js, fallback_names));
         }
     }
 
-    let bundle_refs: Vec<(&str, &str)> = bundles
+    let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
-        .map(|(name, js)| (name.as_str(), js.as_str()))
+        .map(|(name, js, fallback_names)| thaw_bridge::ModuleBundle {
+            package_name: name.as_str(),
+            js_source: js.as_str(),
+            fallback_names,
+        })
         .collect();
-    shim.push_str(&thaw_bridge::generate_module_init(&bundle_refs));
+    shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
 
     Ok((shim, native_libs))
 }
