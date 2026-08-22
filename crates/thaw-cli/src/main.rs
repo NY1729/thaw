@@ -14,13 +14,66 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("registry") => {
+            if let Err(err) = run_registry(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--registry <dir>] [--use <package>]..."
+                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--registry <dir>] [--use <package>]...\n       thaw registry add <package> [--registry <dir>]"
             );
             std::process::exit(1);
         }
     }
+}
+
+fn run_registry(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("add") => run_registry_add(&args[1..]),
+        _ => Err("usage: thaw registry add <package> [--registry <dir>]".to_string()),
+    }
+}
+
+/// The "automatic" half of the registry story (docs/design/registry.md
+/// section 6): fetches a real npm package and drops it into the local
+/// registry directory in the layout `thaw build --use` expects, so a
+/// package name is all a user needs -- no hand-copying `package.d.ts`/
+/// `bundle.js` themselves.
+fn run_registry_add(args: &[String]) -> Result<(), String> {
+    let mut package: Option<String> = None;
+    let mut registry_dir = PathBuf::from("thaw_modules");
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--registry" => {
+                i += 1;
+                let value = args.get(i).ok_or("--registry requires a path argument")?;
+                registry_dir = PathBuf::from(value);
+            }
+            other => {
+                if package.is_some() {
+                    return Err(format!("unexpected extra argument `{other}`"));
+                }
+                package = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+
+    let package = package.ok_or("missing package name (usage: thaw registry add <package>)")?;
+
+    println!("fetching `{package}`...");
+    let added = thaw_registry::add(&registry_dir, &package)?;
+    println!(
+        "added `{package}` to `{}`\n  types: {}\n  main:  {}",
+        registry_dir.join(&package).display(),
+        added.dts_relative_path,
+        added.js_relative_path
+    );
+    Ok(())
 }
 
 fn run_build(args: &[String]) -> Result<(), String> {
