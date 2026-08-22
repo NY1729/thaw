@@ -22,10 +22,10 @@
 use std::collections::HashMap;
 
 use swc_ecma_ast::{
-    AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Decl, Expr, FnDecl, KeyValueProp, Lit,
-    MemberExpr, MemberProp, Module, ModuleItem, ObjectLit as SwcObjectLit, Pat, Prop, PropName,
-    PropOrSpread, SimpleAssignTarget, Stmt, TsKeywordTypeKind, TsType, TsTypeElement, UpdateOp,
-    VarDecl, VarDeclOrExpr,
+    AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl, Expr, FnDecl,
+    KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem, ObjectLit as SwcObjectLit, Pat,
+    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsKeywordTypeKind, TsType,
+    TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 
 use crate::{BinOp, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType, Symbol};
@@ -485,8 +485,12 @@ impl<'a> FnLowerer<'a> {
                 let HirExpr::Var(name) = callee.as_ref() else {
                     return Err("cannot infer the type of a call through a non-name callee".into());
                 };
-                if name == "console.log" {
-                    return Ok(HirType::F64);
+                match name.as_str() {
+                    "console.log" => return Ok(HirType::F64),
+                    "fetch" => return Ok(HirType::Str),
+                    "JSON.parse" => return Ok(HirType::Json),
+                    "JSON.stringify" => return Ok(HirType::Str),
+                    _ => {}
                 }
                 self.signatures
                     .get(name)
@@ -517,6 +521,10 @@ impl<'a> FnLowerer<'a> {
                 other => Err(format!("cannot access `.{field}` on a value of type {other:?}")),
             },
             HirExpr::PropAssign(_, _, _, value) => self.infer_expr_type(value),
+            HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) => Ok(HirType::Json),
+            HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
+            HirExpr::JsonAsString(_) => Ok(HirType::Str),
+            HirExpr::JsonAsBool(_) => Ok(HirType::Bool),
             // V1 erases Promise entirely: a call's return type in
             // `self.signatures` is already unwrapped for async functions,
             // so `await` is transparent here too.
@@ -621,8 +629,13 @@ impl<'a> FnLowerer<'a> {
         match &member.prop {
             MemberProp::Computed(computed) => {
                 let obj = self.lower_expr(&member.obj)?;
+                let obj_ty = self.infer_expr_type(&obj)?;
                 let index = self.lower_expr(&computed.expr)?;
-                Ok(HirExpr::Index(Box::new(obj), Box::new(index)))
+                match obj_ty {
+                    HirType::Array(_) => Ok(HirExpr::Index(Box::new(obj), Box::new(index))),
+                    HirType::Json => Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index))),
+                    other => Err(format!("cannot index into a value of type {other:?}")),
+                }
             }
             MemberProp::Ident(prop) => {
                 let obj = self.lower_expr(&member.obj)?;
@@ -638,6 +651,7 @@ impl<'a> FnLowerer<'a> {
                             Err(format!("object has no field `{}`", prop.sym))
                         }
                     }
+                    HirType::Json => Ok(HirExpr::JsonGet(Box::new(obj), prop.sym.to_string())),
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
                         prop.sym
@@ -648,6 +662,28 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `array[index]` used as an assignment/`++`/`--` target. Checks
+    /// `array` is actually a `number[]` first -- `Str`/`Object`/`Json` all
+    /// share the same pointer representation as arrays at the LLVM level,
+    /// so building a `Target::Index` for one of those would silently
+    /// misinterpret its bytes as array elements at runtime instead of
+    /// failing to compile.
+    fn lower_index_target(
+        &mut self,
+        member: &MemberExpr,
+        computed: &ComputedPropName,
+    ) -> Result<Target, String> {
+        let obj = self.lower_expr(&member.obj)?;
+        let obj_ty = self.infer_expr_type(&obj)?;
+        if obj_ty != HirType::Array(Box::new(HirType::F64)) {
+            return Err(format!(
+                "cannot assign to a computed index on a value of type {obj_ty:?} (only number[] supports this)"
+            ));
+        }
+        let index = self.lower_expr(&computed.expr)?;
+        Ok(Target::Index(obj, index))
+    }
+
     fn lower_assign_target(&mut self, target: &AssignTarget) -> Result<Target, String> {
         let AssignTarget::Simple(simple) = target else {
             return Err("destructuring assignment targets are not supported".into());
@@ -655,10 +691,7 @@ impl<'a> FnLowerer<'a> {
         match simple {
             SimpleAssignTarget::Ident(binding) => Ok(Target::Var(binding.id.sym.to_string())),
             SimpleAssignTarget::Member(member) => match &member.prop {
-                MemberProp::Computed(computed) => Ok(Target::Index(
-                    self.lower_expr(&member.obj)?,
-                    self.lower_expr(&computed.expr)?,
-                )),
+                MemberProp::Computed(computed) => self.lower_index_target(member, computed),
                 MemberProp::Ident(prop) => {
                     let obj = self.lower_expr(&member.obj)?;
                     let obj_ty = self.infer_expr_type(&obj)?;
@@ -713,10 +746,7 @@ impl<'a> FnLowerer<'a> {
         let target = match update.arg.as_ref() {
             Expr::Ident(ident) => Target::Var(ident.sym.to_string()),
             Expr::Member(member) => match &member.prop {
-                MemberProp::Computed(computed) => Target::Index(
-                    self.lower_expr(&member.obj)?,
-                    self.lower_expr(&computed.expr)?,
-                ),
+                MemberProp::Computed(computed) => self.lower_index_target(member, computed)?,
                 _ => return Err("unsupported ++/-- target".into()),
             },
             _ => return Err("unsupported ++/-- target".into()),
@@ -757,6 +787,33 @@ impl<'a> FnLowerer<'a> {
                 )
             }
         };
+
+        // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
+        // value. Unlike `console.log` (whose codegen can disambiguate its
+        // argument by LLVM value shape -- f64 vs. pointer), `Str`/`Array`/
+        // `Object`/`Json` all share the same pointer representation, so
+        // this has to be resolved here at lowering time using the
+        // argument's inferred type, not deferred to codegen.
+        if matches!(callee_name.as_str(), "Number" | "String" | "Boolean") {
+            let [arg] = call.args.as_slice() else {
+                return Err(format!("`{callee_name}` expects exactly one argument"));
+            };
+            if arg.spread.is_some() {
+                return Err("spread arguments are not supported".into());
+            }
+            let value = self.lower_expr(&arg.expr)?;
+            let ty = self.infer_expr_type(&value)?;
+            if ty != HirType::Json {
+                return Err(format!(
+                    "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
+                ));
+            }
+            return Ok(match callee_name.as_str() {
+                "Number" => HirExpr::JsonAsNumber(Box::new(value)),
+                "String" => HirExpr::JsonAsString(Box::new(value)),
+                _ => HirExpr::JsonAsBool(Box::new(value)),
+            });
+        }
 
         let param_types = self.signatures.get(&callee_name).map(|sig| sig.params.clone());
 
@@ -1098,5 +1155,90 @@ mod tests {
         .unwrap();
         let err = lower_module(&module).unwrap_err();
         assert!(err.contains("Promise"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn lowers_fetch_and_json_parse_field_access() {
+        let program = lower(
+            r#"function main(): void {
+                const text: string = fetch("https://example.com/api");
+                const data = JSON.parse(text);
+                const name: string = String(data.name);
+                const count: number = Number(data.items[0]);
+                console.log(name);
+                console.log(count);
+            }"#,
+        );
+        let f = &program.functions[0];
+
+        assert_eq!(
+            f.body[0],
+            HirStmt::Let(
+                "text".into(),
+                HirType::Str,
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("fetch".into())),
+                    vec![HirExpr::Lit(HirLit::Str("https://example.com/api".into()))],
+                ),
+            )
+        );
+        assert_eq!(
+            f.body[1],
+            HirStmt::Let(
+                "data".into(),
+                HirType::Json,
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("JSON.parse".into())),
+                    vec![HirExpr::Var("text".into())],
+                ),
+            )
+        );
+        assert_eq!(
+            f.body[2],
+            HirStmt::Let(
+                "name".into(),
+                HirType::Str,
+                HirExpr::JsonAsString(Box::new(HirExpr::JsonGet(
+                    Box::new(HirExpr::Var("data".into())),
+                    "name".into(),
+                ))),
+            )
+        );
+        assert_eq!(
+            f.body[3],
+            HirStmt::Let(
+                "count".into(),
+                HirType::F64,
+                HirExpr::JsonAsNumber(Box::new(HirExpr::JsonIndex(
+                    Box::new(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var("data".into())),
+                        "items".into(),
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                ))),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_number_conversion_on_a_non_json_value() {
+        let module = thaw_parser::parse_typescript(
+            "function main(): void { const x: number = Number(1); }",
+        )
+        .unwrap();
+        let err = lower_module(&module).unwrap_err();
+        assert!(err.contains("JSON"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_indexed_assignment_into_a_non_array() {
+        let module = thaw_parser::parse_typescript(
+            r#"function main(): void {
+                const data = JSON.parse("[]");
+                data[0] = 1;
+            }"#,
+        )
+        .unwrap();
+        assert!(lower_module(&module).is_err());
     }
 }

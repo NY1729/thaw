@@ -145,6 +145,56 @@ impl<'ctx> HirCompiler<'ctx> {
         let fflush_type = i32_type.fn_type(&[i8_ptr.into()], false);
         self.module
             .add_function("fflush", fflush_type, Some(Linkage::External));
+
+        // thaw-std: fetch + JSON (see docs/design/async-await.md for why
+        // `fetch` is a plain blocking call under the hood).
+        let f64_type = self.context.f64_type();
+
+        let fetch_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_fetch_get", fetch_type, Some(Linkage::External));
+
+        let json_parse_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_json_parse", json_parse_type, Some(Linkage::External));
+
+        let json_stringify_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_stringify",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
+
+        let json_get_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_json_get", json_get_type, Some(Linkage::External));
+
+        let json_index_type = i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false);
+        self.module
+            .add_function("thaw_json_index", json_index_type, Some(Linkage::External));
+
+        let json_as_number_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_as_number",
+            json_as_number_type,
+            Some(Linkage::External),
+        );
+
+        let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_as_string",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+
+        // Returns i8 (0/1), not i1 -- see thaw-std's `thaw_json_as_bool`
+        // doc comment on why it avoids relying on `bool`'s C ABI shape.
+        let json_as_bool_type = self.context.i8_type().fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_as_bool",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
     }
 
     fn llvm_symbol_for(name: &str) -> String {
@@ -184,6 +234,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            // A `Json` value is an opaque pointer to a boxed, dynamically-
+            // typed `serde_json::Value` (thaw-std), same representation
+            // family as everything else -- only `thaw_json_*` (thaw-std)
+            // ever dereferences it.
+            HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             other => Err(format!("Phase 1/2 codegen does not support type {other:?} yet")),
         }
     }
@@ -520,6 +575,12 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirExpr::EnvVar(name) => self.compile_env_var(name),
 
+            HirExpr::JsonGet(obj, field) => self.compile_json_get(obj, field),
+            HirExpr::JsonIndex(obj, idx) => self.compile_json_index(obj, idx),
+            HirExpr::JsonAsNumber(inner) => self.compile_json_as(inner, "thaw_json_as_number"),
+            HirExpr::JsonAsString(inner) => self.compile_json_as(inner, "thaw_json_as_string"),
+            HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
+
             // V1 async/await (docs/design/async-await.md): `await` is an
             // identity transform -- `Promise` was already erased at
             // lowering time (async functions' `ret` is the unwrapped `T`),
@@ -691,6 +752,103 @@ impl<'ctx> HirCompiler<'ctx> {
     /// `process.env.NAME`, via libc `getenv`. Returns an empty string
     /// instead of a null pointer when the variable is unset, since Str
     /// values elsewhere (puts/printf %s) assume a valid C string.
+    /// Calls a declared extern function of shape `ptr (ptr)` with a single
+    /// compiled argument -- the shared shape of `fetch`/`JSON.parse`/
+    /// `JSON.stringify`.
+    fn compile_single_arg_call(
+        &mut self,
+        fn_name: &str,
+        args: &[HirExpr],
+        source_name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [arg] = args else {
+            return Err(format!("`{source_name}` expects exactly one argument"));
+        };
+        let arg_val = self.compile_expr(arg)?;
+        let function = self.module.get_function(fn_name).unwrap();
+        let call = self
+            .builder
+            .build_call(function, &[arg_val.into()], "call")
+            .map_err(|e| e.to_string())?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("`{fn_name}` did not return a value"))
+    }
+
+    /// `json.field`, via thaw-std's `thaw_json_get`.
+    fn compile_json_get(&mut self, obj: &HirExpr, field: &str) -> Result<BasicValueEnum<'ctx>, String> {
+        let obj_val = self.compile_expr(obj)?;
+        let key_global = self
+            .builder
+            .build_global_string_ptr(field, "jsonkey")
+            .map_err(|e| e.to_string())?;
+        let get_fn = self.module.get_function("thaw_json_get").unwrap();
+        let call = self
+            .builder
+            .build_call(get_fn, &[obj_val.into(), key_global.as_pointer_value().into()], "json_get")
+            .map_err(|e| e.to_string())?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_get did not return a value".to_string())
+    }
+
+    /// `json[index]`, via thaw-std's `thaw_json_index`.
+    fn compile_json_index(&mut self, obj: &HirExpr, index: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        let obj_val = self.compile_expr(obj)?;
+        let idx_val = self.compile_expr(index)?.into_float_value();
+        let idx_i64 = self
+            .builder
+            .build_float_to_signed_int(idx_val, self.context.i64_type(), "jsonidx")
+            .map_err(|e| e.to_string())?;
+        let index_fn = self.module.get_function("thaw_json_index").unwrap();
+        let call = self
+            .builder
+            .build_call(index_fn, &[obj_val.into(), idx_i64.into()], "json_index")
+            .map_err(|e| e.to_string())?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_index did not return a value".to_string())
+    }
+
+    /// `Number(json)`/`String(json)`/`Boolean(json)`.
+    fn compile_json_as(
+        &mut self,
+        inner: &HirExpr,
+        fn_name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let val = self.compile_expr(inner)?;
+        let function = self.module.get_function(fn_name).unwrap();
+        let call = self
+            .builder
+            .build_call(function, &[val.into()], "json_as")
+            .map_err(|e| e.to_string())?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("`{fn_name}` did not return a value"))
+    }
+
+    /// `Boolean(json)`. Separate from `compile_json_as`: `thaw_json_as_bool`
+    /// returns `i8` (0/1), not `i1`, so the result needs converting to
+    /// match how `HirType::Bool` is represented everywhere else.
+    fn compile_json_as_bool(&mut self, inner: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        let val = self.compile_expr(inner)?;
+        let function = self.module.get_function("thaw_json_as_bool").unwrap();
+        let call = self
+            .builder
+            .build_call(function, &[val.into()], "json_as_bool_u8")
+            .map_err(|e| e.to_string())?;
+        let u8_val = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_as_bool did not return a value")?
+            .into_int_value();
+        let zero = self.context.i8_type().const_int(0, false);
+        self.builder
+            .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_as_bool")
+            .map(Into::into)
+            .map_err(|e| e.to_string())
+    }
+
     fn compile_env_var(&mut self, name: &str) -> Result<BasicValueEnum<'ctx>, String> {
         let name_global = self
             .builder
@@ -795,8 +953,16 @@ impl<'ctx> HirCompiler<'ctx> {
             return Err("call target must be a plain name in Phase 0/1".to_string());
         };
 
-        if name == "console.log" {
-            return self.compile_console_log(args);
+        match name.as_str() {
+            "console.log" => return self.compile_console_log(args),
+            "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
+            "JSON.parse" => {
+                return self.compile_single_arg_call("thaw_json_parse", args, "JSON.parse")
+            }
+            "JSON.stringify" => {
+                return self.compile_single_arg_call("thaw_json_stringify", args, "JSON.stringify")
+            }
+            _ => {}
         }
 
         let symbol = Self::llvm_symbol_for(name);
@@ -849,6 +1015,26 @@ impl<'ctx> HirCompiler<'ctx> {
                         &[format.as_pointer_value().into(), f.into()],
                         "printfcall",
                     )
+                    .map_err(|e| e.to_string())?;
+            }
+            // Our only first-class `IntValue` is `i1` (`HirType::Bool`) --
+            // nothing else reaches console.log as a raw `IntValue`.
+            BasicValueEnum::IntValue(b) => {
+                let true_str = self
+                    .builder
+                    .build_global_string_ptr("true", "true_str")
+                    .map_err(|e| e.to_string())?;
+                let false_str = self
+                    .builder
+                    .build_global_string_ptr("false", "false_str")
+                    .map_err(|e| e.to_string())?;
+                let selected = self
+                    .builder
+                    .build_select(b, true_str.as_pointer_value(), false_str.as_pointer_value(), "bool_str")
+                    .map_err(|e| e.to_string())?;
+                let puts = self.module.get_function("puts").unwrap();
+                self.builder
+                    .build_call(puts, &[selected.into()], "putscall")
                     .map_err(|e| e.to_string())?;
             }
             other => {
@@ -997,11 +1183,15 @@ mod tests {
 
         compiler.write_object_file(&obj_path).unwrap();
 
+        // Always link both -- an unreferenced static archive member is
+        // simply never pulled in, same reasoning as thaw-cli's build().
         let arena_lib = build_staticlib("thaw-arena");
+        let std_lib = build_staticlib("thaw-std");
 
         let link_status = Command::new("cc")
             .arg(&obj_path)
             .arg(&arena_lib)
+            .arg(&std_lib)
             .arg("-o")
             .arg(&exe_path)
             .status()
@@ -1187,6 +1377,56 @@ mod tests {
         assert_eq!(
             compile_and_run_with_env(source, "async_v1", &[("STAGE", "prod")]),
             "prod\n5\n"
+        );
+    }
+
+    /// Full pipeline: `fetch` a JSON body from a real (mock) HTTP server,
+    /// `JSON.parse` it, read fields (both `.field` and `[i]`), and convert
+    /// them to concrete types with `Number`/`String`/`Boolean`.
+    #[test]
+    fn compiles_fetch_and_json_parsing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).unwrap();
+            let body = r#"{"name": "thaw", "active": true, "tags": ["fast", "native"]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+        });
+
+        let source = format!(
+            r#"
+            async function main(): Promise<void> {{
+                const text: string = await fetch("http://{addr}/");
+                const data = JSON.parse(text);
+                console.log(String(data.name));
+                console.log(Boolean(data.active));
+                console.log(Number(data.tags.length));
+                console.log(String(data.tags[0]));
+                console.log(JSON.stringify(data));
+            }}
+        "#
+        );
+
+        let output = compile_and_run(&source, "fetch_json");
+        server.join().unwrap();
+
+        let mut lines = output.lines();
+        assert_eq!(lines.next(), Some("thaw"));
+        assert_eq!(lines.next(), Some("true"));
+        assert_eq!(lines.next(), Some("2"));
+        assert_eq!(lines.next(), Some("fast"));
+        let reparsed: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert_eq!(
+            reparsed,
+            serde_json::json!({"name": "thaw", "active": true, "tags": ["fast", "native"]})
         );
     }
 
