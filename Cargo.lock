@@ -1035,6 +1035,7 @@ dependencies = [
  "swc_ecma_ast",
  "thaw-hir",
  "thaw-parser",
+ "thaw-quickjs",
 ]
 
 [[package]]

@@ -424,7 +424,48 @@ module.exports = { inspect: inspect };
 それらを要求する別のパッケージにぶつかった時点で、同じ要領
 （`builtin_module_source` に1エントリ追加する）で対応していく。
 
-## 12. その他、今回やらなかったこと（意図的なスコープ外）
+## 12. スコープ付きパッケージの実地検証、プラットフォームグローバルの対応
+
+`@scope/name` 形式のスコープ付きパッケージは、これまで
+`types_package_name`/`split_bare_spec` 等のユニットテストでしか
+確認しておらず、実際に `npm install` して最後まで通した検証が
+なかった。`@hapi/hoek`（型定義バンドル済み・依存なしの実パッケージ）
+で試したところ、`thaw registry add @hapi/hoek` 自体は問題なく成功した
+（`node_modules/@scope/name/` という実ディレクトリ構造は元々
+`Path::join` がそのまま扱えていたため）。ただし実行時に、11章までの
+「npm パッケージの require グラフ」とも「Node コアビルトインモジュール」
+とも異なる、3つ目の種類の互換性の穴が2つ見つかった:
+
+- **`Buffer && Buffer.isBuffer(x)`**: `@hapi/hoek` のコードは
+  Node 専用グローバルを使う前にちゃんと truthy チェックで**ガード**
+  していた。しかし JS では、一度も宣言されていない裸の識別子への
+  参照はガードの中であっても（真偽値評価のために識別子解決が必要な
+  ため）`ReferenceError` を投げる -- ガードの意図（「Buffer が
+  使えない環境では諦める」）を活かすには、`Buffer` という名前
+  **自体**が存在しさえすればよい。`wrap_as_commonjs_module` に
+  `if (typeof globalThis.Buffer === 'undefined') { globalThis.Buffer
+  = undefined; }` を追加するだけで解決した -- 実際に Buffer を
+  実装する必要は一切ない。
+- **`URL.prototype`**（ガードなし）: 同じパッケージの別の場所で、
+  今度はガードせずに `URL.prototype` を直接参照していた。`undefined`
+  では `.prototype` アクセスに耐えられないため、こちらは空の
+  コンストラクタ関数 `function URL() {}` を代わりに用意した
+  （JS の関数は自動的に `.prototype` オブジェクトを持つため、
+  この最小限のスタブで十分だった）。
+
+どちらも「本物の実装を用意する」のではなく「参照してもエラーに
+ならない最小限の見せかけを用意する」という、11章の `util` polyfill
+と同じ考え方 -- 実際に必要になった分だけ、その場で対応する。
+
+**検証**: 新規ユニットテストで、ガード済み `Buffer` 参照とガードなし
+`URL.prototype` 参照の両方が実際に thaw-quickjs 上で例外を投げずに
+実行できることを確認した上で、実際の `@hapi/hoek` を通しで検証:
+`thaw registry add @hapi/hoek` → `thaw build --use @hapi/hoek` で
+`escapeRegex("a.b*c")` → `"a\.b\*c"`、
+`escapeHtml("<b>hi</b>")` → `"&lt;b&gt;hi&lt;&#x2f;b&gt;"` という
+正しい結果を得た -- スコープ付きパッケージの初めての完全な実地検証。
+
+## 13. その他、今回やらなかったこと（意図的なスコープ外）
 
 - **バージョン解決**: パッケージ名だけを見る。`package.json`/lockfile
   相当のものは存在しない。`npm install` は常に最新版を取得する
@@ -439,6 +480,10 @@ module.exports = { inspect: inspect };
   依然として未対応（構文自体が QuickJS-NG のスクリプト評価モードでは
   そのままでは動かない）。
 - namespace 内で宣言された `interface`/`type`（9章末尾）。
+- **その他のプラットフォームグローバル**: `Buffer`/`URL` 以外にも
+  `process`/`TextEncoder`/`setTimeout` など、実際に参照する
+  パッケージにぶつかった時点で都度追加していく前提（12章と同じ方針）。
+  網羅的な対応表は用意していない。
 - bridge.md 5章で述べた実際の C ABI（`(ptr, len)` 分割など）に合わせた
   Marshal アダプタ生成は引き続きスコープ外。
 
@@ -450,6 +495,7 @@ module.exports = { inspect: inspect };
 世界でどれだけ普通に書かれていても（内部で複数ファイルに分かれていて
 いても、DefinitelyTyped の型を使っていても、`main` フィールドの
 書き方が多少雑でも、他パッケージに依存していても）そのまま動く」こと
--- つまり npm を使う感覚と地続きの体験にすること。11章の Node
-コアビルトインをはじめ、まだ埋まっていない穴は多いが、優先順位は
+-- つまり npm を使う感覚と地続きの体験にすること。ESM 専用パッケージや
+未対応のプラットフォームグローバルをはじめ、まだ埋まっていない穴は
+多いが、優先順位は
 「実際に試して見つかった順」で決めていく。

@@ -1021,6 +1021,23 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
         "globalThis.module = {{ exports: {{}} }};\n\
          globalThis.exports = globalThis.module.exports;\n\
          globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported in the Fallback path yet\"); }};\n\
+         // Real packages commonly *guard* Node-only globals before using\n\
+         // them (`Buffer && Buffer.isBuffer(x)`, `Buffer?.from(x)`) for\n\
+         // exactly this situation -- a non-Node environment. But an\n\
+         // undeclared bare identifier throws `ReferenceError` just from\n\
+         // being *referenced*, guard or not (found via `@hapi/hoek`,\n\
+         // which does this unconditionally at load time); explicitly\n\
+         // assigning it `undefined` makes the identifier exist without\n\
+         // pretending Buffer support exists, so those guards correctly\n\
+         // take their \"not available\" branch instead of throwing.\n\
+         if (typeof globalThis.Buffer === 'undefined') {{ globalThis.Buffer = undefined; }}\n\
+         // Unlike `Buffer` above, real code sometimes reaches for `URL`\n\
+         // *unconditionally* (e.g. `URL.prototype` as a lookup-table key,\n\
+         // found via `@hapi/hoek`) rather than guarding it first --\n\
+         // `undefined` doesn't survive a `.prototype` access, so this\n\
+         // needs an actual (empty) constructor stand-in instead, which\n\
+         // gets a `.prototype` object for free like any JS function.\n\
+         if (typeof globalThis.URL === 'undefined') {{ globalThis.URL = function URL() {{}}; }}\n\
          {js_source}\n\
          if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
          {bind_default_exports}"
@@ -1645,6 +1662,50 @@ mod tests {
         assert!(wrapped.contains("function greet(name) { return 'hi, ' + name; }"));
         // Not wrapped in an extra IIFE/function around the source itself.
         assert!(!wrapped.contains("(function(module, exports, require)"));
+    }
+
+    /// The exact pattern found in a real npm package (`@hapi/hoek`):
+    /// code that *guards* a Node-only global before using it (`Buffer &&
+    /// Buffer.isBuffer(x)`) still throws `ReferenceError: Buffer is not
+    /// defined` if `Buffer` was never declared anywhere -- referencing an
+    /// undeclared bare identifier throws regardless of the guard's
+    /// intent. Must load successfully and take the guard's "not
+    /// available" branch instead.
+    #[test]
+    fn guarded_buffer_reference_does_not_throw() {
+        use std::ffi::{CStr, CString};
+
+        let wrapped = wrap_as_commonjs_module(
+            "module.exports = function checkBuffer(x) { return (Buffer && Buffer.isBuffer(x)) || false; };",
+            &["checkBuffer".to_string()],
+        );
+
+        let source = CString::new(wrapped).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+
+        let func = CString::new("checkBuffer").unwrap();
+        let args = CString::new("[1]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "false", "the guard should take its no-Buffer branch, not throw");
+    }
+
+    /// The exact pattern found in the same real npm package (`@hapi/hoek`):
+    /// `URL.prototype` accessed *unconditionally* (as a lookup-table key,
+    /// not behind a truthiness guard) -- `undefined` doesn't survive a
+    /// `.prototype` property access the way it survives `Buffer && ...`,
+    /// so `URL` needs an actual (empty) constructor stand-in instead.
+    #[test]
+    fn unguarded_url_prototype_access_does_not_throw() {
+        use std::ffi::CString;
+
+        let wrapped = wrap_as_commonjs_module(
+            "module.exports = function getIt() { return typeof URL.prototype; };",
+            &["getIt".to_string()],
+        );
+
+        let source = CString::new(wrapped).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
     }
 
     /// Same bar as `generated_shim_round_trips_through_real_lowering`: the
