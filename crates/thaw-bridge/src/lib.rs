@@ -176,13 +176,11 @@ fn resolve_interface(
             None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
         };
         match field_ty {
-            DtsType::Native(HirType::F64) => fields.push((field_name, HirType::F64)),
-            DtsType::Native(other) => {
-                failure = Some(format!(
-                    "field `{field_name}` has type {other:?} (only number fields supported yet)"
-                ));
-                break;
-            }
+            // Any type hir_codegen's `basic_type` can represent is fine as
+            // a field now (fields are word-sized regardless of their own
+            // type -- see hir_codegen.rs's `basic_type` for the
+            // `HirType::Object` case), including a nested object.
+            DtsType::Native(ty) => fields.push((field_name, ty)),
             DtsType::Unsupported(reason) => {
                 failure = Some(format!("field `{field_name}`: {reason}"));
                 break;
@@ -297,12 +295,9 @@ fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsTy
                     None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
                 };
                 match field_ty {
-                    DtsType::Native(HirType::F64) => fields.push((field_name, HirType::F64)),
-                    DtsType::Native(other) => {
-                        return DtsType::Unsupported(format!(
-                            "object field `{field_name}` has type {other:?} (only number fields supported yet)"
-                        ))
-                    }
+                    // See the parallel comment in `resolve_interface`:
+                    // any representable type works as a field now.
+                    DtsType::Native(ty) => fields.push((field_name, ty)),
                     DtsType::Unsupported(reason) => {
                         return DtsType::Unsupported(format!("object field `{field_name}`: {reason}"))
                     }
@@ -508,11 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn nested_object_fields_fall_back_until_codegen_supports_them() {
+    fn nested_object_fields_classify_as_fast_path() {
         // `Line.start` is itself an object (`Point`), not a number --
-        // hir_codegen's object layout is `f64`-fields-only today (see
-        // hir_codegen.rs's `basic_type`), so this must *not* classify as
-        // fast path even though the interfaces themselves resolve fine.
+        // hir_codegen's object layout now supports any representable
+        // field type (fields are word-sized regardless of their own
+        // type), including a nested object, so this classifies as fast
+        // path just like a flat one.
         let source = r#"
             export interface Point {
                 x: number;
@@ -525,7 +521,23 @@ mod tests {
             export declare function len(l: Line): number;
         "#;
         let funcs = parse_dts(source).unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert_eq!(
+            classify(&funcs[0]),
+            Classification::FastPath(FfiSignature {
+                symbol: "len".into(),
+                params: vec![HirType::Object(vec![
+                    (
+                        "start".into(),
+                        HirType::Object(vec![
+                            ("x".into(), HirType::F64),
+                            ("y".into(), HirType::F64),
+                        ]),
+                    ),
+                    ("length".into(), HirType::F64),
+                ])],
+                ret: HirType::F64,
+            })
+        );
     }
 
     #[test]
