@@ -155,7 +155,13 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
             .map_err(|e| format!("failed to read `{}`: {e}", path.display()))?;
         let functions = thaw_bridge::parse_dts(&source)
             .map_err(|e| format!("failed to parse `{}`: {e}", path.display()))?;
-        shim.push_str(&thaw_bridge::generate_shim(&functions));
+        // `true`: the manual `--bridge` path trusts the classification
+        // as-is, since the user is already responsible for supplying a
+        // matching `--link`ed library themselves for any FastPath
+        // function it declares (unlike `--use`, see
+        // `generate_registry_shims`, where thaw-registry knows whether a
+        // `native.a` actually exists).
+        shim.push_str(&thaw_bridge::generate_shim(&functions, true));
     }
     Ok(shim)
 }
@@ -184,7 +190,15 @@ fn generate_registry_shims(
         let package = thaw_registry::resolve(registry_dir, name)?;
         let functions = thaw_bridge::parse_dts(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
-        shim.push_str(&thaw_bridge::generate_shim(&functions));
+        // Whether there's actually a `native.a` to link a FastPath
+        // signature against -- without one, a fully-primitive real npm
+        // function (e.g. date-fns's `daysToWeeks(days: number): number`)
+        // would still classify FastPath on type shape alone and produce
+        // an unresolvable `declare function`, even though a working JS
+        // implementation is sitting right there in `bundle.js`. See
+        // `thaw_bridge::effective_classifications`'s doc comment.
+        let native_lib_available = package.native_lib.is_some();
+        shim.push_str(&thaw_bridge::generate_shim(&functions, native_lib_available));
 
         if let Some(native_lib) = package.native_lib {
             native_libs.push(native_lib);
@@ -193,11 +207,11 @@ fn generate_registry_shims(
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
-            // QuickJS-NG at all. `classify_all` (not per-function
-            // `classify`) so an overloaded name that's a mix of FastPath/
-            // Fallback signatures is counted once, consistently with
-            // what `generate_shim` actually emitted for it.
-            let fallback_names = thaw_bridge::classify_all(&functions)
+            // QuickJS-NG at all. Uses the same `effective_classifications`
+            // (not raw `classify`/`classify_all`) that `generate_shim`
+            // itself used, so this can't disagree with what was actually
+            // emitted for a given name.
+            let fallback_names = thaw_bridge::effective_classifications(&functions, native_lib_available)
                 .into_iter()
                 .filter_map(|(name, classification)| match classification {
                     thaw_bridge::Classification::Fallback { .. } => Some(name),

@@ -147,6 +147,34 @@ Fallback**に倒す -- Fast path は1つの固定シグネチャを1つのネイ
 ことを確認済み）。`generate_shim`/thaw-cli の Fallback 名前収集は
 どちらもこの `classify_all` を使うよう統一した。
 
+### 4.4 型分類と「実際にリンクできるか」は別の問題
+
+4.3節の直後に、より根本的な問題を見つけた: `thaw registry add`
+（[registry.md](registry.md)）で取り込む実際の npm パッケージは
+**純粋な JS で、対応するネイティブライブラリは存在しない**。にも
+関わらず、date-fns の `daysToWeeks(days: number): number` のように
+オーバーロードのない単純な primitive のみのシグネチャは、`classify`
+だけを見れば普通に Fast path に分類される。これをそのまま
+`generate_shim` に渡すと `declare function daysToWeeks(...)` という
+ambient FFI 宣言が生成され、実際に呼び出すと
+
+```
+undefined reference to `daysToWeeks'
+```
+
+というリンクエラーで落ちる -- すぐ隣の `bundle.js` に動く JS 実装が
+あるにも関わらず、である。「型シグネチャが Fast path 互換かどうか」と
+「実際にリンクできるネイティブシンボルが存在するかどうか」は独立した
+問題なのに、`classify`/`classify_all` は前者しか見ていなかった。
+
+対策として `generate_shim`/`effective_classifications` に
+`native_lib_available: bool` を追加した。`false` の場合、`classify_all`
+が Fast path と判定した名前も無条件で Fallback に格下げする。
+`thaw-cli` は `--use`（レジストリ経由）では `package.native_lib.is_some()`
+をそのまま渡す一方、`--bridge`（手動経路）では常に `true` を渡す --
+`--bridge` はユーザーが自分で `--link` を用意する前提の経路であり、
+この判断はユーザーに委ねられたまま変えていない。
+
 ## 5. Marshal/Unmarshal コード生成
 
 Fast path に分類された関数は、[HirExpr::FfiCall](../../crates/thaw-hir/src/lib.rs)
