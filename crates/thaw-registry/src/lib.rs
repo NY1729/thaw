@@ -97,12 +97,15 @@ pub struct AddedPackage {
 /// docs/design/registry.md): turns a bare package name into a usable
 /// `--use <package>` entry, no hand-curation.
 ///
-/// V1 only handles packages that bundle their own type declarations (a
-/// `types`/`typings` field in `package.json`, or a same-named
-/// `index.d.ts` next to `main`) -- a package needing a separate
-/// `@types/*` package, an ESM-only package, and a native addon (this
-/// never produces a `native.a`) are all still out of scope; see the
-/// design doc's closing section.
+/// If `package` doesn't bundle its own type declarations (no `types`/
+/// `typings` field in `package.json`, no same-named `index.d.ts`), this
+/// falls back to fetching the corresponding DefinitelyTyped package
+/// (`@types/<package>`, or `@types/<scope>__<name>` for a scoped
+/// `@<scope>/<name>` package) and uses *its* declarations -- the JS
+/// still always comes from `package` itself, since `@types/*` packages
+/// carry no runtime code. An ESM-only package and a native addon (this
+/// never produces a `native.a`) are still out of scope; see the design
+/// doc's closing section.
 pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
     let scratch = std::env::temp_dir().join(format!(
         "thaw-registry-add-{}-{}",
@@ -123,48 +126,27 @@ fn fetch_and_copy(
     registry_dir: &Path,
     package: &str,
 ) -> Result<AddedPackage, String> {
-    let output = Command::new("npm")
-        .arg("install")
-        .arg("--prefix")
-        .arg(scratch)
-        .args(["--no-audit", "--no-fund", "--ignore-scripts", package])
-        .output()
-        .map_err(|e| format!("failed to invoke `npm` (is Node.js/npm installed?): {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "`npm install {package}` failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
+    npm_install(scratch, package)?;
 
     let package_dir = scratch.join("node_modules").join(package);
-    let manifest_path = package_dir.join("package.json");
-    let manifest_source = fs::read_to_string(&manifest_path).map_err(|e| {
-        format!(
-            "failed to read `{}` after `npm install`: {e}",
-            manifest_path.display()
-        )
-    })?;
-    let manifest: serde_json::Value = serde_json::from_str(&manifest_source)
-        .map_err(|e| format!("`{}` is not valid JSON: {e}", manifest_path.display()))?;
+    let manifest = read_manifest(&package_dir)?;
 
-    let dts_relative_path = find_dts_path(&manifest, &package_dir).ok_or_else(|| {
-        format!(
-            "`{package}` has no bundled type declarations (no `types`/`typings` field in \
-             package.json, no `index.d.ts`) -- packages needing a separate `@types/{package}` \
-             aren't supported yet; add a `package.d.ts` by hand instead"
-        )
-    })?;
     let js_relative_path = manifest
         .get("main")
         .and_then(|v| v.as_str())
         .unwrap_or("index.js")
         .to_string();
-
-    let dts_source = fs::read_to_string(package_dir.join(&dts_relative_path))
-        .map_err(|e| format!("failed to read `{dts_relative_path}`: {e}"))?;
     let js_source = fs::read_to_string(package_dir.join(&js_relative_path))
         .map_err(|e| format!("failed to read `{js_relative_path}`: {e}"))?;
+
+    let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
+        Some((rel, abs)) => {
+            let source = fs::read_to_string(&abs)
+                .map_err(|e| format!("failed to read `{rel}`: {e}"))?;
+            (rel, source)
+        }
+        None => fetch_types_package_dts(scratch, package)?,
+    };
 
     let dest_dir = registry_dir.join(package);
     fs::create_dir_all(&dest_dir)
@@ -180,18 +162,83 @@ fn fetch_and_copy(
     })
 }
 
+fn npm_install(scratch: &Path, package: &str) -> Result<(), String> {
+    let output = Command::new("npm")
+        .arg("install")
+        .arg("--prefix")
+        .arg(scratch)
+        .args(["--no-audit", "--no-fund", "--ignore-scripts", package])
+        .output()
+        .map_err(|e| format!("failed to invoke `npm` (is Node.js/npm installed?): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`npm install {package}` failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn read_manifest(package_dir: &Path) -> Result<serde_json::Value, String> {
+    let manifest_path = package_dir.join("package.json");
+    let manifest_source = fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "failed to read `{}` after `npm install`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    serde_json::from_str(&manifest_source)
+        .map_err(|e| format!("`{}` is not valid JSON: {e}", manifest_path.display()))
+}
+
+/// `package` has no bundled type declarations of its own -- fetch the
+/// corresponding DefinitelyTyped package instead. `@types/*` packages
+/// carry no runtime JS of their own (`main` is typically empty), just
+/// declarations, so this only ever contributes the `.d.ts`; the actual
+/// `bundle.js` still always comes from `package`.
+fn fetch_types_package_dts(scratch: &Path, package: &str) -> Result<(String, String), String> {
+    let types_package = types_package_name(package);
+    npm_install(scratch, &types_package).map_err(|e| {
+        format!("`{package}` has no bundled type declarations, and fetching `{types_package}` also failed: {e}")
+    })?;
+
+    let types_dir = scratch.join("node_modules").join(&types_package);
+    let manifest = read_manifest(&types_dir).map_err(|e| {
+        format!("`{package}` has no bundled type declarations, and reading `{types_package}`'s manifest failed: {e}")
+    })?;
+    let (rel, abs) = find_own_dts(&manifest, &types_dir).ok_or_else(|| {
+        format!("`{package}` has no bundled type declarations, and `{types_package}` doesn't provide a usable one either")
+    })?;
+    let source = fs::read_to_string(&abs)
+        .map_err(|e| format!("failed to read `{rel}` from `{types_package}`: {e}"))?;
+
+    Ok((format!("{types_package}/{rel}"), source))
+}
+
+/// The DefinitelyTyped naming convention: `foo` -> `@types/foo`,
+/// `@scope/name` -> `@types/scope__name` (the `/` becomes `__`, since a
+/// types package itself is unscoped).
+fn types_package_name(package: &str) -> String {
+    match package.strip_prefix('@').and_then(|rest| rest.split_once('/')) {
+        Some((scope, name)) => format!("@types/{scope}__{name}"),
+        None => format!("@types/{package}"),
+    }
+}
+
 /// `types`/`typings` field first (in that order -- both spellings are
 /// common in the wild), then a same-named `index.d.ts` next to `main` as
 /// a last resort (common for older packages predating the `types` field
-/// convention, e.g. left-pad/slugify).
-fn find_dts_path(manifest: &serde_json::Value, package_dir: &Path) -> Option<String> {
+/// convention, e.g. left-pad/slugify). Returns both the path as recorded
+/// (relative to `package_dir`) and the resolved absolute path to read.
+fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(String, PathBuf)> {
     for field in ["types", "typings"] {
         if let Some(path) = manifest.get(field).and_then(|v| v.as_str()) {
-            return Some(path.to_string());
+            return Some((path.to_string(), package_dir.join(path)));
         }
     }
-    if package_dir.join("index.d.ts").is_file() {
-        return Some("index.d.ts".to_string());
+    let index = package_dir.join("index.d.ts");
+    if index.is_file() {
+        return Some(("index.d.ts".to_string(), index));
     }
     None
 }
@@ -278,14 +325,17 @@ mod tests {
     /// `add`'s actual `npm install` step needs network access and isn't
     /// exercised by the automated suite (consistent with this project's
     /// other network-touching work, which was validated manually rather
-    /// than in `cargo test` -- see docs/design/registry.md). `find_dts_path`
-    /// is the one piece of `add` with real decision logic and no network
-    /// dependency, so it gets full offline coverage here.
+    /// than in `cargo test` -- see docs/design/registry.md). `find_own_dts`/
+    /// `types_package_name` are the pieces of `add` with real decision
+    /// logic and no network dependency, so they get full offline coverage
+    /// here.
     #[test]
     fn finds_dts_from_types_field() {
         let manifest: serde_json::Value = serde_json::from_str(r#"{"types": "dist/index.d.ts"}"#).unwrap();
         let dir = temp_registry("dts_types_field");
-        assert_eq!(find_dts_path(&manifest, &dir), Some("dist/index.d.ts".to_string()));
+        let (rel, abs) = find_own_dts(&manifest, &dir).unwrap();
+        assert_eq!(rel, "dist/index.d.ts");
+        assert_eq!(abs, dir.join("dist/index.d.ts"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -293,7 +343,8 @@ mod tests {
     fn finds_dts_from_typings_field_when_types_is_absent() {
         let manifest: serde_json::Value = serde_json::from_str(r#"{"typings": "index.d.ts"}"#).unwrap();
         let dir = temp_registry("dts_typings_field");
-        assert_eq!(find_dts_path(&manifest, &dir), Some("index.d.ts".to_string()));
+        let (rel, _) = find_own_dts(&manifest, &dir).unwrap();
+        assert_eq!(rel, "index.d.ts");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -302,7 +353,8 @@ mod tests {
         let manifest: serde_json::Value =
             serde_json::from_str(r#"{"types": "a.d.ts", "typings": "b.d.ts"}"#).unwrap();
         let dir = temp_registry("dts_prefers_types");
-        assert_eq!(find_dts_path(&manifest, &dir), Some("a.d.ts".to_string()));
+        let (rel, _) = find_own_dts(&manifest, &dir).unwrap();
+        assert_eq!(rel, "a.d.ts");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -311,7 +363,8 @@ mod tests {
         let manifest: serde_json::Value = serde_json::from_str(r#"{"main": "index.js"}"#).unwrap();
         let dir = temp_registry("dts_index_fallback");
         fs::write(dir.join("index.d.ts"), "declare function f(): void;").unwrap();
-        assert_eq!(find_dts_path(&manifest, &dir), Some("index.d.ts".to_string()));
+        let (rel, _) = find_own_dts(&manifest, &dir).unwrap();
+        assert_eq!(rel, "index.d.ts");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -319,7 +372,17 @@ mod tests {
     fn finds_no_dts_when_nothing_is_bundled() {
         let manifest: serde_json::Value = serde_json::from_str(r#"{"main": "index.js"}"#).unwrap();
         let dir = temp_registry("dts_none");
-        assert_eq!(find_dts_path(&manifest, &dir), None);
+        assert!(find_own_dts(&manifest, &dir).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn types_package_name_for_an_unscoped_package() {
+        assert_eq!(types_package_name("left-pad"), "@types/left-pad");
+    }
+
+    #[test]
+    fn types_package_name_for_a_scoped_package() {
+        assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
     }
 }
