@@ -520,6 +520,12 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirExpr::EnvVar(name) => self.compile_env_var(name),
 
+            // V1 async/await (docs/design/async-await.md): `await` is an
+            // identity transform -- `Promise` was already erased at
+            // lowering time (async functions' `ret` is the unwrapped `T`),
+            // so there's nothing left to suspend on here.
+            HirExpr::Await(inner) => self.compile_expr(inner),
+
             HirExpr::ObjectLit(fields) => self.compile_object_lit(fields),
             HirExpr::PropAccess(obj, object_ty, field) => {
                 let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
@@ -1151,6 +1157,36 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "objects"),
             "1\n3\n11\n7\n"
+        );
+    }
+
+    /// V1 async/await (docs/design/async-await.md): `async`/`await` are
+    /// pure sugar over synchronous calls, including `main` itself being
+    /// `async` -- the entry-point detection in `compile_program` doesn't
+    /// care about `is_async` at all, since by the time codegen sees it the
+    /// function's `ret` is already the unwrapped, non-Promise type.
+    #[test]
+    fn compiles_async_functions_as_synchronous_calls() {
+        let source = r#"
+            async function computeStage(): Promise<string> {
+                const s: string = process.env.STAGE;
+                return s;
+            }
+
+            async function addAsync(a: number, b: number): Promise<number> {
+                return a + b;
+            }
+
+            async function main(): Promise<void> {
+                const stage: string = await computeStage();
+                console.log(stage);
+                const sum: number = await addAsync(2, 3);
+                console.log(sum);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run_with_env(source, "async_v1", &[("STAGE", "prod")]),
+            "prod\n5\n"
         );
     }
 

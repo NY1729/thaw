@@ -70,6 +70,11 @@ pub enum HirExpr {
     Var(Symbol),
     BinOp(BinOp, Box<HirExpr>, Box<HirExpr>),
     Call(Box<HirExpr>, Vec<HirExpr>),
+    /// `await expr`. V1 (see docs/design/async-await.md) compiles this as
+    /// an identity transform in codegen -- `async`/`await` is sugar over
+    /// synchronous calls, valid because Lambda only ever processes one
+    /// invocation at a time (nothing to interleave with). A real suspend
+    /// point is V2, not implemented.
     Await(Box<HirExpr>),
     Lambda(Vec<HirParam>, Box<HirExpr>),
     Block(Vec<HirStmt>),
@@ -131,7 +136,14 @@ pub enum HirStmt {
 pub struct HirFunction {
     pub name: Symbol,
     pub params: Vec<HirParam>,
+    /// The function's *unwrapped* return type: for an `async function`
+    /// declared as `Promise<T>`, this is `T`, not `Promise<T>` -- see the
+    /// V1 async/await design (docs/design/async-await.md). `is_async`
+    /// records that the unwrap happened, for tooling/future-V2 use; V1
+    /// codegen doesn't need to branch on it (`await` is an identity
+    /// transform, see hir_codegen).
     pub ret: HirType,
+    pub is_async: bool,
     pub body: Vec<HirStmt>,
 }
 

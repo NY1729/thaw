@@ -52,10 +52,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                     .iter()
                     .map(|p| lower_param(&p.pat).map(|p| p.ty))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ret = match &func.return_type {
-                    Some(ann) => lower_ts_type(&ann.type_ann)?,
-                    None => HirType::Void,
-                };
+                let ret = lower_fn_return_type(func.is_async, &func.return_type, &name)?;
                 signatures.insert(name, FnSignature { params, ret });
                 fn_decls.push(fn_decl);
             }
@@ -92,10 +89,7 @@ fn lower_fn_decl(
         .map(|param| lower_param(&param.pat))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let ret = match &func.return_type {
-        Some(ann) => lower_ts_type(&ann.type_ann)?,
-        None => HirType::Void,
-    };
+    let ret = lower_fn_return_type(func.is_async, &func.return_type, &name)?;
 
     let body_block = func
         .body
@@ -112,8 +106,33 @@ fn lower_fn_decl(
         name,
         params,
         ret,
+        is_async: func.is_async,
         body,
     })
+}
+
+/// Computes a function's *unwrapped* return type: `async function`s must be
+/// declared as returning `Promise<T>`, and this returns `T` -- V1
+/// async/await erases `Promise` entirely at lowering time (see
+/// docs/design/async-await.md). Non-async functions are unaffected.
+fn lower_fn_return_type(
+    is_async: bool,
+    return_type: &Option<Box<swc_ecma_ast::TsTypeAnn>>,
+    fn_name: &str,
+) -> Result<HirType, String> {
+    let declared = match return_type {
+        Some(ann) => lower_ts_type(&ann.type_ann)?,
+        None => HirType::Void,
+    };
+    if !is_async {
+        return Ok(declared);
+    }
+    match declared {
+        HirType::Promise(inner) => Ok(*inner),
+        other => Err(format!(
+            "async function `{fn_name}` must be declared as returning `Promise<T>`, found {other:?}"
+        )),
+    }
 }
 
 fn lower_param(pat: &Pat) -> Result<HirParam, String> {
@@ -145,18 +164,28 @@ fn lower_ts_type(ty: &TsType) -> Result<HirType, String> {
         },
         TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(lower_ts_type(&arr.elem_type)?))),
         TsType::TsTypeRef(ty_ref) => {
-            // Accept `Array<T>` as an alternate spelling of `T[]`. This is
-            // not general generics support (still deferred per the
-            // roadmap) -- just recognizing the one built-in spelling.
-            let is_array_ref = matches!(&ty_ref.type_name, swc_ecma_ast::TsEntityName::Ident(id) if id.sym == *"Array");
-            if is_array_ref {
-                if let Some(params) = &ty_ref.type_params {
-                    if let [elem] = params.params.as_slice() {
-                        return Ok(HirType::Array(Box::new(lower_ts_type(elem)?)));
-                    }
+            // Accept `Array<T>` / `Promise<T>` as the two built-in generic
+            // spellings we recognize. This is not general generics support
+            // (still deferred per the roadmap) -- just these two names.
+            let ref_name = match &ty_ref.type_name {
+                swc_ecma_ast::TsEntityName::Ident(id) => Some(id.sym.as_str()),
+                swc_ecma_ast::TsEntityName::TsQualifiedName(_) => None,
+            };
+            let single_type_param = ty_ref
+                .type_params
+                .as_ref()
+                .and_then(|params| match params.params.as_slice() {
+                    [elem] => Some(elem.as_ref()),
+                    _ => None,
+                });
+
+            match (ref_name, single_type_param) {
+                (Some("Array"), Some(elem)) => Ok(HirType::Array(Box::new(lower_ts_type(elem)?))),
+                (Some("Promise"), Some(inner)) => {
+                    Ok(HirType::Promise(Box::new(lower_ts_type(inner)?)))
                 }
+                _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
-            Err("unsupported type reference (generics are not supported yet)".into())
         }
         TsType::TsTypeLit(type_lit) => {
             let fields = type_lit
@@ -488,6 +517,10 @@ impl<'a> FnLowerer<'a> {
                 other => Err(format!("cannot access `.{field}` on a value of type {other:?}")),
             },
             HirExpr::PropAssign(_, _, _, value) => self.infer_expr_type(value),
+            // V1 erases Promise entirely: a call's return type in
+            // `self.signatures` is already unwrapped for async functions,
+            // so `await` is transparent here too.
+            HirExpr::Await(inner) => self.infer_expr_type(inner),
             other => Err(format!(
                 "cannot infer the type of {other:?} (needs an explicit type annotation)"
             )),
@@ -535,6 +568,10 @@ impl<'a> FnLowerer<'a> {
             Expr::Assign(assign) => self.lower_assign(assign),
 
             Expr::Update(update) => self.lower_update(update),
+
+            Expr::Await(await_expr) => {
+                Ok(HirExpr::Await(Box::new(self.lower_expr(&await_expr.arg)?)))
+            }
 
             other => Err(format!(
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
@@ -1016,5 +1053,50 @@ mod tests {
                 ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
             ])]
         );
+    }
+
+    #[test]
+    fn lowers_async_function_unwrapping_promise_and_await() {
+        let program = lower(
+            r#"async function fetchStage(): Promise<string> {
+                const s: string = process.env.STAGE;
+                return s;
+            }
+            async function main(): Promise<void> {
+                const stage: string = await fetchStage();
+                console.log(stage);
+            }"#,
+        );
+
+        let fetch_stage = &program.functions[0];
+        assert!(fetch_stage.is_async);
+        // `Promise<string>` is unwrapped to `string` -- Promise never
+        // appears in the compiled HIR (V1 design).
+        assert_eq!(fetch_stage.ret, HirType::Str);
+
+        let main = &program.functions[1];
+        assert!(main.is_async);
+        assert_eq!(main.ret, HirType::Void);
+        assert_eq!(
+            main.body[0],
+            HirStmt::Let(
+                "stage".into(),
+                HirType::Str,
+                HirExpr::Await(Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("fetchStage".into())),
+                    vec![],
+                ))),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_async_function_not_declared_as_returning_promise() {
+        let module = thaw_parser::parse_typescript(
+            "async function f(): number { return 1; }",
+        )
+        .unwrap();
+        let err = lower_module(&module).unwrap_err();
+        assert!(err.contains("Promise"), "unexpected error: {err}");
     }
 }
