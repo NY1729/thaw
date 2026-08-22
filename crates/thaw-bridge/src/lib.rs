@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use swc_ecma_ast::{
     Decl, Expr, FnDecl, Module, ModuleDecl, ModuleItem, Pat, TsEntityName, TsInterfaceDecl,
-    TsKeywordTypeKind, TsType, TsTypeElement,
+    TsKeywordTypeKind, TsLit, TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
 use thaw_hir::{FfiSignature, HirType};
 
@@ -75,12 +75,12 @@ pub enum Classification {
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_typescript(source)?;
     let (interfaces, generic_interfaces) = resolve_interfaces(&module);
-    module
+    Ok(module
         .body
         .iter()
         .filter_map(extract_fn_decl)
         .map(|fn_decl| lower_dts_function(fn_decl, &interfaces, &generic_interfaces))
-        .collect()
+        .collect())
 }
 
 fn extract_fn_decl(item: &ModuleItem) -> Option<&FnDecl> {
@@ -263,38 +263,148 @@ fn resolve_type_with_interfaces(
     classify_ts_type(ty, resolved, &GenericInterfaces::new())
 }
 
+/// Never fails: an unsupported parameter pattern (e.g. destructuring)
+/// degrades that one parameter to `DtsType::Unsupported`, same as any
+/// other unclassifiable type, rather than aborting this function -- and,
+/// since `parse_dts` used to propagate that abort as a `Result::Err`
+/// covering *every* function in the file, rather than aborting every
+/// other function in the same `.d.ts` file along with it. Validated
+/// against a real npm package's `.d.ts` corpus (date-fns): one function
+/// with a destructured parameter (`function milliseconds({ years, ... }:
+/// Duration)`) used to silently delete every other function in that file
+/// from `parse_dts`'s result.
 fn lower_dts_function(
     fn_decl: &FnDecl,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
-) -> Result<DtsFunction, String> {
+) -> DtsFunction {
     let name = fn_decl.ident.sym.to_string();
     let func = &fn_decl.function;
 
     let params = func
         .params
         .iter()
-        .map(|param| {
+        .enumerate()
+        .map(|(i, param)| {
             let Pat::Ident(binding) = &param.pat else {
-                return Err(format!(
-                    "function `{name}` has an unsupported parameter pattern (only simple identifiers)"
-                ));
+                let reason = "unsupported parameter pattern (only simple identifiers are classified yet)".to_string();
+                return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
             let param_name = binding.id.sym.to_string();
             let ty = match &binding.type_ann {
                 Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
             };
-            Ok((param_name, ty))
+            (param_name, ty)
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
 
     let ret = match &func.return_type {
         Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
         None => DtsType::Native(HirType::Void),
     };
 
-    Ok(DtsFunction { name, params, ret })
+    DtsFunction { name, params, ret }
+}
+
+/// Renders an arbitrary `.d.ts` type back to a short, TS-like expression,
+/// for use in a `Classification::Fallback` `reason`. Validated against a
+/// real npm package's `.d.ts` corpus (date-fns): without this, reasons for
+/// anything beyond the simplest unsupported types were unreadable `{:?}`
+/// dumps of the full AST node (spans, nested `Box`es, etc.) -- e.g.
+/// `unsupported type TsUnionOrIntersectionType(TsIntersectionType(TsIntersectionType
+/// { span: 1063..1081, types: [...] }))` for a type that's really just
+/// `DateArg<Date> & {}`. This never needs to be exhaustive or fully
+/// faithful (it's a diagnostic message, not something re-parsed), so
+/// unusual type forms fall back to a short generic label instead of
+/// recursing further.
+fn describe_ts_type(ty: &TsType) -> String {
+    match ty {
+        TsType::TsKeywordType(kw) => keyword_name(kw.kind).to_string(),
+        TsType::TsThisType(_) => "this".to_string(),
+        TsType::TsFnOrConstructorType(_) => "a function type".to_string(),
+        TsType::TsTypeRef(ty_ref) => {
+            let name = match &ty_ref.type_name {
+                TsEntityName::Ident(id) => id.sym.to_string(),
+                TsEntityName::TsQualifiedName(_) => "<qualified name>".to_string(),
+            };
+            match &ty_ref.type_params {
+                Some(params) => {
+                    let args = params
+                        .params
+                        .iter()
+                        .map(|p| describe_ts_type(p))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{name}<{args}>")
+                }
+                None => name,
+            }
+        }
+        TsType::TsTypeQuery(_) => "a `typeof` query type".to_string(),
+        TsType::TsTypeLit(lit) if lit.members.is_empty() => "{}".to_string(),
+        TsType::TsTypeLit(_) => "{ ... }".to_string(),
+        TsType::TsArrayType(arr) => format!("{}[]", describe_ts_type(&arr.elem_type)),
+        TsType::TsTupleType(_) => "a tuple type".to_string(),
+        TsType::TsOptionalType(opt) => format!("{}?", describe_ts_type(&opt.type_ann)),
+        TsType::TsRestType(rest) => format!("...{}", describe_ts_type(&rest.type_ann)),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(u)) => u
+            .types
+            .iter()
+            .map(|t| describe_ts_type(t))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(i)) => i
+            .types
+            .iter()
+            .map(|t| describe_ts_type(t))
+            .collect::<Vec<_>>()
+            .join(" & "),
+        TsType::TsConditionalType(_) => "a conditional type".to_string(),
+        TsType::TsInferType(_) => "an `infer` type".to_string(),
+        TsType::TsParenthesizedType(p) => format!("({})", describe_ts_type(&p.type_ann)),
+        TsType::TsTypeOperator(op) => {
+            let op_name = match op.op {
+                TsTypeOperatorOp::KeyOf => "keyof",
+                TsTypeOperatorOp::Unique => "unique",
+                TsTypeOperatorOp::ReadOnly => "readonly",
+            };
+            format!("{op_name} {}", describe_ts_type(&op.type_ann))
+        }
+        TsType::TsIndexedAccessType(_) => "an indexed access type".to_string(),
+        TsType::TsMappedType(_) => "a mapped type".to_string(),
+        TsType::TsLitType(lit) => match &lit.lit {
+            // `Wtf8Atom` has no `Display`; its `Debug` already renders as
+            // a quoted string, which is exactly what's wanted here.
+            TsLit::Str(s) => format!("{:?}", s.value),
+            TsLit::Bool(b) => b.value.to_string(),
+            TsLit::Number(n) => n.value.to_string(),
+            _ => "a literal type".to_string(),
+        },
+        TsType::TsTypePredicate(_) => "a type predicate".to_string(),
+        TsType::TsImportType(_) => "an `import()` type".to_string(),
+    }
+}
+
+/// The TS keyword spelling for a `TsKeywordTypeKind` (`number`/`string`/
+/// `boolean`/`void` are handled natively by `classify_ts_type` and never
+/// reach here; this covers the rest for `describe_ts_type`/error messages).
+fn keyword_name(kind: TsKeywordTypeKind) -> &'static str {
+    match kind {
+        TsKeywordTypeKind::TsAnyKeyword => "any",
+        TsKeywordTypeKind::TsUnknownKeyword => "unknown",
+        TsKeywordTypeKind::TsNumberKeyword => "number",
+        TsKeywordTypeKind::TsObjectKeyword => "object",
+        TsKeywordTypeKind::TsBooleanKeyword => "boolean",
+        TsKeywordTypeKind::TsBigIntKeyword => "bigint",
+        TsKeywordTypeKind::TsStringKeyword => "string",
+        TsKeywordTypeKind::TsSymbolKeyword => "symbol",
+        TsKeywordTypeKind::TsVoidKeyword => "void",
+        TsKeywordTypeKind::TsUndefinedKeyword => "undefined",
+        TsKeywordTypeKind::TsNullKeyword => "null",
+        TsKeywordTypeKind::TsNeverKeyword => "never",
+        TsKeywordTypeKind::TsIntrinsicKeyword => "intrinsic",
+    }
 }
 
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
@@ -312,7 +422,7 @@ fn classify_ts_type(
             TsKeywordTypeKind::TsStringKeyword => DtsType::Native(HirType::Str),
             TsKeywordTypeKind::TsBooleanKeyword => DtsType::Native(HirType::Bool),
             TsKeywordTypeKind::TsVoidKeyword => DtsType::Native(HirType::Void),
-            other => DtsType::Unsupported(format!("unsupported keyword type {other:?}")),
+            other => DtsType::Unsupported(format!("`{}` is not supported", keyword_name(other))),
         },
 
         TsType::TsArrayType(arr) => match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
@@ -392,7 +502,7 @@ fn classify_ts_type(
             ))
         }
 
-        other => DtsType::Unsupported(format!("unsupported type {other:?}")),
+        other => DtsType::Unsupported(format!("unsupported type `{}`", describe_ts_type(other))),
     }
 }
 
@@ -1136,5 +1246,84 @@ mod tests {
         assert_eq!(program.functions.len(), 2);
         assert!(program.functions.iter().any(|f| f.name == "__thaw_module_init"));
         assert!(program.functions.iter().any(|f| f.name == "main"));
+    }
+
+    /// Found by running the classifier against a real npm package's
+    /// `.d.ts` corpus (date-fns): before `describe_ts_type`, this reason
+    /// was an unreadable `{:?}` dump of the full nested AST (spans,
+    /// `Box`es, and all) instead of anything resembling what a developer
+    /// wrote.
+    #[test]
+    fn fallback_reason_renders_union_types_readably() {
+        let funcs = parse_dts("export declare function f(x: string | number): void;").unwrap();
+        let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
+            panic!("expected Fallback");
+        };
+        assert_eq!(reason, "parameter `x`: unsupported type `string | number`");
+    }
+
+    /// The exact shape found in date-fns v4's real `.d.ts` files (e.g.
+    /// `addDays`'s `date: DateArg<DateType> & {}` parameter).
+    #[test]
+    fn fallback_reason_renders_intersection_and_generic_types_readably() {
+        let funcs =
+            parse_dts("export declare function f(x: DateArg<Date> & {}): void;").unwrap();
+        let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
+            panic!("expected Fallback");
+        };
+        assert_eq!(reason, "parameter `x`: unsupported type `DateArg<Date> & {}`");
+    }
+
+    #[test]
+    fn fallback_reason_renders_callback_types_readably() {
+        let funcs =
+            parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
+        let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
+            panic!("expected Fallback");
+        };
+        assert_eq!(reason, "parameter `cb`: unsupported type `a function type`");
+    }
+
+    #[test]
+    fn fallback_reason_renders_unsupported_keywords_by_name() {
+        let funcs = parse_dts("export declare function f(x: any): void;").unwrap();
+        let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
+            panic!("expected Fallback");
+        };
+        assert_eq!(reason, "parameter `x`: `any` is not supported");
+    }
+
+    /// The actual regression this was validated against: a real date-fns
+    /// function (`milliseconds({ years, months, ... }: Duration)`) uses a
+    /// destructured parameter, which `parse_dts` used to reject by
+    /// returning `Err` for the *whole file* -- silently discarding every
+    /// other function defined alongside it. It must now still show up
+    /// (correctly, as Fallback), and every sibling function in the same
+    /// file must survive.
+    #[test]
+    fn destructured_parameter_falls_back_without_dropping_sibling_functions() {
+        let source = r#"
+            export declare function add(a: number, b: number): number;
+            export declare function milliseconds({ hours, minutes }: Duration): number;
+            export declare function subtract(a: number, b: number): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 3, "one bad parameter pattern must not delete sibling functions");
+
+        assert!(matches!(
+            classify(funcs.iter().find(|f| f.name == "add").unwrap()),
+            Classification::FastPath(_)
+        ));
+        assert!(matches!(
+            classify(funcs.iter().find(|f| f.name == "subtract").unwrap()),
+            Classification::FastPath(_)
+        ));
+
+        let Classification::Fallback { reason, .. } =
+            classify(funcs.iter().find(|f| f.name == "milliseconds").unwrap())
+        else {
+            panic!("expected Fallback");
+        };
+        assert!(reason.contains("unsupported parameter pattern"));
     }
 }
