@@ -751,6 +751,51 @@ pub fn classify(func: &DtsFunction) -> Classification {
     })
 }
 
+/// Classifies every function in `functions`, but only once per distinct
+/// name: a `.d.ts` overload set (multiple `declare function foo(...)`
+/// signatures sharing a name -- common in real npm packages, e.g. `ms`'s
+/// `ms(value: number, options?): string` / `ms(value: string): number`)
+/// can't become a single native `extern "C"` symbol the way Fast path
+/// needs, even when one individual overload would classify Fast path on
+/// its own. So a name with more than one signature always falls back as
+/// a whole; Fallback's `callDynamic` doesn't care about a fixed shape,
+/// so the real JS function is free to handle whatever overload logic it
+/// wants. A name with exactly one signature classifies exactly as
+/// `classify` would.
+///
+/// Found necessary by running a real overloaded package (`ms`) through
+/// `generate_shim`: without this, an overload set whose members classify
+/// differently produced two separate, name-colliding top-level
+/// declarations, and thaw-hir/codegen silently picked whichever was
+/// declared last -- no error, and the outcome depended entirely on
+/// declaration order rather than being a real decision.
+pub fn classify_all(functions: &[DtsFunction]) -> Vec<(String, Classification)> {
+    let mut by_name: Vec<(&str, Vec<&DtsFunction>)> = Vec::new();
+    for func in functions {
+        match by_name.iter_mut().find(|(name, _)| *name == func.name) {
+            Some((_, group)) => group.push(func),
+            None => by_name.push((&func.name, vec![func])),
+        }
+    }
+
+    by_name
+        .into_iter()
+        .map(|(name, group)| {
+            let classification = match group.as_slice() {
+                [only] => classify(only),
+                overloads => Classification::Fallback {
+                    function: name.to_string(),
+                    reason: format!(
+                        "`{name}` has {} overloaded signatures in the .d.ts; Fast path needs exactly one",
+                        overloads.len()
+                    ),
+                },
+            };
+            (name.to_string(), classification)
+        })
+        .collect()
+}
+
 /// Renders a `HirType` back into the TS syntax `thaw_hir::lower::lower_ts_type`
 /// accepts, for `generate_shim`'s ambient declarations. Only ever called on
 /// types that actually came from a successful classification (primitives,
@@ -793,9 +838,15 @@ fn render_ts_type(ty: &HirType) -> String {
 /// as the first statement in `main`/`handler`).
 pub fn generate_shim(functions: &[DtsFunction]) -> String {
     let mut out = String::new();
-    for func in functions {
-        match classify(func) {
+    for (name, classification) in classify_all(functions) {
+        match classification {
             Classification::FastPath(sig) => {
+                // `classify_all` only returns `FastPath` for a name with
+                // exactly one signature, so this lookup is unambiguous.
+                let func = functions
+                    .iter()
+                    .find(|f| f.name == name)
+                    .expect("FastPath classification implies a matching DtsFunction exists");
                 let params = func
                     .params
                     .iter()
@@ -1236,6 +1287,75 @@ mod tests {
         assert!(shim.contains("// Fallback (QuickJS-NG):"));
         assert!(shim.contains("function identity(argsArray: Json): Json {"));
         assert!(shim.contains(r#"return callDynamic("identity", argsArray);"#));
+    }
+
+    #[test]
+    fn classify_all_collapses_a_single_signature_exactly_like_classify() {
+        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let grouped = classify_all(&funcs);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0], ("add".to_string(), classify(&funcs[0])));
+    }
+
+    /// The exact shape found in a real npm package (`@types/ms`): two
+    /// `declare function ms(...)` overloads, one classifying FastPath on
+    /// its own and one Fallback. Thaw can't represent two native
+    /// signatures under one FFI symbol, so the whole name must fall back.
+    #[test]
+    fn classify_all_falls_back_an_overload_set_even_if_one_member_is_fast_path() {
+        let dts = r#"
+            declare function ms(value: number, options?: { long: boolean }): string;
+            declare function ms(value: string): number;
+        "#;
+        let funcs = parse_dts(dts).unwrap();
+        assert_eq!(funcs.len(), 2, "both overloads should be extracted");
+
+        let grouped = classify_all(&funcs);
+        assert_eq!(grouped.len(), 1, "one name -> one classification, not two");
+        let (name, classification) = &grouped[0];
+        assert_eq!(name, "ms");
+        assert!(
+            matches!(classification, Classification::Fallback { .. }),
+            "an overloaded name must fall back even if one overload alone would be FastPath"
+        );
+    }
+
+    /// Same rule even when *every* overload individually classifies
+    /// FastPath: Thaw still can't pick one signature over the other, so
+    /// this must not silently choose either.
+    #[test]
+    fn classify_all_falls_back_when_every_overload_is_individually_fast_path() {
+        let dts = r#"
+            declare function f(a: number): number;
+            declare function f(a: string): string;
+        "#;
+        let funcs = parse_dts(dts).unwrap();
+        let grouped = classify_all(&funcs);
+        assert_eq!(grouped.len(), 1);
+        assert!(matches!(grouped[0].1, Classification::Fallback { .. }));
+    }
+
+    /// Regression test for the actual bug: before `classify_all`,
+    /// `generate_shim` emitted one entry per raw `DtsFunction`, so an
+    /// overloaded name produced two colliding top-level declarations
+    /// (`declare function ms(...)` and `function ms(argsArray...) {...}`)
+    /// that thaw-hir/codegen resolved silently and order-dependently.
+    #[test]
+    fn generate_shim_emits_exactly_one_declaration_for_an_overloaded_name() {
+        let dts = r#"
+            declare function ms(value: number, options?: { long: boolean }): string;
+            declare function ms(value: string): number;
+        "#;
+        let funcs = parse_dts(dts).unwrap();
+        let shim = generate_shim(&funcs);
+
+        assert_eq!(
+            shim.matches("function ms").count(),
+            1,
+            "exactly one top-level declaration named `ms`, got:\n{shim}"
+        );
+        assert!(shim.contains("// Fallback (QuickJS-NG):"));
+        assert!(shim.contains(r#"return callDynamic("ms", argsArray);"#));
     }
 
     /// The generated shim isn't just plausible-looking text -- it must
