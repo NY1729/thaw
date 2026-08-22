@@ -281,18 +281,40 @@ var formats = require('./formats');
 残っている -- 9章参照）。単発ファイルのパッケージ（`left-pad` など）
 がこの変更で壊れていないことも再確認済み。
 
-## 9. 今回見つけた、まだ手を付けていない課題
+## 9. `declare namespace` の中の関数宣言（対応済み）
 
-`qs` の検証中に見つかった、今回のスコープには含めなかったもの:
+8章の `qs` 検証で見つかった課題を対応した。詳細は
+[bridge.md 3.1節](bridge.md)参照 -- thaw-bridge の `parse_dts` が
+`declare namespace Foo { function bar(...): ...; }` という形（`qs`
+自身がまさにこの形）で名前空間の中に書かれた関数も再帰的に抽出する
+ようになった。抽出した名前は namespace 修飾なしの裸の名前（`parse`
+など）で、これは6章の CommonJS ラップ機構が既にサポートしている
+「`module.exports` がオブジェクトならプロパティごとにグローバルへ
+hoist する」という挙動と自然に噛み合う。
 
-- **`declare namespace` の中の関数宣言**: thaw-bridge の `parse_dts`
-  はトップレベルの `declare function`/`export declare function` しか
-  見ていない。`qs` のように `declare namespace Foo { function
-  bar(...): ...; }` という形で関数を名前空間の中に書くパッケージは、
-  現状 `parse_dts` から見て関数が0個になる。実用上の網羅性に大きく
-  影響しうる、次に手を付けるべき候補。
+**検証**: 手作りの namespace 付きパッケージ（依存なし）を
+`--use` 経由でビルド・実行し、`double(21)` → `42`、
+`greet("thaw")` → `"hi, thaw"` を確認した。実際の `qs` でも
+`thaw registry add qs` → `thaw build --use qs` で関数の生成
+（`parse`/`stringify` の Fallback wrapper）自体は正しく行われることを
+確認したが、`qs` は `side-channel`/`es-define-property` という
+**真の外部パッケージ依存**を持っており（`package.json` の
+`dependencies`）、これは6/10章で明示的にスコープ外としている
+依存解決の問題であって、今回直した名前空間抽出とは別の課題。
+`qs` を完全に動かすには、次の10章にある「真の外部依存解決」が
+別途必要になる。
 
-## 10. 今回やらなかったこと（意図的なスコープ外）
+## 10. まだ手を付けていない課題（優先度順ではなく、見つかった順）
+
+- **真の外部パッケージ依存の解決**: `qs` が要求する
+  `side-channel`/`es-define-property` のような、パッケージが
+  `package.json` の `dependencies` に持つ他の npm パッケージへの
+  依存。現状は`require`スタブが常にエラーになるだけ（8章）。
+  「npm と同じ感覚」に最も直接効きそうな次の一手 -- `thaw registry
+  add` が対象パッケージの `dependencies` を再帰的に解決・バンドルする
+  ところまで踏み込むかどうかの設計判断が要る。
+
+## 11. その他、今回やらなかったこと（意図的なスコープ外）
 
 - **バージョン解決**: パッケージ名だけを見る。`package.json`/lockfile
   相当のものは存在しない。`npm install` は常に最新版を取得する
@@ -301,15 +323,12 @@ var formats = require('./formats');
 - **ネイティブライブラリのビルド**: `native.a` は事前にビルド済みの
   ものを置く前提。「実際の npm パッケージのネイティブアドオンを
   Thaw 向けにビルドする」パイプラインはまだない。
-- **真の外部依存解決**: パッケージ間の依存は `--use` を書いた順序が
-  そのまま `loadScript` の呼び出し順序になるだけで、循環検出や
-  自動的な依存解決はない。バンドルで解決できない `require(...)` は
-  常にエラーになる（8章）。
 - **ESM (`import`/`export`) パッケージ**: 6章の CommonJS/UMD 対応は
   `module.exports`/`exports` を書くパッケージのみが対象。`export
   default`/`export { ... }` 構文をそのまま使う ESM 専用パッケージは
   依然として未対応（構文自体が QuickJS-NG のスクリプト評価モードでは
   そのままでは動かない）。
+- namespace 内で宣言された `interface`/`type`（9章末尾）。
 - bridge.md 5章で述べた実際の C ABI（`(ptr, len)` 分割など）に合わせた
   Marshal アダプタ生成は引き続きスコープ外。
 
@@ -320,6 +339,7 @@ var formats = require('./formats');
 「`thaw registry add <package>` するだけで、その `package` が npm の
 世界でどれだけ普通に書かれていても（内部で複数ファイルに分かれていて
 いても、DefinitelyTyped の型を使っていても、`main` フィールドの
-書き方が多少雑でも）そのまま動く」こと -- つまり npm を使う感覚と
-地続きの体験にすること。9章の名前空間の件をはじめ、まだ埋まっていない
-穴は多いが、優先順位は「実際に試して見つかった順」で決めていく。
+書き方が多少雑でも、他パッケージに依存していても）そのまま動く」こと
+-- つまり npm を使う感覚と地続きの体験にすること。10章の外部依存解決を
+はじめ、まだ埋まっていない穴は多いが、優先順位は「実際に試して
+見つかった順」で決めていく。

@@ -71,6 +71,46 @@ Bar<Baz>` のようなエイリアスや、複数ファイルにまたがる型�
 の正しさは損なわれない（誤検知は最適化の機会損失であって、バグでは
 ない）。
 
+### 3.1 `declare namespace` の中の関数も抽出する
+
+[docs/design/registry.md](registry.md) の「npm と同じ感覚で使える」
+検証の一環で見つかった穴: `parse_dts` は当初トップレベルの
+`declare function`/`export declare function` しか見ていなかったが、
+実際の npm パッケージ（`qs`）は関数を含む型宣言のほぼ全てを
+`declare namespace QueryString { ... }` の中に書いていた。
+
+```ts
+export = QueryString;
+declare namespace QueryString {
+    function stringify(obj: any, options?: IStringifyOptions): string;
+    function parse(str: string, options?: IParseOptions): ParsedQs;
+}
+```
+
+これをそのまま `parse_dts` に通すと関数が0個になる。対策として
+`extract_fn_decls`（旧 `extract_fn_decl`、複数形に変更）が
+`Decl::TsModule`（namespace 宣言）を見つけたら、その中の
+`ModuleItem` を再帰的に辿って関数を集めるようにした -- namespace が
+入れ子（`namespace Outer { namespace Inner { function f() {} } }`）
+でも対応する。
+
+抽出した関数名は**そのまま**（`QueryString.parse` のような
+namespace 修飾はしない）。理由: `export = QueryString;` を持つ
+パッケージの実際の JS 実装は、6章の CommonJS ラップ機構が既に
+サポートしている「`module.exports = { parse, stringify, ... }` という
+オブジェクトの各プロパティをグローバルにフックする」パターンと
+一致する（`qs` 自身の `lib/index.js` がまさにこの形）。つまり
+namespace 抽出とオブジェクトエクスポートのフックは、お互いを意識せず
+そのまま噛み合う -- `.d.ts` 側で名前空間が使われていても、実行時に
+グローバルへ hoist される名前は変わらないため。
+
+`interface`/`type` が同じ namespace の中で宣言されているケース
+（`qs` はまさにこれ）は今回もスコープ外のまま: `resolve_interfaces`
+はトップレベルの `interface` しか見ないため、namespace 内で
+定義された補助的な型（オプションオブジェクトの型など）への参照は
+「対応不可」判定になり Fallback に倒れる。これは安全な劣化
+（4.2節と同じ「速く倒れる」方向）なので、実行時の正しさは失われない。
+
 ## 4. 型 → C ABI マッピングエンジン
 
 ### 4.1 分類アルゴリズム

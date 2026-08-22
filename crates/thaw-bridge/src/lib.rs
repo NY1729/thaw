@@ -23,7 +23,8 @@ use std::collections::HashMap;
 
 use swc_ecma_ast::{
     Decl, Expr, FnDecl, Module, ModuleDecl, ModuleItem, Pat, TsEntityName, TsInterfaceDecl,
-    TsKeywordTypeKind, TsLit, TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
+    TsKeywordTypeKind, TsLit, TsNamespaceBody, TsType, TsTypeElement, TsTypeOperatorOp,
+    TsUnionOrIntersectionType,
 };
 use thaw_hir::{FfiSignature, HirType};
 
@@ -78,19 +79,44 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     Ok(module
         .body
         .iter()
-        .filter_map(extract_fn_decl)
+        .flat_map(extract_fn_decls)
         .map(|fn_decl| lower_dts_function(fn_decl, &interfaces, &generic_interfaces))
         .collect())
 }
 
-fn extract_fn_decl(item: &ModuleItem) -> Option<&FnDecl> {
+/// A single top-level `declare function`/`export declare function`
+/// extracts one `FnDecl`; a `declare namespace Foo { function bar(...):
+/// ...; }` recurses into its body and extracts every function found
+/// inside (at any nesting depth -- a namespace can itself contain a
+/// nested namespace). Found necessary by a real npm package (`qs`),
+/// whose entire type surface -- including every function -- lives
+/// inside `declare namespace QueryString { ... }` rather than at the
+/// top level; without this, `parse_dts` found zero functions in it. The
+/// extracted `DtsFunction.name` is the bare function name (`parse`, not
+/// `QueryString.parse`) -- that's also what `wrap_as_commonjs_module`'s
+/// object-export hoisting binds it to at runtime (`qs`'s own
+/// `module.exports = { parse, stringify, ... }`), so the two already
+/// agree without any extra namespace-qualification logic.
+fn extract_fn_decls(item: &ModuleItem) -> Vec<&FnDecl> {
     match item {
-        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Fn(fn_decl))) => Some(fn_decl),
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
-            Decl::Fn(fn_decl) => Some(fn_decl),
-            _ => None,
-        },
-        _ => None,
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_fn_decls_from_decl(decl),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+            extract_fn_decls_from_decl(&export.decl)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<&FnDecl> {
+    match decl {
+        Decl::Fn(fn_decl) => vec![fn_decl],
+        Decl::TsModule(module_decl) => {
+            let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
+                return Vec::new();
+            };
+            block.body.iter().flat_map(extract_fn_decls).collect()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -1118,6 +1144,83 @@ mod tests {
         assert!(matches!(classify(&funcs[0]), Classification::FastPath(_)));
         assert!(matches!(classify(&funcs[1]), Classification::FastPath(_)));
         assert!(matches!(classify(&funcs[2]), Classification::Fallback { .. }));
+    }
+
+    /// The exact shape found in a real npm package (`qs`): every function
+    /// lives inside `declare namespace QueryString { ... }` rather than
+    /// at the top level, with `export = QueryString;` outside it.
+    #[test]
+    fn extracts_functions_declared_inside_a_namespace() {
+        let source = r#"
+            export = QueryString;
+            declare namespace QueryString {
+                function stringify(obj: number): string;
+                function parse(str: string): number;
+            }
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 2);
+        assert!(funcs.iter().any(|f| f.name == "stringify"));
+        assert!(funcs.iter().any(|f| f.name == "parse"));
+        // The bare name, not `QueryString.parse` -- that's what
+        // `wrap_as_commonjs_module`'s object-export hoisting binds it to.
+        assert!(!funcs.iter().any(|f| f.name.contains('.')));
+    }
+
+    #[test]
+    fn extracts_functions_from_a_nested_namespace() {
+        let source = r#"
+            declare namespace Outer {
+                namespace Inner {
+                    function deep(x: number): number;
+                }
+                function shallow(x: number): number;
+            }
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 2);
+        assert!(funcs.iter().any(|f| f.name == "deep"));
+        assert!(funcs.iter().any(|f| f.name == "shallow"));
+    }
+
+    #[test]
+    fn namespaced_functions_classify_normally() {
+        let source = r#"
+            declare namespace Ns {
+                function add(a: number, b: number): number;
+                function identity<T>(x: T): T;
+            }
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        let add = funcs.iter().find(|f| f.name == "add").unwrap();
+        let identity = funcs.iter().find(|f| f.name == "identity").unwrap();
+        assert!(matches!(classify(add), Classification::FastPath(_)));
+        assert!(matches!(classify(identity), Classification::Fallback { .. }));
+    }
+
+    /// The real `qs` round-trip: a namespaced Fallback function's
+    /// generated wrapper must actually parse and lower, same bar as
+    /// every other `generate_shim` round-trip test.
+    #[test]
+    fn namespaced_fallback_function_shim_round_trips_through_real_lowering() {
+        let source = r#"
+            export = QueryString;
+            declare namespace QueryString {
+                function parse(str: string, options?: object): object;
+            }
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 1);
+        let shim = generate_shim(&funcs, false);
+        assert!(shim.contains("function parse(argsArray: Json): Json {"));
+
+        let program_source = format!(
+            "{shim}\nfunction main(): void {{\n    const r = parse(JSON.parse(\"[\\\"a=1\\\"]\"));\n    console.log(String(r));\n}}\n"
+        );
+        let module = thaw_parser::parse_typescript(&program_source)
+            .unwrap_or_else(|e| panic!("generated shim did not parse: {e}\n---\n{program_source}"));
+        thaw_hir::lower_module(&module)
+            .unwrap_or_else(|e| panic!("generated shim did not lower: {e}\n---\n{program_source}"));
     }
 
     #[test]
