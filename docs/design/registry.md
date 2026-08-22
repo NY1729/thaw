@@ -1,0 +1,126 @@
+# thaw-registry 設計ドキュメント（V1: ローカルディレクトリ）
+
+- ステータス: 設計 + 最初の垂直スライス実装
+- 前提: [thaw-bridge](../../crates/thaw-bridge), [docs/design/bridge.md](bridge.md) の分類/シム生成機構を前提にする
+- 位置づけ: [[project_thaw_overview]] が「Thaw の本質的価値」と位置づける部分そのもの。bridge.md 8章・7章で「未実装」として送られていた `thaw-registry` を、最小の形で実装する。
+
+## 1. これまでの状態と、埋めるギャップ
+
+bridge.md までの実装で、`.d.ts` を渡せば Fast path / Fallback を自動判定し、
+呼び出し可能な TS シムを生成する（`thaw_bridge::generate_shim`）ところまでは
+できていた。ただし、ユーザーから見るとまだ3つの手作業が残っていた：
+
+1. `--bridge <path.d.ts>` を毎回手で指定する
+2. Fast path のシンボルを提供する静的ライブラリを `--link` で手で指定する
+3. Fallback 関数を使う前に、パッケージの実 JS ソースを `loadScript(...)`
+   で自分のコード中に手で書いて一度ロードする
+
+「パッケージ名を1つ指定するだけで、この3つが自動化される」ところまでを
+今回のスコープとする。**ネットワーク経由の取得・バージョン解決・
+ネイティブライブラリのビルドは意図的にスコープ外**（7章）。
+
+## 2. V1 レジストリの形：ただのローカルディレクトリ
+
+```
+<registry-dir>/<package-name>/
+  package.d.ts   (必須)  -- thaw-bridge の parse_dts/classify に渡す
+  native.a       (任意)  -- Fast path 関数の実体を提供する静的ライブラリ
+  bundle.js      (任意)  -- Fallback 関数の実体となる JS ソース
+```
+
+`package.d.ts` だけが必須。片方しか要らないパッケージもある
+（純粋な Fast path パッケージは `bundle.js` 不要、純粋な Fallback
+パッケージは `native.a` 不要）。
+
+`thaw-registry` crate（[crates/thaw-registry](../../crates/thaw-registry))
+はこのディレクトリ規約を読むだけの薄い層：
+
+```rust
+pub struct ResolvedPackage {
+    pub name: String,
+    pub dts_source: String,
+    pub native_lib: Option<PathBuf>,
+    pub bundle_js: Option<String>,
+}
+
+pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, String>;
+```
+
+## 3. CLI: `--registry` / `--use`
+
+```
+thaw build app.ts --use left-pad --use is-odd
+thaw build app.ts --registry ./vendor --use left-pad
+```
+
+- `--registry <dir>`: レジストリのルート（デフォルト `./thaw_modules`）
+- `--use <package>`: レジストリから解決するパッケージ名（複数指定可）
+
+thaw-cli はここで解決したパッケージごとに:
+
+1. `package.d.ts` を `thaw_bridge::parse_dts` + `generate_shim` に通し、
+   結果のシムをユーザーソースの前に結合する（`--bridge` と同じ仕組み）。
+2. `native.a` があればリンク対象に自動的に加える（`--link` を書く必要が
+   なくなる）。
+3. `bundle.js` があれば内容を集約し、4章の `__thaw_module_init` に
+   まとめる。
+
+既存の `--bridge`/`--link` はそのまま残す（レジストリに登録していない
+一発物の `.d.ts`/ライブラリを試す手動経路として引き続き有効）。
+
+## 4. モジュール自動初期化: `__thaw_module_init`
+
+「Fallback 関数を使う前に `loadScript` を一度呼ぶ」という手順を自動化
+するには、ユーザーの `main`/`handler` の**先頭で**何かを実行できる
+仕組みが要る。Thaw にはまだトップレベル文やモジュールシステムがないため、
+新しい構文は増やさず、**特別扱いする関数名**で済ませることにした：
+
+- `thaw-bridge::generate_module_init(&[(name, js_source)]) -> String` が
+  `function __thaw_module_init(): void { loadScript("..."); ... }` という
+  ふつうの Thaw 関数を生成する（複数パッケージ分の `loadScript` 呼び出しを
+  `--use` で指定した順に並べる）。
+- thaw-llvm の `compile_program` は、`main`/`handler` どちらの
+  エントリポイントを合成する場合も、実際のユーザーコードを呼ぶ**前**に
+  `__thaw_module_init` が定義されていればそれを呼ぶ
+  （`MODULE_INIT_SYMBOL`/`call_module_init_if_present`、
+  [hir_codegen.rs](../../crates/thaw-llvm/src/hir_codegen.rs)）。
+  定義されていなければ何もしない（`bundle.js` を持つパッケージを
+  1つも `--use` していないプログラムでは、生成すらされない）。
+
+これにより `__thaw_module_init` は HIR/codegen にとって「ただの関数」
+のまま扱える -- 新しい `HirStmt`/`HirExpr` もパーサー変更も不要。
+唯一の特別扱いは「存在すれば呼ぶタイミング」だけ。
+
+## 5. 検証した垂直スライス
+
+- `thaw-registry`: ディレクトリ規約の解決（全ファイルあり/必須のみ/
+  `.d.ts` 欠落エラー/パッケージ自体が存在しないエラー、の4パターンを
+  ユニットテストで確認）。
+- `thaw-bridge::generate_module_init`: 生成される `loadScript` 呼び出しの
+  順序、JS ソース中の `"`/`\`/改行のエスケープ、そして生成コードが
+  実際に `thaw_parser`→`thaw_hir` でパース/lowering できることを
+  round-trip テストで確認（bridge.md の `generate_shim` と同じ方針）。
+- thaw-llvm: `__thaw_module_init` が `main` エントリでも `handler`
+  （Lambda）エントリでも、ユーザーコードより先に実行されることを、
+  実際にコンパイル・リンクしたネイティブバイナリを実行して確認
+  （Lambda 側はモック Runtime API サーバーに対する実際の HTTP
+  往復で確認 -- 既存の Lambda テストと同じプロトコル）。
+- thaw-cli: `--registry`/`--use` を実際に使い、Fast path 関数
+  （`native.a` 自動リンク）と Fallback 関数（`bundle.js` 自動ロード、
+  ユーザーコードに `loadScript` 記述なし）を1つのプログラムに混在させて
+  ビルド・実行し、両方とも正しい出力を得た。
+
+## 6. 今回やらなかったこと（意図的なスコープ外）
+
+- **ネットワーク経由の取得**: `npm install` 相当のダウンロードは存在しない。
+  `<registry-dir>` は事前に用意されている前提。
+- **バージョン解決**: パッケージ名だけを見る。`package.json`/lockfile
+  相当のものは存在しない。
+- **ネイティブライブラリのビルド**: `native.a` は事前にビルド済みの
+  ものを置く前提。「実際の npm パッケージのネイティブアドオンを
+  Thaw 向けにビルドする」パイプラインはまだない。
+- **依存関係グラフ**: パッケージ間の依存は `--use` を書いた順序が
+  そのまま `loadScript` の呼び出し順序になるだけで、循環検出や
+  自動的な依存解決はない。
+- bridge.md 5章で述べた実際の C ABI（`(ptr, len)` 分割など）に合わせた
+  Marshal アダプタ生成は引き続きスコープ外。

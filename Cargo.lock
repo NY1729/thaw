@@ -1046,6 +1046,7 @@ dependencies = [
  "thaw-hir",
  "thaw-llvm",
  "thaw-parser",
+ "thaw-registry",
 ]
 
 [[package]]
@@ -1081,6 +1082,10 @@ version = "0.1.0"
 dependencies = [
  "rquickjs",
 ]
+
+[[package]]
+name = "thaw-registry"
+version = "0.1.0"
 
 [[package]]
 name = "thaw-runtime"
