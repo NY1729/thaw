@@ -93,6 +93,22 @@ pub enum HirExpr {
     /// `process.env.NAME`. Same story as `ArrayLen`: no general member
     /// model yet, just this one special-cased builtin (Phase 2).
     EnvVar(Symbol),
+    /// An object literal, fields in the order codegen should lay them out
+    /// in memory. thaw-hir's lowering reorders a literal's fields to match
+    /// its declared type (see `lower.rs`) before this node is built, so
+    /// codegen never has to reconcile two different field orderings.
+    /// Phase 2 codegen only supports `f64`-valued fields.
+    ObjectLit(Vec<(Symbol, HirExpr)>),
+    /// `object.field`. Unlike `ArrayLen`/`EnvVar`, this *is* a general
+    /// member-access node -- but it still isn't resolved by a real type
+    /// checker at codegen time, so lowering bakes in the object's full
+    /// `HirType::Object(fields)` shape (field order = the field's byte
+    /// offset in the arena-allocated buffer) so codegen doesn't need to
+    /// re-derive it.
+    PropAccess(Box<HirExpr>, HirType, Symbol),
+    /// `object.field = value` (and desugared compound forms). Evaluates to
+    /// `value`. Same `HirType` bookkeeping as `PropAccess`.
+    PropAssign(Box<HirExpr>, HirType, Symbol, Box<HirExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
