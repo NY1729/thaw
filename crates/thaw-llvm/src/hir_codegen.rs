@@ -1482,6 +1482,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compiles_interface_extends() {
+        let source = r#"
+            interface Shape {
+                color: number;
+            }
+            interface Circle extends Shape {
+                radius: number;
+            }
+
+            function area(c: Circle): number {
+                return c.radius * c.radius;
+            }
+
+            function main(): void {
+                const c: Circle = { radius: 3, color: 1 };
+                console.log(c.color);
+                console.log(area(c));
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "interface_extends"), "1\n9\n");
+    }
+
     /// V1 async/await (docs/design/async-await.md): `async`/`await` are
     /// pure sugar over synchronous calls, including `main` itself being
     /// `async` -- the entry-point detection in `compile_program` doesn't
