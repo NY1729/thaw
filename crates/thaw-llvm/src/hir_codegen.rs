@@ -80,10 +80,22 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_function_body(func)?;
         }
 
-        if self.module.get_function(USER_MAIN_SYMBOL).is_none() {
-            return Err("no `function main(): void { ... }` found".to_string());
+        let has_main = self.module.get_function(USER_MAIN_SYMBOL).is_some();
+        let handler_hir = program.functions.iter().find(|f| f.name == "handler");
+
+        match (has_main, handler_hir) {
+            (true, Some(_)) => {
+                return Err("a program can define `main` or `handler`, not both".to_string())
+            }
+            (true, None) => self.emit_c_main_entry(),
+            (false, Some(handler)) => self.emit_lambda_entry(handler)?,
+            (false, None) => {
+                return Err(
+                    "no `function main(): void { ... }` or `function handler(event: string): string { ... }` found"
+                        .to_string(),
+                )
+            }
         }
-        self.emit_c_main();
 
         self.module
             .verify()
@@ -107,6 +119,19 @@ impl<'ctx> HirCompiler<'ctx> {
         let arena_alloc_type = i8_ptr.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module
             .add_function("thaw_arena_alloc", arena_alloc_type, Some(Linkage::External));
+
+        let getenv_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("getenv", getenv_type, Some(Linkage::External));
+
+        // Lambda captures stdout via a pipe, not a TTY, so libc's stdio
+        // fully-buffers it by default -- output could sit in the buffer
+        // and never reach CloudWatch if the process is frozen/killed
+        // between invocations. `console.log` flushes after every call to
+        // avoid that (see `compile_console_log`).
+        let fflush_type = i32_type.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("fflush", fflush_type, Some(Linkage::External));
     }
 
     fn llvm_symbol_for(name: &str) -> String {
@@ -468,7 +493,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())
             }
 
-            other => Err(format!("Phase 1 codegen does not support {other:?} yet")),
+            HirExpr::EnvVar(name) => self.compile_env_var(name),
+
+            other => Err(format!("Phase 1/2 codegen does not support {other:?} yet")),
         }
     }
 
@@ -542,6 +569,56 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_in_bounds_gep(self.context.i8_type(), arr_ptr, &[byte_offset], "elem_ptr")
                 .map_err(|e| e.to_string())
         }
+    }
+
+    /// `process.env.NAME`, via libc `getenv`. Returns an empty string
+    /// instead of a null pointer when the variable is unset, since Str
+    /// values elsewhere (puts/printf %s) assume a valid C string.
+    fn compile_env_var(&mut self, name: &str) -> Result<BasicValueEnum<'ctx>, String> {
+        let name_global = self
+            .builder
+            .build_global_string_ptr(name, "envname")
+            .map_err(|e| e.to_string())?;
+        let getenv_fn = self.module.get_function("getenv").unwrap();
+        let call = self
+            .builder
+            .build_call(getenv_fn, &[name_global.as_pointer_value().into()], "getenv_call")
+            .map_err(|e| e.to_string())?;
+        let raw_ptr = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("getenv did not return a value")?
+            .into_pointer_value();
+
+        let function = self.current_function();
+        let null_bb = self.context.append_basic_block(function, "envnull");
+        let notnull_bb = self.context.append_basic_block(function, "envnotnull");
+        let merge_bb = self.context.append_basic_block(function, "envmerge");
+
+        let is_null = self.builder.build_is_null(raw_ptr, "is_null").map_err(|e| e.to_string())?;
+        self.builder
+            .build_conditional_branch(is_null, null_bb, notnull_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(null_bb);
+        let empty = self
+            .builder
+            .build_global_string_ptr("", "envempty")
+            .map_err(|e| e.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(notnull_bb);
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| e.to_string())?;
+
+        self.builder.position_at_end(merge_bb);
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let phi = self.builder.build_phi(ptr_ty, "envval").map_err(|e| e.to_string())?;
+        phi.add_incoming(&[(&empty.as_pointer_value(), null_bb), (&raw_ptr, notnull_bb)]);
+        Ok(phi.as_basic_value())
     }
 
     fn compile_binop(
@@ -664,23 +741,71 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
+        // Flush immediately -- see the comment on `fflush`'s declaration.
+        let fflush_fn = self.module.get_function("fflush").unwrap();
+        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder
+            .build_call(fflush_fn, &[null_ptr.into()], "fflush_call")
+            .map_err(|e| e.to_string())?;
+
         Ok(self.context.i32_type().const_int(0, false).into())
     }
 
     /// Emits `int main(void) { thaw_user_main(); return 0; }`, the real
-    /// process entry point that the system linker/CRT expects.
-    fn emit_c_main(&mut self) {
+    /// process entry point that the system linker/CRT expects, for
+    /// ordinary (non-Lambda) programs that define `main`.
+    fn emit_c_main_entry(&mut self) {
         let user_main = self.module.get_function(USER_MAIN_SYMBOL).unwrap();
 
+        let (_main_fn, entry) = self.new_c_main();
+        self.builder.position_at_end(entry);
+        self.builder
+            .build_call(user_main, &[], "call_thaw_user_main")
+            .unwrap();
+        self.finish_c_main();
+    }
+
+    /// Emits `int main(void) { thaw_runtime_run(&handler); return 0; }` for
+    /// programs that define `handler` instead of `main` -- `thaw_runtime_run`
+    /// (see thaw-runtime) never actually returns; it polls the Lambda
+    /// Runtime API forever.
+    fn emit_lambda_entry(&mut self, handler_hir: &HirFunction) -> Result<(), String> {
+        let valid_signature = handler_hir.params.len() == 1
+            && handler_hir.params[0].ty == HirType::Str
+            && handler_hir.ret == HirType::Str;
+        if !valid_signature {
+            return Err(
+                "`handler` must have the signature `(event: string): string`".to_string(),
+            );
+        }
+        let handler_fn = self.module.get_function("handler").unwrap();
+
+        let i8_ptr = self.context.ptr_type(AddressSpace::default());
+        let run_type = self.context.void_type().fn_type(&[i8_ptr.into()], false);
+        let run_fn = self
+            .module
+            .add_function("thaw_runtime_run", run_type, Some(Linkage::External));
+
+        let (_main_fn, entry) = self.new_c_main();
+        self.builder.position_at_end(entry);
+        let handler_ptr = handler_fn.as_global_value().as_pointer_value();
+        self.builder
+            .build_call(run_fn, &[handler_ptr.into()], "call_thaw_runtime_run")
+            .map_err(|e| e.to_string())?;
+        self.finish_c_main();
+        Ok(())
+    }
+
+    fn new_c_main(&mut self) -> (FunctionValue<'ctx>, BasicBlock<'ctx>) {
         let i32_type = self.context.i32_type();
         let main_type = i32_type.fn_type(&[], false);
         let main_fn = self.module.add_function("main", main_type, None);
         let entry = self.context.append_basic_block(main_fn, "entry");
-        self.builder.position_at_end(entry);
+        (main_fn, entry)
+    }
 
-        self.builder
-            .build_call(user_main, &[], "call_thaw_user_main")
-            .unwrap();
+    fn finish_c_main(&mut self) {
+        let i32_type = self.context.i32_type();
         self.builder
             .build_return(Some(&i32_type.const_int(0, false)))
             .unwrap();
@@ -722,13 +847,22 @@ impl<'ctx> HirCompiler<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// Builds the given TS source into a standalone native binary (linking
     /// thaw-arena's staticlib too, since array-using programs call into
-    /// it), runs it, and returns its captured stdout. This is the same
-    /// pipeline thaw-cli drives, just inlined for testing.
+    /// it), runs it with the given extra environment variables, and
+    /// returns its captured stdout. This is the same pipeline thaw-cli
+    /// drives, just inlined for testing.
     fn compile_and_run(source: &str, test_name: &str) -> String {
+        compile_and_run_with_env(source, test_name, &[])
+    }
+
+    fn compile_and_run_with_env(source: &str, test_name: &str, envs: &[(&str, &str)]) -> String {
         let module = thaw_parser::parse_typescript(source).unwrap();
         let program = thaw_hir::lower_module(&module).unwrap();
 
@@ -746,7 +880,7 @@ mod tests {
 
         compiler.write_object_file(&obj_path).unwrap();
 
-        let arena_lib = build_thaw_arena_staticlib();
+        let arena_lib = build_staticlib("thaw-arena");
 
         let link_status = Command::new("cc")
             .arg(&obj_path)
@@ -758,6 +892,7 @@ mod tests {
         assert!(link_status.success(), "linking failed");
 
         let output = Command::new(&exe_path)
+            .envs(envs.iter().copied())
             .output()
             .expect("failed to execute compiled binary");
         assert!(output.status.success(), "binary exited non-zero");
@@ -766,22 +901,16 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    /// Builds thaw-arena as a staticlib (if not already built) and returns
-    /// the path to the resulting `.a` file, by parsing `cargo build`'s JSON
+    /// Builds `pkg` as a staticlib (if not already built) and returns the
+    /// path to the resulting `.a` file, by parsing `cargo build`'s JSON
     /// artifact output -- robust to `CARGO_TARGET_DIR` overrides, unlike
     /// guessing a relative path.
-    fn build_thaw_arena_staticlib() -> std::path::PathBuf {
+    fn build_staticlib(pkg: &str) -> std::path::PathBuf {
         let output = Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "-p",
-                "thaw-arena",
-                "--message-format=json",
-            ])
+            .args(["build", "--release", "-p", pkg, "--message-format=json"])
             .output()
-            .expect("failed to invoke `cargo build -p thaw-arena`");
-        assert!(output.status.success(), "building thaw-arena failed");
+            .unwrap_or_else(|e| panic!("failed to invoke `cargo build -p {pkg}`: {e}"));
+        assert!(output.status.success(), "building {pkg} failed");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
@@ -795,7 +924,7 @@ mod tests {
                 }
             }
         }
-        panic!("could not find libthaw_arena.a in `cargo build` output:\n{stdout}");
+        panic!("could not find a staticlib for `{pkg}` in `cargo build` output:\n{stdout}");
     }
 
     /// Full pipeline smoke test: TS source -> thaw-parser -> thaw-hir ->
@@ -888,5 +1017,131 @@ mod tests {
             compile_and_run(source, "trycatch"),
             "before\nboom\nafter\n"
         );
+    }
+
+    #[test]
+    fn reads_process_env() {
+        let source = r#"
+            function main(): void {
+                console.log(process.env.THAW_TEST_VAR);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run_with_env(source, "envvar", &[("THAW_TEST_VAR", "hello-env")]),
+            "hello-env\n"
+        );
+    }
+
+    #[test]
+    fn unset_env_var_reads_as_empty_string_not_a_crash() {
+        let source = r#"
+            function main(): void {
+                console.log(process.env.THAW_DEFINITELY_UNSET_VAR_XYZ);
+                console.log("still alive");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "envvar_unset"),
+            "\nstill alive\n"
+        );
+    }
+
+    /// Full pipeline test for the Lambda entry point: a `handler(event:
+    /// string): string` program is compiled, linked against both
+    /// thaw-arena and thaw-runtime, run as a real subprocess against a
+    /// mock Lambda Runtime API server (the same protocol thaw-runtime
+    /// itself is tested against), and its actual HTTP interaction is
+    /// verified end to end.
+    #[test]
+    fn compiles_and_runs_a_lambda_handler_against_a_mock_runtime_api() {
+        let source = r#"
+            function handler(event: string): string {
+                console.log(event);
+                return "{\"ok\":true}";
+            }
+        "#;
+
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "lambda_handler");
+        compiler.compile_program(&program).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-lambda-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        compiler.write_object_file(&obj_path).unwrap();
+
+        let arena_lib = build_staticlib("thaw-arena");
+        let runtime_lib = build_staticlib("thaw-runtime");
+
+        let link_status = Command::new("cc")
+            .arg(&obj_path)
+            .arg(&arena_lib)
+            .arg(&runtime_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .expect("failed to invoke system `cc` linker");
+        assert!(link_status.success(), "linking failed");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).unwrap();
+            let body = "\"ping\"";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: test-req-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            conn.read_to_end(&mut buf).unwrap();
+            tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
+
+            let response = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            conn.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut child = Command::new(&exe_path)
+            .env("AWS_LAMBDA_RUNTIME_API", &addr)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn compiled Lambda handler binary");
+
+        let post_request = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("handler never posted a response to the mock runtime API");
+        server.join().unwrap();
+
+        // `thaw_runtime_run` loops forever by design (it's the actual
+        // Lambda execution model) -- kill the process after we've observed
+        // one full round trip rather than waiting for an exit that never
+        // comes on its own.
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+
+        assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/response"));
+        assert!(post_request.ends_with("{\"ok\":true}"));
+        // Also confirms the fflush-after-console.log fix: stdout is a pipe
+        // here (fully buffered by default in libc), and the process is
+        // killed rather than exited normally, so without an explicit flush
+        // this assertion would flake/fail.
+        assert!(String::from_utf8_lossy(&output.stdout).contains("\"ping\""));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

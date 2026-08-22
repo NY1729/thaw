@@ -66,11 +66,18 @@ fn build(input: &Path, output: &Path) -> Result<(), String> {
     let obj_path = output.with_extension("o");
     compiler.write_object_file(&obj_path)?;
 
-    let arena_lib = build_thaw_arena_staticlib()?;
+    // Always link both: thaw-arena backs array allocation (Phase 1),
+    // thaw-runtime backs the Lambda event loop for `handler`-based programs
+    // (Phase 2). An unreferenced static archive member is simply never
+    // pulled into the final binary, so linking both unconditionally is
+    // harmless and keeps this simple.
+    let arena_lib = build_staticlib("thaw-arena")?;
+    let runtime_lib = build_staticlib("thaw-runtime")?;
 
     let link_status = Command::new("cc")
         .arg(&obj_path)
         .arg(&arena_lib)
+        .arg(&runtime_lib)
         .arg("-o")
         .arg(output)
         .status()
@@ -86,24 +93,18 @@ fn build(input: &Path, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Builds thaw-arena as a staticlib (backing Phase 1 array allocation; see
-/// `thaw-llvm::hir_codegen`) and returns the path to the resulting `.a`
-/// file, parsed out of `cargo build`'s JSON artifact output. That's robust
-/// to `CARGO_TARGET_DIR` overrides, unlike guessing a relative path.
-fn build_thaw_arena_staticlib() -> Result<PathBuf, String> {
+/// Builds `pkg` as a staticlib (thaw-arena, thaw-runtime, ...) and returns
+/// the path to the resulting `.a` file, parsed out of `cargo build`'s JSON
+/// artifact output. That's robust to `CARGO_TARGET_DIR` overrides, unlike
+/// guessing a relative path.
+fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
     let output = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "thaw-arena",
-            "--message-format=json",
-        ])
+        .args(["build", "--release", "-p", pkg, "--message-format=json"])
         .output()
-        .map_err(|e| format!("failed to invoke `cargo build -p thaw-arena`: {e}"))?;
+        .map_err(|e| format!("failed to invoke `cargo build -p {pkg}`: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "building thaw-arena failed:\n{}",
+            "building {pkg} failed:\n{}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -117,5 +118,5 @@ fn build_thaw_arena_staticlib() -> Result<PathBuf, String> {
             }
         }
     }
-    Err("could not find libthaw_arena.a in `cargo build` output".to_string())
+    Err(format!("could not find a staticlib for `{pkg}` in `cargo build` output"))
 }
