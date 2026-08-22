@@ -16,7 +16,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]..."
+                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--registry <dir>] [--use <package>]..."
             );
             std::process::exit(1);
         }
@@ -28,6 +28,8 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut output: Option<PathBuf> = None;
     let mut extra_links: Vec<PathBuf> = Vec::new();
     let mut bridge_dts: Vec<PathBuf> = Vec::new();
+    let mut registry_dir = PathBuf::from("thaw_modules");
+    let mut use_packages: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -47,6 +49,16 @@ fn run_build(args: &[String]) -> Result<(), String> {
                 let value = args.get(i).ok_or("--bridge requires a path argument")?;
                 bridge_dts.push(PathBuf::from(value));
             }
+            "--registry" => {
+                i += 1;
+                let value = args.get(i).ok_or("--registry requires a path argument")?;
+                registry_dir = PathBuf::from(value);
+            }
+            "--use" => {
+                i += 1;
+                let value = args.get(i).ok_or("--use requires a package name argument")?;
+                use_packages.push(value.clone());
+            }
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -63,7 +75,14 @@ fn run_build(args: &[String]) -> Result<(), String> {
         PathBuf::from(stem)
     });
 
-    build(&input, &output, &extra_links, &bridge_dts)
+    build(
+        &input,
+        &output,
+        &extra_links,
+        &bridge_dts,
+        &registry_dir,
+        &use_packages,
+    )
 }
 
 /// Reads each `.d.ts` in `bridge_dts`, classifies its functions (thaw-bridge,
@@ -88,15 +107,59 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
     Ok(shim)
 }
 
+/// Resolves each `--use`d package against the local registry (thaw-registry;
+/// `registry_dir` defaults to `thaw_modules/`), generating its callable
+/// surface exactly like `generate_bridge_shims` does for a standalone
+/// `.d.ts` -- but additionally auto-linking the package's `native.a` if it
+/// ships one (replacing a manual `--link`), and collecting its `bundle.js`
+/// (if any) into a single generated `__thaw_module_init` (thaw-bridge's
+/// `generate_module_init`) so it's auto-loaded before user code runs
+/// (replacing a manual `loadScript` call). Returns the generated shim text
+/// and the native lib paths to link.
+fn generate_registry_shims(
+    registry_dir: &Path,
+    use_packages: &[String],
+) -> Result<(String, Vec<PathBuf>), String> {
+    let mut shim = String::new();
+    let mut native_libs = Vec::new();
+    let mut bundles: Vec<(String, String)> = Vec::new();
+
+    for name in use_packages {
+        let package = thaw_registry::resolve(registry_dir, name)?;
+        let functions = thaw_bridge::parse_dts(&package.dts_source)
+            .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
+        shim.push_str(&thaw_bridge::generate_shim(&functions));
+
+        if let Some(native_lib) = package.native_lib {
+            native_libs.push(native_lib);
+        }
+        if let Some(bundle_js) = package.bundle_js {
+            bundles.push((package.name.clone(), bundle_js));
+        }
+    }
+
+    let bundle_refs: Vec<(&str, &str)> = bundles
+        .iter()
+        .map(|(name, js)| (name.as_str(), js.as_str()))
+        .collect();
+    shim.push_str(&thaw_bridge::generate_module_init(&bundle_refs));
+
+    Ok((shim, native_libs))
+}
+
 fn build(
     input: &Path,
     output: &Path,
     extra_links: &[PathBuf],
     bridge_dts: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
 ) -> Result<(), String> {
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
-    let source = generate_bridge_shims(bridge_dts)? + &user_source;
+    let (registry_shim, registry_native_libs) =
+        generate_registry_shims(registry_dir, use_packages)?;
+    let source = registry_shim + &generate_bridge_shims(bridge_dts)? + &user_source;
 
     let module = thaw_parser::parse_typescript(&source)?;
     let program = thaw_hir::lower_module(&module)?;
@@ -134,6 +197,7 @@ fn build(
         // normally adds `-lm` automatically when it does the final link,
         // but this is a manual `cc` invocation instead.
         .arg("-lm")
+        .args(&registry_native_libs)
         .args(extra_links)
         .arg("-o")
         .arg(output)
