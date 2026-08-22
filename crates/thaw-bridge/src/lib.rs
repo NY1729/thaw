@@ -836,9 +836,50 @@ fn render_ts_type(ty: &HirType) -> String {
 /// module-level initialization mechanism in Thaw yet to hook that up
 /// automatically, so it stays the caller's explicit responsibility, e.g.
 /// as the first statement in `main`/`handler`).
-pub fn generate_shim(functions: &[DtsFunction]) -> String {
+/// `classify_all`, then downgrades every FastPath entry to Fallback when
+/// `native_lib_available` is false: a real npm package fetched via
+/// `thaw registry add` is pure JS with no native counterpart at all, so a
+/// type shape that happens to be fully representable in a native ABI
+/// (e.g. date-fns's `daysToWeeks(days: number): number`) still has
+/// nothing to link against. Treating it as FastPath anyway produces a
+/// confusing `undefined reference` linker error for a function that has
+/// a perfectly good JS implementation sitting right next to it in
+/// `bundle.js`.
+///
+/// This is the single source of truth for "is this name actually
+/// callable via FFI" -- `generate_shim` and any caller that separately
+/// needs to know which names require Fallback binding (e.g. thaw-cli's
+/// `ModuleBundle::fallback_names`) both call this rather than
+/// `classify_all` directly, so they can't disagree.
+pub fn effective_classifications(
+    functions: &[DtsFunction],
+    native_lib_available: bool,
+) -> Vec<(String, Classification)> {
+    classify_all(functions)
+        .into_iter()
+        .map(|(name, classification)| match classification {
+            Classification::FastPath(_) if !native_lib_available => (
+                name.clone(),
+                Classification::Fallback {
+                    function: name,
+                    reason: "no linked native library backs this Fast path signature".to_string(),
+                },
+            ),
+            other => (name, other),
+        })
+        .collect()
+}
+
+/// `native_lib_available` says whether there's actually a linkable
+/// native library backing this `.d.ts`'s FastPath signatures -- see
+/// `effective_classifications`. thaw-cli passes `true` only for the
+/// manual `--bridge` path, where the user is already responsible for
+/// supplying a matching `--link`ed library themselves (that contract
+/// predates this flag and is unchanged); for a registry (`--use`)
+/// package it passes whether `native.a` actually exists.
+pub fn generate_shim(functions: &[DtsFunction], native_lib_available: bool) -> String {
     let mut out = String::new();
-    for (name, classification) in classify_all(functions) {
+    for (name, classification) in effective_classifications(functions, native_lib_available) {
         match classification {
             Classification::FastPath(sig) => {
                 // `classify_all` only returns `FastPath` for a name with
@@ -1262,7 +1303,7 @@ mod tests {
     fn generates_ambient_declaration_for_fast_path_function() {
         let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
         assert_eq!(
-            generate_shim(&funcs),
+            generate_shim(&funcs, true),
             "declare function add(a: number, b: number): number;\n"
         );
     }
@@ -1275,15 +1316,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            generate_shim(&funcs),
+            generate_shim(&funcs, true),
             "declare function dist(p: { x: number; y: number }): number;\n"
         );
+    }
+
+    /// The actual bug: a real npm package fetched via `thaw registry
+    /// add` (e.g. date-fns's `daysToWeeks(days: number): number`) is
+    /// pure JS with no native library at all, but classifies FastPath on
+    /// type shape alone. Emitting the ambient `declare function` anyway
+    /// produced a real, reproduced `undefined reference` linker error --
+    /// `native_lib_available: false` must downgrade it to a Fallback
+    /// wrapper instead, since a working JS implementation is right there.
+    #[test]
+    fn downgrades_fast_path_to_fallback_when_no_native_lib_is_available() {
+        let funcs = parse_dts("export declare function daysToWeeks(days: number): number;").unwrap();
+        let shim = generate_shim(&funcs, false);
+        assert!(
+            !shim.contains("declare function"),
+            "must not emit an ambient FFI declaration with nothing to link against, got:\n{shim}"
+        );
+        assert!(shim.contains("function daysToWeeks(argsArray: Json): Json {"));
+        assert!(shim.contains(r#"return callDynamic("daysToWeeks", argsArray);"#));
+    }
+
+    #[test]
+    fn native_lib_available_true_keeps_fast_path_as_before() {
+        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        assert_eq!(
+            generate_shim(&funcs, true),
+            "declare function add(a: number, b: number): number;\n"
+        );
+    }
+
+    #[test]
+    fn effective_classifications_downgrades_fast_path_when_native_lib_unavailable() {
+        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let result = effective_classifications(&funcs, false);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].1, Classification::Fallback { .. }));
+    }
+
+    #[test]
+    fn effective_classifications_leaves_fallback_alone_regardless_of_native_lib() {
+        let funcs = parse_dts("export declare function identity<T>(x: T): T;").unwrap();
+        let with_native = effective_classifications(&funcs, true);
+        let without_native = effective_classifications(&funcs, false);
+        assert!(matches!(with_native[0].1, Classification::Fallback { .. }));
+        assert!(matches!(without_native[0].1, Classification::Fallback { .. }));
     }
 
     #[test]
     fn generates_call_dynamic_wrapper_for_fallback_function() {
         let funcs = parse_dts("export declare function identity<T>(x: T): T;").unwrap();
-        let shim = generate_shim(&funcs);
+        let shim = generate_shim(&funcs, true);
         assert!(shim.contains("// Fallback (QuickJS-NG):"));
         assert!(shim.contains("function identity(argsArray: Json): Json {"));
         assert!(shim.contains(r#"return callDynamic("identity", argsArray);"#));
@@ -1347,7 +1433,7 @@ mod tests {
             declare function ms(value: string): number;
         "#;
         let funcs = parse_dts(dts).unwrap();
-        let shim = generate_shim(&funcs);
+        let shim = generate_shim(&funcs, true);
 
         assert_eq!(
             shim.matches("function ms").count(),
@@ -1370,7 +1456,7 @@ mod tests {
             export declare function identity<T>(x: T): T;
         "#;
         let funcs = parse_dts(dts).unwrap();
-        let shim = generate_shim(&funcs);
+        let shim = generate_shim(&funcs, true);
 
         let program_source = format!(
             "{shim}\nfunction main(): void {{\n    console.log(add(2, 3));\n    const r = identity(JSON.parse(\"[1]\"));\n    console.log(Number(r));\n}}\n"
