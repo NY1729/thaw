@@ -74,12 +74,12 @@ pub enum Classification {
 /// model.
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_typescript(source)?;
-    let interfaces = resolve_interfaces(&module);
+    let (interfaces, generic_interfaces) = resolve_interfaces(&module);
     module
         .body
         .iter()
         .filter_map(extract_fn_decl)
-        .map(|fn_decl| lower_dts_function(fn_decl, &interfaces))
+        .map(|fn_decl| lower_dts_function(fn_decl, &interfaces, &generic_interfaces))
         .collect()
 }
 
@@ -105,25 +105,35 @@ fn extract_interface_decl(item: &ModuleItem) -> Option<&TsInterfaceDecl> {
     }
 }
 
-/// Resolves every top-level `interface` into a `DtsType`, mirroring
-/// `thaw_hir::lower::resolve_interfaces` but degrading to
-/// `DtsType::Unsupported` (with a reason) instead of erroring on a
-/// generic/self-referential/otherwise-unrepresentable interface -- one
-/// broken interface should make signatures that use it fall back, not
-/// abort classifying the rest of the `.d.ts` file.
-fn resolve_interfaces(module: &Module) -> HashMap<String, DtsType> {
-    let raw: HashMap<String, &TsInterfaceDecl> = module
-        .body
-        .iter()
-        .filter_map(extract_interface_decl)
-        .map(|iface| (iface.id.sym.to_string(), iface))
-        .collect();
+type GenericInterfaces<'a> = HashMap<String, &'a TsInterfaceDecl>;
+
+/// Resolves every top-level *non-generic* `interface` into a `DtsType`
+/// (first map), mirroring `thaw_hir::lower::resolve_interfaces` but
+/// degrading to `DtsType::Unsupported` (with a reason) instead of erroring
+/// on a self-referential/otherwise-unrepresentable interface -- one broken
+/// interface should make signatures that use it fall back, not abort
+/// classifying the rest of the `.d.ts` file. Generic interfaces are kept
+/// raw (second map), resolved on demand via substitution -- see
+/// `resolve_generic_interface`, and `thaw_hir::lower::GenericInterfaces`'s
+/// doc comment for the scope limits this mirrors (no nested-inside-
+/// another-interface use, no `extends` on the generic interface itself).
+fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInterfaces<'_>) {
+    let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
+    let mut generic: GenericInterfaces = HashMap::new();
+    for iface in module.body.iter().filter_map(extract_interface_decl) {
+        let name = iface.id.sym.to_string();
+        if iface.type_params.is_some() {
+            generic.insert(name, iface);
+        } else {
+            raw.insert(name, iface);
+        }
+    }
 
     let mut resolved = HashMap::new();
     for name in raw.keys().cloned().collect::<Vec<_>>() {
         resolve_interface(&name, &raw, &mut resolved, &mut Vec::new());
     }
-    resolved
+    (resolved, generic)
 }
 
 fn resolve_interface(
@@ -141,14 +151,8 @@ fn resolve_interface(
         return ty;
     }
     let Some(iface) = raw.get(name) else {
-        return DtsType::Unsupported(format!("unknown interface `{name}`"));
+        return DtsType::Unsupported(format!("unknown or generic interface `{name}`"));
     };
-
-    if iface.type_params.is_some() {
-        let ty = DtsType::Unsupported(format!("generic interface `{name}` is not classified yet"));
-        resolved.insert(name.to_string(), ty.clone());
-        return ty;
-    }
 
     in_progress.push(name.to_string());
 
@@ -254,12 +258,15 @@ fn resolve_type_with_interfaces(
             }
         }
     }
-    classify_ts_type(ty, resolved)
+    // No generic interfaces here by design -- see `GenericInterfaces`'s
+    // scope note.
+    classify_ts_type(ty, resolved, &GenericInterfaces::new())
 }
 
 fn lower_dts_function(
     fn_decl: &FnDecl,
     interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
 ) -> Result<DtsFunction, String> {
     let name = fn_decl.ident.sym.to_string();
     let func = &fn_decl.function;
@@ -275,7 +282,7 @@ fn lower_dts_function(
             };
             let param_name = binding.id.sym.to_string();
             let ty = match &binding.type_ann {
-                Some(ann) => classify_ts_type(&ann.type_ann, interfaces),
+                Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
             };
             Ok((param_name, ty))
@@ -283,7 +290,7 @@ fn lower_dts_function(
         .collect::<Result<Vec<_>, String>>()?;
 
     let ret = match &func.return_type {
-        Some(ann) => classify_ts_type(&ann.type_ann, interfaces),
+        Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
         None => DtsType::Native(HirType::Void),
     };
 
@@ -294,7 +301,11 @@ fn lower_dts_function(
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
 /// aborting the whole `.d.ts` file over one unsupported signature.
-fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsType {
+fn classify_ts_type(
+    ty: &TsType,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> DtsType {
     match ty {
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => DtsType::Native(HirType::F64),
@@ -304,7 +315,7 @@ fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsTy
             other => DtsType::Unsupported(format!("unsupported keyword type {other:?}")),
         },
 
-        TsType::TsArrayType(arr) => match classify_ts_type(&arr.elem_type, interfaces) {
+        TsType::TsArrayType(arr) => match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
             DtsType::Native(HirType::F64) => {
                 DtsType::Native(HirType::Array(Box::new(HirType::F64)))
             }
@@ -330,7 +341,7 @@ fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsTy
                     _ => return DtsType::Unsupported("unsupported object type literal key".to_string()),
                 };
                 let field_ty = match &prop.type_ann {
-                    Some(ann) => classify_ts_type(&ann.type_ann, interfaces),
+                    Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
                     None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
                 };
                 match field_ty {
@@ -353,10 +364,22 @@ fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsTy
                 }
             };
 
-            // A name matching a resolved `interface` -- treated exactly
-            // like an inline `{ ... }` type literal.
+            // A name matching a resolved (non-generic) `interface` --
+            // treated exactly like an inline `{ ... }` type literal.
             if let Some(resolved) = interfaces.get(&ref_name) {
                 return resolved.clone();
+            }
+            // A generic interface, referenced with concrete type
+            // arguments -- resolved on demand via substitution.
+            if let Some(decl) = generic_interfaces.get(&ref_name) {
+                return resolve_generic_interface(
+                    &ref_name,
+                    decl,
+                    ty_ref,
+                    interfaces,
+                    generic_interfaces,
+                    &mut Vec::new(),
+                );
             }
 
             // Note: no `Array<T>`/`Promise<T>` recognition here (unlike
@@ -365,11 +388,221 @@ fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsTy
             // (arrays) or the async ABI (promises) across a *foreign* FFI
             // boundary that section 5 of the design doc explicitly defers.
             DtsType::Unsupported(format!(
-                "type reference `{ref_name}` is not classified yet (generics/Array<T>/Promise<T>)"
+                "type reference `{ref_name}` is not classified yet (Array<T>/Promise<T>)"
             ))
         }
 
         other => DtsType::Unsupported(format!("unsupported type {other:?}")),
+    }
+}
+
+/// Resolves `Name<ConcreteArg, ...>` for a generic interface `Name`,
+/// mirroring `thaw_hir::lower::resolve_generic_interface` but degrading to
+/// `DtsType::Unsupported` instead of erroring (wrong argument count,
+/// self-reference, `extends`, or an unsupported member all degrade rather
+/// than abort). Same scope limits as the thaw-hir version.
+fn resolve_generic_interface(
+    name: &str,
+    decl: &TsInterfaceDecl,
+    ty_ref: &swc_ecma_ast::TsTypeRef,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> DtsType {
+    if in_progress.iter().any(|n| n == name) {
+        return DtsType::Unsupported(format!(
+            "generic interface `{name}` is (indirectly) self-referential"
+        ));
+    }
+    if !decl.extends.is_empty() {
+        return DtsType::Unsupported(format!("generic interface `{name}` cannot use `extends` yet"));
+    }
+
+    let type_param_decl = decl
+        .type_params
+        .as_ref()
+        .expect("caller only reaches here for a generic interface");
+    let type_param_names: Vec<String> = type_param_decl
+        .params
+        .iter()
+        .map(|p| p.name.sym.to_string())
+        .collect();
+
+    let type_args: &[Box<TsType>] = ty_ref
+        .type_params
+        .as_ref()
+        .map(|params| params.params.as_slice())
+        .unwrap_or(&[]);
+    if type_args.len() != type_param_names.len() {
+        return DtsType::Unsupported(format!(
+            "interface `{name}` expects {} type argument(s), got {}",
+            type_param_names.len(),
+            type_args.len()
+        ));
+    }
+
+    let mut substitution: HashMap<String, HirType> = HashMap::new();
+    for (param_name, arg) in type_param_names.into_iter().zip(type_args) {
+        match classify_ts_type(arg, interfaces, generic_interfaces) {
+            DtsType::Native(ty) => {
+                substitution.insert(param_name, ty);
+            }
+            DtsType::Unsupported(reason) => {
+                return DtsType::Unsupported(format!("type argument for `{param_name}`: {reason}"))
+            }
+        }
+    }
+
+    in_progress.push(name.to_string());
+
+    let mut fields = Vec::with_capacity(decl.body.body.len());
+    let mut failure = None;
+    for member in &decl.body.body {
+        let TsTypeElement::TsPropertySignature(prop) = member else {
+            failure = Some("has a non-property member (method/index signature)".to_string());
+            break;
+        };
+        let field_name = match prop.key.as_ref() {
+            Expr::Ident(ident) => ident.sym.to_string(),
+            _ => {
+                failure = Some("has an unsupported property key".to_string());
+                break;
+            }
+        };
+        let field_ty = match &prop.type_ann {
+            Some(ann) => resolve_ts_type_with_substitution(
+                &ann.type_ann,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ),
+            None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+        };
+        match field_ty {
+            DtsType::Native(ty) => fields.push((field_name, ty)),
+            DtsType::Unsupported(reason) => {
+                failure = Some(format!("field `{field_name}`: {reason}"));
+                break;
+            }
+        }
+    }
+
+    in_progress.pop();
+
+    match failure {
+        Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
+        None => DtsType::Native(HirType::Object(fields)),
+    }
+}
+
+/// Like `classify_ts_type`, but a bare `TsTypeRef` matching one of `Name`'s
+/// type parameters resolves to the corresponding concrete type instead of
+/// an unknown-reference `Unsupported`. Mirrors
+/// `thaw_hir::lower::resolve_ts_type_with_substitution`.
+fn resolve_ts_type_with_substitution(
+    ty: &TsType,
+    substitution: &HashMap<String, HirType>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> DtsType {
+    if let TsType::TsTypeRef(ty_ref) = ty {
+        if let TsEntityName::Ident(id) = &ty_ref.type_name {
+            let ref_name = id.sym.as_str();
+            if let Some(concrete) = substitution.get(ref_name) {
+                return DtsType::Native(concrete.clone());
+            }
+            if let Some(decl) = generic_interfaces.get(ref_name) {
+                return resolve_generic_interface(
+                    ref_name,
+                    decl,
+                    ty_ref,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+            }
+            if let Some(params) = &ty_ref.type_params {
+                if let [elem] = params.params.as_slice() {
+                    let resolved_elem = resolve_ts_type_with_substitution(
+                        elem,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    );
+                    match (ref_name, resolved_elem) {
+                        ("Array", DtsType::Native(HirType::F64)) => {
+                            return DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                        }
+                        ("Array", DtsType::Native(other)) => {
+                            return DtsType::Unsupported(format!(
+                                "array element type {other:?} is not supported yet (only number[])"
+                            ))
+                        }
+                        ("Array", DtsType::Unsupported(reason)) => {
+                            return DtsType::Unsupported(format!("array element type: {reason}"))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        return classify_ts_type(ty, interfaces, generic_interfaces);
+    }
+
+    match ty {
+        TsType::TsArrayType(arr) => {
+            match resolve_ts_type_with_substitution(
+                &arr.elem_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ) {
+                DtsType::Native(HirType::F64) => DtsType::Native(HirType::Array(Box::new(HirType::F64))),
+                DtsType::Native(other) => DtsType::Unsupported(format!(
+                    "array element type {other:?} is not supported yet (only number[])"
+                )),
+                DtsType::Unsupported(reason) => {
+                    DtsType::Unsupported(format!("array element type: {reason}"))
+                }
+            }
+        }
+        TsType::TsTypeLit(type_lit) => {
+            let mut fields = Vec::with_capacity(type_lit.members.len());
+            for member in &type_lit.members {
+                let TsTypeElement::TsPropertySignature(prop) = member else {
+                    return DtsType::Unsupported(
+                        "object type literal has a non-property member (method/index signature)"
+                            .to_string(),
+                    );
+                };
+                let field_name = match prop.key.as_ref() {
+                    Expr::Ident(ident) => ident.sym.to_string(),
+                    _ => return DtsType::Unsupported("unsupported object type literal key".to_string()),
+                };
+                let field_ty = match &prop.type_ann {
+                    Some(ann) => resolve_ts_type_with_substitution(
+                        &ann.type_ann,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    ),
+                    None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+                };
+                match field_ty {
+                    DtsType::Native(ty) => fields.push((field_name, ty)),
+                    DtsType::Unsupported(reason) => {
+                        return DtsType::Unsupported(format!("object field `{field_name}`: {reason}"))
+                    }
+                }
+            }
+            DtsType::Native(HirType::Object(fields))
+        }
+        other => classify_ts_type(other, interfaces, generic_interfaces),
     }
 }
 
@@ -595,12 +828,45 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_on_generic_interface() {
+    fn classifies_generic_interface_instantiation_as_fast_path() {
         let source = r#"
             export interface Box<T> {
                 value: T;
             }
             export declare function unwrap(b: Box<number>): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(
+            classify(&funcs[0]),
+            Classification::FastPath(FfiSignature {
+                symbol: "unwrap".into(),
+                params: vec![HirType::Object(vec![("value".into(), HirType::F64)])],
+                ret: HirType::F64,
+            })
+        );
+    }
+
+    #[test]
+    fn falls_back_on_wrong_number_of_generic_type_arguments() {
+        let source = r#"
+            export interface Pair<A, B> {
+                first: A;
+                second: B;
+            }
+            export declare function f(p: Pair<number>): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+    }
+
+    #[test]
+    fn falls_back_on_self_referential_generic_interface() {
+        let source = r#"
+            export interface Node<T> {
+                value: T;
+                next: Node<T>;
+            }
+            export declare function head(n: Node<number>): number;
         "#;
         let funcs = parse_dts(source).unwrap();
         assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
