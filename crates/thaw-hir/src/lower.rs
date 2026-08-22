@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use swc_ecma_ast::{
     AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl, Expr, FnDecl,
     KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem, ObjectLit as SwcObjectLit, Pat,
-    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsKeywordTypeKind, TsType,
-    TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
+    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsInterfaceDecl, TsKeywordTypeKind,
+    TsType, TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 
 use crate::{
@@ -49,6 +49,8 @@ struct FnSignature {
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
+    let interfaces = resolve_interfaces(module)?;
+
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
 
@@ -64,9 +66,9 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 let params = func
                     .params
                     .iter()
-                    .map(|p| lower_param(&p.pat).map(|p| p.ty))
+                    .map(|p| lower_param(&p.pat, &interfaces).map(|p| p.ty))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ret = lower_fn_return_type(func.is_async, &func.return_type, &name)?;
+                let ret = lower_fn_return_type(func.is_async, &func.return_type, &name, &interfaces)?;
                 signatures.insert(
                     name,
                     FnSignature {
@@ -79,9 +81,11 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                     fn_decls.push(fn_decl);
                 }
             }
+            // Already consumed by `resolve_interfaces` above.
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {}
             ModuleItem::Stmt(_) => {
                 return Err(
-                    "Phase 0/1/2 only support top-level function declarations; wrap other code in a function"
+                    "Phase 0/1/2 only support top-level function declarations and `interface`s; wrap other code in a function"
                         .into(),
                 )
             }
@@ -103,7 +107,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let functions = fn_decls
         .into_iter()
-        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures))
+        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures, &interfaces))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(HirProgram {
@@ -112,9 +116,112 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     })
 }
 
+/// Resolves every top-level `interface` declaration into a
+/// `HirType::Object`, so `lower_ts_type` can treat a `TsTypeRef` naming an
+/// interface exactly like an inline `{ ... }` type literal. Interfaces may
+/// be declared in any order and may reference each other; a true cycle (an
+/// interface whose field chain refers back to itself) is rejected, since
+/// Thaw's flat, fixed-size object layout has no way to represent one.
+fn resolve_interfaces(module: &Module) -> Result<HashMap<Symbol, HirType>, String> {
+    let mut raw: HashMap<Symbol, &TsInterfaceDecl> = HashMap::new();
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) = item {
+            raw.insert(iface.id.sym.to_string(), iface.as_ref());
+        }
+    }
+
+    let mut resolved = HashMap::new();
+    let names: Vec<Symbol> = raw.keys().cloned().collect();
+    for name in names {
+        resolve_interface(&name, &raw, &mut resolved, &mut Vec::new())?;
+    }
+    Ok(resolved)
+}
+
+fn resolve_interface(
+    name: &str,
+    raw: &HashMap<Symbol, &TsInterfaceDecl>,
+    resolved: &mut HashMap<Symbol, HirType>,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    if let Some(ty) = resolved.get(name) {
+        return Ok(ty.clone());
+    }
+    if in_progress.iter().any(|n| n == name) {
+        return Err(format!(
+            "interface `{name}` is (indirectly) self-referential, which Thaw's fixed-size object layout can't represent"
+        ));
+    }
+
+    let iface = raw
+        .get(name)
+        .ok_or_else(|| format!("unknown interface `{name}`"))?;
+
+    if iface.type_params.is_some() {
+        return Err(format!("generic interfaces are not supported yet (`{name}`)"));
+    }
+    if !iface.extends.is_empty() {
+        return Err(format!(
+            "`extends` is not supported yet on interfaces (`{name}`)"
+        ));
+    }
+
+    in_progress.push(name.to_string());
+
+    let mut fields = Vec::with_capacity(iface.body.body.len());
+    for member in &iface.body.body {
+        let TsTypeElement::TsPropertySignature(prop) = member else {
+            return Err(format!(
+                "interface `{name}` has an unsupported member (only plain properties are supported, no methods/index signatures)"
+            ));
+        };
+        let field_name = match prop.key.as_ref() {
+            Expr::Ident(ident) => ident.sym.to_string(),
+            _ => return Err(format!("interface `{name}` has an unsupported property key")),
+        };
+        let ann = prop.type_ann.as_ref().ok_or_else(|| {
+            format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
+        })?;
+        let field_ty = resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress)?;
+        fields.push((field_name, field_ty));
+    }
+
+    in_progress.pop();
+
+    let hir_ty = HirType::Object(fields);
+    resolved.insert(name.to_string(), hir_ty.clone());
+    Ok(hir_ty)
+}
+
+/// Like `lower_ts_type`, but additionally resolves a `TsTypeRef` naming a
+/// not-yet-resolved interface, recursively. Used only while building the
+/// interface table (`resolve_interfaces`); everywhere else, `lower_ts_type`
+/// consults the finished, read-only table instead.
+fn resolve_type_with_interfaces(
+    ty: &TsType,
+    raw: &HashMap<Symbol, &TsInterfaceDecl>,
+    resolved: &mut HashMap<Symbol, HirType>,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    if let TsType::TsTypeRef(ty_ref) = ty {
+        if let swc_ecma_ast::TsEntityName::Ident(id) = &ty_ref.type_name {
+            let ref_name = id.sym.as_str();
+            if raw.contains_key(ref_name) {
+                return resolve_interface(ref_name, raw, resolved, in_progress);
+            }
+        }
+    }
+    // Not an interface reference -- fall through to the ordinary rules.
+    // Any nested `TsTypeRef` to another interface inside e.g. an object
+    // type literal's field is still caught, since `lower_ts_type` also
+    // consults `resolved` for `TsTypeRef` lookups.
+    lower_ts_type(ty, resolved)
+}
+
 fn lower_fn_decl(
     fn_decl: &FnDecl,
     signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
 ) -> Result<HirFunction, String> {
     let name = fn_decl.ident.sym.to_string();
     let func = &fn_decl.function;
@@ -122,17 +229,17 @@ fn lower_fn_decl(
     let params = func
         .params
         .iter()
-        .map(|param| lower_param(&param.pat))
+        .map(|param| lower_param(&param.pat, interfaces))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let ret = lower_fn_return_type(func.is_async, &func.return_type, &name)?;
+    let ret = lower_fn_return_type(func.is_async, &func.return_type, &name, interfaces)?;
 
     let body_block = func
         .body
         .as_ref()
         .ok_or_else(|| format!("function `{name}` has no body (ambient/overload decl?)"))?;
 
-    let mut lowerer = FnLowerer::new(signatures, ret.clone());
+    let mut lowerer = FnLowerer::new(signatures, interfaces, ret.clone());
     for param in &params {
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
     }
@@ -155,9 +262,10 @@ fn lower_fn_return_type(
     is_async: bool,
     return_type: &Option<Box<swc_ecma_ast::TsTypeAnn>>,
     fn_name: &str,
+    interfaces: &HashMap<Symbol, HirType>,
 ) -> Result<HirType, String> {
     let declared = match return_type {
-        Some(ann) => lower_ts_type(&ann.type_ann)?,
+        Some(ann) => lower_ts_type(&ann.type_ann, interfaces)?,
         None => HirType::Void,
     };
     if !is_async {
@@ -171,13 +279,13 @@ fn lower_fn_return_type(
     }
 }
 
-fn lower_param(pat: &Pat) -> Result<HirParam, String> {
+fn lower_param(pat: &Pat, interfaces: &HashMap<Symbol, HirType>) -> Result<HirParam, String> {
     let Pat::Ident(binding) = pat else {
         return Err("only simple identifier parameters are supported".into());
     };
     let name = binding.id.sym.to_string();
     let ty = match &binding.type_ann {
-        Some(ann) => lower_ts_type(&ann.type_ann)?,
+        Some(ann) => lower_ts_type(&ann.type_ann, interfaces)?,
         None => {
             return Err(format!(
                 "parameter `{name}` needs an explicit type annotation (no type inference for params)"
@@ -187,7 +295,7 @@ fn lower_param(pat: &Pat) -> Result<HirParam, String> {
     Ok(HirParam { name, ty })
 }
 
-fn lower_ts_type(ty: &TsType) -> Result<HirType, String> {
+fn lower_ts_type(ty: &TsType, interfaces: &HashMap<Symbol, HirType>) -> Result<HirType, String> {
     match ty {
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => Ok(HirType::F64),
@@ -198,15 +306,28 @@ fn lower_ts_type(ty: &TsType) -> Result<HirType, String> {
                 "unsupported type keyword {other:?} (supports number/string/boolean/void)"
             )),
         },
-        TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(lower_ts_type(&arr.elem_type)?))),
+        TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(lower_ts_type(
+            &arr.elem_type,
+            interfaces,
+        )?))),
         TsType::TsTypeRef(ty_ref) => {
-            // Accept `Array<T>` / `Promise<T>` as the two built-in generic
-            // spellings we recognize. This is not general generics support
-            // (still deferred per the roadmap) -- just these two names.
             let ref_name = match &ty_ref.type_name {
                 swc_ecma_ast::TsEntityName::Ident(id) => Some(id.sym.as_str()),
                 swc_ecma_ast::TsEntityName::TsQualifiedName(_) => None,
             };
+
+            // A name matching a resolved `interface` -- treated exactly
+            // like an inline `{ ... }` type literal from here on.
+            if let Some(name) = ref_name {
+                if let Some(resolved) = interfaces.get(name) {
+                    return Ok(resolved.clone());
+                }
+            }
+
+            // Otherwise, accept `Array<T>` / `Promise<T>` as the two
+            // built-in generic spellings we recognize. This is not general
+            // generics support (still deferred per the roadmap) -- just
+            // these two names.
             let single_type_param = ty_ref
                 .type_params
                 .as_ref()
@@ -216,9 +337,11 @@ fn lower_ts_type(ty: &TsType) -> Result<HirType, String> {
                 });
 
             match (ref_name, single_type_param) {
-                (Some("Array"), Some(elem)) => Ok(HirType::Array(Box::new(lower_ts_type(elem)?))),
+                (Some("Array"), Some(elem)) => {
+                    Ok(HirType::Array(Box::new(lower_ts_type(elem, interfaces)?)))
+                }
                 (Some("Promise"), Some(inner)) => {
-                    Ok(HirType::Promise(Box::new(lower_ts_type(inner)?)))
+                    Ok(HirType::Promise(Box::new(lower_ts_type(inner, interfaces)?)))
                 }
                 _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
@@ -241,13 +364,13 @@ fn lower_ts_type(ty: &TsType) -> Result<HirType, String> {
                     let ann = prop.type_ann.as_ref().ok_or_else(|| {
                         format!("field `{name}` needs an explicit type annotation")
                     })?;
-                    Ok((name, lower_ts_type(&ann.type_ann)?))
+                    Ok((name, lower_ts_type(&ann.type_ann, interfaces)?))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(HirType::Object(fields))
         }
         other => Err(format!(
-            "unsupported type annotation {other:?} (supports primitive keywords, T[]/Array<T>, and object type literals)"
+            "unsupported type annotation {other:?} (supports primitive keywords, T[]/Array<T>, interfaces, and object type literals)"
         )),
     }
 }
@@ -312,14 +435,20 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     signatures: &'a HashMap<Symbol, FnSignature>,
+    interfaces: &'a HashMap<Symbol, HirType>,
     ret_type: HirType,
 }
 
 impl<'a> FnLowerer<'a> {
-    fn new(signatures: &'a HashMap<Symbol, FnSignature>, ret_type: HirType) -> Self {
+    fn new(
+        signatures: &'a HashMap<Symbol, FnSignature>,
+        interfaces: &'a HashMap<Symbol, HirType>,
+        ret_type: HirType,
+    ) -> Self {
         Self {
             scope: HashMap::new(),
             signatures,
+            interfaces,
             ret_type,
         }
     }
@@ -444,7 +573,7 @@ impl<'a> FnLowerer<'a> {
                 let value = self.lower_expr(init)?;
 
                 let ty = match &binding.type_ann {
-                    Some(ann) => lower_ts_type(&ann.type_ann)?,
+                    Some(ann) => lower_ts_type(&ann.type_ann, self.interfaces)?,
                     None => self.infer_expr_type(&value).map_err(|e| {
                         format!(
                             "cannot infer the type of `{name}`: {e} \
@@ -1327,5 +1456,117 @@ mod tests {
                 )],
             ))
         );
+    }
+
+    #[test]
+    fn lowers_interface_as_a_named_object_type() {
+        let program = lower(
+            r#"interface Point {
+                x: number;
+                y: number;
+            }
+
+            function dist(p: Point): number {
+                return p.x + p.y;
+            }
+
+            function main(): void {
+                const p: Point = { y: 2, x: 1 };
+                console.log(dist(p));
+            }"#,
+        );
+
+        let point_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
+
+        let dist = &program.functions[0];
+        assert_eq!(dist.params, vec![HirParam { name: "p".into(), ty: point_ty.clone() }]);
+
+        let main = &program.functions[1];
+        // Declared via the interface name, but the literal is still
+        // reordered to the interface's field order (same machinery as
+        // inline object type literals).
+        assert_eq!(
+            main.body[0],
+            HirStmt::Let(
+                "p".into(),
+                point_ty,
+                HirExpr::ObjectLit(vec![
+                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
+                    ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
+                ]),
+            )
+        );
+    }
+
+    #[test]
+    fn interfaces_can_reference_each_other_regardless_of_declaration_order() {
+        // `Line` is declared before `Point`, and refers to it -- the
+        // resolver must not depend on source order.
+        let program = lower(
+            r#"interface Line {
+                start: Point;
+                length: number;
+            }
+
+            interface Point {
+                x: number;
+                y: number;
+            }
+
+            function main(): void {
+                const l: Line = { start: { x: 1, y: 2 }, length: 5 };
+                console.log(l.length);
+            }"#,
+        );
+
+        let point_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
+        let line_ty = HirType::Object(vec![
+            ("start".into(), point_ty),
+            ("length".into(), HirType::F64),
+        ]);
+
+        assert_eq!(
+            program.functions[0].body[0],
+            HirStmt::Let(
+                "l".into(),
+                line_ty,
+                HirExpr::ObjectLit(vec![
+                    (
+                        "start".into(),
+                        HirExpr::ObjectLit(vec![
+                            ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
+                            ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
+                        ]),
+                    ),
+                    ("length".into(), HirExpr::Lit(HirLit::F64(5.0))),
+                ]),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_self_referential_interface() {
+        let module = thaw_parser::parse_typescript(
+            r#"interface Node {
+                value: number;
+                next: Node;
+            }
+            function main(): void {}"#,
+        )
+        .unwrap();
+        let err = lower_module(&module).unwrap_err();
+        assert!(err.contains("self-referential"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rejects_generic_interface() {
+        let module = thaw_parser::parse_typescript(
+            r#"interface Box<T> {
+                value: T;
+            }
+            function main(): void {}"#,
+        )
+        .unwrap();
+        assert!(lower_module(&module).is_err());
     }
 }

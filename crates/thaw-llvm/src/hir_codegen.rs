@@ -1403,6 +1403,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compiles_interface_typed_object() {
+        let source = r#"
+            interface Point {
+                x: number;
+                y: number;
+            }
+
+            function dist(p: Point): number {
+                return p.x + p.y;
+            }
+
+            function main(): void {
+                const p: Point = { y: 2, x: 1 };
+                console.log(dist(p));
+                p.x = p.x + 10;
+                console.log(p.x);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "interfaces"), "3\n11\n");
+    }
+
     /// V1 async/await (docs/design/async-await.md): `async`/`await` are
     /// pure sugar over synchronous calls, including `main` itself being
     /// `async` -- the entry-point detection in `compile_program` doesn't

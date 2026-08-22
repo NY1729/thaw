@@ -1,6 +1,10 @@
 //! `.d.ts` -> Fast-path/Fallback classification. See
 //! `docs/design/bridge.md` for the full design; this crate implements
-//! sections 3 (parsing) and 4 (type classification) of it.
+//! sections 3 (parsing) and 4 (type classification) of it. `interface`
+//! declarations are resolved into named object types (mirroring
+//! `thaw_hir::lower::resolve_interfaces`; see `resolve_interfaces` below),
+//! since `.d.ts` files lean on `interface` far more than inline `{ ... }`
+//! type literals.
 //!
 //! This does *not* reuse `thaw_hir::lower_module`: a `.d.ts` file is a bag
 //! of ambient signatures with no bodies at all and no `main`/`handler`
@@ -15,9 +19,11 @@
 //! enough that sharing code would mean threading a mode flag through
 //! `lower_ts_type` for one caller.
 
+use std::collections::HashMap;
+
 use swc_ecma_ast::{
-    Decl, Expr, FnDecl, ModuleDecl, ModuleItem, Pat, TsEntityName, TsKeywordTypeKind, TsType,
-    TsTypeElement,
+    Decl, Expr, FnDecl, Module, ModuleDecl, ModuleItem, Pat, TsEntityName, TsInterfaceDecl,
+    TsKeywordTypeKind, TsType, TsTypeElement,
 };
 use thaw_hir::{FfiSignature, HirType};
 
@@ -39,7 +45,8 @@ pub enum DtsType {
     Native(HirType),
     /// Doesn't map onto anything Thaw's native codegen supports today
     /// (generics, unions, callbacks, non-number array/object elements,
-    /// `interface` types, ...). Carries a human-readable reason.
+    /// unresolvable/self-referential interfaces, ...). Carries a
+    /// human-readable reason.
     Unsupported(String),
 }
 
@@ -59,16 +66,20 @@ pub enum Classification {
 /// signature (`declare function foo(...): T;` and
 /// `export declare function foo(...): T;` -- `.d.ts` files don't have
 /// function bodies to begin with, so plain `export function foo(...): T;`
-/// is equally ambient here). Anything else at the top level (classes,
-/// `interface`, `const`, re-exports, ...) is silently skipped: this is a
-/// function-signature extractor, not a full `.d.ts` model.
+/// is equally ambient here). `interface` declarations are resolved first
+/// (see `resolve_interfaces`) so a signature using one classifies as
+/// `Native` just like an inline `{ ... }` type literal would. Anything else
+/// at the top level (classes, `const`, re-exports, ...) is silently
+/// skipped: this is a function-signature extractor, not a full `.d.ts`
+/// model.
 pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
     let module = thaw_parser::parse_typescript(source)?;
+    let interfaces = resolve_interfaces(&module);
     module
         .body
         .iter()
         .filter_map(extract_fn_decl)
-        .map(lower_dts_function)
+        .map(|fn_decl| lower_dts_function(fn_decl, &interfaces))
         .collect()
 }
 
@@ -83,7 +94,136 @@ fn extract_fn_decl(item: &ModuleItem) -> Option<&FnDecl> {
     }
 }
 
-fn lower_dts_function(fn_decl: &FnDecl) -> Result<DtsFunction, String> {
+fn extract_interface_decl(item: &ModuleItem) -> Option<&TsInterfaceDecl> {
+    match item {
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::TsInterface(iface))) => Some(iface),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            Decl::TsInterface(iface) => Some(iface),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Resolves every top-level `interface` into a `DtsType`, mirroring
+/// `thaw_hir::lower::resolve_interfaces` but degrading to
+/// `DtsType::Unsupported` (with a reason) instead of erroring on a
+/// generic/self-referential/otherwise-unrepresentable interface -- one
+/// broken interface should make signatures that use it fall back, not
+/// abort classifying the rest of the `.d.ts` file.
+fn resolve_interfaces(module: &Module) -> HashMap<String, DtsType> {
+    let raw: HashMap<String, &TsInterfaceDecl> = module
+        .body
+        .iter()
+        .filter_map(extract_interface_decl)
+        .map(|iface| (iface.id.sym.to_string(), iface))
+        .collect();
+
+    let mut resolved = HashMap::new();
+    for name in raw.keys().cloned().collect::<Vec<_>>() {
+        resolve_interface(&name, &raw, &mut resolved, &mut Vec::new());
+    }
+    resolved
+}
+
+fn resolve_interface(
+    name: &str,
+    raw: &HashMap<String, &TsInterfaceDecl>,
+    resolved: &mut HashMap<String, DtsType>,
+    in_progress: &mut Vec<String>,
+) -> DtsType {
+    if let Some(ty) = resolved.get(name) {
+        return ty.clone();
+    }
+    if in_progress.iter().any(|n| n == name) {
+        let ty = DtsType::Unsupported(format!("interface `{name}` is (indirectly) self-referential"));
+        resolved.insert(name.to_string(), ty.clone());
+        return ty;
+    }
+    let Some(iface) = raw.get(name) else {
+        return DtsType::Unsupported(format!("unknown interface `{name}`"));
+    };
+
+    if iface.type_params.is_some() {
+        let ty = DtsType::Unsupported(format!("generic interface `{name}` is not classified yet"));
+        resolved.insert(name.to_string(), ty.clone());
+        return ty;
+    }
+    if !iface.extends.is_empty() {
+        let ty = DtsType::Unsupported(format!("`extends` on interface `{name}` is not classified yet"));
+        resolved.insert(name.to_string(), ty.clone());
+        return ty;
+    }
+
+    in_progress.push(name.to_string());
+
+    let mut fields = Vec::with_capacity(iface.body.body.len());
+    let mut failure = None;
+    for member in &iface.body.body {
+        let TsTypeElement::TsPropertySignature(prop) = member else {
+            failure = Some("has a non-property member (method/index signature)".to_string());
+            break;
+        };
+        let field_name = match prop.key.as_ref() {
+            Expr::Ident(ident) => ident.sym.to_string(),
+            _ => {
+                failure = Some("has an unsupported property key".to_string());
+                break;
+            }
+        };
+        let field_ty = match &prop.type_ann {
+            Some(ann) => resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress),
+            None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+        };
+        match field_ty {
+            DtsType::Native(HirType::F64) => fields.push((field_name, HirType::F64)),
+            DtsType::Native(other) => {
+                failure = Some(format!(
+                    "field `{field_name}` has type {other:?} (only number fields supported yet)"
+                ));
+                break;
+            }
+            DtsType::Unsupported(reason) => {
+                failure = Some(format!("field `{field_name}`: {reason}"));
+                break;
+            }
+        }
+    }
+
+    in_progress.pop();
+
+    let result = match failure {
+        Some(reason) => DtsType::Unsupported(format!("interface `{name}` {reason}")),
+        None => DtsType::Native(HirType::Object(fields)),
+    };
+    resolved.insert(name.to_string(), result.clone());
+    result
+}
+
+/// Like `classify_ts_type`, but additionally resolves a `TsTypeRef` naming
+/// a not-yet-resolved interface, recursively. Used only while building the
+/// interface table (`resolve_interfaces`).
+fn resolve_type_with_interfaces(
+    ty: &TsType,
+    raw: &HashMap<String, &TsInterfaceDecl>,
+    resolved: &mut HashMap<String, DtsType>,
+    in_progress: &mut Vec<String>,
+) -> DtsType {
+    if let TsType::TsTypeRef(ty_ref) = ty {
+        if let TsEntityName::Ident(id) = &ty_ref.type_name {
+            let ref_name = id.sym.as_str();
+            if raw.contains_key(ref_name) {
+                return resolve_interface(ref_name, raw, resolved, in_progress);
+            }
+        }
+    }
+    classify_ts_type(ty, resolved)
+}
+
+fn lower_dts_function(
+    fn_decl: &FnDecl,
+    interfaces: &HashMap<String, DtsType>,
+) -> Result<DtsFunction, String> {
     let name = fn_decl.ident.sym.to_string();
     let func = &fn_decl.function;
 
@@ -98,7 +238,7 @@ fn lower_dts_function(fn_decl: &FnDecl) -> Result<DtsFunction, String> {
             };
             let param_name = binding.id.sym.to_string();
             let ty = match &binding.type_ann {
-                Some(ann) => classify_ts_type(&ann.type_ann),
+                Some(ann) => classify_ts_type(&ann.type_ann, interfaces),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
             };
             Ok((param_name, ty))
@@ -106,7 +246,7 @@ fn lower_dts_function(fn_decl: &FnDecl) -> Result<DtsFunction, String> {
         .collect::<Result<Vec<_>, String>>()?;
 
     let ret = match &func.return_type {
-        Some(ann) => classify_ts_type(&ann.type_ann),
+        Some(ann) => classify_ts_type(&ann.type_ann, interfaces),
         None => DtsType::Native(HirType::Void),
     };
 
@@ -117,7 +257,7 @@ fn lower_dts_function(fn_decl: &FnDecl) -> Result<DtsFunction, String> {
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
 /// aborting the whole `.d.ts` file over one unsupported signature.
-fn classify_ts_type(ty: &TsType) -> DtsType {
+fn classify_ts_type(ty: &TsType, interfaces: &HashMap<String, DtsType>) -> DtsType {
     match ty {
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => DtsType::Native(HirType::F64),
@@ -127,7 +267,7 @@ fn classify_ts_type(ty: &TsType) -> DtsType {
             other => DtsType::Unsupported(format!("unsupported keyword type {other:?}")),
         },
 
-        TsType::TsArrayType(arr) => match classify_ts_type(&arr.elem_type) {
+        TsType::TsArrayType(arr) => match classify_ts_type(&arr.elem_type, interfaces) {
             DtsType::Native(HirType::F64) => {
                 DtsType::Native(HirType::Array(Box::new(HirType::F64)))
             }
@@ -153,7 +293,7 @@ fn classify_ts_type(ty: &TsType) -> DtsType {
                     _ => return DtsType::Unsupported("unsupported object type literal key".to_string()),
                 };
                 let field_ty = match &prop.type_ann {
-                    Some(ann) => classify_ts_type(&ann.type_ann),
+                    Some(ann) => classify_ts_type(&ann.type_ann, interfaces),
                     None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
                 };
                 match field_ty {
@@ -178,13 +318,20 @@ fn classify_ts_type(ty: &TsType) -> DtsType {
                     return DtsType::Unsupported("qualified type names are not supported yet".to_string())
                 }
             };
+
+            // A name matching a resolved `interface` -- treated exactly
+            // like an inline `{ ... }` type literal.
+            if let Some(resolved) = interfaces.get(&ref_name) {
+                return resolved.clone();
+            }
+
             // Note: no `Array<T>`/`Promise<T>` recognition here (unlike
             // thaw-hir's `lower_ts_type`) -- a `.d.ts` signature using
             // either still needs a real decision about arena lifetime
             // (arrays) or the async ABI (promises) across a *foreign* FFI
             // boundary that section 5 of the design doc explicitly defers.
             DtsType::Unsupported(format!(
-                "type reference `{ref_name}` is not classified yet (generics/interfaces/Array<T>/Promise<T>)"
+                "type reference `{ref_name}` is not classified yet (generics/Array<T>/Promise<T>)"
             ))
         }
 
@@ -313,5 +460,98 @@ mod tests {
         assert!(matches!(classify(&funcs[0]), Classification::FastPath(_)));
         assert!(matches!(classify(&funcs[1]), Classification::FastPath(_)));
         assert!(matches!(classify(&funcs[2]), Classification::Fallback { .. }));
+    }
+
+    #[test]
+    fn classifies_interface_typed_signature_as_fast_path() {
+        let source = r#"
+            export interface Point {
+                x: number;
+                y: number;
+            }
+            export declare function dist(p: Point): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            classify(&funcs[0]),
+            Classification::FastPath(FfiSignature {
+                symbol: "dist".into(),
+                params: vec![HirType::Object(vec![
+                    ("x".into(), HirType::F64),
+                    ("y".into(), HirType::F64),
+                ])],
+                ret: HirType::F64,
+            })
+        );
+    }
+
+    #[test]
+    fn interfaces_can_reference_each_other_regardless_of_order() {
+        // `B` is declared before `A` and refers to it -- the resolver must
+        // not depend on source order. Both interfaces are number-only, so
+        // this still classifies as fast path (see the next test for what
+        // happens when a field is itself a nested object).
+        let source = r#"
+            export interface B {
+                a_sum: number;
+                extra: number;
+            }
+            export interface A {
+                x: number;
+                y: number;
+            }
+            export declare function f(b: B): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert!(matches!(classify(&funcs[0]), Classification::FastPath(_)));
+    }
+
+    #[test]
+    fn nested_object_fields_fall_back_until_codegen_supports_them() {
+        // `Line.start` is itself an object (`Point`), not a number --
+        // hir_codegen's object layout is `f64`-fields-only today (see
+        // hir_codegen.rs's `basic_type`), so this must *not* classify as
+        // fast path even though the interfaces themselves resolve fine.
+        let source = r#"
+            export interface Point {
+                x: number;
+                y: number;
+            }
+            export interface Line {
+                start: Point;
+                length: number;
+            }
+            export declare function len(l: Line): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+    }
+
+    #[test]
+    fn falls_back_on_self_referential_interface_without_breaking_other_functions() {
+        let source = r#"
+            export interface Node {
+                value: number;
+                next: Node;
+            }
+            export declare function head(n: Node): number;
+            export declare function add(a: number, b: number): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(classify(&funcs[1]), Classification::FastPath(_)));
+    }
+
+    #[test]
+    fn falls_back_on_generic_interface() {
+        let source = r#"
+            export interface Box<T> {
+                value: T;
+            }
+            export declare function unwrap(b: Box<number>): number;
+        "#;
+        let funcs = parse_dts(source).unwrap();
+        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
     }
 }
