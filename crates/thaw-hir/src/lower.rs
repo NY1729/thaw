@@ -28,14 +28,24 @@ use swc_ecma_ast::{
     TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 
-use crate::{BinOp, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType, Symbol};
+use crate::{
+    BinOp, FfiSignature, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
+    Symbol,
+};
 
 /// Signature info needed to type calls to other top-level functions during
 /// lowering, collected in a pre-pass over the whole module before any
 /// function body is lowered (so forward references and mutual calls work).
+#[derive(Clone)]
 struct FnSignature {
     params: Vec<HirType>,
     ret: HirType,
+    /// A function declared with no body (`declare function foo(...): T;`,
+    /// or the same syntax without `declare` in a regular `.ts` file --
+    /// SWC represents both identically, `body: None`). See
+    /// docs/design/bridge.md section 6: calls to these lower to
+    /// `HirExpr::FfiCall`, not `HirExpr::Call`.
+    is_extern: bool,
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
@@ -47,14 +57,27 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) => {
                 let name = fn_decl.ident.sym.to_string();
                 let func = &fn_decl.function;
+                let is_extern = func.body.is_none();
+                if is_extern && func.is_async {
+                    return Err(format!("ambient function `{name}` cannot be async"));
+                }
                 let params = func
                     .params
                     .iter()
                     .map(|p| lower_param(&p.pat).map(|p| p.ty))
                     .collect::<Result<Vec<_>, _>>()?;
                 let ret = lower_fn_return_type(func.is_async, &func.return_type, &name)?;
-                signatures.insert(name, FnSignature { params, ret });
-                fn_decls.push(fn_decl);
+                signatures.insert(
+                    name,
+                    FnSignature {
+                        params,
+                        ret,
+                        is_extern,
+                    },
+                );
+                if !is_extern {
+                    fn_decls.push(fn_decl);
+                }
             }
             ModuleItem::Stmt(_) => {
                 return Err(
@@ -68,12 +91,25 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
 
+    let extern_functions = signatures
+        .iter()
+        .filter(|(_, sig)| sig.is_extern)
+        .map(|(name, sig)| FfiSignature {
+            symbol: name.clone(),
+            params: sig.params.clone(),
+            ret: sig.ret.clone(),
+        })
+        .collect();
+
     let functions = fn_decls
         .into_iter()
         .map(|fn_decl| lower_fn_decl(fn_decl, &signatures))
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(HirProgram { functions })
+    Ok(HirProgram {
+        functions,
+        extern_functions,
+    })
 }
 
 fn lower_fn_decl(
@@ -525,6 +561,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
             HirExpr::JsonAsString(_) => Ok(HirType::Str),
             HirExpr::JsonAsBool(_) => Ok(HirType::Bool),
+            HirExpr::FfiCall(sig, _) => Ok(sig.ret.clone()),
             // V1 erases Promise entirely: a call's return type in
             // `self.signatures` is already unwrapped for async functions,
             // so `await` is transparent here too.
@@ -815,7 +852,8 @@ impl<'a> FnLowerer<'a> {
             });
         }
 
-        let param_types = self.signatures.get(&callee_name).map(|sig| sig.params.clone());
+        let signature = self.signatures.get(&callee_name).cloned();
+        let param_types = signature.as_ref().map(|sig| sig.params.clone());
 
         let args = call
             .args
@@ -832,6 +870,15 @@ impl<'a> FnLowerer<'a> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        if let Some(sig) = signature.filter(|sig| sig.is_extern) {
+            let ffi_signature = FfiSignature {
+                symbol: callee_name,
+                params: sig.params,
+                ret: sig.ret,
+            };
+            return Ok(HirExpr::FfiCall(ffi_signature, args));
+        }
 
         Ok(HirExpr::Call(Box::new(HirExpr::Var(callee_name)), args))
     }
@@ -1240,5 +1287,45 @@ mod tests {
         )
         .unwrap();
         assert!(lower_module(&module).is_err());
+    }
+
+    #[test]
+    fn lowers_ambient_declaration_call_to_ffi_call() {
+        let program = lower(
+            r#"declare function native_add(a: number, b: number): number;
+
+            function main(): void {
+                console.log(native_add(2, 3));
+            }"#,
+        );
+
+        assert_eq!(program.functions.len(), 1, "the ambient decl has no body to lower");
+        assert_eq!(
+            program.extern_functions,
+            vec![crate::FfiSignature {
+                symbol: "native_add".into(),
+                params: vec![HirType::F64, HirType::F64],
+                ret: HirType::F64,
+            }]
+        );
+
+        let main = &program.functions[0];
+        assert_eq!(
+            main.body[0],
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("console.log".into())),
+                vec![HirExpr::FfiCall(
+                    crate::FfiSignature {
+                        symbol: "native_add".into(),
+                        params: vec![HirType::F64, HirType::F64],
+                        ret: HirType::F64,
+                    },
+                    vec![
+                        HirExpr::Lit(HirLit::F64(2.0)),
+                        HirExpr::Lit(HirLit::F64(3.0)),
+                    ],
+                )],
+            ))
+        );
     }
 }

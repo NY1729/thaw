@@ -15,7 +15,7 @@ fn main() {
             }
         }
         _ => {
-            eprintln!("usage: thaw build <input.ts> [-o <output>]");
+            eprintln!("usage: thaw build <input.ts> [-o <output>] [--link <path>]...");
             std::process::exit(1);
         }
     }
@@ -24,6 +24,7 @@ fn main() {
 fn run_build(args: &[String]) -> Result<(), String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut extra_links: Vec<PathBuf> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -32,6 +33,11 @@ fn run_build(args: &[String]) -> Result<(), String> {
                 i += 1;
                 let value = args.get(i).ok_or("-o requires a path argument")?;
                 output = Some(PathBuf::from(value));
+            }
+            "--link" => {
+                i += 1;
+                let value = args.get(i).ok_or("--link requires a path argument")?;
+                extra_links.push(PathBuf::from(value));
             }
             other => {
                 if input.is_some() {
@@ -49,10 +55,10 @@ fn run_build(args: &[String]) -> Result<(), String> {
         PathBuf::from(stem)
     });
 
-    build(&input, &output)
+    build(&input, &output, &extra_links)
 }
 
-fn build(input: &Path, output: &Path) -> Result<(), String> {
+fn build(input: &Path, output: &Path, extra_links: &[PathBuf]) -> Result<(), String> {
     let source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
 
@@ -76,11 +82,15 @@ fn build(input: &Path, output: &Path) -> Result<(), String> {
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
 
+    // `--link <path>` lets a program using `declare function` (see
+    // docs/design/bridge.md section 6) actually resolve at link time,
+    // until thaw-registry can fetch/build that library automatically.
     let link_status = Command::new("cc")
         .arg(&obj_path)
         .arg(&arena_lib)
         .arg(&runtime_lib)
         .arg(&std_lib)
+        .args(extra_links)
         .arg("-o")
         .arg(output)
         .status()

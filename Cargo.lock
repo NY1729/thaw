@@ -968,6 +968,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "thaw-bridge"
+version = "0.1.0"
+dependencies = [
+ "swc_ecma_ast",
+ "thaw-hir",
+ "thaw-parser",
+]
+
+[[package]]
 name = "thaw-cli"
 version = "0.1.0"
 dependencies = [
