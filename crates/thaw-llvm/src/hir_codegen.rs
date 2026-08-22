@@ -45,7 +45,7 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, OptimizationLevel};
 
-use thaw_hir::{BinOp, HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
+use thaw_hir::{BinOp, FfiSignature, HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
 
 /// The user's `main`, if any, is compiled under this symbol instead of
 /// `main` so we can wrap it in a proper `i32 main(void)` C entry point
@@ -86,6 +86,9 @@ impl<'ctx> HirCompiler<'ctx> {
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.declare_runtime_builtins();
 
+        for sig in &program.extern_functions {
+            self.declare_extern_function(sig)?;
+        }
         for func in &program.functions {
             self.declare_function(func)?;
         }
@@ -257,6 +260,27 @@ impl<'ctx> HirCompiler<'ctx> {
 
         let symbol = Self::llvm_symbol_for(&func.name);
         Ok(self.module.add_function(&symbol, fn_type, None))
+    }
+
+    /// Declares an ambient (`declare function`) signature as an `extern
+    /// "C"` symbol -- see docs/design/bridge.md section 6. The final link
+    /// step must resolve it from somewhere else (a real native library
+    /// today; thaw-registry eventually).
+    fn declare_extern_function(&mut self, sig: &FfiSignature) -> Result<FunctionValue<'ctx>, String> {
+        let param_types = sig
+            .params
+            .iter()
+            .map(|ty| self.basic_type(ty).map(BasicMetadataTypeEnum::from))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let fn_type = match &sig.ret {
+            HirType::Void => self.context.void_type().fn_type(&param_types, false),
+            ret => self.basic_type(ret)?.fn_type(&param_types, false),
+        };
+
+        Ok(self
+            .module
+            .add_function(&sig.symbol, fn_type, Some(Linkage::External)))
     }
 
     fn compile_function_body(&mut self, func: &HirFunction) -> Result<(), String> {
@@ -544,6 +568,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
 
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
+            HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args),
 
             HirExpr::ArrayLit(elems) => self.compile_array_lit(elems),
             HirExpr::Index(arr, idx) => {
@@ -971,6 +996,34 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_function(&symbol)
             .ok_or_else(|| format!("call to undeclared function `{name}`"))?;
 
+        self.build_call_with(function, args, name)
+    }
+
+    /// `HirExpr::FfiCall` -- an ambient `declare function` call (see
+    /// docs/design/bridge.md). By the time codegen sees this, the symbol
+    /// is already declared (`declare_extern_function` ran in the
+    /// `compile_program` pre-pass), so this is otherwise identical to a
+    /// normal call.
+    fn compile_ffi_call(
+        &mut self,
+        sig: &FfiSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let function = self
+            .module
+            .get_function(&sig.symbol)
+            .expect("extern function was declared in compile_program's pre-pass");
+        self.build_call_with(function, args, &sig.symbol)
+    }
+
+    /// Compiles `args`, calls `function` with them, and extracts the
+    /// return value. Shared by `compile_call` and `compile_ffi_call`.
+    fn build_call_with(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        args: &[HirExpr],
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let compiled_args = args
             .iter()
             .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
@@ -1428,6 +1481,74 @@ mod tests {
             reparsed,
             serde_json::json!({"name": "thaw", "active": true, "tags": ["fast", "native"]})
         );
+    }
+
+    /// docs/design/bridge.md's first vertical slice: an ambient `declare
+    /// function` call actually links against and calls a real native
+    /// implementation -- here a tiny hand-written C function, standing in
+    /// for what would eventually be a thaw-registry-fetched library.
+    #[test]
+    fn compiles_ambient_declaration_and_links_a_real_native_function() {
+        let source = r#"
+            declare function native_add(a: number, b: number): number;
+
+            function main(): void {
+                console.log(native_add(2, 3));
+            }
+        "#;
+
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        assert_eq!(program.extern_functions.len(), 1, "sanity: this is really an FFI call");
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_ambient");
+        compiler.compile_program(&program).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi_ambient-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+
+        compiler.write_object_file(&obj_path).unwrap();
+
+        std::fs::write(
+            &native_c_path,
+            "double native_add(double a, double b) { return a + b; }\n",
+        )
+        .unwrap();
+        let cc_status = Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .expect("failed to invoke `cc` to build the native stand-in library");
+        assert!(cc_status.success(), "compiling native.c failed");
+
+        let arena_lib = build_staticlib("thaw-arena");
+        let link_status = Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .expect("failed to invoke system `cc` linker");
+        assert!(link_status.success(), "linking failed");
+
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("failed to execute compiled binary");
+        assert!(output.status.success(), "binary exited non-zero");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "5\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
