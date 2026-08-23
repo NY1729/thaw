@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::os::raw::{c_char, c_void};
 
 fn string_from_ptr(value: *const c_char) -> String {
@@ -45,9 +45,16 @@ fn serve_once(
     }
     let listener = TcpListener::bind(("127.0.0.1", port as u16))
         .map_err(|error| format!("bind failed: {error}"))?;
-    let (mut stream, _) = listener
+    let (stream, _) = listener
         .accept()
         .map_err(|error| format!("accept failed: {error}"))?;
+    handle_stream(stream, response_for)
+}
+
+fn handle_stream(
+    mut stream: TcpStream,
+    response_for: impl FnOnce(&str, &str) -> ResponseSpec,
+) -> Result<String, String> {
     let mut request = [0_u8; 8192];
     let length = stream
         .read(&mut request)
@@ -166,7 +173,14 @@ pub extern "C" fn createServerOnce(port: f64, callback: *const c_void) -> *const
 }
 
 fn run_server(port: f64, callback: *const c_void) -> String {
-    serve_once(port, |method, target| unsafe {
+    serve_once(port, |method, target| {
+        invoke_server_callback(callback, method, target)
+    })
+    .unwrap_or_default()
+}
+
+fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -> ResponseSpec {
+    unsafe {
         type Callback = unsafe extern "C" fn(
             *const c_void,
             *const IncomingMessage,
@@ -216,8 +230,29 @@ fn run_server(port: f64, callback: *const c_void) -> String {
             headers: state.headers,
             body: state.body,
         }
-    })
-    .unwrap_or_default()
+    }
+}
+
+fn run_server_many(port: f64, callback: *const c_void, count: usize) -> String {
+    if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
+        return String::new();
+    }
+    let Ok(listener) = TcpListener::bind(("127.0.0.1", port as u16)) else {
+        return String::new();
+    };
+    let mut last_target = String::new();
+    for _ in 0..count {
+        let Ok((stream, _)) = listener.accept() else {
+            return String::new();
+        };
+        match handle_stream(stream, |method, target| {
+            invoke_server_callback(callback, method, target)
+        }) {
+            Ok(target) => last_target = target,
+            Err(_) => return String::new(),
+        }
+    }
+    last_target
 }
 
 struct ServerState {
@@ -227,12 +262,30 @@ struct ServerState {
 #[repr(C)]
 struct Server {
     listen: *const NativeClosure,
+    listen_many: *const NativeClosure,
 }
 
 unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    CString::new(run_server(port, state.callback))
+    CString::new(run_server_many(port, state.callback, usize::MAX))
+        .unwrap_or_default()
+        .into_raw()
+}
+
+unsafe extern "C" fn server_listen_many(
+    environment: *const c_void,
+    port: f64,
+    count: f64,
+) -> *const c_char {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    let count = if count.is_finite() && count >= 0.0 {
+        count as usize
+    } else {
+        0
+    };
+    CString::new(run_server_many(port, state.callback, count))
         .unwrap_or_default()
         .into_raw()
 }
@@ -248,7 +301,15 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_listen as *const c_void,
         context: state.cast(),
     }));
-    Box::into_raw(Box::new(Server { listen })).cast()
+    let listen_many = Box::into_raw(Box::new(NativeClosure {
+        code: server_listen_many as *const c_void,
+        context: state.cast(),
+    }));
+    Box::into_raw(Box::new(Server {
+        listen,
+        listen_many,
+    }))
+    .cast()
 }
 
 #[cfg(test)]

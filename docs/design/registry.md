@@ -926,12 +926,10 @@ objectのfunction型propertyは一般のclosureとして呼び出せる。これ
 `createServer(callback).listen(port)` は、callbackへ
 `IncomingMessage { method, url }` と
 `ServerResponse { statusCode, setHeader, write, end }` を渡す。status、header、分割write、
-endの本文は実際のHTTP responseへ反映される。現在の `listen` は1リクエストを同期的に
-処理して返る最小sliceであり、継続待受け、close、イベントループ統合は次段階である。
-
-これはNode互換の `createServer` そのものではない。次の段階では関数型、arrow
-function、closure capture、request/response object methodをHIRとLLVMへ通し、
-`createServer((req, res) => ...)` を表現できる呼び出し規約へ拡張する必要がある。
+endの本文は実際のHTTP responseへ反映される。`listen` は同じsocketで逐次リクエストを
+継続処理し、テストやbatch用途では `listenMany(port, count)` が指定数の処理後に返る。
+複数リクエスト間でもcallbackのclosure stateは保持される。現在はblocking acceptであり、
+`close` とevent loop上のnon-blocking server lifecycleは次段階である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 
