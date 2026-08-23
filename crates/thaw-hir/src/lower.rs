@@ -34,8 +34,8 @@ use swc_ecma_ast::{
 };
 
 use crate::{
-    BinOp, FfiSignature, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
-    Symbol,
+    BinOp, FfiErrorAbi, FfiSignature, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt,
+    HirType, Symbol,
 };
 
 /// Signature info needed to type calls to other top-level functions during
@@ -338,6 +338,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             symbol: name.clone(),
             params: sig.params.clone(),
             ret: sig.ret.clone(),
+            error_abi: FfiErrorAbi::Direct,
         })
         .collect();
 
@@ -2428,6 +2429,7 @@ impl<'a> FnLowerer<'a> {
                 symbol: callee_name,
                 params: sig.params,
                 ret: sig.ret,
+                error_abi: FfiErrorAbi::Direct,
             };
             return Ok(HirExpr::FfiCall(ffi_signature, args));
         }
@@ -3391,6 +3393,7 @@ mod tests {
                 symbol: "native_add".into(),
                 params: vec![HirType::F64, HirType::F64],
                 ret: HirType::F64,
+                error_abi: crate::FfiErrorAbi::Direct,
             }]
         );
 
@@ -3404,6 +3407,7 @@ mod tests {
                         symbol: "native_add".into(),
                         params: vec![HirType::F64, HirType::F64],
                         ret: HirType::F64,
+                        error_abi: crate::FfiErrorAbi::Direct,
                     },
                     vec![
                         HirExpr::Lit(HirLit::F64(2.0)),

@@ -22,7 +22,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--registry <dir>] [--use <package>]...\n       thaw registry add <package>[@<version>] [--registry <dir>]"
+                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw registry add <package>[@<version>] [--registry <dir>]"
             );
             std::process::exit(1);
         }
@@ -107,6 +107,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut output: Option<PathBuf> = None;
     let mut extra_links: Vec<PathBuf> = Vec::new();
     let mut bridge_dts: Vec<PathBuf> = Vec::new();
+    let mut ffi_metadata: Vec<PathBuf> = Vec::new();
     let mut registry_dir = PathBuf::from("thaw_modules");
     let mut use_packages: Vec<String> = Vec::new();
 
@@ -127,6 +128,13 @@ fn run_build(args: &[String]) -> Result<(), String> {
                 i += 1;
                 let value = args.get(i).ok_or("--bridge requires a path argument")?;
                 bridge_dts.push(PathBuf::from(value));
+            }
+            "--ffi-metadata" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or("--ffi-metadata requires a path argument")?;
+                ffi_metadata.push(PathBuf::from(value));
             }
             "--registry" => {
                 i += 1;
@@ -161,6 +169,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
         &output,
         &extra_links,
         &bridge_dts,
+        &ffi_metadata,
         &registry_dir,
         &use_packages,
     )
@@ -514,11 +523,61 @@ fn rewrite_qualified_calls(
     Ok(out)
 }
 
+fn read_ffi_metadata(
+    paths: &[PathBuf],
+) -> Result<std::collections::HashMap<String, thaw_hir::FfiErrorAbi>, String> {
+    let mut configured = std::collections::HashMap::new();
+    for path in paths {
+        let source = std::fs::read_to_string(path)
+            .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+        let document: serde_json::Value = serde_json::from_str(&source)
+            .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
+        if document.get("version").and_then(|value| value.as_u64()) != Some(1) {
+            return Err(format!(
+                "`{}` must declare FFI metadata version 1",
+                path.display()
+            ));
+        }
+        let functions = document
+            .get("functions")
+            .and_then(|value| value.as_object())
+            .ok_or_else(|| format!("`{}` needs a `functions` object", path.display()))?;
+        for (symbol, entry) in functions {
+            let spelling = entry
+                .get("errorAbi")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "FFI metadata for `{symbol}` in `{}` needs `errorAbi`",
+                        path.display()
+                    )
+                })?;
+            let abi = match spelling {
+                "direct" => thaw_hir::FfiErrorAbi::Direct,
+                "thaw-result" => thaw_hir::FfiErrorAbi::ThawResult,
+                other => {
+                    return Err(format!(
+                        "unknown errorAbi `{other}` for `{symbol}` in `{}`",
+                        path.display()
+                    ))
+                }
+            };
+            if let Some(previous) = configured.insert(symbol.clone(), abi.clone()) {
+                if previous != abi {
+                    return Err(format!("conflicting FFI error ABI metadata for `{symbol}`"));
+                }
+            }
+        }
+    }
+    Ok(configured)
+}
+
 fn build(
     input: &Path,
     output: &Path,
     extra_links: &[PathBuf],
     bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
     registry_dir: &Path,
     use_packages: &[String],
 ) -> Result<(), String> {
@@ -535,9 +594,12 @@ fn build(
     let source = registry_shim + &generate_bridge_shims(bridge_dts)? + &user_source;
 
     let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
-    let program =
+    let mut program =
         thaw_hir::lower_module_with_source_map(&module, &source_map, input.display().to_string())
             .map_err(|diagnostic| diagnostic.to_string())?;
+    for (symbol, abi) in read_ffi_metadata(ffi_metadata)? {
+        thaw_hir::set_ffi_error_abi(&mut program, &symbol, abi)?;
+    }
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
@@ -644,6 +706,46 @@ mod tests {
         assert_eq!(sanitize_identifier("qs"), "qs");
         assert_eq!(sanitize_identifier("@hapi/hoek"), "_hapi_hoek");
         assert_eq!(sanitize_identifier("left-pad"), "left_pad");
+    }
+
+    #[test]
+    fn reads_versioned_ffi_error_abi_metadata() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-ffi-metadata-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ffi.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"functions":{"externalRead":{"errorAbi":"thaw-result"}}}"#,
+        )
+        .unwrap();
+        let metadata = read_ffi_metadata(&[path]).unwrap();
+        assert_eq!(metadata["externalRead"], thaw_hir::FfiErrorAbi::ThawResult);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_unknown_ffi_metadata_versions_and_abis() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-invalid-ffi-metadata-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let version = dir.join("version.json");
+        std::fs::write(&version, r#"{"version":2,"functions":{}}"#).unwrap();
+        assert!(read_ffi_metadata(&[version])
+            .unwrap_err()
+            .contains("version 1"));
+        let abi = dir.join("abi.json");
+        std::fs::write(
+            &abi,
+            r#"{"version":1,"functions":{"f":{"errorAbi":"errno"}}}"#,
+        )
+        .unwrap();
+        assert!(read_ffi_metadata(&[abi])
+            .unwrap_err()
+            .contains("unknown errorAbi"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -45,7 +45,9 @@ use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
-use thaw_hir::{BinOp, FfiSignature, HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
+use thaw_hir::{
+    BinOp, FfiErrorAbi, FfiSignature, HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType,
+};
 
 /// The user's `main`, if any, is compiled under this symbol instead of
 /// `main` so we can wrap it in a proper `i32 main(void)` C entry point
@@ -610,9 +612,27 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<FunctionValue<'ctx>, String> {
         let param_types = self.ffi_param_types(&sig.params)?;
 
-        let fn_type = match &sig.ret {
-            HirType::Void => self.context.void_type().fn_type(&param_types, false),
-            ret => self.basic_type(ret)?.fn_type(&param_types, false),
+        let fn_type = match (&sig.error_abi, &sig.ret) {
+            (FfiErrorAbi::ThawResult, HirType::Void) => {
+                return Err(format!(
+                    "FFI function `{}` cannot use thaw-result with a void return yet",
+                    sig.symbol
+                ));
+            }
+            (FfiErrorAbi::ThawResult, ret) => self
+                .context
+                .struct_type(
+                    &[
+                        self.basic_type(ret)?,
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                )
+                .fn_type(&param_types, false),
+            (FfiErrorAbi::Direct, HirType::Void) => {
+                self.context.void_type().fn_type(&param_types, false)
+            }
+            (FfiErrorAbi::Direct, ret) => self.basic_type(ret)?.fn_type(&param_types, false),
         };
 
         Ok(self
@@ -4068,10 +4088,29 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(function, &compiled_args, "ffi_calltmp")
             .map_err(|e| e.to_string())?;
-        call_site
+        let returned = call_site
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| format!("`{}` does not return a value", sig.symbol))
+            .ok_or_else(|| format!("`{}` does not return a value", sig.symbol))?;
+        if sig.error_abi == FfiErrorAbi::Direct {
+            return Ok(returned);
+        }
+
+        let result = returned.into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "ffi_result_value")
+            .map_err(|e| e.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "ffi_result_error")
+            .map_err(|e| e.to_string())?
+            .into_pointer_value();
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|e| e.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
     }
 
     /// Compiles `args`, calls `function` with them, and extracts the
@@ -6196,6 +6235,81 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "5\n");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
+        let source = r#"
+            declare function native_read(value: number): number;
+
+            function main(): void {
+                console.log(native_read(2));
+                try {
+                    console.log(native_read(0 - 1));
+                    console.log("unreachable");
+                } catch (error) {
+                    console.log(error);
+                } finally {
+                    console.log("cleanup");
+                }
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_read",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_result_abi");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-result-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "typedef struct { double value; const char *error; } ThawF64Result;\n\
+             ThawF64Result native_read(double value) {\n\
+               if (value < 0) return (ThawF64Result){0, \"native read failed\"};\n\
+               return (ThawF64Result){value * 10, 0};\n\
+             }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "20\nnative read failed\ncleanup\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// docs/design/bridge.md section 5's marshal-adapter gap, closed:
