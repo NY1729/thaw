@@ -269,8 +269,9 @@ The workspace crates have narrow responsibilities:
   parent branch, and conditions plus branch bodies may both suspend
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
-- `Promise.all` joins a literal list of `Promise<number>` concurrently,
-  preserves input order, supports empty arrays, composes with async
+- `Promise.all` joins homogeneous Promise arrays concurrently. It supports
+  number, string, boolean, object, and nested-array results, accepts both
+  literals and array variables, preserves input order, supports empty arrays, composes with async
   `if`/`while`/`try`, and routes the first observed rejection to the nearest
   catch immediately. Remaining children are retained and drained before the
   process exits or the Lambda request arena resets
@@ -292,9 +293,8 @@ The workspace crates have narrow responsibilities:
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
 - Block-scoped locals inside nested control flow and fully general
-  value-returning Promise APIs. `Promise.all` currently accepts only an array
-  literal of homogeneous `Promise<number>` values; heterogeneous tuples,
-  `Promise.race`/`any`/`allSettled`, and arbitrary Promise arrays remain
+  value-returning Promise APIs. `Promise.all` supports homogeneous Promise
+  arrays; heterogeneous tuples and `Promise.race`/`any`/`allSettled` remain
   unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata

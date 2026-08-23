@@ -1475,7 +1475,9 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             names.insert(name.clone());
             collect_referenced_bindings(value, names);
         }
-        HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+        HirExpr::BinOp(_, left, right)
+        | HirExpr::Index(left, right)
+        | HirExpr::TypedIndex(left, right, _) => {
             collect_referenced_bindings(left, names);
             collect_referenced_bindings(right, names);
         }
@@ -1486,13 +1488,17 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             }
         }
         HirExpr::Await(value)
+        | HirExpr::PromiseAllArray(value, _)
         | HirExpr::ArrayLen(value)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value) => collect_referenced_bindings(value, names),
         HirExpr::Lambda(_, _, _, body) => collect_referenced_bindings(body, names),
         HirExpr::Block(stmts) => collect_stmt_bindings(stmts, names),
-        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) | HirExpr::ArrayLit(args) => {
+        HirExpr::FfiCall(_, args)
+        | HirExpr::DynamicCall(_, args)
+        | HirExpr::ArrayLit(args)
+        | HirExpr::PromiseAll(args, _) => {
             for arg in args {
                 collect_referenced_bindings(arg, names);
             }
@@ -2178,12 +2184,42 @@ impl<'a> FnLowerer<'a> {
                     None => Err(format!("call to unknown function `{name}`")),
                 }
             }
+            HirExpr::PromiseAll(_, element) => Ok(HirType::Promise(Box::new(HirType::Array(
+                Box::new(element.clone()),
+            )))),
+            HirExpr::PromiseAllArray(_, element) => Ok(HirType::Promise(Box::new(HirType::Array(
+                Box::new(element.clone()),
+            )))),
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
-                for value in values {
-                    self.expect_type(&HirType::F64, value, "array element")?;
+                let Some(first) = values.first() else {
+                    return Ok(HirType::Array(Box::new(HirType::F64)));
+                };
+                let array_element_type = |value: &HirExpr| -> Result<HirType, String> {
+                    let inferred = self.infer_expr_type(value)?;
+                    if let HirExpr::Call(callee, _) = value {
+                        if let HirExpr::Var(name) = callee.as_ref() {
+                            if self
+                                .signatures
+                                .get(name)
+                                .is_some_and(|signature| signature.is_async)
+                            {
+                                return Ok(HirType::Promise(Box::new(inferred)));
+                            }
+                        }
+                    }
+                    Ok(inferred)
+                };
+                let element = array_element_type(first)?;
+                for value in &values[1..] {
+                    let actual = array_element_type(value)?;
+                    if actual != element {
+                        return Err(format!(
+                            "array element has type {actual:?}, expected {element:?}"
+                        ));
+                    }
                 }
-                Ok(HirType::Array(Box::new(HirType::F64)))
+                Ok(HirType::Array(Box::new(element)))
             }
             HirExpr::Index(arr, index) => {
                 self.expect_type(&HirType::F64, index, "array index")?;
@@ -2192,6 +2228,7 @@ impl<'a> FnLowerer<'a> {
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
             }
+            HirExpr::TypedIndex(_, _, element) => Ok(element.clone()),
             HirExpr::IndexAssign(arr, index, value) => {
                 self.expect_type(&HirType::F64, index, "array index")?;
                 let HirType::Array(element) = self.infer_expr_type(arr)? else {
@@ -2428,7 +2465,11 @@ impl<'a> FnLowerer<'a> {
                 let index = self.lower_expr(&computed.expr)?;
                 self.expect_type(&HirType::F64, &index, "index expression")?;
                 match obj_ty {
-                    HirType::Array(_) => Ok(HirExpr::Index(Box::new(obj), Box::new(index))),
+                    HirType::Array(element) => Ok(HirExpr::TypedIndex(
+                        Box::new(obj),
+                        Box::new(index),
+                        *element,
+                    )),
                     HirType::Json => Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index))),
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
@@ -2697,8 +2738,19 @@ impl<'a> FnLowerer<'a> {
                 return Err("spread arguments are not supported in `Promise.all`".into());
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                return Err("`Promise.all` currently requires an array literal".into());
+                let values = self.lower_expr(&arg.expr)?;
+                let HirType::Array(element) = self.infer_expr_type(&values)? else {
+                    return Err("`Promise.all` expects an array of promises".into());
+                };
+                let HirType::Promise(element) = *element else {
+                    return Err("`Promise.all` expects an array of promises".into());
+                };
+                if *element == HirType::Void {
+                    return Err("`Promise.all` elements must not resolve to void".into());
+                }
+                return Ok(HirExpr::PromiseAllArray(Box::new(values), *element));
             };
+            let mut element_type = None;
             let promises = array
                 .elems
                 .iter()
@@ -2711,21 +2763,34 @@ impl<'a> FnLowerer<'a> {
                         return Err("spread elements are not supported in `Promise.all`".into());
                     }
                     let value = self.lower_expr(&element.expr)?;
-                    match self.infer_expr_type(&value)? {
-                        HirType::Promise(inner) if *inner == HirType::F64 => Ok(value),
-                        HirType::F64
+                    let resolved = match self.infer_expr_type(&value)? {
+                        HirType::Promise(inner) => *inner,
+                        returned
                             if matches!(&value, HirExpr::Call(callee, _)
                                 if matches!(callee.as_ref(), HirExpr::Var(name)
-                                    if self.signatures.get(name).is_some_and(|signature| signature.is_async && signature.ret == HirType::F64))) => Ok(value),
+                                    if self.signatures.get(name).is_some_and(|signature| signature.is_async))) => returned,
                         other => Err(format!(
-                            "Promise.all element {index} must be Promise<number>, got {other:?}"
-                        )),
+                            "Promise.all element {index} must be a Promise, got {other:?}"
+                        ))?,
+                    };
+                    if resolved == HirType::Void {
+                        return Err(format!("Promise.all element {index} resolves to void"));
                     }
+                    if let Some(expected) = &element_type {
+                        if expected != &resolved {
+                            return Err(format!(
+                                "Promise.all element {index} resolves to {resolved:?}, expected {expected:?}"
+                            ));
+                        }
+                    } else {
+                        element_type = Some(resolved);
+                    }
+                    Ok(value)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            return Ok(HirExpr::Call(
-                Box::new(HirExpr::Var("Promise.all".into())),
+            return Ok(HirExpr::PromiseAll(
                 promises,
+                element_type.unwrap_or(HirType::F64),
             ));
         }
 
@@ -3438,9 +3503,10 @@ mod tests {
             f.body[1],
             HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::Index(
+                vec![HirExpr::TypedIndex(
                     Box::new(HirExpr::Var("xs".into())),
                     Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                    HirType::F64,
                 )],
             ))
         );
@@ -3692,7 +3758,7 @@ mod tests {
     }
 
     #[test]
-    fn promise_all_requires_homogeneous_number_promises() {
+    fn promise_all_requires_homogeneous_promises() {
         let module = thaw_parser::parse_typescript(
             r#"
             async function value(): Promise<number> {
@@ -3707,7 +3773,7 @@ mod tests {
         )
         .unwrap();
         let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("Promise.all element 1 must be Promise<number>"));
+        assert!(error.contains("Promise.all element 1 resolves to void"));
     }
 
     #[test]

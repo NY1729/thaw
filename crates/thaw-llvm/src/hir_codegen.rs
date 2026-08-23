@@ -264,12 +264,17 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> bool {
         match expr {
             HirExpr::Await(inner) => {
-                matches!(inner.as_ref(), HirExpr::Call(callee, _)
+                matches!(
+                    inner.as_ref(),
+                    HirExpr::PromiseAll(_, _) | HirExpr::PromiseAllArray(_, _)
+                ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
                     || Self::expr_awaits_frame_source(inner, frame_functions)
             }
-            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            HirExpr::BinOp(_, left, right)
+            | HirExpr::Index(left, right)
+            | HirExpr::TypedIndex(left, right, _) => {
                 Self::expr_awaits_frame_source(left, frame_functions)
                     || Self::expr_awaits_frame_source(right, frame_functions)
             }
@@ -280,10 +285,12 @@ impl<'ctx> HirCompiler<'ctx> {
                         .iter()
                         .any(|arg| Self::expr_awaits_frame_source(arg, frame_functions))
             }
-            HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) | HirExpr::ArrayLit(args) => {
-                args.iter()
-                    .any(|arg| Self::expr_awaits_frame_source(arg, frame_functions))
-            }
+            HirExpr::FfiCall(_, args)
+            | HirExpr::DynamicCall(_, args)
+            | HirExpr::ArrayLit(args)
+            | HirExpr::PromiseAll(args, _) => args
+                .iter()
+                .any(|arg| Self::expr_awaits_frame_source(arg, frame_functions)),
             HirExpr::IndexAssign(a, b, c) => {
                 Self::expr_awaits_frame_source(a, frame_functions)
                     || Self::expr_awaits_frame_source(b, frame_functions)
@@ -636,8 +643,8 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
-            "thaw_promise_all_f64",
-            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            "thaw_promise_all_slots",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i64_type.into()], false),
             Some(Linkage::External),
         );
     }
@@ -660,11 +667,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // C string vs. a [len][elements...] buffer).
             HirType::Str => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Array(elem) => {
-                if **elem != HirType::F64 {
-                    return Err(format!(
-                        "Phase 1 only supports number[] arrays, not {elem:?}[]"
-                    ));
-                }
+                self.basic_type(elem)?;
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             // Objects are represented the same way: a single opaque pointer
@@ -694,6 +697,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // ever dereferences it.
             HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             other => Err(format!(
                 "Phase 1/2 codegen does not support type {other:?} yet"
             )),
@@ -1860,12 +1864,17 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> bool {
         match expr {
             HirExpr::Await(inner) => {
-                matches!(inner.as_ref(), HirExpr::Call(callee, _)
+                matches!(
+                    inner.as_ref(),
+                    HirExpr::PromiseAll(_, _) | HirExpr::PromiseAllArray(_, _)
+                ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "fetch" || name == "Promise.all" || frame_names.contains(name)))
                     || Self::expr_awaits_named_async(inner, frame_names)
             }
-            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            HirExpr::BinOp(_, left, right)
+            | HirExpr::Index(left, right)
+            | HirExpr::TypedIndex(left, right, _) => {
                 Self::expr_awaits_named_async(left, frame_names)
                     || Self::expr_awaits_named_async(right, frame_names)
             }
@@ -1881,7 +1890,10 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn is_frame_await_source(&self, expr: &HirExpr) -> bool {
-        matches!(expr, HirExpr::Call(callee, _)
+        matches!(
+            expr,
+            HirExpr::PromiseAll(_, _) | HirExpr::PromiseAllArray(_, _)
+        ) || matches!(expr, HirExpr::Call(callee, _)
             if matches!(callee.as_ref(), HirExpr::Var(name)
                 if name == "sleep" || name == "fetch" || name == "Promise.all" || self.frame_async_functions.contains_key(name)))
     }
@@ -1917,8 +1929,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                         HirType::Str
                     }
-                    HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "Promise.all") => {
-                        HirType::Array(Box::new(HirType::F64))
+                    HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
+                        HirType::Array(Box::new(element.clone()))
                     }
                     HirExpr::Call(callee, _) => {
                         let HirExpr::Var(name) = callee.as_ref() else {
@@ -1937,7 +1949,9 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match expr {
-            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            HirExpr::BinOp(_, left, right)
+            | HirExpr::Index(left, right)
+            | HirExpr::TypedIndex(left, right, _) => {
                 if let Some(found) = self.extract_first_frame_await(left, temporary)? {
                     Ok(Some(found))
                 } else {
@@ -1955,7 +1969,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 Ok(None)
             }
-            HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) | HirExpr::ArrayLit(args) => {
+            HirExpr::FfiCall(_, args)
+            | HirExpr::DynamicCall(_, args)
+            | HirExpr::ArrayLit(args)
+            | HirExpr::PromiseAll(args, _) => {
                 for arg in args {
                     if let Some(found) = self.extract_first_frame_await(arg, temporary)? {
                         return Ok(Some(found));
@@ -1964,6 +1981,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(None)
             }
             HirExpr::Assign(_, value)
+            | HirExpr::PromiseAllArray(value, _)
             | HirExpr::ArrayLen(value)
             | HirExpr::JsonGet(value, _)
             | HirExpr::JsonAsNumber(value)
@@ -3661,6 +3679,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
 
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
+            HirExpr::PromiseAll(args, element) => self.compile_promise_all(args, element),
+            HirExpr::PromiseAllArray(array, element) => {
+                self.compile_promise_all_array(array, element)
+            }
             HirExpr::Lambda(captures, params, ret, body) => {
                 self.compile_lambda(captures, params, ret, body)
             }
@@ -3672,6 +3694,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 let elem_ptr = self.compile_element_ptr(arr, idx)?;
                 self.builder
                     .build_load(self.context.f64_type(), elem_ptr, "elem")
+                    .map_err(|e| e.to_string())
+            }
+            HirExpr::TypedIndex(arr, idx, element) => {
+                let elem_ptr = self.compile_element_ptr(arr, idx)?;
+                self.builder
+                    .build_load(self.basic_type(element)?, elem_ptr, "typed_elem")
                     .map_err(|e| e.to_string())
             }
             HirExpr::IndexAssign(arr, idx, value) => {
@@ -4960,7 +4988,6 @@ impl<'ctx> HirCompiler<'ctx> {
             "console.log" => return self.compile_console_log(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
-            "Promise.all" => return self.compile_promise_all(args),
             "JSON.parse" => {
                 return self.compile_single_arg_call("thaw_json_parse", args, "JSON.parse")
             }
@@ -5049,7 +5076,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "thaw_sleep_ms did not return a promise".to_string())
     }
 
-    fn compile_promise_all(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+    fn compile_promise_all(
+        &mut self,
+        args: &[HirExpr],
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i64_type = self.context.i64_type();
         let promises = if args.is_empty() {
@@ -5091,17 +5122,60 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.builder
             .build_call(
-                self.module.get_function("thaw_promise_all_f64").unwrap(),
+                self.module.get_function("thaw_promise_all_slots").unwrap(),
                 &[
                     promises.into(),
                     i64_type.const_int(args.len() as u64, false).into(),
+                    i64_type
+                        .const_int(if *element == HirType::Bool { 1 } else { 8 }, false)
+                        .into(),
                 ],
                 "promise_all",
             )
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| "thaw_promise_all_f64 did not return a promise".to_string())
+            .ok_or_else(|| "thaw_promise_all_slots did not return a promise".to_string())
+    }
+
+    fn compile_promise_all_array(
+        &mut self,
+        array: &HirExpr,
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let base = self.compile_expr(array)?.into_pointer_value();
+        let len = self
+            .builder
+            .build_load(i64_type, base, "promise_all_len")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let promises = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    base,
+                    &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
+                    "promise_all_values",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_all_slots").unwrap(),
+                &[
+                    promises.into(),
+                    len.into(),
+                    i64_type
+                        .const_int(if *element == HirType::Bool { 1 } else { 8 }, false)
+                        .into(),
+                ],
+                "promise_all_array",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_promise_all_slots did not return a promise".to_string())
     }
 
     fn compile_await(&mut self, inner: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
@@ -7304,6 +7378,91 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "promise_all_order"),
             "1\n2\n3\n3\n0\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_supports_strings_and_booleans() {
+        let source = r#"
+            async function word(value: string, milliseconds: number): Promise<string> {
+                await sleep(milliseconds);
+                return value;
+            }
+
+            async function flag(value: boolean, milliseconds: number): Promise<boolean> {
+                await sleep(milliseconds);
+                return value;
+            }
+
+            async function main(): Promise<void> {
+                const words: string[] = await Promise.all([
+                    word("first", 20),
+                    word("second", 1)
+                ]);
+                const flags: boolean[] = await Promise.all([
+                    flag(true, 15),
+                    flag(false, 1)
+                ]);
+                console.log(words[0]);
+                console.log(words[1]);
+                console.log(flags[0]);
+                console.log(flags[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_typed_scalars"),
+            "first\nsecond\ntrue\nfalse\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_supports_aggregate_values() {
+        let source = r#"
+            interface Item { value: number; }
+
+            async function item(value: number, milliseconds: number): Promise<Item> {
+                await sleep(milliseconds);
+                return { value: value };
+            }
+
+            async function row(value: number, milliseconds: number): Promise<number[]> {
+                await sleep(milliseconds);
+                return [value, value + 1];
+            }
+
+            async function main(): Promise<void> {
+                const items: Item[] = await Promise.all([item(7, 15), item(9, 1)]);
+                const rows: number[][] = await Promise.all([row(3, 12), row(5, 1)]);
+                console.log(items[0].value);
+                console.log(items[1].value);
+                console.log(rows[0][1]);
+                console.log(rows[1][0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_aggregate_values"),
+            "7\n9\n4\n5\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_accepts_a_promise_array_variable() {
+        let source = r#"
+            async function delayed(value: number, milliseconds: number): Promise<number> {
+                await sleep(milliseconds);
+                return value;
+            }
+
+            async function main(): Promise<void> {
+                const pending: Promise<number>[] = [delayed(4, 20), delayed(6, 1)];
+                const values: number[] = await Promise.all(pending);
+                console.log(values[0]);
+                console.log(values[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_array_variable"),
+            "4\n6\n"
         );
     }
 

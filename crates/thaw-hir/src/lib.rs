@@ -126,6 +126,11 @@ pub enum HirExpr {
     Var(Symbol),
     BinOp(BinOp, Box<HirExpr>, Box<HirExpr>),
     Call(Box<HirExpr>, Vec<HirExpr>),
+    /// A homogeneous `Promise.all` join. The element type is retained so
+    /// codegen can copy and later load non-number result slots correctly.
+    PromiseAll(Vec<HirExpr>, HirType),
+    /// A homogeneous `Promise.all` whose promises are supplied as an array.
+    PromiseAllArray(Box<HirExpr>, HirType),
     /// `await expr`. V1 (see docs/design/async-await.md) compiles this as
     /// an identity transform in codegen -- `async`/`await` is sugar over
     /// synchronous calls, valid because Lambda only ever processes one
@@ -147,6 +152,8 @@ pub enum HirExpr {
     ArrayLit(Vec<HirExpr>),
     /// `array[index]`
     Index(Box<HirExpr>, Box<HirExpr>),
+    /// `array[index]` with the statically resolved element type.
+    TypedIndex(Box<HirExpr>, Box<HirExpr>, HirType),
     /// `array[index] = value` (and desugared compound forms). Evaluates to
     /// `value`.
     IndexAssign(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>),
@@ -269,7 +276,9 @@ pub fn set_ffi_error_abi(
                     visit_expr(arg, symbol, abi, found);
                 }
             }
-            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            HirExpr::BinOp(_, left, right)
+            | HirExpr::Index(left, right)
+            | HirExpr::TypedIndex(left, right, _) => {
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
             }
@@ -285,6 +294,7 @@ pub fn set_ffi_error_abi(
                 }
             }
             HirExpr::Await(inner)
+            | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
@@ -292,7 +302,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
-            HirExpr::ArrayLit(values) => {
+            HirExpr::ArrayLit(values) | HirExpr::PromiseAll(values, _) => {
                 for value in values {
                     visit_expr(value, symbol, abi, found);
                 }
@@ -376,7 +386,7 @@ pub fn set_ffi_ownership(
             }
         }
         match expr {
-            HirExpr::FfiCall(_, args) | HirExpr::ArrayLit(args) => {
+            HirExpr::FfiCall(_, args) | HirExpr::ArrayLit(args) | HirExpr::PromiseAll(args, _) => {
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }
@@ -392,11 +402,14 @@ pub fn set_ffi_ownership(
                     update_expr(arg, symbol, returns, errors, found);
                 }
             }
-            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            HirExpr::BinOp(_, left, right)
+            | HirExpr::Index(left, right)
+            | HirExpr::TypedIndex(left, right, _) => {
                 update_expr(left, symbol, returns, errors, found);
                 update_expr(right, symbol, returns, errors, found);
             }
             HirExpr::Await(inner)
+            | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
@@ -505,7 +518,9 @@ pub fn set_ffi_string_abi(
             }
         }
         match expr {
-            HirExpr::FfiCall(_, values) | HirExpr::ArrayLit(values) => {
+            HirExpr::FfiCall(_, values)
+            | HirExpr::ArrayLit(values)
+            | HirExpr::PromiseAll(values, _) => {
                 for value in values {
                     update_expr(value, symbol, params, returns, calling_convention, found);
                 }
@@ -521,11 +536,14 @@ pub fn set_ffi_string_abi(
                     update_expr(value, symbol, params, returns, calling_convention, found);
                 }
             }
-            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            HirExpr::BinOp(_, left, right)
+            | HirExpr::Index(left, right)
+            | HirExpr::TypedIndex(left, right, _) => {
                 update_expr(left, symbol, params, returns, calling_convention, found);
                 update_expr(right, symbol, params, returns, calling_convention, found);
             }
             HirExpr::Await(inner)
+            | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
