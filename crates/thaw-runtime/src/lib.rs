@@ -81,6 +81,7 @@ static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
 static PROMISE_RACE_EMPTY_ERROR: &[u8] = b"Promise.race requires at least one promise\0";
 static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
+static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"All promises were rejected\0";
 
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
@@ -1744,6 +1745,77 @@ pub unsafe extern "C" fn thaw_promise_race(
     output
 }
 
+struct PromiseAnyState {
+    output: *mut ThawPromise,
+    remaining: usize,
+    fulfilled: bool,
+}
+
+struct PromiseAnyChild {
+    state: *mut PromiseAnyState,
+    promise: *mut ThawPromise,
+}
+
+extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
+    let child = unsafe { Box::from_raw(frame.cast::<PromiseAnyChild>()) };
+    let state = unsafe { &mut *child.state };
+    if !state.fulfilled && unsafe { thaw_promise_state(child.promise) } == 1 {
+        state.fulfilled = true;
+        thaw_promise_resolve(state.output, result);
+    }
+    unsafe { thaw_promise_destroy(child.promise) };
+    state.remaining -= 1;
+    if state.remaining == 0 {
+        if !state.fulfilled {
+            thaw_promise_reject(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+        }
+        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        unsafe { drop(Box::from_raw(child.state)) };
+    }
+}
+
+/// Resolves with the first fulfilled input Promise. Rejections are ignored
+/// until every distinct input has rejected, at which point an aggregate error
+/// message is used to reject the output. Slower children are still drained.
+///
+/// # Safety
+///
+/// `promises` must reference `len` readable Promise handles. Each distinct
+/// non-null handle is consumed and must not be used after this call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_any(
+    promises: *const *mut ThawPromise,
+    len: usize,
+) -> *mut ThawPromise {
+    let output = thaw_promise_new();
+    if len == 0 || promises.is_null() {
+        thaw_promise_reject(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+        return output;
+    }
+    let mut unique = Vec::<*mut ThawPromise>::new();
+    for index in 0..len {
+        let promise = unsafe { *promises.add(index) };
+        if !promise.is_null() && !unique.contains(&promise) {
+            unique.push(promise);
+        }
+    }
+    if unique.is_empty() {
+        thaw_promise_reject(output, PROMISE_ANY_REJECTED_ERROR.as_ptr());
+        return output;
+    }
+    let state = Box::into_raw(Box::new(PromiseAnyState {
+        output,
+        remaining: unique.len(),
+        fulfilled: false,
+    }));
+    ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
+    for promise in unique {
+        let child = Box::into_raw(Box::new(PromiseAnyChild { state, promise }));
+        unsafe { thaw_promise_subscribe(promise, resume_promise_any_child, child.cast()) };
+    }
+    output
+}
+
 fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
@@ -2384,6 +2456,54 @@ mod tests {
             PROMISE_RACE_EMPTY_ERROR.as_ptr()
         );
         unsafe { thaw_promise_destroy(raced) };
+    }
+
+    #[test]
+    fn promise_any_ignores_rejections_and_uses_the_first_fulfillment() {
+        let failed = thaw_promise_new();
+        let slow = timed_value(25, 1.0);
+        let fast = timed_value(2, 2.0);
+        let children = [failed, slow, fast, failed];
+        let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
+        let error = b"ignored failure\0";
+        assert_eq!(thaw_promise_reject(failed, error.as_ptr()), 1);
+        let result = thaw_runtime_run_until_resolved(any);
+        assert_eq!(unsafe { result.cast::<f64>().read_unaligned() }, 2.0);
+        unsafe { thaw_promise_destroy(any) };
+        thaw_runtime_drain_detached();
+        assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn promise_any_rejects_only_after_every_input_rejects() {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
+        let first_error = [b'f', b'i', b'r', b's', b't', 0];
+        let second_error = [b's', b'e', b'c', b'o', b'n', b'd', 0];
+        assert_eq!(thaw_promise_reject(first, first_error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(any), 0);
+        assert_eq!(thaw_promise_reject(second, second_error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(any), 2);
+        assert_eq!(
+            thaw_runtime_run_until_resolved(any),
+            PROMISE_ANY_REJECTED_ERROR.as_ptr()
+        );
+        unsafe { thaw_promise_destroy(any) };
+    }
+
+    #[test]
+    fn promise_any_rejects_an_empty_input() {
+        let any = unsafe { thaw_promise_any(std::ptr::null(), 0) };
+        assert_eq!(thaw_promise_state(any), 2);
+        assert_eq!(
+            thaw_runtime_run_until_resolved(any),
+            PROMISE_ANY_REJECTED_ERROR.as_ptr()
+        );
+        unsafe { thaw_promise_destroy(any) };
     }
 
     #[test]
