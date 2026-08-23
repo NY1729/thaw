@@ -165,7 +165,8 @@ The workspace crates have narrow responsibilities:
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
-  Rust can invoke them through the callback FFI in fully static executables
+  Rust can invoke them through the callback FFI in fully static executables;
+  captured mutable bindings are shared with their outer scope
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint

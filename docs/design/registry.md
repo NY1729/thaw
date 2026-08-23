@@ -918,8 +918,9 @@ target内に`*`が複数現れる場合は同じcaptureをすべてへ適用す�
 closure環境を指し、間接呼び出しではその環境を隠し第1引数として渡す。これにより
 外側の値を読むclosure、nested closure、Rustからのcallback呼び戻しが可能になった。
 `serveOnceWith(port, (target) => body)` はこのABIを使い、callbackの戻り値を実際の
-HTTP response bodyとして送信する。現段階のcaptureは生成時の値を保存する方式で、
-JavaScriptと同じ共有mutable bindingへの拡張は今後の課題である。
+HTTP response bodyとして送信する。capture entryは値のコピーではなくarena上の
+variable cellを指すため、closure生成後に外側で行った代入とclosure内の代入を
+双方から観測できる。nested closureが作成元の呼び出しを抜けた後もcellは有効である。
 
 これはNode互換の `createServer` そのものではない。次の段階では関数型、arrow
 function、closure capture、request/response object methodをHIRとLLVMへ通し、
