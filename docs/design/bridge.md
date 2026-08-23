@@ -347,11 +347,10 @@ extern "C" fn thaw_dynamic_call(
 - 5章で述べた、外部ライブラリの実際の C ABI 規約（`(ptr, len)` 分割
   など）に合わせた Marshal アダプタ生成 -- **`number[]` パラメータの
   `(const double*, int64_t len)` 展開と、object パラメータのフィールド
-  単位への展開は実装済み**（`thaw-llvm::hir_codegen::ffi_param_types`/
-  `compile_ffi_call`、手書きの実 C 関数とリンクして検証）。戻り値側の
-  マーシャリング（`Array`/`Object` を返す C 関数への対応）と、文字列の
-  `(ptr, len)` 分割規約（`string` はそのまま `const char*` として渡す
-  規約のみ対応）は引き続き未対応。
+  単位への展開に加え、`Array`/`Object`のportable struct戻り値、文字列の
+  `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
+  `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
+  target固有struct packing、variadic、nested aggregate ownershipは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -369,11 +368,24 @@ optional destructor. For non-null C strings, LLVM copies `strlen(ptr) + 1`
 bytes into `thaw_arena_alloc` before invoking the destructor. The copy therefore
 survives native deallocation and remains valid through return and catch/finally
 paths. Null pointers are preserved and never passed to a destructor. Ownership
-metadata is currently limited to `string` returns and the thaw-result error
-string; unsupported type/ownership combinations are compilation errors.
+metadata supports `string` and `number[]` returns; unsupported ownership
+combinations are compilation errors. A `number[]` return uses
+`struct { double *data; int64_t len; }`; the data is copied into the arena and
+its configured destructor is invoked exactly once.
+
+Version 3 adds `parameterStringAbis`, `returnStringAbi`,
+`aggregateReturnAbi`, and `callingConvention`. String ABI entries are `null-terminated` or
+`pointer-length`; calling conventions are `c`, `fast`, or `cold`. A
+pointer-length return is `struct { const char *data; int64_t len; }` and is
+copied with an added terminator before an optional ownership destructor runs.
+Array and fixed object direct returns use portable value structs when
+`aggregateReturnAbi` is `portable`, and are reconstructed into Thaw's arena
+layout after the native call. The default `internal` preserves the legacy
+pointer ABI for existing builtins and native archives.
 
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
-Version 1 remains backward-compatible and implies borrowed ownership. Void
-thaw-result values and aggregate ownership remain future extensions.
+Versions 1 and 2 remain backward-compatible. Void thaw-result values,
+target-specific packing, variadics and nested aggregate ownership remain future
+extensions.

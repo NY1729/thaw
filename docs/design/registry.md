@@ -872,9 +872,10 @@ bridge.md 5章がスコープ外として保留していた項目: Fast path の
   以外にも `TextEncoder`/`setTimeout` など、実際に参照する
   パッケージにぶつかった時点で都度追加していく前提（12章と同じ方針）。
   網羅的な対応表は用意していない。
-- Marshal アダプタの残り: 18章の通り、パラメータ側の `(ptr, len)`/
-  フィールド展開は実装したが、戻り値側のマーシャリングと文字列の
-  `(ptr, len)` 分割規約は未対応のまま。
+- Marshal アダプタは、パラメータ側の配列／object展開、Array／Objectの
+  portable struct戻り値、文字列の`(ptr, len)`引数／戻り値、配列戻り値の
+  ownershipまで対応した。target固有struct packing、variadic、nested
+  aggregate ownershipは引き続き対象外である。
 
 ## 21. ユーザーコードの bare import と package exports
 
