@@ -498,7 +498,78 @@ namespace 修飾したりする機能（`qs.stringify` のような書き方）�
 衝突のない4パッケージの組み合わせ（`qs` を除いた分）は問題なく
 ビルド・実行できることも確認済み。
 
-## 14. その他、今回やらなかったこと（意図的なスコープ外）
+## 14. ESM 専用パッケージへの対応
+
+`import`/`export` 構文をそのまま使う ESM 専用パッケージ
+（`package.json` の `"type": "module"`）は、これまで完全にスコープ外
+だった -- QuickJS-NG のスクリプト評価モード（`ctx.eval`）は
+`import`/`export` 構文をそのまま実行できないため、6章までの
+CommonJS/UMD 対応では歯が立たなかった。
+
+対応方針は、実行時に本物の ES Module 評価モードを使うのではなく、
+**バンドル時（`add` の時点）に ESM 構文を CommonJS 相当のコードへ
+書き換えてしまう**というもの -- そうすれば8〜13章までに作った
+require グラフ解決の仕組み（相対 require、外部パッケージ、deep
+import、ビルトイン polyfill）をそのまま再利用できる。
+
+- `thaw-parser` に `parse_javascript_with_source_map` を追加した。
+  `parse_javascript`（`parse_module()` を使う、ES Module 構文を
+  ネイティブに解釈できる既存関数）の結果に加え `SourceMap` も返す --
+  ノードの元のソーステキストを `SourceMap::span_to_snippet` で
+  正確に取り出すために必要（`Span` の生のバイトオフセットを自分で
+  計算するのは安全ではないため）。
+- `thaw-registry` の `rewrite_esm_to_commonjs` が実際の書き換えを行う:
+  ファイルをパースして `ModuleDecl`（`import`/`export`）が1つでも
+  あれば ESM と判定し、`import`/`export` 宣言だけを合成した
+  `require(...)`/`exports.x = ...` に置き換え、それ以外の文は
+  **AST から再生成せず、元のソーステキストをそのまま**
+  （`span_to_snippet` で）コピーする -- このプロジェクトは汎用の
+  JS コード生成器を持たないため、触らない部分は一切再フォーマットせず
+  温存するという方針。ESM 構文が1つも見つからなければ `None` を返し、
+  呼び出し側は元のソースをそのまま使う -- 既存の CommonJS パッケージを
+  壊すリスクは原理的にない。
+  - `import x from './y'` → `require('./y')` の呼び出し結果から
+    `.default`（`.__esModule` フラグで本物の ESM 由来かどうかを
+    判定し、そうでなければオブジェクト全体を default 扱いする、
+    Babel 等が使うのと同じ相互運用規約）を取り出す。
+  - `import { a, b as c } from './y'`/`import * as ns from './y'`/
+    `export { a } from './y'`/`export * from './y'` もそれぞれ対応。
+  - `export default <値>`/`export function foo(){}`/`export const
+    x = ...` は、対応する CommonJS の書き方（`module.exports.default
+    = ...`/`exports.foo = foo;` など）に変換する。
+  - この書き換えは require グラフを辿る**全てのファイル**に対して
+    行われる（`main` だけでなく、内部の相対ファイルや外部依存も含む）
+    ので、パッケージの一部だけが ESM、というケースも自然にカバーする。
+  - `resolve_module_path` の解決候補に `.mjs` を追加した（実際の ESM
+    パッケージが `.js` の代わりに使うことが多いため）。
+- **もう1つ見つけて直した統合上のバグ**: `escape-string-regexp`
+  （実際の ESM パッケージ）で検証したところ、`export default function
+  escapeStringRegexp(){}` は書き換え後 `module.exports.default = ...`
+  になるが、6章の `wrap_as_commonjs_module` の default-export 束縛
+  ロジックは `typeof module.exports === 'function'` しか見ておらず、
+  `module.exports` 自体がオブジェクト（`{ __esModule: true, default:
+  fn }`）のこのケースを見逃していた。`module.exports.default` が
+  関数かどうかも追加でチェックするよう修正した。
+- **もう1つ見つけて直した `.d.ts` 抽出の穴**: `escape-string-regexp`
+  自身の `.d.ts` も `export default function
+  escapeStringRegexp(string: string): string;` という書き方をしており、
+  これは `export declare function foo(){}`（`ExportDecl`）とは別の
+  AST ノード（`ExportDefaultDecl`）のため、thaw-bridge の `parse_dts`
+  は当初これを抽出できなかった。名前付きの `export default function`
+  も抽出するよう `extract_fn_decls` を拡張した（無名の場合は
+  呼び出し可能な名前が存在しないため、諦めて0関数のまま -- クラッシュ
+  はしない）。
+
+**検証**: 書き換えロジック自体のユニットテストに加え、ESM の
+`import`/`export` で分割された2ファイルのバンドルを実際に
+thaw-quickjs（QuickJS-NG）で実行するテスト、`module.exports.default`
+の束縛修正についても同様に実機で確認した。実際の ESM 専用パッケージ
+`escape-string-regexp`（`"type": "module"`、単一の default export
+関数）で通しの検証を行い、`thaw registry add escape-string-regexp` →
+`thaw build --use escape-string-regexp` で `escapeStringRegexp("a.b*c")`
+→ `"a\.b\*c"` という正しい結果を、手作業を一切介さず得た。
+
+## 15. その他、今回やらなかったこと（意図的なスコープ外）
 
 - **名前衝突の自動解決**: 13章の通り検出してエラーにするところまでは
   実装したが、`qs.stringify`/`hoek.stringify` のような namespace
@@ -512,11 +583,6 @@ namespace 修飾したりする機能（`qs.stringify` のような書き方）�
 - **ネイティブライブラリのビルド**: `native.a` は事前にビルド済みの
   ものを置く前提。「実際の npm パッケージのネイティブアドオンを
   Thaw 向けにビルドする」パイプラインはまだない。
-- **ESM (`import`/`export`) パッケージ**: 6章の CommonJS/UMD 対応は
-  `module.exports`/`exports` を書くパッケージのみが対象。`export
-  default`/`export { ... }` 構文をそのまま使う ESM 専用パッケージは
-  依然として未対応（構文自体が QuickJS-NG のスクリプト評価モードでは
-  そのままでは動かない）。
 - namespace 内で宣言された `interface`/`type`（9章末尾）。
 - **その他のプラットフォームグローバル**: `Buffer`/`URL` 以外にも
   `process`/`TextEncoder`/`setTimeout` など、実際に参照する
@@ -533,7 +599,7 @@ namespace 修飾したりする機能（`qs.stringify` のような書き方）�
 世界でどれだけ普通に書かれていても（内部で複数ファイルに分かれていて
 いても、DefinitelyTyped の型を使っていても、`main` フィールドの
 書き方が多少雑でも、他パッケージに依存していても）そのまま動く」こと
--- つまり npm を使う感覚と地続きの体験にすること。ESM 専用パッケージや
-未対応のプラットフォームグローバルをはじめ、まだ埋まっていない穴は
-多いが、優先順位は
+-- つまり npm を使う感覚と地続きの体験にすること。ESM 専用パッケージも
+書いてある順に近い状態で動くようになったが、名前衝突の自動解決や
+ネイティブアドオンなど、まだ埋まっていない穴は多い。優先順位は
 「実際に試して見つかった順」で決めていく。
