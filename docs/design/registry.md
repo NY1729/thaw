@@ -926,12 +926,20 @@ objectのfunction型propertyは一般のclosureとして呼び出せる。これ
 `createServer(callback).listen(port)` は、callbackへ
 `IncomingMessage { method, url }` と
 `ServerResponse { statusCode, setHeader, write, end }` を渡す。status、header、分割write、
-endの本文は実際のHTTP responseへ反映される。`listen` は同じsocketで逐次リクエストを
-継続処理し、テストやbatch用途では `listenMany(port, count)` が指定数の処理後に返る。
-複数リクエスト間でもcallbackのclosure stateは保持される。現在はblocking acceptであり、
-`close()` は共有Atomic状態を通じて冪等に停止要求を設定する。listenerはnon-blocking
-acceptを短い間隔で確認するため、次のrequest待ちも停止できる。TypeScriptのmainを
-ブロックしないevent loop統合とlisten/close event callbackは次段階である。
+endの本文は実際のHTTP responseへ反映される。`listen` はsocketを登録して即座に返り、
+生成されたC entry pointがTypeScriptのmain完了後に登録済みlistenerを駆動して、同じ
+socketで逐次リクエストを継続処理する。テストやbatch用途では
+`listenMany(port, count)` が従来どおり同期的に指定数を処理して返る。複数リクエスト間でも
+callbackのclosure stateは保持される。`close()` は共有Atomic状態を通じて冪等に停止要求を
+設定し、process lifecycle loopは閉じたlistenerを除去して、listenerがなくなると終了する。
+listenerはthaw-runtimeの永続fd watcherとして登録され、timer、Promise continuation、
+非同期HTTPと同じ `poll(2)` 呼び出しでreadable通知を受ける。server callbackの実行は
+現在も単一threadの逐次実行だが、accept済みsocketも個別のread/write watcherとして
+登録される。headerを送り切らない遅い接続やresponse backpressureが、他接続のaccept・
+request処理を停止しない。`close()` は新規acceptを停止し、処理中の接続が完了してから
+process lifecycle loopが終了する。`listen(port, callback)` のcallbackはlistener登録後の
+event loop開始時に、`close(callback)` のcallbackはaccept済み接続がすべて完了した後に
+単一thread上で呼ばれる。一般的なEventEmitter APIとerror eventは次段階である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 
