@@ -46,9 +46,13 @@ with `--ffi-metadata <file.json>`:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "functions": {
-    "read_config": { "errorAbi": "thaw-result" }
+    "read_config": {
+      "errorAbi": "thaw-result",
+      "returnOwnership": "owned",
+      "destroy": "free_config"
+    }
   }
 }
 ```
@@ -57,6 +61,12 @@ For a declared return type `T`, `thaw-result` expects the C function to return
 `struct { T value; const char *error; }`. Exactly one channel should be active;
 a non-null error propagates through Thaw `try/catch/finally`. Unlisted symbols
 keep the legacy direct return ABI.
+Version 2 additionally describes string ownership. `borrowed` leaves a pointer
+untouched; `owned` copies it into Thaw's request arena and calls the required
+`destroy`/`returnDestroy` function exactly once; `arena-copy` performs the copy
+and optionally calls a destructor. `errorOwnership` uses the same values and an
+optional `errorDestroy`. Version 1 remains accepted and defaults both channels
+to `borrowed`.
 
 ## Architecture
 
@@ -198,6 +208,8 @@ The workspace crates have narrow responsibilities:
   error endpoint with their original message
 - Versioned FFI metadata can opt native functions into a typed
   `{ value, error }` result ABI whose errors propagate through Thaw catch paths
+- Metadata v2 copies owned native string results/errors into the request arena
+  and invokes their configured destructors exactly once
 
 ### Not yet compatible
 
@@ -213,9 +225,9 @@ The workspace crates have narrow responsibilities:
 - Full Node.js module resolution, all core modules and the complete Node global
   API
 - Full ESM semantics and a parser-backed production bundler
-- A general ABI-description format. Some native APIs need metadata beyond a
-  `.d.ts`, including string `(pointer, length)`, structures, ownership and
-  calling-convention details
+- A fully general ABI-description format. String result/error ownership is
+  supported, but `(pointer, length)` strings, aggregate-result ownership and
+  calling-convention details are not yet described
 - Loading Node N-API `.node` addons
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design

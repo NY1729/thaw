@@ -66,11 +66,20 @@ pub enum FfiErrorAbi {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum FfiOwnership {
+    Borrowed,
+    Owned { destroy: Symbol },
+    ArenaCopy { destroy: Option<Symbol> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FfiSignature {
     pub symbol: Symbol,
     pub params: Vec<HirType>,
     pub ret: HirType,
     pub error_abi: FfiErrorAbi,
+    pub return_ownership: FfiOwnership,
+    pub error_ownership: FfiOwnership,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,6 +305,126 @@ pub fn set_ffi_error_abi(
     } else {
         Err(format!(
             "FFI metadata references unknown ambient function `{symbol}`"
+        ))
+    }
+}
+
+pub fn set_ffi_ownership(
+    program: &mut HirProgram,
+    symbol: &str,
+    return_ownership: FfiOwnership,
+    error_ownership: FfiOwnership,
+) -> Result<(), String> {
+    fn update_expr(
+        expr: &mut HirExpr,
+        symbol: &str,
+        returns: &FfiOwnership,
+        errors: &FfiOwnership,
+        found: &mut bool,
+    ) {
+        if let HirExpr::FfiCall(signature, _) = expr {
+            if signature.symbol == symbol {
+                signature.return_ownership = returns.clone();
+                signature.error_ownership = errors.clone();
+                *found = true;
+            }
+        }
+        match expr {
+            HirExpr::FfiCall(_, args) | HirExpr::ArrayLit(args) => {
+                for arg in args {
+                    update_expr(arg, symbol, returns, errors, found);
+                }
+            }
+            HirExpr::Call(callee, args) | HirExpr::DynamicCall(callee, args) => {
+                update_expr(callee, symbol, returns, errors, found);
+                for arg in args {
+                    update_expr(arg, symbol, returns, errors, found);
+                }
+            }
+            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+                update_expr(left, symbol, returns, errors, found);
+                update_expr(right, symbol, returns, errors, found);
+            }
+            HirExpr::Await(inner)
+            | HirExpr::Assign(_, inner)
+            | HirExpr::ArrayLen(inner)
+            | HirExpr::JsonAsNumber(inner)
+            | HirExpr::JsonAsString(inner)
+            | HirExpr::JsonAsBool(inner) => update_expr(inner, symbol, returns, errors, found),
+            HirExpr::Lambda(_, body) => update_expr(body, symbol, returns, errors, found),
+            HirExpr::Block(stmts) => update_stmts(stmts, symbol, returns, errors, found),
+            HirExpr::IndexAssign(a, b, c) => {
+                update_expr(a, symbol, returns, errors, found);
+                update_expr(b, symbol, returns, errors, found);
+                update_expr(c, symbol, returns, errors, found);
+            }
+            HirExpr::ObjectLit(fields) => {
+                for (_, value) in fields {
+                    update_expr(value, symbol, returns, errors, found);
+                }
+            }
+            HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => {
+                update_expr(object, symbol, returns, errors, found)
+            }
+            HirExpr::PropAssign(object, _, _, value) | HirExpr::JsonIndex(object, value) => {
+                update_expr(object, symbol, returns, errors, found);
+                update_expr(value, symbol, returns, errors, found);
+            }
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) => {}
+        }
+    }
+    fn update_stmts(
+        stmts: &mut [HirStmt],
+        symbol: &str,
+        returns: &FfiOwnership,
+        errors: &FfiOwnership,
+        found: &mut bool,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
+                    update_expr(expr, symbol, returns, errors, found)
+                }
+                HirStmt::Return(Some(expr)) => update_expr(expr, symbol, returns, errors, found),
+                HirStmt::If(condition, then_body, else_body) => {
+                    update_expr(condition, symbol, returns, errors, found);
+                    update_stmts(then_body, symbol, returns, errors, found);
+                    update_stmts(else_body, symbol, returns, errors, found);
+                }
+                HirStmt::While(condition, body) => {
+                    update_expr(condition, symbol, returns, errors, found);
+                    update_stmts(body, symbol, returns, errors, found);
+                }
+                HirStmt::Try(body, _, catch_body) => {
+                    update_stmts(body, symbol, returns, errors, found);
+                    update_stmts(catch_body, symbol, returns, errors, found);
+                }
+                HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+            }
+        }
+    }
+    let mut found = false;
+    for signature in &mut program.extern_functions {
+        if signature.symbol == symbol {
+            signature.return_ownership = return_ownership.clone();
+            signature.error_ownership = error_ownership.clone();
+            found = true;
+        }
+    }
+    for function in &mut program.functions {
+        update_stmts(
+            &mut function.body,
+            symbol,
+            &return_ownership,
+            &error_ownership,
+            &mut found,
+        );
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "FFI ownership metadata references unknown ambient function `{symbol}`"
         ))
     }
 }

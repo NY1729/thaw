@@ -46,7 +46,8 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use thaw_hir::{
-    BinOp, FfiErrorAbi, FfiSignature, HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType,
+    BinOp, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr, HirFunction, HirLit, HirProgram,
+    HirStmt, HirType,
 };
 
 /// The user's `main`, if any, is compiled under this symbol instead of
@@ -379,6 +380,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
 
+        let strlen_type = i64_type.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("strlen", strlen_type, Some(Linkage::External));
+        let memcpy_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false);
+        self.module
+            .add_function("memcpy", memcpy_type, Some(Linkage::External));
+
         let getenv_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module
             .add_function("getenv", getenv_type, Some(Linkage::External));
@@ -610,6 +618,35 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         sig: &FfiSignature,
     ) -> Result<FunctionValue<'ctx>, String> {
+        if sig.return_ownership != FfiOwnership::Borrowed && sig.ret != HirType::Str {
+            return Err(format!(
+                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string returns",
+                sig.symbol
+            ));
+        }
+        if sig.error_abi == FfiErrorAbi::Direct && sig.error_ownership != FfiOwnership::Borrowed {
+            return Err(format!(
+                "FFI function `{}` cannot configure error ownership with the direct error ABI",
+                sig.symbol
+            ));
+        }
+        for ownership in [&sig.return_ownership, &sig.error_ownership] {
+            let destroy = match ownership {
+                FfiOwnership::Owned { destroy } => Some(destroy),
+                FfiOwnership::ArenaCopy {
+                    destroy: Some(destroy),
+                } => Some(destroy),
+                _ => None,
+            };
+            if let Some(destroy) = destroy {
+                if self.module.get_function(destroy).is_none() {
+                    let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                    let fn_ty = self.context.void_type().fn_type(&[ptr_ty.into()], false);
+                    self.module
+                        .add_function(destroy, fn_ty, Some(Linkage::External));
+                }
+            }
+        }
         let param_types = self.ffi_param_types(&sig.params)?;
 
         let fn_type = match (&sig.error_abi, &sig.ret) {
@@ -4002,6 +4039,110 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(resolved.into())
     }
 
+    fn apply_ffi_string_ownership(
+        &mut self,
+        source: PointerValue<'ctx>,
+        ownership: &FfiOwnership,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        if *ownership == FfiOwnership::Borrowed {
+            return Ok(source);
+        }
+
+        let function = self.current_function();
+        let null_bb = self
+            .context
+            .append_basic_block(function, &format!("{name}_null"));
+        let copy_bb = self
+            .context
+            .append_basic_block(function, &format!("{name}_copy"));
+        let merge_bb = self
+            .context
+            .append_basic_block(function, &format!("{name}_merge"));
+        let is_null = self
+            .builder
+            .build_is_null(source, &format!("{name}_is_null"))
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_null, null_bb, copy_bb)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(null_bb);
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(copy_bb);
+        let strlen = self.module.get_function("strlen").unwrap();
+        let length = self
+            .builder
+            .build_call(strlen, &[source.into()], &format!("{name}_length"))
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let size = self
+            .builder
+            .build_int_add(
+                length,
+                self.context.i64_type().const_int(1, false),
+                &format!("{name}_size"),
+            )
+            .map_err(|error| error.to_string())?;
+        let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+        let copied = self
+            .builder
+            .build_call(
+                arena_alloc,
+                &[
+                    size.into(),
+                    self.context.i64_type().const_int(1, false).into(),
+                ],
+                &format!("{name}_alloc"),
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let memcpy = self.module.get_function("memcpy").unwrap();
+        self.builder
+            .build_call(
+                memcpy,
+                &[copied.into(), source.into(), size.into()],
+                &format!("{name}_memcpy"),
+            )
+            .map_err(|error| error.to_string())?;
+        let destroy = match ownership {
+            FfiOwnership::Owned { destroy } => Some(destroy),
+            FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
+            FfiOwnership::Borrowed => None,
+        };
+        if let Some(destroy) = destroy {
+            let destroy_fn = self
+                .module
+                .get_function(destroy)
+                .ok_or_else(|| format!("FFI ownership destructor `{destroy}` was not declared"))?;
+            self.builder
+                .build_call(destroy_fn, &[source.into()], &format!("{name}_destroy"))
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(merge_bb);
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let phi = self
+            .builder
+            .build_phi(ptr_ty, &format!("{name}_owned"))
+            .map_err(|error| error.to_string())?;
+        let null = ptr_ty.const_null();
+        phi.add_incoming(&[(&null, null_bb), (&copied, copy_bb)]);
+        Ok(phi.as_basic_value().into_pointer_value())
+    }
+
     /// `HirExpr::FfiCall` -- an ambient `declare function` call (see
     /// docs/design/bridge.md). By the time codegen sees this, the symbol
     /// is already declared (`declare_extern_function` ran in the
@@ -4093,6 +4234,15 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or_else(|| format!("`{}` does not return a value", sig.symbol))?;
         if sig.error_abi == FfiErrorAbi::Direct {
+            if sig.ret == HirType::Str {
+                return self
+                    .apply_ffi_string_ownership(
+                        returned.into_pointer_value(),
+                        &sig.return_ownership,
+                        "ffi_return",
+                    )
+                    .map(BasicValueEnum::from);
+            }
             return Ok(returned);
         }
 
@@ -4106,10 +4256,20 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_extract_value(result, 1, "ffi_result_error")
             .map_err(|e| e.to_string())?
             .into_pointer_value();
+        let error = self.apply_ffi_string_ownership(error, &sig.error_ownership, "ffi_error")?;
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|e| e.to_string())?;
         self.branch_on_pending_exception()?;
+        if sig.ret == HirType::Str {
+            return self
+                .apply_ffi_string_ownership(
+                    value.into_pointer_value(),
+                    &sig.return_ownership,
+                    "ffi_return",
+                )
+                .map(BasicValueEnum::from);
+        }
         Ok(value)
     }
 
@@ -6308,6 +6468,100 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "20\nnative read failed\ncleanup\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
+        let source = r#"
+            declare function native_read(value: number): string;
+            declare function return_destroy_count(): number;
+            declare function error_destroy_count(): number;
+
+            function main(): void {
+                console.log(native_read(1));
+                console.log(return_destroy_count());
+                try {
+                    console.log(native_read(0 - 1));
+                } catch (error) {
+                    console.log(error);
+                    console.log(error_destroy_count());
+                }
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_read",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_ownership(
+            &mut program,
+            "native_read",
+            thaw_hir::FfiOwnership::Owned {
+                destroy: "destroy_return".into(),
+            },
+            thaw_hir::FfiOwnership::Owned {
+                destroy: "destroy_error".into(),
+            },
+        )
+        .unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_owned_result");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-owned-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdlib.h>\n#include <string.h>\n\
+             typedef struct { char *value; char *error; } ThawStringResult;\n\
+             static int return_destroys; static int error_destroys;\n\
+             static char *copy(const char *s) { size_t n = strlen(s) + 1; char *p = malloc(n); memcpy(p, s, n); return p; }\n\
+             ThawStringResult native_read(double value) {\n\
+               if (value < 0) return (ThawStringResult){0, copy(\"owned error\")};\n\
+               return (ThawStringResult){copy(\"owned value\"), 0};\n\
+             }\n\
+             void destroy_return(char *p) { ++return_destroys; free(p); }\n\
+             void destroy_error(char *p) { ++error_destroys; free(p); }\n\
+             double return_destroy_count(void) { return return_destroys; }\n\
+             double error_destroy_count(void) { return error_destroys; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "owned value\n1\nowned error\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

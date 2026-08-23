@@ -362,7 +362,18 @@ equivalent of `struct { T value; const char *error; }`. LLVM extracts the error
 pointer into Thaw's pending-exception channel before exposing the value, so the
 existing `try/catch/finally` implementation handles native failures unchanged.
 
+Version 2 keeps that ABI field and adds `returnOwnership` and `errorOwnership`.
+Each defaults to `borrowed`; `owned` requires `destroy`/`returnDestroy` for the
+return channel or `errorDestroy` for the error channel; `arena-copy` accepts an
+optional destructor. For non-null C strings, LLVM copies `strlen(ptr) + 1`
+bytes into `thaw_arena_alloc` before invoking the destructor. The copy therefore
+survives native deallocation and remains valid through return and catch/finally
+paths. Null pointers are preserved and never passed to a destructor. Ownership
+metadata is currently limited to `string` returns and the thaw-result error
+string; unsupported type/ownership combinations are compilation errors.
+
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
-Void results and ownership/destructor metadata remain future extensions.
+Version 1 remains backward-compatible and implies borrowed ownership. Void
+thaw-result values and aggregate ownership remain future extensions.
