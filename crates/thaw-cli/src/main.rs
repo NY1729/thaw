@@ -245,6 +245,7 @@ fn sanitize_identifier(s: &str) -> String {
 /// here is the *qualifier identifier* (`qualifier_identifier`), not
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
+type ExternalExports = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
 
 /// The identifier a user writes as the object in `pkg.name(...)`
 /// qualified-call syntax for a `--use`d package. A scoped package's real
@@ -258,6 +259,21 @@ type QualifiedCallRewrite = (String, String, String);
 /// docs/design/registry.md).
 fn qualifier_identifier(package: &str) -> &str {
     package.rsplit('/').next().unwrap_or(package)
+}
+
+fn bare_package_name(specifier: &str) -> &str {
+    if specifier.starts_with('@') {
+        specifier
+            .match_indices('/')
+            .nth(1)
+            .map(|(index, _)| &specifier[..index])
+            .unwrap_or(specifier)
+    } else {
+        specifier
+            .split_once('/')
+            .map(|(name, _)| name)
+            .unwrap_or(specifier)
+    }
 }
 
 /// Resolves each `--use`d package against the local registry
@@ -274,10 +290,22 @@ fn qualifier_identifier(package: &str) -> &str {
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
-) -> Result<(String, Vec<PathBuf>, Vec<QualifiedCallRewrite>), String> {
+) -> Result<
+    (
+        String,
+        Vec<PathBuf>,
+        Vec<QualifiedCallRewrite>,
+        ExternalExports,
+    ),
+    String,
+> {
     let mut resolved = Vec::new();
     for name in use_packages {
-        let package = thaw_registry::resolve(registry_dir, name)?;
+        let package = if name.starts_with("node:") {
+            thaw_registry::resolve_builtin(name)?
+        } else {
+            thaw_registry::resolve(registry_dir, name)?
+        };
         let functions = thaw_bridge::parse_dts(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
         // Whether there's actually a `native.a` to link a FastPath
@@ -472,7 +500,25 @@ fn generate_registry_shims(
         .collect();
     shim.push_str(&thaw_bridge::generate_native_addon_init(&native_addons));
 
-    Ok((shim, native_libs, rewrites))
+    let mut external_exports = ExternalExports::new();
+    for pkg in &resolved {
+        let mut package_exports = std::collections::HashMap::new();
+        for (name, classification) in &pkg.classifications {
+            let target = if matches!(classification, thaw_bridge::Classification::Fallback { .. }) {
+                format!("{}_{name}", sanitize_identifier(&pkg.name))
+            } else {
+                name.clone()
+            };
+            package_exports.insert(name.clone(), target.clone());
+        }
+        if package_exports.len() == 1 {
+            let target = package_exports.values().next().unwrap().clone();
+            package_exports.insert("default".to_string(), target);
+        }
+        external_exports.insert(pkg.name.clone(), package_exports);
+    }
+
+    Ok((shim, native_libs, rewrites, external_exports))
 }
 
 /// Rewrites `pkg.name(...)` call expressions in a user's own `.ts` source
@@ -690,8 +736,36 @@ fn build(
 ) -> Result<(), String> {
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
-    let (registry_shim, registry_native_libs, qualified_call_rewrites) =
-        generate_registry_shims(registry_dir, use_packages)?;
+    let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
+    let mut resolved_packages = use_packages.to_vec();
+    for (specifier, location) in &external_specifiers {
+        let package = if specifier.starts_with("node:") {
+            thaw_registry::resolve_builtin(specifier)
+                .map_err(|error| format!("{location}: {error}"))?;
+            specifier.clone()
+        } else {
+            let package = bare_package_name(specifier).to_string();
+            if package != *specifier {
+                return Err(format!(
+                    "{location}: package subpath import `{specifier}` is not supported yet"
+                ));
+            }
+            thaw_registry::resolve(registry_dir, &package)
+                .map_err(|error| format!("{location}: {error}"))?;
+            package
+        };
+        if !resolved_packages.contains(&package) {
+            resolved_packages.push(package);
+        }
+    }
+    let (registry_shim, registry_native_libs, qualified_call_rewrites, mut external_exports) =
+        generate_registry_shims(registry_dir, &resolved_packages)?;
+    for (specifier, _) in &external_specifiers {
+        let package = bare_package_name(specifier);
+        if let Some(exports) = external_exports.get(package).cloned() {
+            external_exports.insert(specifier.clone(), exports);
+        }
+    }
     // `qs.stringify(x)`-style calls, for a name that collided across two
     // `--use`d packages, only exist as source-level syntax sugar over the
     // package-qualified alias `generate_registry_shims` actually
@@ -699,7 +773,7 @@ fn build(
     // (and no parse at all) when there were no collisions.
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
     let shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
-    let mut module = module_graph::bundle(input, &user_source)?;
+    let mut module = module_graph::bundle(input, &user_source, &external_exports)?;
     if !shim_source.is_empty() {
         let mut shim = thaw_parser::parse_typescript(&shim_source)?;
         shim.body.extend(module.body);
@@ -896,6 +970,7 @@ mod tests {
         let error = module_graph::bundle(
             &dir.join("main.ts"),
             &std::fs::read_to_string(dir.join("main.ts")).unwrap(),
+            &std::collections::HashMap::new(),
         )
         .unwrap_err();
         assert!(error.contains("cyclic user-module import"));
@@ -976,6 +1051,217 @@ mod tests {
         let _ = child.wait();
         assert!(request.starts_with("POST /2018-06-01/runtime/invocation/module-request/response"));
         assert!(request.ends_with("{\"message\":\"module lambda\"}"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bare_imports_automatically_resolve_registry_packages() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-bare-imports-{}", std::process::id()));
+        let registry = dir.join("modules");
+        std::fs::create_dir_all(registry.join("math-kit")).unwrap();
+        std::fs::write(
+            registry.join("math-kit/package.d.ts"),
+            "export declare function add(argsArray: any): any;\nexport declare function sub(argsArray: any): any;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            registry.join("math-kit/bundle.js"),
+            "module.exports = { add: function(a,b){ return a+b; }, sub: function(a,b){ return a-b; } };\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(registry.join("twice")).unwrap();
+        std::fs::write(
+            registry.join("twice/package.d.ts"),
+            "export default function twice(argsArray: any): any;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            registry.join("twice/bundle.js"),
+            "module.exports = function(value){ return value * 2; };\n",
+        )
+        .unwrap();
+
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { add } from "math-kit";
+                import * as math from "math-kit";
+                import twice from "twice";
+                function main(): void {
+                    const sum = Number(add(JSON.parse("[10,11]")));
+                    const difference = Number(math.sub(JSON.parse("[13,2]")));
+                    console.log(Number(twice(JSON.parse("[21]"))));
+                    console.log(sum + difference);
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n32\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn imports_supported_node_builtin_modules() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-node-imports-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import * as path from "node:path";
+                import { inspect } from "node:util";
+                import { cwd } from "node:process";
+                import { byteLength } from "node:buffer";
+                function main(): void {
+                    console.log(String(path.join(JSON.parse("[\"a\",\"b\"]"))));
+                    console.log(String(inspect(JSON.parse("[42]"))));
+                    console.log(String(cwd(JSON.parse("[]"))));
+                    console.log(Number(byteLength(JSON.parse("[\"thaw\"]"))));
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "a/b\n42\n/\n4\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bare_import_resolution_errors_include_source_location() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-missing-bare-import-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            "\n\nimport { missing } from \"not-installed\";\nfunction main(): void {}\n",
+        )
+        .unwrap();
+        let error = build(
+            &entry,
+            &dir.join("app"),
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.contains("main.ts:3:"), "{error}");
+        assert!(error.contains("not-installed"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runs_a_multifile_lambda_with_two_bare_import_packages() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-bare-import-lambda-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        for (package, value) in [("left-mark", 20), ("right-mark", 22)] {
+            std::fs::create_dir_all(registry.join(package)).unwrap();
+            std::fs::write(
+                registry.join(package).join("package.d.ts"),
+                "export declare function mark(argsArray: any): any;\n",
+            )
+            .unwrap();
+            std::fs::write(
+                registry.join(package).join("bundle.js"),
+                format!("module.exports = {{ mark: function() {{ return {value}; }} }};\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.join("work.ts"),
+            r#"
+                import { mark as leftMark } from "left-mark";
+                import { mark as rightMark } from "right-mark";
+                export async function work(): Promise<void> {
+                    await sleep(1);
+                    console.log(Number(leftMark(JSON.parse("[]"))) + Number(rightMark(JSON.parse("[]"))));
+                }
+            "#,
+        )
+        .unwrap();
+        let entry = dir.join("handler.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { work } from "./work";
+                async function handler(event: Json): Promise<Json> {
+                    await work();
+                    return event;
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("bootstrap");
+        build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = conn.read(&mut request).unwrap();
+            let event = "{\"packages\":2}";
+            conn.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: packages-request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    event.len(), event
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            drop(conn);
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+        let mut child = Command::new(&output)
+            .env("AWS_LAMBDA_RUNTIME_API", addr)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let request = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("package Lambda handler did not post a response");
+        server.join().unwrap();
+        let _ = child.kill();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            request.starts_with("POST /2018-06-01/runtime/invocation/packages-request/response")
+        );
+        assert!(request.ends_with("{\"packages\":2}"));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("42"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
