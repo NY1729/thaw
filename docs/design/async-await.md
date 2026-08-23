@@ -375,8 +375,8 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    Lambda ハンドラでの逐次 `await` はこれで完全にカバーできる。
 2. `fetch`/`std` の実装と合わせて、V1 の「ブロッキング呼び出しに
    脱糖する」対象を増やしていく。
-3. `Promise.all`、`Promise.race`、`Promise.any`は7〜9章の形で実装済み。
-   次は同じschedulerを`Promise.allSettled`へ一般化する。
+3. 主要なPromise結合子は7〜10章の形で実装済み。次は一般的なユーザー定義
+   async関数と、さらに深い制御フローへ適用範囲を広げる。
 
 ## 7. Promise.all fan-in
 
@@ -423,3 +423,18 @@ join stateに保持して`thaw_runtime_drain_detached`で回収する。LLVMは`
 handle-array生成経路から`thaw_promise_any`を呼び出す。Runtime testは先行reject、後続成功、
 全reject、空入力、重複とdrainを、E2E testはarray variable、全native value shape、全失敗の
 `try/catch`伝播を単一実行ファイルで検査する。
+
+## 10. Promise.allSettled
+
+本来のTypeScript型はfulfilled/rejectedの判別共用体だが、現段階のHIRには一般的なunion narrowingが
+ない。そのため`Promise.allSettled(Promise<T>[])`は、共通の
+`{ status: string; value: T; reason: string }[]`として表す。fulfilled要素は`reason`が空文字、
+rejected要素は`value`がネイティブ表現のゼロ値になる。利用側は`status`を確認して対応するfieldを読む。
+
+runtimeは全distinct handleをsubscribeし、各入力indexに3-field objectを構築する。成功・失敗に関係なく
+全childがsettleした時点で親をfulfilledにし、入力順を維持したobject pointer配列を返す。同一handleは
+一度だけsubscribeし、その結果を全該当indexへ複製する。空入力は即座に空配列としてfulfilledになる。
+
+LLVMは要素型から1-byte booleanまたは8-byte native slotのコピー幅を渡し、既存のObject/Array配置と
+`PropAccess`をそのまま利用する。E2E testは成功・失敗混在、順序、空配列、Promise配列変数、全native
+value shapeを単一実行ファイルで検査する。

@@ -457,6 +457,14 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
     }
 }
 
+fn promise_settled_result_type(value: HirType) -> HirType {
+    HirType::Object(vec![
+        ("status".into(), HirType::Str),
+        ("value".into(), value),
+        ("reason".into(), HirType::Str),
+    ])
+}
+
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     fn fingerprint(ty: &HirType) -> String {
         match ty {
@@ -1522,6 +1530,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
+        | HirExpr::PromiseAllSettledArray(value, _)
         | HirExpr::ArrayLen(value)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
@@ -1534,7 +1543,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::PromiseAll(args, _)
         | HirExpr::PromiseAllTuple(args, _)
         | HirExpr::PromiseRace(args, _)
-        | HirExpr::PromiseAny(args, _) => {
+        | HirExpr::PromiseAny(args, _)
+        | HirExpr::PromiseAllSettled(args, _) => {
             for arg in args {
                 collect_referenced_bindings(arg, names);
             }
@@ -2235,6 +2245,10 @@ impl<'a> FnLowerer<'a> {
             | HirExpr::PromiseAnyArray(_, element) => {
                 Ok(HirType::Promise(Box::new(element.clone())))
             }
+            HirExpr::PromiseAllSettled(_, element)
+            | HirExpr::PromiseAllSettledArray(_, element) => Ok(HirType::Promise(Box::new(
+                HirType::Array(Box::new(promise_settled_result_type(element.clone()))),
+            ))),
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
                 let Some(first) = values.first() else {
@@ -2845,6 +2859,74 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::PromiseAll(promises, first));
             }
             return Ok(HirExpr::PromiseAllTuple(promises, element_types));
+        }
+
+        if callee_name == "Promise.allSettled" {
+            let [arg] = call.args.as_slice() else {
+                return Err("`Promise.allSettled` expects exactly one array argument".into());
+            };
+            if arg.spread.is_some() {
+                return Err("spread arguments are not supported in `Promise.allSettled`".into());
+            }
+            let Expr::Array(array) = arg.expr.as_ref() else {
+                let values = self.lower_expr(&arg.expr)?;
+                let HirType::Array(element) = self.infer_expr_type(&values)? else {
+                    return Err("`Promise.allSettled` expects an array of promises".into());
+                };
+                let HirType::Promise(element) = *element else {
+                    return Err("`Promise.allSettled` expects an array of promises".into());
+                };
+                if *element == HirType::Void {
+                    return Err("`Promise.allSettled` elements must not resolve to void".into());
+                }
+                return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), *element));
+            };
+            let mut element_type = None;
+            let promises = array
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    let Some(element) = element else {
+                        return Err(format!("Promise.allSettled element {index} is missing"));
+                    };
+                    if element.spread.is_some() {
+                        return Err(
+                            "spread elements are not supported in `Promise.allSettled`".into(),
+                        );
+                    }
+                    let value = self.lower_expr(&element.expr)?;
+                    let resolved = match self.infer_expr_type(&value)? {
+                        HirType::Promise(inner) => *inner,
+                        returned
+                            if matches!(&value, HirExpr::Call(callee, _)
+                                if matches!(callee.as_ref(), HirExpr::Var(name)
+                                    if self.signatures.get(name).is_some_and(|signature| signature.is_async))) => returned,
+                        other => Err(format!(
+                            "Promise.allSettled element {index} must be a Promise, got {other:?}"
+                        ))?,
+                    };
+                    if resolved == HirType::Void {
+                        return Err(format!(
+                            "Promise.allSettled element {index} resolves to void"
+                        ));
+                    }
+                    if let Some(expected) = &element_type {
+                        if expected != &resolved {
+                            return Err(format!(
+                                "Promise.allSettled element {index} resolves to {resolved:?}, expected {expected:?}"
+                            ));
+                        }
+                    } else {
+                        element_type = Some(resolved);
+                    }
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(HirExpr::PromiseAllSettled(
+                promises,
+                element_type.unwrap_or(HirType::F64),
+            ));
         }
 
         if callee_name == "Promise.race" {
@@ -4027,6 +4109,31 @@ mod tests {
         assert!(lower_module(&plain)
             .unwrap_err()
             .contains("Promise.any element 0 must be a Promise"));
+    }
+
+    #[test]
+    fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
+        let mixed = thaw_parser::parse_typescript(
+            r#"
+            async function numberValue(): Promise<number> { return 1; }
+            async function stringValue(): Promise<string> { return "x"; }
+            async function main(): Promise<void> {
+                await Promise.allSettled([numberValue(), stringValue()]);
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(lower_module(&mixed)
+            .unwrap_err()
+            .contains("Promise.allSettled element 1 resolves to Str, expected F64"));
+
+        let plain = thaw_parser::parse_typescript(
+            "async function main(): Promise<void> { await Promise.allSettled([1]); }",
+        )
+        .unwrap();
+        assert!(lower_module(&plain)
+            .unwrap_err()
+            .contains("Promise.allSettled element 0 must be a Promise"));
     }
 
     #[test]
