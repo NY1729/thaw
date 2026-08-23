@@ -147,10 +147,13 @@ pub enum HirExpr {
     /// A homogeneous `Promise.allSettled` supplied through an array value.
     PromiseAllSettledArray(Box<HirExpr>, HirType),
     /// `new Promise<T>((resolve, reject) => ...)`.
-    PromiseNew(Box<HirExpr>, HirType),
+    PromiseNew(Box<HirExpr>, HirType, bool),
     /// A typed `.then`/`.catch` continuation. `on_rejected` distinguishes
     /// catch from then while retaining the input and output native layouts.
     PromiseThen(Box<HirExpr>, Box<HirExpr>, HirType, HirType, bool, bool),
+    /// A `.finally` continuation. The callback return type records whether
+    /// codegen must wait for a returned Promise before forwarding settlement.
+    PromiseFinally(Box<HirExpr>, Box<HirExpr>, HirType, HirType),
     /// A legacy/direct await form, retained for void event sources and the
     /// synchronous fallback path. Frame splitting extracts real suspension
     /// points before ordinary expression code generation.
@@ -162,6 +165,8 @@ pub enum HirExpr {
     /// the body in deterministic name order, followed by ordinary parameters,
     /// the return type, and the body itself.
     Lambda(Vec<HirParam>, Vec<HirParam>, HirType, Box<HirExpr>),
+    /// A top-level function adapted to the closure ABI when used as a value.
+    FunctionRef(String, Vec<HirType>, HirType),
     Block(Vec<HirStmt>),
     FfiCall(FfiSignature, Vec<HirExpr>),
     DynamicCall(DynamicSignature, Vec<HirExpr>),
@@ -326,8 +331,12 @@ pub fn set_ffi_error_abi(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
-            HirExpr::PromiseNew(executor, _) => visit_expr(executor, symbol, abi, found),
+            HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+                visit_expr(source, symbol, abi, found);
+                visit_expr(callback, symbol, abi, found);
+            }
+            HirExpr::PromiseFinally(source, callback, _, _) => {
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
             }
@@ -359,7 +368,7 @@ pub fn set_ffi_error_abi(
                 visit_expr(object, symbol, abi, found);
                 visit_expr(value, symbol, abi, found);
             }
-            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) => {}
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
         }
     }
 
@@ -461,10 +470,14 @@ pub fn set_ffi_ownership(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner) => update_expr(inner, symbol, returns, errors, found),
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
-            HirExpr::PromiseNew(executor, _) => {
+            HirExpr::PromiseNew(executor, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
             }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+                update_expr(source, symbol, returns, errors, found);
+                update_expr(callback, symbol, returns, errors, found);
+            }
+            HirExpr::PromiseFinally(source, callback, _, _) => {
                 update_expr(source, symbol, returns, errors, found);
                 update_expr(callback, symbol, returns, errors, found);
             }
@@ -486,7 +499,7 @@ pub fn set_ffi_ownership(
                 update_expr(object, symbol, returns, errors, found);
                 update_expr(value, symbol, returns, errors, found);
             }
-            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) => {}
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
         }
     }
     fn update_stmts(
@@ -614,10 +627,14 @@ pub fn set_ffi_string_abi(
             HirExpr::Lambda(_, _, _, body) => {
                 update_expr(body, symbol, params, returns, calling_convention, found)
             }
-            HirExpr::PromiseNew(executor, _) => {
+            HirExpr::PromiseNew(executor, _, _) => {
                 update_expr(executor, symbol, params, returns, calling_convention, found)
             }
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+                update_expr(source, symbol, params, returns, calling_convention, found);
+                update_expr(callback, symbol, params, returns, calling_convention, found);
+            }
+            HirExpr::PromiseFinally(source, callback, _, _) => {
                 update_expr(source, symbol, params, returns, calling_convention, found);
                 update_expr(callback, symbol, params, returns, calling_convention, found);
             }
@@ -641,7 +658,7 @@ pub fn set_ffi_string_abi(
                 update_expr(object, symbol, params, returns, calling_convention, found);
                 update_expr(value, symbol, params, returns, calling_convention, found);
             }
-            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) => {}
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
         }
     }
     fn update_stmts(

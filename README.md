@@ -263,6 +263,12 @@ The workspace crates have narrow responsibilities:
   executors. `.then()` transforms resolved values, `.catch()` recovers rejected
   values, returned Promises are flattened, and callback/executor throws reject
   the derived Promise
+- `.finally()` runs for either settlement, preserves the original value/error,
+  waits for returned Promises, and replaces the result when cleanup throws or
+  rejects. Promise callbacks accept arrows, function variables, and named
+  functions; constructor `T` is inferred from consistent `resolve(value)` calls
+- Resolving with another native Promise adopts its eventual state, while a
+  self-resolution cycle becomes an explicit rejection
 - `await` in an `if` condition resumes before selecting the branch; awaits in
   then/else bodies use guarded states, so the inactive branch creates no
   Promise
@@ -313,12 +319,11 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
-- Arbitrary third-party Promise implementations, `.finally`, constructor or
-  continuation callbacks other than typed arrow functions, and implicit type
-  inference for `new Promise` without an explicit `T`. Native and user-created
-  Promise values work across locals, parameters, fields, chains, and the four
-  implemented static combinators. Full discriminated-union narrowing remains
-  unsupported
+- Arbitrary foreign thenable objects and inference from resolve expressions
+  that depend on executor-local variables. Native and user-created Promise
+  values work across locals, parameters, fields, chains, named callbacks,
+  `.finally`, and the four implemented static combinators. Full
+  discriminated-union narrowing remains unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
