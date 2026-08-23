@@ -266,7 +266,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Await(inner) => {
                 matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
-                        if name == "sleep" || name == "fetch" || frame_functions.contains(name)))
+                        if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
                     || Self::expr_awaits_frame_source(inner, frame_functions)
             }
             HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
@@ -628,6 +628,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_promise_destroy",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_all_f64",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false),
             Some(Linkage::External),
         );
     }
@@ -1852,7 +1857,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Await(inner) => {
                 matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
-                        if name == "fetch" || frame_names.contains(name)))
+                        if name == "fetch" || name == "Promise.all" || frame_names.contains(name)))
                     || Self::expr_awaits_named_async(inner, frame_names)
             }
             HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
@@ -1873,7 +1878,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn is_frame_await_source(&self, expr: &HirExpr) -> bool {
         matches!(expr, HirExpr::Call(callee, _)
             if matches!(callee.as_ref(), HirExpr::Var(name)
-                if name == "sleep" || name == "fetch" || self.frame_async_functions.contains_key(name)))
+                if name == "sleep" || name == "fetch" || name == "Promise.all" || self.frame_async_functions.contains_key(name)))
     }
 
     fn extract_first_frame_await_from_stmt(
@@ -1906,6 +1911,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                     HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                         HirType::Str
+                    }
+                    HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "Promise.all") => {
+                        HirType::Array(Box::new(HirType::F64))
                     }
                     HirExpr::Call(callee, _) => {
                         let HirExpr::Var(name) = callee.as_ref() else {
@@ -4947,6 +4955,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "console.log" => return self.compile_console_log(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
+            "Promise.all" => return self.compile_promise_all(args),
             "JSON.parse" => {
                 return self.compile_single_arg_call("thaw_json_parse", args, "JSON.parse")
             }
@@ -5033,6 +5042,61 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_sleep_ms did not return a promise".to_string())
+    }
+
+    fn compile_promise_all(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        let promises = if args.is_empty() {
+            ptr_type.const_null()
+        } else {
+            let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+            let storage = self
+                .builder
+                .build_call(
+                    arena_alloc,
+                    &[
+                        i64_type.const_int((args.len() * 8) as u64, false).into(),
+                        i64_type.const_int(8, false).into(),
+                    ],
+                    "promise_all_storage",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_pointer_value();
+            for (index, arg) in args.iter().enumerate() {
+                let promise = self.compile_expr(arg)?.into_pointer_value();
+                let slot = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            ptr_type,
+                            storage,
+                            &[i64_type.const_int(index as u64, false)],
+                            "promise_all_slot",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                self.builder
+                    .build_store(slot, promise)
+                    .map_err(|error| error.to_string())?;
+            }
+            storage
+        };
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_all_f64").unwrap(),
+                &[
+                    promises.into(),
+                    i64_type.const_int(args.len() as u64, false).into(),
+                ],
+                "promise_all",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_promise_all_f64 did not return a promise".to_string())
     }
 
     fn compile_await(&mut self, inner: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
@@ -7199,6 +7263,84 @@ mod tests {
         assert!(ir.contains("call ptr @compute()"));
         assert!(ir.contains("awaited_value"));
         assert_eq!(compile_and_run(source, "await_async_result"), "42\n");
+    }
+
+    #[test]
+    fn frame_split_promise_all_preserves_order_and_supports_empty_arrays() {
+        let source = r#"
+            async function delayed(value: number, milliseconds: number): Promise<number> {
+                await sleep(milliseconds);
+                return value;
+            }
+
+            async function main(): Promise<void> {
+                const values: number[] = await Promise.all([
+                    delayed(1, 45),
+                    delayed(2, 5),
+                    delayed(3, 20)
+                ]);
+                console.log(values[0]);
+                console.log(values[1]);
+                console.log(values[2]);
+                console.log(values.length);
+                const empty: number[] = await Promise.all([]);
+                console.log(empty.length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_order"),
+            "1\n2\n3\n3\n0\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_rejection_enters_nearest_catch() {
+        let source = r#"
+            async function succeeds(): Promise<number> {
+                await sleep(10);
+                return 1;
+            }
+
+            async function fails(): Promise<number> {
+                await sleep(2);
+                throw "joined failure";
+            }
+
+            async function main(): Promise<void> {
+                try {
+                    const values: number[] = await Promise.all([succeeds(), fails()]);
+                    console.log(values[0]);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_rejection"),
+            "joined failure\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_composes_with_if_and_while() {
+        let source = r#"
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                return value;
+            }
+
+            async function main(): Promise<void> {
+                let value: number = 0;
+                if (value === 0) {
+                    value = (await Promise.all([delayed(1)]))[0];
+                }
+                while (value < 3) {
+                    value = (await Promise.all([delayed(value + 1)]))[0];
+                }
+                console.log(value);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "promise_all_control_flow"), "3\n");
     }
 
     #[test]

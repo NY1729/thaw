@@ -375,5 +375,22 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    Lambda ハンドラでの逐次 `await` はこれで完全にカバーできる。
 2. `fetch`/`std` の実装と合わせて、V1 の「ブロッキング呼び出しに
    脱糖する」対象を増やしていく。
-3. `Promise.all` 等の並行実行が実際に要求される段階になったら、
-   4章の設計を土台に V2 に着手する。
+3. `Promise.all`のhomogeneous number fan-inは7章の形で実装済み。次は同じ
+   schedulerをheterogeneous tupleと他のPromise結合子へ一般化する。
+
+## 7. Promise.all fan-in
+
+`Promise.all([p0, p1, ...])`は現在、homogeneousな`Promise<number>`のarray literalに
+限定してHIRへ取り込む。lowering後は`Call("Promise.all", children)`となり、戻り型は
+`Promise<number[]>`である。空配列は許可し、非Promiseまたはnumber以外の要素は要素番号を
+含むコンパイルエラーにする。
+
+LLVMは全child callを先に評価し、handle配列を`thaw_promise_all_f64`へ渡す。runtimeは全handleへ
+同時にsubscribeし、入力indexのarena slotへ結果をコピーするため、完了順が変わっても結果順は
+変わらない。結果は`[i64 len][f64...]`へのpointerを格納したtyped result slotとして親Promiseへ
+渡し、通常のframe resume ABIから読み取る。
+
+最初に観測したreject pointerを保持し、それ以後の成功値は無視する。未完了childをLambda request
+境界の外へ残さないため、全child callbackを回収してhandleを破棄した時点で親をrejectする。
+runtime testは空配列、順序、最初のerror、3本の80ms timerが直列化されないことを検査する。
+LLVM E2Eはユーザー定義async関数、`if`、`while`、`try/catch`との合成を単一実行ファイルで検査する。

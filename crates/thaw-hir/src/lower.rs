@@ -67,6 +67,7 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
 struct FnSignature {
     params: Vec<HirType>,
     ret: HirType,
+    is_async: bool,
     /// A function declared with no body (`declare function foo(...): T;`,
     /// or the same syntax without `declare` in a regular `.ts` file --
     /// SWC represents both identically, `body: None`). See
@@ -246,6 +247,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                     FnSignature {
                         params,
                         ret,
+                        is_async: func.is_async,
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
                         generic_type_params,
@@ -2096,6 +2098,25 @@ impl<'a> FnLowerer<'a> {
                     "console.log" => return Ok(HirType::F64),
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
+                    "Promise.all" => {
+                        for (index, arg) in args.iter().enumerate() {
+                            match self.infer_expr_type(arg)? {
+                                HirType::Promise(value) if *value == HirType::F64 => {}
+                                HirType::F64
+                                    if matches!(arg, HirExpr::Call(callee, _)
+                                        if matches!(callee.as_ref(), HirExpr::Var(name)
+                                            if self.signatures.get(name).is_some_and(|signature| signature.is_async && signature.ret == HirType::F64))) => {}
+                                other => {
+                                    return Err(format!(
+                                        "Promise.all element {index} must be Promise<number>, got {other:?}"
+                                    ))
+                                }
+                            }
+                        }
+                        return Ok(HirType::Promise(Box::new(HirType::Array(Box::new(
+                            HirType::F64,
+                        )))));
+                    }
                     "JSON.parse" => return Ok(HirType::Json),
                     "JSON.stringify" => return Ok(HirType::Str),
                     // QuickJS-NG fallback path (docs/design/bridge.md
@@ -2667,6 +2688,46 @@ impl<'a> FnLowerer<'a> {
                     .into(),
             ),
         };
+
+        if callee_name == "Promise.all" {
+            let [arg] = call.args.as_slice() else {
+                return Err("`Promise.all` expects exactly one array argument".into());
+            };
+            if arg.spread.is_some() {
+                return Err("spread arguments are not supported in `Promise.all`".into());
+            }
+            let Expr::Array(array) = arg.expr.as_ref() else {
+                return Err("`Promise.all` currently requires an array literal".into());
+            };
+            let promises = array
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    let Some(element) = element else {
+                        return Err(format!("Promise.all element {index} is missing"));
+                    };
+                    if element.spread.is_some() {
+                        return Err("spread elements are not supported in `Promise.all`".into());
+                    }
+                    let value = self.lower_expr(&element.expr)?;
+                    match self.infer_expr_type(&value)? {
+                        HirType::Promise(inner) if *inner == HirType::F64 => Ok(value),
+                        HirType::F64
+                            if matches!(&value, HirExpr::Call(callee, _)
+                                if matches!(callee.as_ref(), HirExpr::Var(name)
+                                    if self.signatures.get(name).is_some_and(|signature| signature.is_async && signature.ret == HirType::F64))) => Ok(value),
+                        other => Err(format!(
+                            "Promise.all element {index} must be Promise<number>, got {other:?}"
+                        )),
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("Promise.all".into())),
+                promises,
+            ));
+        }
 
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
         // value. Unlike `console.log` (whose codegen can disambiguate its
@@ -3628,6 +3689,25 @@ mod tests {
             .unwrap(),
             HirType::Void
         );
+    }
+
+    #[test]
+    fn promise_all_requires_homogeneous_number_promises() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            async function value(): Promise<number> {
+                await sleep(1);
+                return 1;
+            }
+            async function main(): Promise<void> {
+                const values: number[] = await Promise.all([value(), sleep(1)]);
+                console.log(values.length);
+            }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("Promise.all element 1 must be Promise<number>"));
     }
 
     #[test]
