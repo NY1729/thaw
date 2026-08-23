@@ -922,6 +922,13 @@ HTTP response bodyとして送信する。capture entryは値のコピーでは�
 variable cellを指すため、closure生成後に外側で行った代入とclosure内の代入を
 双方から観測できる。nested closureが作成元の呼び出しを抜けた後もcellは有効である。
 
+objectのfunction型propertyは一般のclosureとして呼び出せる。これを利用した
+`createServer(callback).listen(port)` は、callbackへ
+`IncomingMessage { method, url }` と
+`ServerResponse { statusCode, setHeader, write, end }` を渡す。status、header、分割write、
+endの本文は実際のHTTP responseへ反映される。現在の `listen` は1リクエストを同期的に
+処理して返る最小sliceであり、継続待受け、close、イベントループ統合は次段階である。
+
 これはNode互換の `createServer` そのものではない。次の段階では関数型、arrow
 function、closure capture、request/response object methodをHIRとLLVMへ通し、
 `createServer((req, res) => ...)` を表現できる呼び出し規約へ拡張する必要がある。

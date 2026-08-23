@@ -4653,7 +4653,20 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let HirExpr::Var(name) = callee else {
-            return Err("call target must be a plain name in Phase 0/1".to_string());
+            if let HirExpr::PropAccess(_, HirType::Object(fields), field) = callee {
+                if let Some((_, HirType::Function(params, ret))) =
+                    fields.iter().find(|(name, _)| name == field)
+                {
+                    return self.compile_closure_call(
+                        callee,
+                        params,
+                        ret,
+                        args,
+                        &format!("method `{field}`"),
+                    );
+                }
+            }
+            return Err("call target is not a compiled function value".to_string());
         };
 
         match name.as_str() {
@@ -4675,36 +4688,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         if let Some(HirType::Function(params, ret)) = self.variable_hir_types.get(name).cloned() {
-            let function_type = self.function_type(&params, &ret)?;
-            let closure = self.compile_expr(callee)?.into_pointer_value();
-            let function_pointer = self
-                .builder
-                .build_load(
-                    self.context.ptr_type(AddressSpace::default()),
-                    closure,
-                    "closure_code",
-                )
-                .map_err(|error| error.to_string())?
-                .into_pointer_value();
-            let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
-            compiled_args.extend(
-                args.iter()
-                    .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
-            let call = self
-                .builder
-                .build_indirect_call(
-                    function_type,
-                    function_pointer,
-                    &compiled_args,
-                    "lambda_call",
-                )
-                .map_err(|error| error.to_string())?;
-            return call
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| format!("function value `{name}` does not return a value"));
+            return self.compile_closure_call(callee, &params, &ret, args, name);
         }
 
         let symbol = Self::llvm_symbol_for(name);
@@ -4714,6 +4698,45 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| format!("call to undeclared function `{name}`"))?;
 
         self.build_call_with(function, args, name)
+    }
+
+    fn compile_closure_call(
+        &mut self,
+        callee: &HirExpr,
+        params: &[HirType],
+        ret: &HirType,
+        args: &[HirExpr],
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let function_type = self.function_type(params, ret)?;
+        let closure = self.compile_expr(callee)?.into_pointer_value();
+        let function_pointer = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                closure,
+                "closure_code",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
+        compiled_args.extend(
+            args.iter()
+                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let call = self
+            .builder
+            .build_indirect_call(
+                function_type,
+                function_pointer,
+                &compiled_args,
+                "closure_call",
+            )
+            .map_err(|error| error.to_string())?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("function value `{name}` does not return a value"))
     }
 
     fn compile_sleep(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
@@ -5744,6 +5767,21 @@ mod tests {
             compile_and_run(source, "mutable_captured_arrow"),
             "41\n42\n42\n"
         );
+    }
+
+    #[test]
+    fn calls_a_closure_stored_in_an_object_property() {
+        let source = r#"
+            interface Operations { apply: (value: number) => number; }
+            function main(): void {
+                const offset: number = 40;
+                const operations: Operations = {
+                    apply: (value: number): number => offset + value
+                };
+                console.log(operations.apply(2));
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "object_method_closure"), "42\n");
     }
 
     #[test]
