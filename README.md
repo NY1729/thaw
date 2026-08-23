@@ -177,6 +177,10 @@ The workspace crates have narrow responsibilities:
   back edges recursively; inactive parents skip the inner condition Promise
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
+- QuickJS throws and Promise rejections use a native `{ value, error }` result
+  ABI and propagate through Thaw `try/catch/finally`
+- Uncaught Lambda handler exceptions are posted to the Runtime API invocation
+  error endpoint with their original message
 
 ### Not yet compatible
 
@@ -187,7 +191,7 @@ The workspace crates have narrow responsibilities:
   value-returning/general user-defined Promise async functions and concurrent
   promise combinators. Other user-defined async calls still use the synchronous
   V1 ABI
-- Exception propagation through external C/QuickJS calls
+- Exception propagation through external C calls that use the legacy direct ABI
 - Full Node.js module resolution, all core modules and the complete Node global
   API
 - Full ESM semantics and a parser-backed production bundler
