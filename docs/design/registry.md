@@ -942,9 +942,10 @@ process lifecycle loopが終了する。`listen(port, callback)` のcallbackはl
 event loop開始時に、`close(callback)` のcallbackはaccept済み接続がすべて完了した後に
 単一thread上で呼ばれる。`server.on(event, callback)` は `listening`、`close`、`error` の
 listenerを複数、登録順に保持し、再listen後も残す。listen/closeへ直接渡したcallbackは
-一回だけ発火する。`on("error", (error: string) => ...)` は引数付きの内部ABIへloweringされ、
-不正portを `ERR_SOCKET_BAD_PORT`、bind競合を `EADDRINUSE`、その他のlisten失敗を説明文として
-登録順に通知する。Node互換の構造化Error objectと未処理errorのprocess failureは次段階である。
+一回だけ発火する。`on("error", callback)` は引数付きの内部ABIへloweringされ、`message`、
+`code`、`syscall`、`address`、`port`を持つ構造化objectを登録順に通知する。不正portは
+`ERR_SOCKET_BAD_PORT`、bind競合は`EADDRINUSE`となる。listenerのないerrorをprocess failureへ
+変換する処理は次段階である。
 
 ## 23. platform optional dependencyのN-API prebuild
 
@@ -968,8 +969,16 @@ native側へ戻して、単一実行ファイルが`42`を出力するところ�
 
 この経路はnative HIRのPromise constructor/chainテストとは独立しており、実パッケージ内の
 class/function closure、CommonJS dependency、QuickJS Promise、Json marshalが同時に成立する
-ことを確認する。packageが返すcallable object自体をnative typed valueとして保持する汎用ABIは
-まだないため、現段階ではpackage内部のworkloadをJSON化可能なexported resultへ閉じ込める。
+ことを確認する。`JsValue`はQuickJS realm内のcallableをopaque handleとして保持し、closure
+identityを失わず`callDynamicValue(handle, Json)`で呼び出す。p-limit workloadもこのhandle
+経路を通す。引数と結果は引き続きJSONであり、呼び出し結果として返る別のcallable handleや
+任意objectのproperty操作は次段階である。
+
+## 25. Node風の構造化listen error
+
+`node:http`の`server.on("error", callback)`は文字列ではなく、`message`、`code`、`syscall`、
+`address`、`port`を持つobjectを渡す。単一実行ファイルの実socketテストで、不正portと
+bind競合のcodeをfield accessして検証する。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

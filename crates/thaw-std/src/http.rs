@@ -302,7 +302,7 @@ struct ServerState {
     close_listeners: Mutex<Vec<EventListener>>,
     error_listeners: Mutex<Vec<EventListener>>,
     pending_listening: AtomicBool,
-    pending_errors: Mutex<Vec<String>>,
+    pending_errors: Mutex<Vec<ServerError>>,
     close_requested: AtomicBool,
 }
 
@@ -407,16 +407,42 @@ fn add_event_listener(listeners: &Mutex<Vec<EventListener>>, callback: *const c_
     }
 }
 
-fn emit_error(listeners: &Mutex<Vec<EventListener>>, message: &str) {
+#[derive(Clone)]
+struct ServerError {
+    message: String,
+    code: String,
+    port: f64,
+}
+
+#[repr(C)]
+struct NativeServerError {
+    message: *const c_char,
+    code: *const c_char,
+    syscall: *const c_char,
+    address: *const c_char,
+    port: f64,
+}
+
+fn emit_error(listeners: &Mutex<Vec<EventListener>>, error: &ServerError) {
     let callbacks = listeners.lock().unwrap().clone();
-    let message = CString::new(message).unwrap_or_default();
+    let message = CString::new(error.message.as_str()).unwrap_or_default();
+    let code = CString::new(error.code.as_str()).unwrap_or_default();
+    let syscall = CString::new("listen").unwrap();
+    let address = CString::new("127.0.0.1").unwrap();
+    let native = NativeServerError {
+        message: message.as_ptr(),
+        code: code.as_ptr(),
+        syscall: syscall.as_ptr(),
+        address: address.as_ptr(),
+        port: error.port,
+    };
     for listener in callbacks {
         let callback = listener.callback as *const c_void;
         unsafe {
-            type Callback = unsafe extern "C" fn(*const c_void, *const c_char);
+            type Callback = unsafe extern "C" fn(*const c_void, *const NativeServerError);
             let code = *(callback as *const *const c_void);
             let callback_fn: Callback = std::mem::transmute(code);
-            callback_fn(callback, message.as_ptr());
+            callback_fn(callback, &native);
         }
     }
 }
@@ -581,7 +607,12 @@ unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *co
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
-        fail_server_listen(state, "ERR_SOCKET_BAD_PORT".into());
+        fail_server_listen(
+            state,
+            "Port should be >= 0 and < 65536".into(),
+            "ERR_SOCKET_BAD_PORT".into(),
+            port,
+        );
         return CString::new("").unwrap().into_raw();
     }
     let listener = match TcpListener::bind(("127.0.0.1", port as u16)) {
@@ -592,12 +623,17 @@ unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *co
             } else {
                 format!("listen failed: {error}")
             };
-            fail_server_listen(state, message);
+            fail_server_listen(state, message.clone(), message, port);
             return CString::new("").unwrap().into_raw();
         }
     };
     if listener.set_nonblocking(true).is_err() {
-        fail_server_listen(state, "failed to configure non-blocking listener".into());
+        fail_server_listen(
+            state,
+            "failed to configure non-blocking listener".into(),
+            "ERR_SERVER_LISTEN".into(),
+            port,
+        );
         return CString::new("").unwrap().into_raw();
     }
     state.closed.store(false, Ordering::Release);
@@ -614,7 +650,12 @@ unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *co
         (state as *const ServerState).cast_mut().cast(),
     );
     if watcher == 0 {
-        fail_server_listen(state, "failed to register listener with event loop".into());
+        fail_server_listen(
+            state,
+            "failed to register listener with event loop".into(),
+            "ERR_SERVER_LISTEN".into(),
+            port,
+        );
         return CString::new("").unwrap().into_raw();
     }
     state.watcher.store(watcher, Ordering::Release);
@@ -634,9 +675,13 @@ unsafe extern "C" fn server_listen_with_callback(
     server_listen(environment, port)
 }
 
-fn fail_server_listen(state: &ServerState, message: String) {
+fn fail_server_listen(state: &ServerState, message: String, code: String, port: f64) {
     state.closed.store(true, Ordering::Release);
-    state.pending_errors.lock().unwrap().push(message);
+    state.pending_errors.lock().unwrap().push(ServerError {
+        message,
+        code,
+        port,
+    });
     *state.listener.lock().unwrap() = None;
     register_server(state);
 }

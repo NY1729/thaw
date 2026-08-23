@@ -1207,6 +1207,9 @@ fn lower_ts_type(
             if ref_name == Some("Json") && ty_ref.type_params.is_none() {
                 return Ok(HirType::Json);
             }
+            if ref_name == Some("JsValue") && ty_ref.type_params.is_none() {
+                return Ok(HirType::JsValue);
+            }
 
             // Otherwise, accept `Array<T>` / `Promise<T>` as the two
             // other built-in generic spellings we recognize.
@@ -2204,6 +2207,8 @@ impl<'a> FnLowerer<'a> {
                     // args in and a `Json` result out.
                     "loadScript" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
+                    "getDynamicValue" => return Ok(HirType::JsValue),
+                    "callDynamicValue" => return Ok(HirType::Json),
                     "loadNativeAddon" => return Ok(HirType::Bool),
                     "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
                     "callNativeAddon" => return Ok(HirType::Json),
@@ -2686,7 +2691,7 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn infer_promise_constructor_type(&mut self, executor: &Expr) -> Result<HirType, String> {
-        use swc_ecma_visit::{Visit, VisitWith};
+        use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
         if let Expr::Ident(ident) = executor {
             let name = self.resolve_binding(ident.sym.as_ref());
@@ -2723,8 +2728,19 @@ impl<'a> FnLowerer<'a> {
         struct ResolveCalls {
             name: Symbol,
             values: Vec<Expr>,
+            locals: HashMap<Symbol, Expr>,
         }
         impl Visit for ResolveCalls {
+            fn visit_var_declarator(&mut self, declarator: &swc_ecma_ast::VarDeclarator) {
+                if let (Pat::Ident(binding), Some(initializer)) =
+                    (&declarator.name, &declarator.init)
+                {
+                    self.locals
+                        .insert(binding.id.sym.to_string(), initializer.as_ref().clone());
+                }
+                declarator.visit_children_with(self);
+            }
+
             fn visit_call_expr(&mut self, call: &CallExpr) {
                 if let Callee::Expr(callee) = &call.callee {
                     if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == self.name) {
@@ -2741,10 +2757,37 @@ impl<'a> FnLowerer<'a> {
         let mut calls = ResolveCalls {
             name: resolve_binding.id.sym.to_string(),
             values: Vec::new(),
+            locals: HashMap::new(),
         };
         arrow.body.visit_with(&mut calls);
+
+        struct ExpandExecutorLocals<'a> {
+            locals: &'a HashMap<Symbol, Expr>,
+            expanding: BTreeSet<Symbol>,
+        }
+        impl VisitMut for ExpandExecutorLocals<'_> {
+            fn visit_mut_expr(&mut self, expr: &mut Expr) {
+                if let Expr::Ident(ident) = expr {
+                    let name = ident.sym.to_string();
+                    if let Some(initializer) = self.locals.get(&name) {
+                        if self.expanding.insert(name.clone()) {
+                            let mut replacement = initializer.clone();
+                            replacement.visit_mut_with(self);
+                            self.expanding.remove(&name);
+                            *expr = replacement;
+                        }
+                        return;
+                    }
+                }
+                expr.visit_mut_children_with(self);
+            }
+        }
         let mut inferred = None;
-        for value in calls.values {
+        for mut value in calls.values {
+            value.visit_mut_with(&mut ExpandExecutorLocals {
+                locals: &calls.locals,
+                expanding: BTreeSet::new(),
+            });
             let value = self.lower_expr(&value).map_err(|error| {
                 format!("cannot infer Promise type from resolve argument: {error}")
             })?;
@@ -4435,6 +4478,21 @@ mod tests {
         );
         assert!(matches!(
             &program.functions[0].body[0],
+            HirStmt::Let(_, HirType::F64, HirExpr::AwaitPromise(_, HirType::F64))
+        ));
+
+        let local_program = lower(
+            r#"async function main(): Promise<void> {
+                const value: number = await new Promise((resolve, reject) => {
+                    const base = 20;
+                    const answer = base + 22;
+                    resolve(answer);
+                });
+                console.log(value);
+            }"#,
+        );
+        assert!(matches!(
+            &local_program.functions[0].body[0],
             HirStmt::Let(_, HirType::F64, HirExpr::AwaitPromise(_, HirType::F64))
         ));
 

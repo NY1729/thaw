@@ -537,6 +537,16 @@ impl<'ctx> HirCompiler<'ctx> {
             js_call_result_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_js_get_global",
+            self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         self.module
             .add_function("thaw_napi_load", js_load_type, Some(Linkage::External));
         self.module.add_function(
@@ -760,6 +770,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // family as everything else -- only `thaw_json_*` (thaw-std)
             // ever dereferences it.
             HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             other => Err(format!(
@@ -4506,6 +4517,20 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_backend_call(args, "thaw_js_call_result", "callDynamic")
     }
 
+    fn compile_get_dynamic_value(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_single_arg_call("thaw_js_get_global", args, "getDynamicValue")
+    }
+
+    fn compile_call_dynamic_value(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_json_backend_call(args, "thaw_js_call_handle_result", "callDynamicValue")
+    }
+
     fn compile_typed_dynamic_call(
         &mut self,
         signature: &DynamicSignature,
@@ -5194,6 +5219,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
+            "getDynamicValue" => return self.compile_get_dynamic_value(args),
+            "callDynamicValue" => return self.compile_call_dynamic_value(args),
             "loadNativeAddon" => return self.compile_load_native_addon(args),
             "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
             "callNativeAddon" => return self.compile_call_native_addon(args),
@@ -7844,7 +7871,7 @@ mod tests {
         let source = r#"
             function main(): void {
                 const ok: boolean = loadScript(
-                    "function add(a, b) { return a + b; } function greet(name) { return 'hello, ' + name; } function later(x) { return Promise.resolve(x * 2); }"
+                    "function add(a, b) { return a + b; } function greet(name) { return 'hello, ' + name; } function later(x) { return Promise.resolve(x * 2); } function foreignThenable() { return { then(resolve, reject) { resolve(84); reject('late'); resolve(99); } }; } globalThis.retainedMultiplier = (factor => value => Promise.resolve(value * factor))(2);"
                 );
                 console.log(ok);
 
@@ -7856,11 +7883,18 @@ mod tests {
 
                 const doubled = callDynamic("later", JSON.parse("[21]"));
                 console.log(Number(doubled));
+
+                const assimilated = callDynamic("foreignThenable", JSON.parse("[]"));
+                console.log(Number(assimilated));
+
+                const callable: JsValue = getDynamicValue("retainedMultiplier");
+                const called = callDynamicValue(callable, JSON.parse("[21]"));
+                console.log(Number(called));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "quickjs_fallback"),
-            "true\n5\nhello, thaw\n42\n"
+            "true\n5\nhello, thaw\n42\n84\n42\n"
         );
     }
 
@@ -8006,7 +8040,7 @@ mod tests {
         let source = r#"
             function main(): void {
                 loadScript(
-                    "function boom() { throw new Error('kaboom'); } function later() { return Promise.reject(new Error('nope')); }"
+                    "function boom() { throw new Error('kaboom'); } function later() { return Promise.reject(new Error('nope')); } function badThen() { return Object.create(null, { then: { get() { throw new Error('bad then'); } } }); }"
                 );
                 try {
                     const ignored = callDynamic("boom", JSON.parse("[]"));
@@ -8021,11 +8055,16 @@ mod tests {
                 } catch (error) {
                     console.log(error);
                 }
+                try {
+                    const ignored = callDynamic("badThen", JSON.parse("[]"));
+                } catch (error) {
+                    console.log(error);
+                }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "quickjs_result_abi"),
-            "`boom` threw: kaboom\ncleanup\n`later`'s promise rejected: nope\n"
+            "`boom` threw: kaboom\ncleanup\n`later`'s promise rejected: nope\n`badThen`'s promise rejected: bad then\n"
         );
     }
 
@@ -8936,15 +8975,21 @@ mod tests {
                     console.log(error);
                     return 8;
                 });
+                const inferredLocal: number = await new Promise((resolve, reject) => {
+                    const base = 20;
+                    const answer = base + 22;
+                    resolve(answer);
+                });
                 console.log(await fulfilled);
                 console.log(await recovered);
                 console.log(await callbackThrow);
                 console.log(await executorThrow);
+                console.log(inferredLocal);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "promise_constructor_chains"),
-            "expected failure\nexecutor failure\ncallback failure\n42\n42\n7\n8\n"
+            "expected failure\nexecutor failure\ncallback failure\n42\n42\n7\n8\n42\n"
         );
     }
 

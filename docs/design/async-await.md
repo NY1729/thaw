@@ -473,14 +473,15 @@ callbackのthrowは出力のrejectになる。callbackが`Promise<U>`を返し�
 
 constructorとcontinuationはarrow、関数変数、top-level named functionを受け取る。型引数を
 省略したconstructorはexecutor内の`resolve(value)`を走査し、すべて同じ具体型なら`T`を推論する。
-競合するresolve型はコンパイルエラーにする。executor-local値に依存して静的に型付けできない場合は
-明示的な`T`を要求する。
+競合するresolve型はコンパイルエラーにする。executor-localの`const`/`let` initializer chainも
+展開して推論する。循環するinitializerや代入で後から型が変わる経路では明示的な`T`を要求する。
 
 `.finally(callback)`はfulfilled/rejectedの両方でcallbackを実行し、通常完了なら元のsettlementを
 維持する。callbackのthrow/rejectは出力を置き換え、Promiseを返した場合は完了まで待機する。
 `resolve(nativePromise)`とcontinuationが返すPromiseは`thaw_promise_adopt`でflattenし、自己解決は
-`Chaining cycle detected for promise`としてrejectする。任意の外部thenable objectとの相互運用は
-引き続き未対応である。
+`Chaining cycle detected for promise`としてrejectする。QuickJS fallbackの戻り値はすべてrealmの
+`Promise.resolve`へ通すため、任意の外部thenable、throwする`then` accessor、複数回settleも
+ECMAScriptのPromise解決手順に従う。
 
 HIR、runtime、LLVM、複数TypeScript moduleのLambdaバイナリに加え、npmから取得した
 `p-limit@2.3.0`と依存`p-try@2.2.0`をQuickJS fallbackで実行し、実際のPromise workloadが
