@@ -319,16 +319,20 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
-- Arbitrary foreign thenable objects and inference from resolve expressions
-  that depend on executor-local variables. Native and user-created Promise
-  values work across locals, parameters, fields, chains, named callbacks,
-  `.finally`, and the four implemented static combinators. Full
-  discriminated-union narrowing remains unsupported
+- Native, user-created and foreign thenable values work across locals,
+  parameters, fields, chains, named callbacks, `.finally`, and the four
+  implemented static combinators. Promise constructor inference follows
+  executor-local initializer chains. Full discriminated-union narrowing
+  remains unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
   API
 - Full ESM semantics and a parser-backed production bundler
+- General JavaScript object/property operations across the native boundary.
+  `JsValue` currently retains callable globals and invokes them with JSON
+  arguments/results; handles returned from calls and non-callable objects are
+  the next extension
 - A fully general ABI-description format. Version 3 covers string layouts,
   number-array result ownership and common LLVM calling conventions, but
   target-specific struct packing, variadics and nested aggregate ownership

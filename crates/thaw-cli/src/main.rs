@@ -1831,8 +1831,8 @@ mod tests {
                         server.on("close", (): void => {{
                             console.log("event:close");
                         }});
-                        server.on("error", (error: string): void => {{
-                            console.log(error);
+                        server.on("error", (error: {{ message: string; code: string; syscall: string; address: string; port: number }}): void => {{
+                            console.log(error.code);
                         }});
                         server.listen({}, (): void => {{
                             console.log("listening");
@@ -2567,7 +2567,8 @@ mod tests {
             format!(
                 r#"function main(): void {{
                     loadScript({script_literal});
-                    const result: Json = callDynamic("runThawPLimit", JSON.parse("[]"));
+                    const workload: JsValue = getDynamicValue("runThawPLimit");
+                    const result: Json = callDynamicValue(workload, JSON.parse("[]"));
                     console.log(Number(result.sum));
                 }}"#
             ),

@@ -126,6 +126,19 @@ pub extern "C" fn thaw_js_call_result(
 }
 
 fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, String> {
+    let target: Function = ctx
+        .globals()
+        .get(func_name)
+        .map_err(|_| format!("no such function `{func_name}` (was it loaded via loadScript?)"))?;
+    invoke_impl(ctx, target, func_name, args_json)
+}
+
+fn invoke_impl<'js>(
+    ctx: Ctx<'js>,
+    target: Function<'js>,
+    label: &str,
+    args_json: &str,
+) -> Result<String, String> {
     let to_string_err = |e: rquickjs::Error| e.to_string();
 
     let json: Object = ctx.globals().get("JSON").map_err(to_string_err)?;
@@ -142,31 +155,107 @@ fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, S
         call_args.push_arg(arg).map_err(to_string_err)?;
     }
 
-    let target: Function = ctx
-        .globals()
-        .get(func_name)
-        .map_err(|_| format!("no such function `{func_name}` (was it loaded via loadScript?)"))?;
     let result: Value = target.call_arg(call_args).map_err(|e| match e {
-        rquickjs::Error::Exception => format!("`{func_name}` threw: {}", describe_exception(&ctx)),
-        e => format!("`{func_name}` threw: {e}"),
+        rquickjs::Error::Exception => format!("`{label}` threw: {}", describe_exception(&ctx)),
+        e => format!("`{label}` threw: {e}"),
     })?;
 
-    // V1: drive a returned Promise to completion by polling the job queue,
-    // same shortcut as V1 async/await -- see the module doc comment.
-    let result = match result.as_promise() {
-        Some(promise) => promise.finish::<Value>().map_err(|e| match e {
-            rquickjs::Error::Exception => format!(
-                "`{func_name}`'s promise rejected: {}",
+    // Always pass the result through the realm's Promise resolution
+    // procedure. `Value::as_promise` only recognizes native Promise objects;
+    // `Promise.resolve` also assimilates arbitrary foreign thenables, handles
+    // throwing `then` accessors/calls, and obeys the first-settlement-wins
+    // rule required by JavaScript.
+    let assimilate: Function = ctx
+        .eval("(value) => Promise.resolve(value)")
+        .map_err(to_string_err)?;
+    let promise: rquickjs::Promise = assimilate.call((result,)).map_err(|e| match e {
+        rquickjs::Error::Exception => {
+            format!(
+                "`{label}` could not resolve its result: {}",
                 describe_exception(&ctx)
-            ),
-            e => format!("`{func_name}`'s promise rejected or stalled: {e}"),
-        })?,
-        None => result,
-    };
+            )
+        }
+        e => format!("`{label}` could not resolve its result: {e}"),
+    })?;
+    let result = promise.finish::<Value>().map_err(|e| match e {
+        rquickjs::Error::Exception => {
+            format!("`{label}`'s promise rejected: {}", describe_exception(&ctx))
+        }
+        e => format!("`{label}`'s promise rejected or stalled: {e}"),
+    })?;
 
     stringify
         .call((result,))
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))
+}
+
+/// Retains a global JavaScript value in the realm and returns a stable opaque
+/// handle. Zero denotes failure or a missing value.
+#[no_mangle]
+pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
+    let name = to_str(name);
+    with_context(|ctx| {
+        let Ok(value) = ctx.globals().get::<_, Value>(name.as_str()) else {
+            return 0;
+        };
+        let globals = ctx.globals();
+        let handles: Array = match globals.get("__thaw_value_handles") {
+            Ok(handles) => handles,
+            Err(_) => {
+                let Ok(handles) = Array::new(ctx.clone()) else {
+                    return 0;
+                };
+                if globals
+                    .set("__thaw_value_handles", handles.clone())
+                    .is_err()
+                {
+                    return 0;
+                }
+                handles
+            }
+        };
+        let index = handles.len();
+        if handles.set(index, value).is_err() {
+            return 0;
+        }
+        index as u64 + 1
+    })
+}
+
+/// Calls a callable value retained by [`thaw_js_get_global`]. Arguments and
+/// results use the existing JSON bridge while the callable itself preserves
+/// identity and closures inside QuickJS.
+#[no_mangle]
+pub extern "C" fn thaw_js_call_handle_result(handle: u64, args_json: *const c_char) -> ThawResult {
+    let args_json = to_str(args_json);
+    let result = with_context(|ctx| {
+        if handle == 0 {
+            return Err("invalid JavaScript value handle".to_string());
+        }
+        let handles: Array = ctx
+            .globals()
+            .get("__thaw_value_handles")
+            .map_err(|_| "JavaScript value handle registry is empty".to_string())?;
+        let target: Function = handles
+            .get((handle - 1) as usize)
+            .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+        invoke_impl(
+            ctx,
+            target,
+            &format!("JavaScript value #{handle}"),
+            &args_json,
+        )
+    });
+    match result {
+        Ok(text) => ThawResult {
+            value: CString::new(text).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(reason) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(reason).unwrap_or_default().into_raw(),
+        },
+    }
 }
 
 /// `rquickjs::Error::Exception` doesn't carry the thrown value itself
@@ -246,6 +335,43 @@ mod tests {
             1
         );
         assert_eq!(call("later", "[21]"), "42");
+    }
+
+    #[test]
+    fn retains_and_calls_a_callable_javascript_value() {
+        assert_eq!(
+            load("globalThis.times = factor => value => Promise.resolve(value * factor); globalThis.twice = times(2);"),
+            1
+        );
+        let name = CString::new("twice").unwrap();
+        let handle = thaw_js_get_global(name.as_ptr());
+        assert_ne!(handle, 0);
+        let args = CString::new("[21]").unwrap();
+        let result = thaw_js_call_handle_result(handle, args.as_ptr());
+        assert!(result.error.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn assimilates_foreign_thenables_once_and_reports_then_errors() {
+        assert_eq!(
+            load(
+                "function thenable() {\n\
+                   return { then(resolve, reject) { resolve(42); reject('late'); resolve(99); } };\n\
+                 }\n\
+                 function throwingThen() {\n\
+                   return Object.create(null, { then: { get() { throw new Error('bad then'); } } });\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("thenable", "[]"), "42");
+        let failed = call("throwingThen", "[]");
+        assert!(failed.contains("__thaw_error__"), "{failed}");
+        assert!(failed.contains("bad then"), "{failed}");
     }
 
     #[test]
