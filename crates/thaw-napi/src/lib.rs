@@ -26,6 +26,8 @@ type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
 type NapiFinalize = unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void);
+type NapiThreadsafeFunctionCallJs =
+    unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void);
 const NAPI_OK: NapiStatus = 0;
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
@@ -190,6 +192,14 @@ pub struct Env {
     wraps: HashMap<usize, WrapRecord>,
     instances: HashMap<usize, usize>,
     accessors: HashMap<(usize, String), Accessor>,
+    finalizers: Vec<FinalizeRecord>,
+    instance_data: Option<FinalizeRecord>,
+}
+
+struct FinalizeRecord {
+    data: *mut c_void,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
 }
 
 struct WrapRecord {
@@ -213,6 +223,8 @@ impl Env {
             wraps: HashMap::new(),
             instances: HashMap::new(),
             accessors: HashMap::new(),
+            finalizers: Vec::new(),
+            instance_data: None,
         }
     }
 
@@ -225,6 +237,16 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        if let Some(record) = self.instance_data.take() {
+            if let Some(finalize) = record.finalize {
+                unsafe { finalize(self, record.data, record.hint) };
+            }
+        }
+        for record in std::mem::take(&mut self.finalizers) {
+            if let Some(finalize) = record.finalize {
+                unsafe { finalize(self, record.data, record.hint) };
+            }
+        }
         let wraps = std::mem::take(&mut self.wraps);
         for wrap in wraps.into_values() {
             if let Some(finalize) = wrap.finalize {
@@ -374,6 +396,11 @@ type RegisterV1 = unsafe extern "C" fn(NapiEnv, NapiValue) -> NapiValue;
 unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     let path = CString::new(path).map_err(|_| "addon path contains NUL".to_string())?;
     PENDING_MODULE.with(|slot| slot.borrow_mut().take());
+    // Node exports libuv from its executable. Some otherwise portable N-API
+    // addons (notably serialport) call that API directly, so expose the system
+    // libuv with global symbol visibility before resolving the addon.
+    #[cfg(target_os = "linux")]
+    let uv_handle = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
     libc::dlerror();
     let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
     if handle.is_null() {
@@ -432,6 +459,10 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.functions.extend(functions);
+        #[cfg(target_os = "linux")]
+        if !uv_handle.is_null() {
+            host.libraries.push(uv_handle);
+        }
         host.libraries.push(handle);
         host.module_envs.push(env);
     });
@@ -1132,6 +1163,30 @@ pub unsafe extern "C" fn napi_has_property(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_has_named_property(
+    env: NapiEnv,
+    object: NapiValue,
+    name: *const c_char,
+    result: *mut bool,
+) -> NapiStatus {
+    if name.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(name) = text(name) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = match value_ref(object) {
+        Ok(Value::Object(properties)) => properties.contains_key(&name),
+        Ok(Value::Function(function)) => function.properties.contains_key(&name),
+        _ => false,
+    } || env.accessors.contains_key(&(object as usize, name));
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_define_properties(
     env: NapiEnv,
     object: NapiValue,
@@ -1270,6 +1325,75 @@ pub unsafe extern "C" fn napi_remove_wrap(
     if !result.is_null() {
         *result = wrap.data;
     }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_add_finalizer(
+    env: NapiEnv,
+    object: NapiValue,
+    data: *mut c_void,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+    result: *mut *mut Reference,
+) -> NapiStatus {
+    if !matches!(object.as_ref(), Some(Value::Object(_) | Value::Function(_))) || finalize.is_none()
+    {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    env.finalizers.push(FinalizeRecord {
+        data,
+        finalize,
+        hint,
+    });
+    if !result.is_null() {
+        *result = Box::into_raw(Box::new(Reference {
+            value: object,
+            count: 0,
+        }));
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_set_instance_data(
+    env: NapiEnv,
+    data: *mut c_void,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if env.instance_data.is_some() {
+        return NAPI_GENERIC_FAILURE;
+    }
+    env.instance_data = Some(FinalizeRecord {
+        data,
+        finalize,
+        hint,
+    });
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_instance_data(
+    env: NapiEnv,
+    result: *mut *mut c_void,
+) -> NapiStatus {
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = env
+        .instance_data
+        .as_ref()
+        .map_or(ptr::null_mut(), |record| record.data);
     NAPI_OK
 }
 
@@ -1435,6 +1559,119 @@ pub unsafe extern "C" fn napi_get_value_int32(
         }
         _ => NAPI_NUMBER_EXPECTED,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_uint32(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut u32,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    match value_ref(value) {
+        Ok(Value::Number(number)) => {
+            *out = *number as u32;
+            NAPI_OK
+        }
+        _ => NAPI_NUMBER_EXPECTED,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_int64(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut i64,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    match value_ref(value) {
+        Ok(Value::Number(number)) => {
+            *out = *number as i64;
+            NAPI_OK
+        }
+        _ => NAPI_NUMBER_EXPECTED,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_coerce_to_bool(
+    env: NapiEnv,
+    value: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let boolean = match value_ref(value) {
+        Ok(Value::Undefined | Value::Null) => false,
+        Ok(Value::Bool(value)) => *value,
+        Ok(Value::Number(value)) => *value != 0.0 && !value.is_nan(),
+        Ok(Value::String(value)) => !value.is_empty(),
+        Ok(_) => true,
+        Err(status) => return status,
+    };
+    napi_get_boolean(env, boolean, out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_coerce_to_number(
+    env: NapiEnv,
+    value: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let number = match value_ref(value) {
+        Ok(Value::Undefined) => f64::NAN,
+        Ok(Value::Null) => 0.0,
+        Ok(Value::Bool(value)) => u8::from(*value) as f64,
+        Ok(Value::Number(value)) => *value,
+        Ok(Value::String(value)) => value.trim().parse().unwrap_or(f64::NAN),
+        Ok(_) => f64::NAN,
+        Err(status) => return status,
+    };
+    napi_create_double(env, number, out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_coerce_to_string(
+    env: NapiEnv,
+    value: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let string = match value_ref(value) {
+        Ok(Value::Undefined) => "undefined".into(),
+        Ok(Value::Null) => "null".into(),
+        Ok(Value::Bool(value)) => value.to_string(),
+        Ok(Value::Number(value)) => value.to_string(),
+        Ok(Value::String(value) | Value::Symbol(value) | Value::Error(value)) => value.clone(),
+        Ok(Value::Array(_)) => "".into(),
+        Ok(_) => "[object Object]".into(),
+        Err(status) => return status,
+    };
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::String(string));
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_coerce_to_object(
+    env: NapiEnv,
+    value: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if matches!(value_ref(value), Ok(Value::Object(_) | Value::Function(_))) {
+        return write_value(out, value);
+    }
+    if matches!(value_ref(value), Ok(Value::Undefined | Value::Null)) {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let object = env.alloc(Value::Object(HashMap::from([("value".into(), value)])));
+    write_value(out, object)
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_value_bool(
@@ -1850,6 +2087,19 @@ pub unsafe extern "C" fn napi_call_function(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn napi_make_callback(
+    env: NapiEnv,
+    _async_context: *mut c_void,
+    this_arg: NapiValue,
+    function: NapiValue,
+    argc: usize,
+    argv: *const NapiValue,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    napi_call_function(env, this_arg, function, argc, argv, result)
+}
+
 const NAPI_PENDING_EXCEPTION: NapiStatus = 10;
 
 #[no_mangle]
@@ -1987,6 +2237,66 @@ pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, _context: *mut c_void)
     } else {
         NAPI_OK
     }
+}
+
+// Thread-safe functions require a cross-thread JS callback queue and lifetime
+// tracking that the current single-threaded host does not yet provide. Export
+// the ABI entry points so addons which only use them on optional paths can be
+// loaded; attempting to create one fails explicitly instead of leaving an
+// unresolved dynamic symbol.
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_threadsafe_function(
+    env: NapiEnv,
+    _function: NapiValue,
+    _async_resource: NapiValue,
+    _async_resource_name: NapiValue,
+    _max_queue_size: usize,
+    _initial_thread_count: usize,
+    _thread_finalize_data: *mut c_void,
+    _thread_finalize_callback: Option<NapiFinalize>,
+    _context: *mut c_void,
+    _call_js_callback: Option<NapiThreadsafeFunctionCallJs>,
+    result: *mut *mut c_void,
+) -> NapiStatus {
+    if env.is_null() || result.is_null() {
+        NAPI_INVALID_ARG
+    } else {
+        *result = ptr::null_mut();
+        NAPI_GENERIC_FAILURE
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_call_threadsafe_function(
+    _function: *mut c_void,
+    _data: *mut c_void,
+    _mode: i32,
+) -> NapiStatus {
+    NAPI_GENERIC_FAILURE
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_release_threadsafe_function(
+    _function: *mut c_void,
+    _mode: i32,
+) -> NapiStatus {
+    NAPI_GENERIC_FAILURE
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_ref_threadsafe_function(
+    _env: NapiEnv,
+    _function: *mut c_void,
+) -> NapiStatus {
+    NAPI_GENERIC_FAILURE
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_unref_threadsafe_function(
+    _env: NapiEnv,
+    _function: *mut c_void,
+) -> NapiStatus {
+    NAPI_GENERIC_FAILURE
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_open_escapable_handle_scope(
@@ -2596,6 +2906,22 @@ mod tests {
             let (error, result) = bridge_output.lock().unwrap().take().unwrap();
             assert!(error.is_null());
             assert!(result.as_str().unwrap().starts_with("$2b$04$"));
+        }
+    }
+
+    #[test]
+    fn loads_serialport_class_prebuild_when_supplied() {
+        let Ok(path) = std::env::var("THAW_SERIALPORT_NODE") else {
+            return;
+        };
+        let path = CString::new(path).unwrap();
+        unsafe {
+            assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+            let poller = HOST.with(|host| host.borrow().functions.get("Poller").cloned());
+            assert!(
+                poller.is_some(),
+                "serialport did not export its Poller class"
+            );
         }
     }
 }

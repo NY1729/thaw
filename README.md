@@ -366,6 +366,11 @@ The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
 the host with real synchronous hashing and callback-based asynchronous salt
 generation (`THAW_BCRYPT_NODE=/path/to/bcrypt.glibc.node cargo test -p
 thaw-napi runs_bcrypt_prebuild_when_supplied`).
+The official Linux x64 prebuild from `@serialport/bindings-cpp@12.0.1`
+verifies a real `node-addon-api` class export (`Poller`). Its direct libuv
+references are resolved by exposing the system `libuv.so.1`, matching the
+symbols Node normally provides (`THAW_SERIALPORT_NODE=/path/to/node.napi.glibc.node
+cargo test -p thaw-napi loads_serialport_class_prebuild_when_supplied`).
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
