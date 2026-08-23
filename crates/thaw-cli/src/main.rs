@@ -22,7 +22,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--registry <dir>] [--use <package>]...\n       thaw registry add <package> [--registry <dir>]"
+                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--registry <dir>] [--use <package>]...\n       thaw registry add <package>[@<version>] [--registry <dir>]"
             );
             std::process::exit(1);
         }
@@ -32,7 +32,7 @@ fn main() {
 fn run_registry(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("add") => run_registry_add(&args[1..]),
-        _ => Err("usage: thaw registry add <package> [--registry <dir>]".to_string()),
+        _ => Err("usage: thaw registry add <package>[@<version>] [--registry <dir>]".to_string()),
     }
 }
 
@@ -63,7 +63,15 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    let package = package.ok_or("missing package name (usage: thaw registry add <package>)")?;
+    let package =
+        package.ok_or("missing package name (usage: thaw registry add <package>[@<version>])")?;
+    // `add` accepts an optional `@<version>` suffix (same syntax as `npm
+    // install`) but the registry's own directory is always named after
+    // the bare package name, independent of which version was requested
+    // -- `thaw_registry::package_name` does the same split thaw-registry
+    // itself uses internally, purely for this function's own display
+    // purposes.
+    let name = thaw_registry::package_name(&package);
 
     println!("fetching `{package}`...");
     let added = thaw_registry::add(&registry_dir, &package)?;
@@ -73,8 +81,9 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
         String::new()
     };
     println!(
-        "added `{package}` to `{}`\n  types: {}\n  main:  {}{bundle_note}",
-        registry_dir.join(&package).display(),
+        "added `{name}@{}` to `{}`\n  types: {}\n  main:  {}{bundle_note}",
+        added.resolved_version,
+        registry_dir.join(name).display(),
         added.dts_relative_path,
         added.js_relative_path
     );
