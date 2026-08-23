@@ -1,7 +1,7 @@
 # ネイティブアドオン（`.node`）実行 設計ドキュメント
 
-- ステータス: 設計のみ（未実装）。ユーザー自身が実装する前提で、実装すべき
-  ことを具体的に書き下したもの。
+- ステータス: V1 の最小同期ホストを実装済み。`thaw-napi`、HIR/LLVM、
+  registry/bridge/CLI を統合し、実 `.node` のロードと同期呼び出しを検証済み。
 - 前提: [thaw-quickjs](../../crates/thaw-quickjs)（Fallback パスの既存実装、
   本ドキュメントの設計はこれと**意図的に並行した構造**にする）、
   [thaw-bridge](../../crates/thaw-bridge)、[thaw-registry](registry.md)
@@ -313,3 +313,21 @@ N-API ホスト向けには、同じ関数の中に `loadNativeAddon("<path>")` 
 現実的に多くカバーできる**（`bcrypt.hashSync`/`compareSync`、
 `better-sqlite3` の同期 API 中心の設計など）。まず同期のみで最大公約数を
 取りに行く、という優先順位が妥当と考える。
+
+## 9. 実装結果
+
+`crates/thaw-napi` は `napi_register_module_v1` と
+`napi_module_register` の両登録方式を受け付け、数値・文字列・真偽値・
+object・array・Buffer、同期callback、例外、no-op handle scope を提供する。
+呼び出し引数と結果は QuickJS fallback と同じ JSON 境界を使い、失敗は
+`ThawResult { value, error }` を通じて既存の `try/catch/finally` に入る。
+
+registry は `native.a` と区別して `native.node` を検出する。bridge は
+`callNativeAddon` wrapper と `__thaw_native_module_init` を生成し、LLVM は
+`thaw_napi_load`/`thaw_napi_call_result` を呼ぶ。CLI の最終リンクでは
+`thaw-napi`、`libdl`、`--export-dynamic` を追加し、addon が参照する
+`napi_*` symbol を解決可能にする。
+
+V1 は Linux のローカル `native.node` を対象とする。プリビルドの自動取得、
+`node-gyp`、非同期work、class/wrap/finalizer、および実パッケージ固有APIは
+引き続きスコープ外である。

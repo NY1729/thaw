@@ -213,6 +213,7 @@ struct ResolvedPackage {
     functions: Vec<thaw_bridge::DtsFunction>,
     classifications: Vec<(String, thaw_bridge::Classification)>,
     native_lib: Option<PathBuf>,
+    native_addon: Option<PathBuf>,
     bundle_js: Option<String>,
 }
 
@@ -282,6 +283,7 @@ fn generate_registry_shims(
             functions,
             classifications,
             native_lib: package.native_lib,
+            native_addon: package.native_addon,
             bundle_js: package.bundle_js,
         });
     }
@@ -382,21 +384,34 @@ fn generate_registry_shims(
     let mut shim = String::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
+    let mut native_addons: Vec<(String, String)> = Vec::new();
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
         let native_lib_available = pkg.native_lib.is_some();
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
-        shim.push_str(&thaw_bridge::generate_shim(
-            &pkg.functions,
-            native_lib_available,
-            qualified,
-        ));
+        if pkg.native_addon.is_some() {
+            shim.push_str(&thaw_bridge::generate_native_addon_shim(
+                &pkg.functions,
+                qualified,
+            ));
+        } else {
+            shim.push_str(&thaw_bridge::generate_shim(
+                &pkg.functions,
+                native_lib_available,
+                qualified,
+            ));
+        }
 
         if let Some(native_lib) = &pkg.native_lib {
             native_libs.push(native_lib.clone());
         }
-        if let Some(bundle_js) = &pkg.bundle_js {
+        if let Some(native_addon) = &pkg.native_addon {
+            native_addons.push((
+                pkg.name.clone(),
+                native_addon.to_string_lossy().into_owned(),
+            ));
+        } else if let Some(bundle_js) = &pkg.bundle_js {
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
@@ -434,6 +449,14 @@ fn generate_registry_shims(
         )
         .collect();
     shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
+    let native_addons: Vec<thaw_bridge::NativeAddon<'_>> = native_addons
+        .iter()
+        .map(|(name, path)| thaw_bridge::NativeAddon {
+            package_name: name,
+            path,
+        })
+        .collect();
+    shim.push_str(&thaw_bridge::generate_native_addon_init(&native_addons));
 
     Ok((shim, native_libs, rewrites))
 }
@@ -684,7 +707,7 @@ fn build(
     let obj_path = output.with_extension("o");
     compiler.write_object_file(&obj_path)?;
 
-    // Always link all four: thaw-arena backs array/object allocation
+    // Always link the runtime support crates: thaw-arena backs array/object allocation
     // (Phase 1/2), thaw-runtime backs the Lambda event loop for
     // `handler`-based programs (Phase 2), thaw-std backs `fetch`/`JSON.*`,
     // thaw-quickjs backs `loadScript`/`callDynamic` (the QuickJS-NG
@@ -696,6 +719,7 @@ fn build(
     let runtime_lib = build_staticlib("thaw-runtime")?;
     let std_lib = build_staticlib("thaw-std")?;
     let quickjs_lib = build_staticlib("thaw-quickjs")?;
+    let napi_lib = build_staticlib("thaw-napi")?;
 
     // `--link <path>` lets a program using `declare function` (see
     // docs/design/bridge.md section 6) actually resolve at link time,
@@ -706,10 +730,13 @@ fn build(
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&quickjs_lib)
+        .arg(&napi_lib)
         // QuickJS-NG's C code calls libm math functions directly; `rustc`
         // normally adds `-lm` automatically when it does the final link,
         // but this is a manual `cc` invocation instead.
         .arg("-lm")
+        .arg("-ldl")
+        .arg("-Wl,--export-dynamic")
         .args(&registry_native_libs)
         .args(extra_links)
         .arg("-o")
@@ -855,6 +882,74 @@ mod tests {
                 },
             }
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registry_native_addon_builds_and_runs_end_to_end() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-native-addon-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let package = registry.join("native-add");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export declare function add(argsArray: any): any;\n",
+        )
+        .unwrap();
+        let addon_c = dir.join("addon.c");
+        std::fs::write(&addon_c, r#"
+            #include <stddef.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_get_value_double(napi_env, napi_value, double*);
+            extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            static napi_value add(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_value_double(env, argv[0], &a); napi_get_value_double(env, argv[1], &b);
+                napi_create_double(env, a + b, &result); return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn; napi_create_function(env, "add", 3, add, 0, &fn);
+                napi_set_named_property(env, exports, "add", fn); return exports;
+            }
+        "#).unwrap();
+        assert!(Command::new("cc")
+            .args(["-shared", "-fPIC"])
+            .arg(&addon_c)
+            .arg("-o")
+            .arg(package.join("native.node"))
+            .status()
+            .unwrap()
+            .success());
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            "function main(): void { console.log(Number(add(JSON.parse(\"[20,22]\")))); }\n",
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["native-add".into()],
+        )
+        .unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 

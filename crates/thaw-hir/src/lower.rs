@@ -1932,6 +1932,8 @@ impl<'a> FnLowerer<'a> {
                     // args in and a `Json` result out.
                     "loadScript" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
+                    "loadNativeAddon" => return Ok(HirType::Bool),
+                    "callNativeAddon" => return Ok(HirType::Json),
                     _ => {}
                 }
                 let signature = self.signatures.get(name).or_else(|| {

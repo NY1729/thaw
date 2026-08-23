@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/thaw-llvm", "crates/thaw-parser", "crates/thaw-hir", "crates/thaw-cli", "crates/thaw-arena", "crates/thaw-runtime", "crates/thaw-std", "crates/thaw-bridge", "crates/thaw-quickjs", "crates/thaw-registry"]
+members = ["crates/thaw-llvm", "crates/thaw-parser", "crates/thaw-hir", "crates/thaw-cli", "crates/thaw-arena", "crates/thaw-runtime", "crates/thaw-std", "crates/thaw-bridge", "crates/thaw-quickjs", "crates/thaw-napi", "crates/thaw-registry"]
 
 [workspace.package]
 edition = "2021"

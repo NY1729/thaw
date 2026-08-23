@@ -1048,6 +1048,59 @@ pub fn generate_shim(
     out
 }
 
+/// Generates the same JSON-shaped fallback wrappers as `generate_shim`, but
+/// targets the synchronous N-API host instead of QuickJS.
+pub fn generate_native_addon_shim(
+    functions: &[DtsFunction],
+    qualified: &[QualifiedFallback],
+) -> String {
+    let mut out = String::new();
+    for (function, _) in effective_classifications(functions, false) {
+        if let Some(qualified) = qualified.iter().find(|entry| entry.name == function) {
+            out.push_str("// Fallback (N-API), package-qualified alias\n");
+            out.push_str(&format!(
+                "function {}(argsArray: Json): Json {{\n",
+                qualified.alias
+            ));
+            out.push_str(&format!(
+                "    return callNativeAddon(\"{function}\", argsArray);\n"
+            ));
+            out.push_str("}\n");
+            if qualified.suppress_bare {
+                continue;
+            }
+        }
+        out.push_str("// Fallback (N-API)\n");
+        out.push_str(&format!("function {function}(argsArray: Json): Json {{\n"));
+        out.push_str(&format!(
+            "    return callNativeAddon(\"{function}\", argsArray);\n"
+        ));
+        out.push_str("}\n");
+    }
+    out
+}
+
+pub struct NativeAddon<'a> {
+    pub package_name: &'a str,
+    pub path: &'a str,
+}
+
+pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
+    if addons.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("function __thaw_native_module_init(): void {\n");
+    for addon in addons {
+        out.push_str(&format!("    // {}\n", addon.package_name));
+        out.push_str(&format!(
+            "    loadNativeAddon(\"{}\");\n",
+            escape_ts_string_literal(addon.path)
+        ));
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// Escapes JS source for embedding as a double-quoted TS string literal
 /// (backslash, `"`, and newlines/carriage-returns -- the characters that
 /// would otherwise terminate or corrupt the literal). `generate_module_init`
@@ -1262,6 +1315,19 @@ mod tests {
                 error_ownership: FfiOwnership::Borrowed,
             })
         );
+    }
+
+    #[test]
+    fn generates_native_addon_wrapper_and_module_initializer() {
+        let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
+        let shim = generate_native_addon_shim(&funcs, &[]);
+        assert!(shim.contains(r#"return callNativeAddon("add", argsArray);"#));
+        let init = generate_native_addon_init(&[NativeAddon {
+            package_name: "native-add",
+            path: "/tmp/native.node",
+        }]);
+        assert!(init.contains("function __thaw_native_module_init(): void"));
+        assert!(init.contains(r#"loadNativeAddon("/tmp/native.node");"#));
     }
 
     #[test]
