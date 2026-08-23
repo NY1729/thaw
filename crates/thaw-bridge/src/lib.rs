@@ -557,8 +557,28 @@ fn classify_ts_type(
                     &mut Vec::new(),
                 );
             }
+            if ref_name == "Json" && ty_ref.type_params.is_none() {
+                return DtsType::Native(HirType::Json);
+            }
+            if ref_name == "Array" {
+                let Some(element) = ty_ref
+                    .type_params
+                    .as_ref()
+                    .and_then(|params| params.params.first())
+                else {
+                    return DtsType::Unsupported("Array<T> needs one type argument".to_string());
+                };
+                return match classify_ts_type(element, interfaces, generic_interfaces) {
+                    DtsType::Native(HirType::F64) => {
+                        DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                    }
+                    _ => DtsType::Unsupported(
+                        "only number[] has a native dynamic layout".to_string(),
+                    ),
+                };
+            }
 
-            // Note: no `Array<T>`/`Promise<T>` recognition here (unlike
+            // Note: no `Promise<T>` recognition here (unlike
             // thaw-hir's `lower_ts_type`) -- a `.d.ts` signature using
             // either still needs a real decision about arena lifetime
             // (arrays) or the async ABI (promises) across a *foreign* FFI
