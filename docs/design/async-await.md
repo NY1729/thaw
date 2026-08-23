@@ -5,7 +5,9 @@
   async mainのramp/resumeフレーム分割まで実装済み。
   トップレベルおよびネストした制御フローのローカルframe slot、一般async関数、
   async try/catchの例外伝播、fdのI/O readiness登録とpollイベントループ統合も
-  実装済み。非ブロッキングHTTP状態機械とasync fetch接続も実装済み
+  実装済み。非ブロッキングHTTP状態機械とasync fetch接続も実装済み。
+  async関数の集約型・タプル戻り値、式内の複数await、深いif/while/try、
+  Promise値のローカル・引数・オブジェクトfield経由の受け渡しも実装済み
 - 前提: [thaw-hir](../../crates/thaw-hir), [thaw-llvm/hir_codegen](../../crates/thaw-llvm/src/hir_codegen.rs), [thaw-runtime](../../crates/thaw-runtime) の現状（Phase 0〜2一部）を前提にする
 
 ## 1. 目的とスコープ
@@ -375,8 +377,10 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    Lambda ハンドラでの逐次 `await` はこれで完全にカバーできる。
 2. `fetch`/`std` の実装と合わせて、V1 の「ブロッキング呼び出しに
    脱糖する」対象を増やしていく。
-3. 主要なPromise結合子は7〜10章の形で実装済み。次は一般的なユーザー定義
-   async関数と、さらに深い制御フローへ適用範囲を広げる。
+3. 主要なPromise結合子は7〜10章の形で実装済み。ユーザー定義async関数、
+   深い制御フロー、式・リテラル中の複数await、Promise値の保持と受け渡しまで
+   適用範囲を拡張済み。残る主要課題はPromise executor、`.then`/`.catch`、
+   外部Promise実装との相互運用である。
 
 ## 7. Promise.all fan-in
 
@@ -438,3 +442,16 @@ runtimeは全distinct handleをsubscribeし、各入力indexに3-field objectを
 LLVMは要素型から1-byte booleanまたは8-byte native slotのコピー幅を渡し、既存のObject/Array配置と
 `PropAccess`をそのまま利用する。E2E testは成功・失敗混在、順序、空配列、Promise配列変数、全native
 value shapeを単一実行ファイルで検査する。
+
+## 11. Promise値の保持と一般await
+
+loweringはasync関数呼び出しを`Promise<T>`として型付けし、`await`時に解決型`T`を
+`HirExpr::AwaitPromise`へ記録する。これによりPromise handleをローカル変数、関数引数、
+オブジェクトfieldへ保存してから後続の状態でawaitできる。LLVMのframe splitterは直接の
+async呼び出しだけでなく任意のtyped Promise式をサスペンド境界として抽出し、解決値を
+型付きtemporary slotへ格納する。
+
+集約型のasync戻り値はobject、homogeneous array、heterogeneous tupleを扱う。関数引数、
+array/object literal内のawaitは左から右へ抽出され、ネストしたif/while/tryとblock scopeを
+またぐreturnもframe guardとtyped slotを通じて保持される。HIR/LLVM E2Eに加え、複数の
+TypeScript moduleを束ねたLambda実行テストでPromiseのfield保持とimport境界を検証する。

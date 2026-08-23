@@ -1528,9 +1528,14 @@ mod tests {
         std::fs::write(
             dir.join("transform.ts"),
             r#"
-                export async function transform(event: Json): Promise<Json> {
+                interface PendingEvent { value: Promise<Json>; }
+                async function delayed(event: Json): Promise<Json> {
                     await sleep(1);
                     return event;
+                }
+                export async function transform(event: Json): Promise<Json> {
+                    const pending: PendingEvent = { value: delayed(event) };
+                    return await pending.value;
                 }
             "#,
         )

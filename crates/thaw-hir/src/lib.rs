@@ -146,12 +146,13 @@ pub enum HirExpr {
     PromiseAllSettled(Vec<HirExpr>, HirType),
     /// A homogeneous `Promise.allSettled` supplied through an array value.
     PromiseAllSettledArray(Box<HirExpr>, HirType),
-    /// `await expr`. V1 (see docs/design/async-await.md) compiles this as
-    /// an identity transform in codegen -- `async`/`await` is sugar over
-    /// synchronous calls, valid because Lambda only ever processes one
-    /// invocation at a time (nothing to interleave with). A real suspend
-    /// point is V2, not implemented.
+    /// A legacy/direct await form, retained for void event sources and the
+    /// synchronous fallback path. Frame splitting extracts real suspension
+    /// points before ordinary expression code generation.
     Await(Box<HirExpr>),
+    /// Awaiting a Promise value loaded from a variable, parameter, or field.
+    /// The resolved type is retained for coroutine-frame resume loads.
+    AwaitPromise(Box<HirExpr>, HirType),
     /// A typed closure. `captures` contains the outer bindings referenced by
     /// the body in deterministic name order, followed by ordinary parameters,
     /// the return type, and the body itself.
@@ -309,6 +310,7 @@ pub fn set_ffi_error_abi(
                 }
             }
             HirExpr::Await(inner)
+            | HirExpr::AwaitPromise(inner, _)
             | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::PromiseRaceArray(inner, _)
             | HirExpr::PromiseAnyArray(inner, _)
@@ -438,6 +440,7 @@ pub fn set_ffi_ownership(
                 update_expr(right, symbol, returns, errors, found);
             }
             HirExpr::Await(inner)
+            | HirExpr::AwaitPromise(inner, _)
             | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::PromiseRaceArray(inner, _)
             | HirExpr::PromiseAnyArray(inner, _)
@@ -579,6 +582,7 @@ pub fn set_ffi_string_abi(
                 update_expr(right, symbol, params, returns, calling_convention, found);
             }
             HirExpr::Await(inner)
+            | HirExpr::AwaitPromise(inner, _)
             | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::PromiseRaceArray(inner, _)
             | HirExpr::PromiseAnyArray(inner, _)
