@@ -1487,6 +1487,7 @@ struct PromiseAllState {
     first_error: *const u8,
     result: *mut u64,
     result_slot: *mut *const u8,
+    element_size: usize,
 }
 
 struct PromiseAllChild {
@@ -1506,9 +1507,12 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
             thaw_promise_reject(state.output, result);
         }
     } else if !state.rejected {
-        let value = unsafe { result.cast::<u64>().read_unaligned() };
         for index in &child.indices {
-            unsafe { state.result.add(index + 1).write(value) };
+            let destination = unsafe { state.result.add(index + 1).cast::<u8>() };
+            unsafe {
+                destination.write_bytes(0, size_of::<u64>());
+                std::ptr::copy_nonoverlapping(result, destination, state.element_size);
+            }
         }
     }
     unsafe { thaw_promise_destroy(child.promise) };
@@ -1522,8 +1526,8 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
     }
 }
 
-/// Joins homogeneous `Promise<number>` handles without serializing them.
-/// The result uses Thaw's `[i64 len][f64 elements...]` array layout in the
+/// Joins homogeneous Promise handles without serializing them.
+/// The result uses Thaw's `[i64 len][8-byte slots...]` array layout in the
 /// request arena and therefore remains valid after the returned promise is
 /// destroyed. Child handles are consumed by this call.
 ///
@@ -1532,11 +1536,16 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
 /// `promises` must reference `len` live handles returned by Thaw async
 /// functions. Each handle must be unique and must not be used after this call.
 #[no_mangle]
-pub unsafe extern "C" fn thaw_promise_all_f64(
+pub unsafe extern "C" fn thaw_promise_all_slots(
     promises: *const *mut ThawPromise,
     len: usize,
+    element_size: usize,
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
+    if element_size == 0 || element_size > size_of::<u64>() {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
     let allocation =
         thaw_arena::thaw_arena_alloc((len + 2) * size_of::<u64>(), align_of::<u64>()).cast::<u64>();
     if allocation.is_null() {
@@ -1583,6 +1592,7 @@ pub unsafe extern "C" fn thaw_promise_all_f64(
         },
         result,
         result_slot,
+        element_size,
     }));
     if !grouped.is_empty() {
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
@@ -1606,6 +1616,19 @@ pub unsafe extern "C" fn thaw_promise_all_f64(
         unsafe { drop(Box::from_raw(state)) };
     }
     output
+}
+
+/// Backward-compatible number-only entry point.
+///
+/// # Safety
+///
+/// The same contract as [`thaw_promise_all_slots`] applies.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_all_f64(
+    promises: *const *mut ThawPromise,
+    len: usize,
+) -> *mut ThawPromise {
+    unsafe { thaw_promise_all_slots(promises, len, size_of::<f64>()) }
 }
 
 fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
