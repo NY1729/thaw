@@ -563,6 +563,21 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.i64_type().fn_type(&[], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_napi_poll_async_work",
+            self.context.i64_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_unload_all",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_take_fatal_exception",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
 
         let sleep_type = i8_ptr.fn_type(&[i64_type.into()], false);
         self.module
@@ -4298,6 +4313,34 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_backend_call(args, "thaw_napi_call_result", "callNativeAddon")
     }
 
+    fn compile_poll_native_addon_events(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if !args.is_empty() {
+            return Err("pollNativeAddonEvents expects no arguments".into());
+        }
+        self.uses_napi = true;
+        let count = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_poll_async_work")
+                    .unwrap(),
+                &[],
+                "poll_napi_events",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        self.builder
+            .build_unsigned_int_to_float(count, self.context.f64_type(), "napi_event_count")
+            .map(BasicValueEnum::FloatValue)
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_call_native_addon_with_callback(
         &mut self,
         args: &[HirExpr],
@@ -4853,6 +4896,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "callNativeAddonWithCallback" => {
                 return self.compile_call_native_addon_with_callback(args)
             }
+            "pollNativeAddonEvents" => return self.compile_poll_native_addon_events(args),
             _ => {}
         }
 
@@ -5344,6 +5388,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     "drain_napi_async_work",
                 )
                 .unwrap();
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_napi_unload_all").unwrap(),
+                    &[],
+                    "unload_napi_addons",
+                )
+                .unwrap();
         }
         self.finish_c_main();
     }
@@ -5544,6 +5595,28 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn finish_c_main(&mut self) {
         let i32_type = self.context.i32_type();
+        if self.uses_napi {
+            let fatal = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_napi_take_fatal_exception")
+                        .unwrap(),
+                    &[],
+                    "take_napi_fatal_exception",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value();
+            let status = self
+                .builder
+                .build_int_z_extend(fatal, i32_type, "napi_exit_status")
+                .unwrap();
+            self.builder.build_return(Some(&status)).unwrap();
+            return;
+        }
         self.builder
             .build_return(Some(&i32_type.const_int(0, false)))
             .unwrap();

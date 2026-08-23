@@ -27,6 +27,7 @@ type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
 type NapiFinalize = unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void);
+type NapiCleanupHook = unsafe extern "C" fn(*mut c_void);
 type NapiThreadsafeFunctionCallJs =
     unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void);
 const NAPI_OK: NapiStatus = 0;
@@ -66,6 +67,7 @@ static ASYNC_POOL: OnceLock<Option<Arc<AsyncPool>>> = OnceLock::new();
 static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
+static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
 static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 
 pub struct ThreadsafeFunction {
@@ -249,6 +251,13 @@ pub struct Env {
     accessors: HashMap<(usize, String), Accessor>,
     finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
+    cleanup_hooks: Vec<CleanupHookRecord>,
+}
+
+#[derive(Clone, Copy)]
+struct CleanupHookRecord {
+    hook: NapiCleanupHook,
+    data: *mut c_void,
 }
 
 struct FinalizeRecord {
@@ -280,6 +289,7 @@ impl Env {
             accessors: HashMap::new(),
             finalizers: Vec::new(),
             instance_data: None,
+            cleanup_hooks: Vec::new(),
         }
     }
 
@@ -292,6 +302,9 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        for hook in std::mem::take(&mut self.cleanup_hooks).into_iter().rev() {
+            unsafe { (hook.hook)(hook.data) };
+        }
         if let Some(record) = self.instance_data.take() {
             if let Some(finalize) = record.finalize {
                 unsafe { finalize(self, record.data, record.hint) };
@@ -327,6 +340,7 @@ pub struct CallbackInfo {
 
 struct Host {
     functions: HashMap<String, Function>,
+    compiled_callbacks: HashMap<(usize, usize), NapiValue>,
     libraries: Vec<*mut c_void>,
     // Addons retain `napi_env` pointers, so moving an Env during Vec growth
     // would invalidate foreign pointers. The Box provides stable addresses.
@@ -343,6 +357,7 @@ impl Host {
     fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            compiled_callbacks: HashMap::new(),
             libraries: Vec::new(),
             module_envs: Vec::new(),
             pending_call_envs: Vec::new(),
@@ -548,6 +563,35 @@ pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *c
             0
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_napi_unload_all() -> u8 {
+    if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
+        || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+    {
+        HOST.with(|host| {
+            host.borrow_mut().last_error =
+                "cannot unload N-API addons while async work or thread-safe functions are active"
+                    .into();
+        });
+        return 0;
+    }
+    HOST.with(|host| {
+        let mut host = host.borrow_mut();
+        host.functions.clear();
+        host.compiled_callbacks.clear();
+        host.pending_call_envs.clear();
+        // Cleanup hooks and native finalizers must run while their addon code
+        // is still mapped.
+        host.module_envs.clear();
+        for handle in host.libraries.drain(..).rev() {
+            unsafe {
+                libc::dlclose(handle);
+            }
+        }
+    });
+    1
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
@@ -813,22 +857,44 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
             .with(|host| host.borrow().functions.get(&name).cloned())
             .ok_or_else(|| format!("no such native addon function `{name}`"))?;
         let callback = callback.ok_or("native addon callback is null")?;
+        // Generated call sites create a small ABI adapter per invocation,
+        // while the closure allocation itself remains stable. Use that
+        // closure context as the identity so subscribe/unsubscribe calls made
+        // at different source locations still receive the same napi_value.
+        let callback_key = (
+            context as usize,
+            if context.is_null() {
+                callback as usize
+            } else {
+                0
+            },
+        );
         let mut env = Box::new(Env::new());
         let mut values: Vec<NapiValue> = args
             .iter()
             .map(|value| value_from_json(&mut env, value))
             .collect();
-        let bridge = Arc::new(ThawCallbackBridge {
-            callback,
-            context: context as usize,
-        });
-        let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
-        values.push(env.alloc(Value::Function(Function {
-            callback: thaw_compiled_callback,
-            data: bridge_data,
-            properties: HashMap::new(),
-            _thaw_bridge: Some(bridge),
-        })));
+        let cached_callback =
+            HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied());
+        let mut created_callback = None;
+        let callback_value = if let Some(callback) = cached_callback {
+            callback
+        } else {
+            let bridge = Arc::new(ThawCallbackBridge {
+                callback,
+                context: context as usize,
+            });
+            let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
+            let value = env.alloc(Value::Function(Function {
+                callback: thaw_compiled_callback,
+                data: bridge_data,
+                properties: HashMap::new(),
+                _thaw_bridge: Some(bridge),
+            }));
+            created_callback = Some(value);
+            value
+        };
+        values.push(callback_value);
         let this_arg = env.alloc(Value::Undefined);
         let mut info = CallbackInfo {
             args: values,
@@ -853,7 +919,20 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
             || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
         {
+            if let Some(callback) = created_callback {
+                HOST.with(|host| {
+                    host.borrow_mut()
+                        .compiled_callbacks
+                        .insert(callback_key, callback);
+                });
+            }
             HOST.with(|host| host.borrow_mut().pending_call_envs.push(env));
+        } else {
+            HOST.with(|host| {
+                let mut host = host.borrow_mut();
+                host.compiled_callbacks.remove(&callback_key);
+                host.pending_call_envs.clear();
+            });
         }
         Ok(value)
     })();
@@ -1495,6 +1574,46 @@ pub unsafe extern "C" fn napi_get_instance_data(
         .instance_data
         .as_ref()
         .map_or(ptr::null_mut(), |record| record.data);
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_add_env_cleanup_hook(
+    env: NapiEnv,
+    hook: Option<NapiCleanupHook>,
+    data: *mut c_void,
+) -> NapiStatus {
+    let (Ok(env), Some(hook)) = (env_mut(env), hook) else {
+        return NAPI_INVALID_ARG;
+    };
+    if env
+        .cleanup_hooks
+        .iter()
+        .any(|record| record.hook as usize == hook as usize && record.data == data)
+    {
+        return NAPI_INVALID_ARG;
+    }
+    env.cleanup_hooks.push(CleanupHookRecord { hook, data });
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_remove_env_cleanup_hook(
+    env: NapiEnv,
+    hook: Option<NapiCleanupHook>,
+    data: *mut c_void,
+) -> NapiStatus {
+    let (Ok(env), Some(hook)) = (env_mut(env), hook) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Some(index) = env
+        .cleanup_hooks
+        .iter()
+        .position(|record| record.hook as usize == hook as usize && record.data == data)
+    else {
+        return NAPI_INVALID_ARG;
+    };
+    env.cleanup_hooks.remove(index);
     NAPI_OK
 }
 
@@ -2303,8 +2422,19 @@ pub unsafe extern "C" fn napi_fatal_exception(env: NapiEnv, error: NapiValue) ->
     if error.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let message = match value_ref(error) {
+        Ok(Value::Error(message) | Value::String(message)) => message.clone(),
+        _ => "unhandled N-API callback exception".into(),
+    };
+    eprintln!("thaw-napi: fatal exception: {message}");
     env.exception = Some(error);
+    FATAL_EXCEPTION_PENDING.store(true, Ordering::Release);
     NAPI_OK
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_napi_take_fatal_exception() -> u8 {
+    u8::from(FATAL_EXCEPTION_PENDING.swap(false, Ordering::AcqRel))
 }
 
 #[repr(C)]
@@ -2861,6 +2991,15 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
             break;
         }
     }
+    if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+        && ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
+    {
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            host.compiled_callbacks.clear();
+            host.pending_call_envs.clear();
+        });
+    }
     completed
 }
 
@@ -2885,7 +3024,11 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
         std::thread::sleep(Duration::from_millis(1));
     }
     if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0 {
-        HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            host.compiled_callbacks.clear();
+            host.pending_call_envs.clear();
+        });
     }
     completed
 }
@@ -2973,6 +3116,16 @@ mod tests {
 
     struct ParcelWatcherProbe {
         events: Mutex<Vec<(String, String)>>,
+    }
+
+    struct CleanupProbe {
+        output: Arc<Mutex<Vec<u32>>>,
+        value: u32,
+    }
+
+    unsafe extern "C" fn cleanup_probe(data: *mut c_void) {
+        let probe = Box::from_raw(data as *mut CleanupProbe);
+        probe.output.lock().unwrap().push(probe.value);
     }
 
     unsafe extern "C" fn parcel_watcher_callback(
@@ -3134,6 +3287,7 @@ mod tests {
             );
             assert_eq!(napi_acquire_threadsafe_function(threadsafe), NAPI_OK);
             assert_eq!(napi_release_threadsafe_function(threadsafe, 0), NAPI_OK);
+            assert_eq!(thaw_napi_unload_all(), 0);
         }
         let address = threadsafe as usize;
         let worker = std::thread::spawn(move || unsafe {
@@ -3163,6 +3317,57 @@ mod tests {
             .all(|thread| *thread == probe.main_thread));
         assert!(probe.finalized.load(Ordering::Acquire));
         assert_eq!(probe.aborted.load(Ordering::Acquire), 0);
+        assert_eq!(thaw_napi_unload_all(), 1);
+    }
+
+    #[test]
+    fn env_cleanup_hooks_run_in_reverse_and_can_be_removed() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let first = Box::into_raw(Box::new(CleanupProbe {
+            output: Arc::clone(&output),
+            value: 1,
+        }));
+        let removed = Box::into_raw(Box::new(CleanupProbe {
+            output: Arc::clone(&output),
+            value: 2,
+        }));
+        let last = Box::into_raw(Box::new(CleanupProbe {
+            output: Arc::clone(&output),
+            value: 3,
+        }));
+        let mut env = Env::new();
+        unsafe {
+            assert_eq!(
+                napi_add_env_cleanup_hook(&mut env, Some(cleanup_probe), first.cast()),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_add_env_cleanup_hook(&mut env, Some(cleanup_probe), removed.cast()),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_add_env_cleanup_hook(&mut env, Some(cleanup_probe), last.cast()),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_remove_env_cleanup_hook(&mut env, Some(cleanup_probe), removed.cast()),
+                NAPI_OK
+            );
+            drop(Box::from_raw(removed));
+        }
+        drop(env);
+        assert_eq!(*output.lock().unwrap(), vec![3, 1]);
+    }
+
+    #[test]
+    fn fatal_exception_sets_a_single_process_failure_status() {
+        let mut env = Env::new();
+        let error = env.alloc(Value::Error("callback failed".into()));
+        unsafe {
+            assert_eq!(napi_fatal_exception(&mut env, error), NAPI_OK);
+        }
+        assert_eq!(thaw_napi_take_fatal_exception(), 1);
+        assert_eq!(thaw_napi_take_fatal_exception(), 0);
     }
 
     #[test]
@@ -3895,5 +4100,76 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
             let _ = std::fs::remove_dir_all(snapshot_dir);
         }
+    }
+
+    #[test]
+    fn parcel_watcher_callback_bridge_reuses_identity_when_supplied() {
+        let _guard = lock_async_test();
+        let Ok(path) = std::env::var("THAW_PARCEL_WATCHER_NODE") else {
+            return;
+        };
+        let path = CString::new(path).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-parcel-bridge-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = CString::new(
+            serde_json::to_string(&serde_json::json!([dir.to_string_lossy()])).unwrap(),
+        )
+        .unwrap();
+        let output: *mut Mutex<Option<(JsonValue, JsonValue)>> =
+            Box::into_raw(Box::new(Mutex::new(None)));
+        unsafe {
+            assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+            let subscribed = thaw_napi_call_with_callback_result(
+                c"subscribe".as_ptr(),
+                args.as_ptr(),
+                Some(bcrypt_bridge_callback),
+                output.cast(),
+            );
+            assert!(subscribed.error.is_null());
+            let watched_file = dir.join("bridge-event.txt");
+            std::fs::write(&watched_file, "event").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while (*output).lock().unwrap().is_none() {
+                thaw_napi_poll_async_work();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "bridge event timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let event = (*output).lock().unwrap().take().unwrap();
+            assert!(event.0.is_null());
+            assert!(event.1.as_array().is_some_and(|events| {
+                events.iter().any(|event| {
+                    event.get("path").and_then(JsonValue::as_str)
+                        == Some(watched_file.to_string_lossy().as_ref())
+                })
+            }));
+            let unsubscribed = thaw_napi_call_with_callback_result(
+                c"unsubscribe".as_ptr(),
+                args.as_ptr(),
+                Some(bcrypt_bridge_callback),
+                output.cast(),
+            );
+            assert!(
+                unsubscribed.error.is_null(),
+                "{}",
+                if unsubscribed.error.is_null() {
+                    "unknown error".into()
+                } else {
+                    CStr::from_ptr(unsubscribed.error)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            );
+            assert_eq!(thaw_napi_run_async_work(), 0);
+            assert_eq!(LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire), 0);
+            drop(Box::from_raw(output));
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
