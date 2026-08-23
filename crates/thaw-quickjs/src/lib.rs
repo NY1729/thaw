@@ -143,7 +143,6 @@ fn invoke_impl<'js>(
 
     let json: Object = ctx.globals().get("JSON").map_err(to_string_err)?;
     let parse: Function = json.get("parse").map_err(to_string_err)?;
-    let stringify: Function = json.get("stringify").map_err(to_string_err)?;
 
     let args_array: Array = parse
         .call((args_json,))
@@ -159,6 +158,18 @@ fn invoke_impl<'js>(
         rquickjs::Error::Exception => format!("`{label}` threw: {}", describe_exception(&ctx)),
         e => format!("`{label}` threw: {e}"),
     })?;
+
+    resolve_value_impl(ctx, result, label)
+}
+
+fn resolve_value_impl<'js>(
+    ctx: Ctx<'js>,
+    result: Value<'js>,
+    label: &str,
+) -> Result<String, String> {
+    let to_string_err = |e: rquickjs::Error| e.to_string();
+    let json: Object = ctx.globals().get("JSON").map_err(to_string_err)?;
+    let stringify: Function = json.get("stringify").map_err(to_string_err)?;
 
     // Always pass the result through the realm's Promise resolution
     // procedure. `Value::as_promise` only recognizes native Promise objects;
@@ -222,6 +233,254 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
     })
 }
 
+fn handle_array<'js>(ctx: &Ctx<'js>) -> Result<Array<'js>, String> {
+    ctx.globals()
+        .get("__thaw_value_handles")
+        .map_err(|_| "JavaScript value handle registry is empty".to_string())
+}
+
+fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, String> {
+    if handle == 0 {
+        return Err("invalid JavaScript value handle 0".to_string());
+    }
+    let value: Value = handle_array(ctx)?
+        .get((handle - 1) as usize)
+        .map_err(|_| format!("invalid JavaScript value handle {handle}"))?;
+    if value.is_undefined() {
+        return Err(format!("released JavaScript value handle {handle}"));
+    }
+    Ok(value)
+}
+
+fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
+    let handles = handle_array(ctx)?;
+    let index = handles.len();
+    handles
+        .set(index, value)
+        .map_err(|error| error.to_string())?;
+    Ok(index as u64 + 1)
+}
+
+fn invoke_raw<'js>(
+    ctx: Ctx<'js>,
+    target: Function<'js>,
+    args_json: &str,
+) -> Result<Value<'js>, String> {
+    let json: Object = ctx
+        .globals()
+        .get("JSON")
+        .map_err(|error| error.to_string())?;
+    let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+    let args_array: Array = parse
+        .call((args_json,))
+        .map_err(|error| format!("args_json is not a valid JSON array: {error}"))?;
+    let mut call_args = Args::new_unsized(ctx.clone());
+    for index in 0..args_array.len() {
+        let arg: Value = args_array.get(index).map_err(|error| error.to_string())?;
+        call_args.push_arg(arg).map_err(|error| error.to_string())?;
+    }
+    target.call_arg(call_args).map_err(|error| match error {
+        rquickjs::Error::Exception => describe_exception(&ctx),
+        error => error.to_string(),
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_call_handle_handle_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> ThawHandleResult {
+    let args_json = to_str(args_json);
+    let result: Result<u64, String> = with_context(|ctx| {
+        let target = Function::from_value(value_for_handle(&ctx, handle)?)
+            .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+        let result = invoke_raw(ctx.clone(), target, &args_json)?;
+        retain_value(&ctx, result)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_call_handle_value_result(handle: u64, argument: u64) -> ThawResult {
+    let result = with_context(|ctx| {
+        let target = Function::from_value(value_for_handle(&ctx, handle)?)
+            .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+        let argument = value_for_handle(&ctx, argument)?;
+        let value: Value = target.call((argument,)).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
+    });
+    match result {
+        Ok(text) => ThawResult {
+            value: CString::new(text).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
+    with_context(|ctx| {
+        if handle == 0 {
+            return 0;
+        }
+        let Ok(handles) = handle_array(&ctx) else {
+            return 0;
+        };
+        let index = (handle - 1) as usize;
+        let Ok(value) = handles.get::<Value>(index) else {
+            return 0;
+        };
+        if value.is_undefined() {
+            return 0;
+        }
+        u8::from(handles.set(index, Value::new_undefined(ctx)).is_ok())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_get_property_result(
+    handle: u64,
+    name: *const c_char,
+) -> ThawHandleResult {
+    let name = to_str(name);
+    let result: Result<u64, String> = with_context(|ctx| {
+        let object = value_for_handle(&ctx, handle)?
+            .into_object()
+            .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+        let value = object.get(name.as_str()).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        retain_value(&ctx, value)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_set_property_result(
+    handle: u64,
+    name: *const c_char,
+    value_handle: u64,
+) -> ThawHandleResult {
+    let name = to_str(name);
+    let result: Result<u64, String> = with_context(|ctx| {
+        let object = value_for_handle(&ctx, handle)?
+            .into_object()
+            .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+        let value = value_for_handle(&ctx, value_handle)?;
+        object
+            .set(name.as_str(), value)
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_exception(&ctx),
+                error => error.to_string(),
+            })?;
+        Ok(1)
+    });
+    match result {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_call_method_result(
+    handle: u64,
+    name: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    let name = to_str(name);
+    let args_json = to_str(args_json);
+    let result = with_context(|ctx| {
+        let object = value_for_handle(&ctx, handle)?
+            .into_object()
+            .ok_or_else(|| format!("JavaScript value handle {handle} is not an object"))?;
+        let method: Function = object.get(name.as_str()).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        let json: Object = ctx
+            .globals()
+            .get("JSON")
+            .map_err(|error| error.to_string())?;
+        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+        let arguments: Array = parse
+            .call((args_json.as_str(),))
+            .map_err(|error| error.to_string())?;
+        let mut call_args = Args::new_unsized(ctx.clone());
+        call_args.this(object).map_err(|error| error.to_string())?;
+        for index in 0..arguments.len() {
+            let argument: Value = arguments.get(index).map_err(|error| error.to_string())?;
+            call_args
+                .push_arg(argument)
+                .map_err(|error| error.to_string())?;
+        }
+        let value: Value = method.call_arg(call_args).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        resolve_value_impl(ctx, value, &format!("JavaScript method `{name}`"))
+    });
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
+    let result = with_context(|ctx| {
+        let value = value_for_handle(&ctx, handle)?;
+        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
+    });
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
 /// Calls a callable value retained by [`thaw_js_get_global`]. Arguments and
 /// results use the existing JSON bridge while the callable itself preserves
 /// identity and closures inside QuickJS.
@@ -229,15 +488,7 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
 pub extern "C" fn thaw_js_call_handle_result(handle: u64, args_json: *const c_char) -> ThawResult {
     let args_json = to_str(args_json);
     let result = with_context(|ctx| {
-        if handle == 0 {
-            return Err("invalid JavaScript value handle".to_string());
-        }
-        let handles: Array = ctx
-            .globals()
-            .get("__thaw_value_handles")
-            .map_err(|_| "JavaScript value handle registry is empty".to_string())?;
-        let target: Function = handles
-            .get((handle - 1) as usize)
+        let target = Function::from_value(value_for_handle(&ctx, handle)?)
             .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
         invoke_impl(
             ctx,
@@ -439,5 +690,11 @@ mod tests {
 #[repr(C)]
 pub struct ThawResult {
     pub value: *const c_char,
+    pub error: *const c_char,
+}
+
+#[repr(C)]
+pub struct ThawHandleResult {
+    pub value: u64,
     pub error: *const c_char,
 }

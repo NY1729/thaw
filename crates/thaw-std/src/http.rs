@@ -318,6 +318,7 @@ fn active_servers() -> &'static Mutex<Vec<usize>> {
 }
 
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static UNHANDLED_SERVER_ERROR: AtomicBool = AtomicBool::new(false);
 
 struct ConnectionState {
     stream: TcpStream,
@@ -425,6 +426,14 @@ struct NativeServerError {
 
 fn emit_error(listeners: &Mutex<Vec<EventListener>>, error: &ServerError) {
     let callbacks = listeners.lock().unwrap().clone();
+    if callbacks.is_empty() {
+        eprintln!(
+            "Unhandled 'error' event: {} ({})",
+            error.message, error.code
+        );
+        UNHANDLED_SERVER_ERROR.store(true, Ordering::Release);
+        return;
+    }
     let message = CString::new(error.message.as_str()).unwrap_or_default();
     let code = CString::new(error.code.as_str()).unwrap_or_default();
     let syscall = CString::new("listen").unwrap();
@@ -445,6 +454,11 @@ fn emit_error(listeners: &Mutex<Vec<EventListener>>, error: &ServerError) {
             callback_fn(callback, &native);
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_http_take_unhandled_error() -> u8 {
+    u8::from(UNHANDLED_SERVER_ERROR.swap(false, Ordering::AcqRel))
 }
 
 extern "C" fn server_listener_ready(context: *mut u8, _events: i16) {
@@ -823,6 +837,21 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unhandled_server_error_sets_process_failure_once() {
+        let listeners = Mutex::new(Vec::new());
+        emit_error(
+            &listeners,
+            &ServerError {
+                message: "listen failed".into(),
+                code: "EADDRINUSE".into(),
+                port: 3000.0,
+            },
+        );
+        assert_eq!(thaw_http_take_unhandled_error(), 1);
+        assert_eq!(thaw_http_take_unhandled_error(), 0);
+    }
     use std::net::TcpStream;
     use std::sync::Arc;
     use std::thread;

@@ -423,6 +423,11 @@ impl<'ctx> HirCompiler<'ctx> {
             run_http_servers_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_http_take_unhandled_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
 
         // thaw-std: fetch + JSON (see docs/design/async-await.md for why
         // `fetch` is a plain blocking call under the hood).
@@ -545,6 +550,64 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_call_handle_result",
             result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_handle_result",
+            self.context
+                .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false)
+                .fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_value_result",
+            result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    self.context.i64_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_release_handle",
+            self.context
+                .i8_type()
+                .fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        let handle_result_type = self
+            .context
+            .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_js_get_property_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_set_property_result",
+            handle_result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_method_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_resolve_handle_result",
+            result_type.fn_type(&[self.context.i64_type().into()], false),
             Some(Linkage::External),
         );
         self.module
@@ -4531,6 +4594,257 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_backend_call(args, "thaw_js_call_handle_result", "callDynamicValue")
     }
 
+    fn compile_call_dynamic_value_handle(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [handle, call_args] = args else {
+            return Err("callDynamicValueHandle expects exactly two arguments".into());
+        };
+        let handle = self.compile_expr(handle)?;
+        let call_args = self.compile_expr(call_args)?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[call_args.into()],
+                "dynamic_handle_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_call_handle_handle_result")
+                    .unwrap(),
+                &[handle.into(), args_json.into()],
+                "dynamic_handle_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "dynamic_handle_value")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "dynamic_handle_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
+    fn compile_call_dynamic_value_with_value(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [callable, argument] = args else {
+            return Err("callDynamicValueWithValue expects exactly two arguments".into());
+        };
+        let callable = self.compile_expr(callable)?;
+        let argument = self.compile_expr(argument)?;
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_call_handle_value_result")
+                    .unwrap(),
+                &[callable.into(), argument.into()],
+                "dynamic_value_argument_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "dynamic_value_argument_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "dynamic_value_argument_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "dynamic_value_argument_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse returned no value".into())
+    }
+
+    fn compile_release_dynamic_value(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let released = self
+            .compile_single_arg_call("thaw_js_release_handle", args, "releaseDynamicValue")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                released,
+                self.context.i8_type().const_zero(),
+                "released_dynamic_value",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_dynamic_handle_operation(
+        &mut self,
+        symbol: &str,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let values = args
+            .iter()
+            .map(|argument| self.compile_expr(argument).map(Into::into))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self
+            .builder
+            .build_call(self.module.get_function(symbol).unwrap(), &values, symbol)
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "dynamic_operation_value")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "dynamic_operation_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
+    fn compile_call_dynamic_method(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [handle, name, call_args] = args else {
+            return Err("callDynamicMethod expects exactly three arguments".into());
+        };
+        let handle = self.compile_expr(handle)?;
+        let name = self.compile_expr(name)?;
+        let call_args = self.compile_expr(call_args)?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[call_args.into()],
+                "dynamic_method_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_call_method_result")
+                    .unwrap(),
+                &[handle.into(), name.into(), args_json.into()],
+                "dynamic_method_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "dynamic_method_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "dynamic_method_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "dynamic_method_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse returned no value".into())
+    }
+
+    fn compile_read_dynamic_value(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [handle] = args else {
+            return Err("readDynamicValue expects exactly one argument".into());
+        };
+        let handle = self.compile_expr(handle)?;
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_js_resolve_handle_result")
+                    .unwrap(),
+                &[handle.into()],
+                "read_dynamic_value",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "read_dynamic_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "read_dynamic_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "read_dynamic_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse returned no value".into())
+    }
+
     fn compile_typed_dynamic_call(
         &mut self,
         signature: &DynamicSignature,
@@ -5221,6 +5535,29 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamic" => return self.compile_call_dynamic(args),
             "getDynamicValue" => return self.compile_get_dynamic_value(args),
             "callDynamicValue" => return self.compile_call_dynamic_value(args),
+            "callDynamicValueHandle" => return self.compile_call_dynamic_value_handle(args),
+            "callDynamicValueWithValue" => return self.compile_call_dynamic_value_with_value(args),
+            "releaseDynamicValue" => return self.compile_release_dynamic_value(args),
+            "getDynamicProperty" => {
+                return self.compile_dynamic_handle_operation("thaw_js_get_property_result", args)
+            }
+            "setDynamicProperty" => {
+                let value = self
+                    .compile_dynamic_handle_operation("thaw_js_set_property_result", args)?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        value,
+                        self.context.i64_type().const_zero(),
+                        "dynamic_property_set",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "callDynamicMethod" => return self.compile_call_dynamic_method(args),
+            "readDynamicValue" => return self.compile_read_dynamic_value(args),
             "loadNativeAddon" => return self.compile_load_native_addon(args),
             "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
             "callNativeAddon" => return self.compile_call_native_addon(args),
@@ -7040,6 +7377,23 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn finish_c_main(&mut self) {
         let i32_type = self.context.i32_type();
+        let http_failure = if self.module.get_function("createServer").is_some() {
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_http_take_unhandled_error")
+                        .unwrap(),
+                    &[],
+                    "take_http_unhandled_error",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value()
+        } else {
+            self.context.i8_type().const_zero()
+        };
         if self.uses_napi {
             let fatal = self
                 .builder
@@ -7055,16 +7409,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .unwrap()
                 .into_int_value();
+            let failed = self
+                .builder
+                .build_or(fatal, http_failure, "process_failed")
+                .unwrap();
             let status = self
                 .builder
-                .build_int_z_extend(fatal, i32_type, "napi_exit_status")
+                .build_int_z_extend(failed, i32_type, "process_exit_status")
                 .unwrap();
             self.builder.build_return(Some(&status)).unwrap();
             return;
         }
-        self.builder
-            .build_return(Some(&i32_type.const_int(0, false)))
+        let status = self
+            .builder
+            .build_int_z_extend(http_failure, i32_type, "http_exit_status")
             .unwrap();
+        self.builder.build_return(Some(&status)).unwrap();
     }
 
     /// Renders the module as textual LLVM IR (handy for debugging / `thaw
@@ -7871,7 +8231,7 @@ mod tests {
         let source = r#"
             function main(): void {
                 const ok: boolean = loadScript(
-                    "function add(a, b) { return a + b; } function greet(name) { return 'hello, ' + name; } function later(x) { return Promise.resolve(x * 2); } function foreignThenable() { return { then(resolve, reject) { resolve(84); reject('late'); resolve(99); } }; } globalThis.retainedMultiplier = (factor => value => Promise.resolve(value * factor))(2);"
+                    "function add(a, b) { return a + b; } function greet(name) { return 'hello, ' + name; } function later(x) { return Promise.resolve(x * 2); } function foreignThenable() { return { then(resolve, reject) { resolve(84); reject('late'); resolve(99); } }; } globalThis.retainedMultiplier = (factor => value => Promise.resolve(value * factor))(2); globalThis.limiterFactory = count => task => Promise.resolve(task()); globalThis.retainedTask = () => 42; globalThis.dynamicBox = { value: 1, add(n) { this.value += n; return this.value; } }; globalThis.dynamicReplacement = 9; globalThis.throwingBox = Object.create(null, { bad: { get() { throw new Error('getter failed'); } } });"
                 );
                 console.log(ok);
 
@@ -7890,11 +8250,33 @@ mod tests {
                 const callable: JsValue = getDynamicValue("retainedMultiplier");
                 const called = callDynamicValue(callable, JSON.parse("[21]"));
                 console.log(Number(called));
+
+                const factory: JsValue = getDynamicValue("limiterFactory");
+                const limiter: JsValue = callDynamicValueHandle(factory, JSON.parse("[2]"));
+                const task: JsValue = getDynamicValue("retainedTask");
+                const limited = callDynamicValueWithValue(limiter, task);
+                console.log(Number(limited));
+                console.log(releaseDynamicValue(limiter));
+                console.log(releaseDynamicValue(limiter));
+
+                const box: JsValue = getDynamicValue("dynamicBox");
+                console.log(Number(callDynamicMethod(box, "add", JSON.parse("[2]"))));
+                const property: JsValue = getDynamicProperty(box, "value");
+                console.log(Number(readDynamicValue(property)));
+                const replacement: JsValue = getDynamicValue("dynamicReplacement");
+                console.log(setDynamicProperty(box, "value", replacement));
+                console.log(Number(callDynamicMethod(box, "add", JSON.parse("[1]"))));
+                const throwing: JsValue = getDynamicValue("throwingBox");
+                try {
+                    const bad: JsValue = getDynamicProperty(throwing, "bad");
+                } catch (error) {
+                    console.log(error);
+                }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "quickjs_fallback"),
-            "true\n5\nhello, thaw\n42\n84\n42\n"
+            "true\n5\nhello, thaw\n42\n84\n42\n42\ntrue\nfalse\n3\n3\ntrue\n10\ngetter failed\n"
         );
     }
 

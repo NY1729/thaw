@@ -1100,16 +1100,33 @@ pub fn generate_shim(
                 ));
             }
             Classification::Fallback { function, reason } => {
+                let returns_callable = functions
+                    .iter()
+                    .filter(|candidate| candidate.name == function)
+                    .all(|candidate| {
+                        matches!(candidate.ret, DtsType::Native(HirType::Function(_, _)))
+                    });
                 let qualified_entry = qualified.iter().find(|q| q.name == function);
                 if let Some(q) = qualified_entry {
                     out.push_str(&format!(
                         "// Fallback (QuickJS-NG), package-qualified alias: {reason}\n"
                     ));
-                    out.push_str(&format!("function {}(argsArray: Json): Json {{\n", q.alias));
-                    out.push_str(&format!(
-                        "    return callDynamic(\"{}\", argsArray);\n",
-                        q.qualified_key
-                    ));
+                    if returns_callable {
+                        out.push_str(&format!(
+                            "function {}(argsArray: Json): JsValue {{\n",
+                            q.alias
+                        ));
+                        out.push_str(&format!(
+                            "    const callable: JsValue = getDynamicValue(\"{}\");\n    return callDynamicValueHandle(callable, argsArray);\n",
+                            q.qualified_key
+                        ));
+                    } else {
+                        out.push_str(&format!("function {}(argsArray: Json): Json {{\n", q.alias));
+                        out.push_str(&format!(
+                            "    return callDynamic(\"{}\", argsArray);\n",
+                            q.qualified_key
+                        ));
+                    }
                     out.push_str("}\n");
                 }
                 if qualified_entry.is_some_and(|q| q.suppress_bare) {
@@ -1120,10 +1137,19 @@ pub fn generate_shim(
                 // *array* of positional arguments, e.g.
                 // `identity(JSON.parse("[42]"))`, not `identity(JSON.parse("42"))` --
                 // named to make that convention hard to miss at the call site.
-                out.push_str(&format!("function {function}(argsArray: Json): Json {{\n"));
-                out.push_str(&format!(
-                    "    return callDynamic(\"{function}\", argsArray);\n"
-                ));
+                if returns_callable {
+                    out.push_str(&format!(
+                        "function {function}(argsArray: Json): JsValue {{\n"
+                    ));
+                    out.push_str(&format!(
+                        "    const callable: JsValue = getDynamicValue(\"{function}\");\n    return callDynamicValueHandle(callable, argsArray);\n"
+                    ));
+                } else {
+                    out.push_str(&format!("function {function}(argsArray: Json): Json {{\n"));
+                    out.push_str(&format!(
+                        "    return callDynamic(\"{function}\", argsArray);\n"
+                    ));
+                }
                 out.push_str("}\n");
             }
         }
@@ -1387,6 +1413,22 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_shim_retains_callable_return_values() {
+        let functions =
+            parse_dts("export declare function make(factor: number): (value: number) => number;")
+                .unwrap();
+        let shim = generate_shim(&functions, false, &[]);
+        assert!(
+            shim.contains("function make(argsArray: Json): JsValue"),
+            "{shim}"
+        );
+        assert!(
+            shim.contains("callDynamicValueHandle(callable, argsArray)"),
+            "{shim}"
+        );
+    }
 
     #[test]
     fn classifies_simple_primitive_signature_as_fast_path() {
