@@ -1472,6 +1472,37 @@ fn inject_finally_before_exits(
     out
 }
 
+/// A classic `for (...; ...; update)` is represented as a HIR `while` with
+/// `update` appended to its body. A source-level `continue` must execute that
+/// update before beginning the next condition check. Recurse through branches
+/// belonging to this loop, but stop at nested loops whose `continue`s target
+/// the nested loop instead.
+fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> Vec<HirStmt> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Continue => {
+                out.push(HirStmt::Expr(update.clone()));
+                out.push(HirStmt::Continue);
+            }
+            HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
+                cond,
+                inject_for_update_before_continue(then_body, update),
+                inject_for_update_before_continue(else_body, update),
+            )),
+            HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
+                inject_for_update_before_continue(body, update),
+                catch_name,
+                inject_for_update_before_continue(catch_body, update),
+            )),
+            // A continue below this node belongs to the nested loop.
+            HirStmt::While(_, _) => out.push(stmt),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn compound_op(op: AssignOp) -> Option<BinOp> {
     match op {
         AssignOp::AddAssign => Some(BinOp::Add),
@@ -1716,7 +1747,9 @@ impl<'a> FnLowerer<'a> {
 
                     let mut body = self.lower_body(&for_stmt.body)?;
                     if let Some(update) = &for_stmt.update {
-                        body.push(HirStmt::Expr(self.lower_expr(update)?));
+                        let update = self.lower_expr(update)?;
+                        body = inject_for_update_before_continue(body, &update);
+                        body.push(HirStmt::Expr(update));
                     }
 
                     out.push(HirStmt::While(cond, body));
@@ -3049,6 +3082,37 @@ mod tests {
         // console.log(i) + the `i = i + 1` update appended to the body.
         assert_eq!(body.len(), 2);
         assert!(matches!(body[1], HirStmt::Expr(HirExpr::Assign(ref n, _)) if n == "i"));
+    }
+
+    #[test]
+    fn classic_for_continue_runs_the_update_but_nested_loop_continue_does_not() {
+        let program = lower(
+            r#"function main(): void {
+                for (let i = 0; i < 3; i++) {
+                    while (i < 1) { continue; }
+                    if (i === 1) { continue; }
+                    console.log(i);
+                }
+            }"#,
+        );
+        let HirStmt::While(_, body) = &program.functions[0].body[1] else {
+            panic!("expected desugared for loop");
+        };
+        let HirStmt::While(_, nested_body) = &body[0] else {
+            panic!("expected nested while loop");
+        };
+        assert_eq!(nested_body, &[HirStmt::Continue]);
+        let HirStmt::If(_, then_body, _) = &body[1] else {
+            panic!("expected conditional continue");
+        };
+        assert!(matches!(
+            then_body.as_slice(),
+            [HirStmt::Expr(HirExpr::Assign(name, _)), HirStmt::Continue] if name == "i"
+        ));
+        assert!(matches!(
+            body.last(),
+            Some(HirStmt::Expr(HirExpr::Assign(name, _))) if name == "i"
+        ));
     }
 
     #[test]
