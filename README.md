@@ -167,6 +167,9 @@ The workspace crates have narrow responsibilities:
   to arena-backed closures, including captured values and nested closures, and
   Rust can invoke them through the callback FFI in fully static executables;
   captured mutable bindings are shared with their outer scope
+- The Node-shaped `createServer(callback).listen(port)` slice passes typed
+  request/response objects and supports `method`, `url`, `statusCode`,
+  `setHeader`, `write`, and `end`; it currently handles one request per listen
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint
