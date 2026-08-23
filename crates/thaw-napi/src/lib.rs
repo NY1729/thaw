@@ -275,10 +275,16 @@ fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), Strin
 
 #[cfg(not(target_os = "linux"))]
 fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
-    let path = std::env::temp_dir().join(format!("thaw-native-addon-{}.node", std::process::id()));
-    std::fs::write(&path, bytes)
+    let mut file = tempfile::Builder::new()
+        .prefix("thaw-native-addon-")
+        .suffix(".node")
+        .tempfile()
+        .map_err(|error| format!("failed to create embedded addon file: {error}"))?;
+    file.write_all(bytes)
         .map_err(|error| format!("failed to write embedded addon: {error}"))?;
-    unsafe { load_impl(&path.to_string_lossy(), root_name) }
+    file.flush()
+        .map_err(|error| format!("failed to flush embedded addon: {error}"))?;
+    unsafe { load_impl(&file.path().to_string_lossy(), root_name) }
 }
 
 #[no_mangle]
