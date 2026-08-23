@@ -46,10 +46,10 @@ struct PromiseSubscription {
 
 thread_local! {
     static READY_CONTINUATIONS: RefCell<VecDeque<(PromiseSubscription, *const u8)>> =
-        RefCell::new(VecDeque::new());
-    static TIMERS: RefCell<Vec<PromiseTimer>> = RefCell::new(Vec::new());
-    static FD_WAITS: RefCell<Vec<PromiseFdWait>> = RefCell::new(Vec::new());
-    static FD_WATCHERS: RefCell<Vec<FdWatcher>> = RefCell::new(Vec::new());
+        const { RefCell::new(VecDeque::new()) };
+    static TIMERS: RefCell<Vec<PromiseTimer>> = const { RefCell::new(Vec::new()) };
+    static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
+    static FD_WATCHERS: RefCell<Vec<FdWatcher>> = const { RefCell::new(Vec::new()) };
 }
 
 struct PromiseTimer {
@@ -382,8 +382,10 @@ struct AsyncHttpGet {
     port: u16,
     path: String,
     redirects: usize,
-    resolution: Option<Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>>,
+    resolution: Option<SharedDnsResolution>,
 }
+
+type SharedDnsResolution = Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>;
 
 impl Drop for AsyncHttpGet {
     fn drop(&mut self) {
@@ -948,7 +950,7 @@ fn schedule_async_http(task: *mut AsyncHttpGet, interests: u8) {
     let milliseconds = remaining.as_millis().max(1).min(u64::MAX as u128) as u64;
     let readiness = thaw_runtime_wait_fd_timeout(task_ref.fd, interests, milliseconds);
     unsafe { (*task).readiness = readiness };
-    thaw_promise_subscribe(readiness, resume_async_http, task.cast());
+    unsafe { thaw_promise_subscribe(readiness, resume_async_http, task.cast()) };
 }
 
 fn complete_async_http_if_ready(task: *mut AsyncHttpGet, eof: bool) -> bool {
@@ -969,7 +971,7 @@ fn complete_async_http_if_ready(task: *mut AsyncHttpGet, eof: bool) -> bool {
 extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
     let task = frame.cast::<AsyncHttpGet>();
     let readiness = unsafe { (*task).readiness };
-    let readiness_state = thaw_promise_state(readiness);
+    let readiness_state = unsafe { thaw_promise_state(readiness) };
     unsafe { thaw_promise_destroy(readiness) };
     unsafe { (*task).readiness = std::ptr::null_mut() };
     if readiness_state == 2 {
@@ -1335,8 +1337,13 @@ pub extern "C" fn thaw_sleep_ms(milliseconds: u64) -> *mut ThawPromise {
 /// Drives ready continuations and timers until `promise` settles. Returns its
 /// result/error pointer; use `thaw_promise_state` to distinguish fulfillment
 /// from rejection. Returns null for an invalid handle or no possible progress.
+///
+/// # Safety
+///
+/// `promise` must be null or point to a live `ThawPromise` for the duration of
+/// this call. No other thread may mutate or destroy it concurrently.
 #[no_mangle]
-pub extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {
+pub unsafe extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {
     loop {
         let Some(promise_ref) = (unsafe { promise.as_ref() }) else {
             return std::ptr::null();
@@ -1347,7 +1354,7 @@ pub extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -
         if thaw_runtime_poll_one() != 0 {
             continue;
         }
-        if thaw_promise_state(promise) != 0 {
+        if unsafe { thaw_promise_state(promise) } != 0 {
             continue;
         }
         let delay = next_timer_delay();
@@ -1387,8 +1394,13 @@ pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
 
 /// Returns 0 for pending, 1 for fulfilled, 2 for rejected, and 255 for an
 /// invalid handle.
+///
+/// # Safety
+///
+/// `promise` must be null or point to a live `ThawPromise` that is not being
+/// mutated or destroyed concurrently.
 #[no_mangle]
-pub extern "C" fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
+pub unsafe extern "C" fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
     let Some(promise) = (unsafe { promise.as_ref() }) else {
         return u8::MAX;
     };
@@ -1402,8 +1414,13 @@ pub extern "C" fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
 /// Registers a coroutine continuation. If already resolved, the callback is
 /// queued immediately, but never invoked reentrantly inside this function.
 /// Returns 1 on success and 0 for an invalid handle.
+///
+/// # Safety
+///
+/// `promise` must be null or point to a live, exclusively accessible
+/// `ThawPromise`. `frame` must remain valid whenever `resume` can be invoked.
 #[no_mangle]
-pub extern "C" fn thaw_promise_subscribe(
+pub unsafe extern "C" fn thaw_promise_subscribe(
     promise: *mut ThawPromise,
     resume: PromiseResumeFn,
     frame: *mut u8,
@@ -1454,6 +1471,11 @@ fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) 
 
 /// Destroys a promise handle. Passing null is a no-op. The caller must not
 /// destroy a promise from inside one of its resume callbacks.
+///
+/// # Safety
+///
+/// `promise` must be null or a pointer returned by `thaw_promise_new` that has
+/// not already been destroyed and is no longer referenced by any subscriber.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
     if !promise.is_null() {
@@ -1655,6 +1677,22 @@ mod tests {
     use std::sync::mpsc;
 
     static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {
+        unsafe { super::thaw_runtime_run_until_resolved(promise) }
+    }
+
+    fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
+        unsafe { super::thaw_promise_state(promise) }
+    }
+
+    fn thaw_promise_subscribe(
+        promise: *mut ThawPromise,
+        resume: PromiseResumeFn,
+        frame: *mut u8,
+    ) -> u8 {
+        unsafe { super::thaw_promise_subscribe(promise, resume, frame) }
+    }
 
     extern "C" fn echo_handler(event: *const c_char) -> *const c_char {
         let event = unsafe { CStr::from_ptr(event) }
