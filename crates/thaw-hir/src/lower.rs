@@ -34,9 +34,29 @@ use swc_ecma_ast::{
 };
 
 use crate::{
-    BinOp, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr, HirFunction, HirLit, HirParam,
-    HirProgram, HirStmt, HirType, Symbol,
+    BinOp, DynamicBackend, DynamicSignature, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr,
+    HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType, Symbol,
 };
+
+fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
+    let (backend, hex) = name
+        .strip_prefix("__thaw_typed_js_")
+        .map(|hex| (DynamicBackend::QuickJs, hex))
+        .or_else(|| {
+            name.strip_prefix("__thaw_typed_napi_")
+                .map(|hex| (DynamicBackend::Napi, hex))
+        })?;
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes)
+        .ok()
+        .map(|symbol| (backend, symbol))
+}
 
 /// Signature info needed to type calls to other top-level functions during
 /// lowering, collected in a pre-pass over the whole module before any
@@ -333,7 +353,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let extern_functions = signatures
         .iter()
-        .filter(|(_, sig)| sig.is_extern)
+        .filter(|(name, sig)| sig.is_extern && dynamic_symbol(name).is_none())
         .map(|(name, sig)| FfiSignature {
             symbol: name.clone(),
             params: sig.params.clone(),
@@ -1971,6 +1991,7 @@ impl<'a> FnLowerer<'a> {
                     None => Err(format!("call to unknown function `{name}`")),
                 }
             }
+            HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
                 for value in values {
                     self.expect_type(&HirType::F64, value, "array element")?;
@@ -2429,6 +2450,17 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some(sig) = signature.clone().filter(|sig| sig.is_extern) {
+            if let Some((backend, symbol)) = dynamic_symbol(&callee_name) {
+                return Ok(HirExpr::DynamicCall(
+                    DynamicSignature {
+                        backend,
+                        symbol,
+                        params: sig.params,
+                        ret: sig.ret,
+                    },
+                    args,
+                ));
+            }
             let ffi_signature = FfiSignature {
                 symbol: callee_name,
                 params: sig.params,
