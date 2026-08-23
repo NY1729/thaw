@@ -22,7 +22,7 @@
 //! `lower_stmt_seq`, not a single-statement `lower_stmt`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use swc_common::{BytePos, SourceMap};
@@ -1459,6 +1459,83 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
     }
 }
 
+fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
+    match expr {
+        HirExpr::Var(name) => {
+            names.insert(name.clone());
+        }
+        HirExpr::Assign(name, value) => {
+            names.insert(name.clone());
+            collect_referenced_bindings(value, names);
+        }
+        HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+            collect_referenced_bindings(left, names);
+            collect_referenced_bindings(right, names);
+        }
+        HirExpr::Call(callee, args) => {
+            collect_referenced_bindings(callee, names);
+            for arg in args {
+                collect_referenced_bindings(arg, names);
+            }
+        }
+        HirExpr::Await(value)
+        | HirExpr::ArrayLen(value)
+        | HirExpr::JsonAsNumber(value)
+        | HirExpr::JsonAsString(value)
+        | HirExpr::JsonAsBool(value) => collect_referenced_bindings(value, names),
+        HirExpr::Lambda(_, _, _, body) => collect_referenced_bindings(body, names),
+        HirExpr::Block(stmts) => collect_stmt_bindings(stmts, names),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) | HirExpr::ArrayLit(args) => {
+            for arg in args {
+                collect_referenced_bindings(arg, names);
+            }
+        }
+        HirExpr::IndexAssign(array, index, value) => {
+            collect_referenced_bindings(array, names);
+            collect_referenced_bindings(index, names);
+            collect_referenced_bindings(value, names);
+        }
+        HirExpr::ObjectLit(fields) => {
+            for (_, value) in fields {
+                collect_referenced_bindings(value, names);
+            }
+        }
+        HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => {
+            collect_referenced_bindings(object, names);
+        }
+        HirExpr::PropAssign(object, _, _, value) | HirExpr::JsonIndex(object, value) => {
+            collect_referenced_bindings(object, names);
+            collect_referenced_bindings(value, names);
+        }
+        HirExpr::Lit(_) | HirExpr::EnvVar(_) => {}
+    }
+}
+
+fn collect_stmt_bindings(stmts: &[HirStmt], names: &mut BTreeSet<Symbol>) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
+                collect_referenced_bindings(expr, names)
+            }
+            HirStmt::Return(Some(expr)) => collect_referenced_bindings(expr, names),
+            HirStmt::If(cond, then_body, else_body) => {
+                collect_referenced_bindings(cond, names);
+                collect_stmt_bindings(then_body, names);
+                collect_stmt_bindings(else_body, names);
+            }
+            HirStmt::While(cond, body) => {
+                collect_referenced_bindings(cond, names);
+                collect_stmt_bindings(body, names);
+            }
+            HirStmt::Try(body, _, catch_body) => {
+                collect_stmt_bindings(body, names);
+                collect_stmt_bindings(catch_body, names);
+            }
+            HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+        }
+    }
+}
+
 /// Expands an enclosing `finally` before every control-flow exit in `stmts`.
 /// A throw in a try body is handled by that try's catch first, so recursive
 /// descent into `HirStmt::Try` only instruments its catch body for throws.
@@ -2120,7 +2197,7 @@ impl<'a> FnLowerer<'a> {
             // but function values do not have a native ABI until the next
             // callback-lowering phase. Keep the enclosing local dynamic
             // instead of discarding or pretending to know that ABI.
-            HirExpr::Lambda(params, ret, _) => Ok(HirType::Function(
+            HirExpr::Lambda(_, params, ret, _) => Ok(HirType::Function(
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),
             )),
@@ -2241,7 +2318,23 @@ impl<'a> FnLowerer<'a> {
                 }
             };
             let return_type = declared_return.clone().unwrap_or(inferred_return);
-            Ok(HirExpr::Lambda(params, return_type, Box::new(body)))
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&body, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter_map(|name| {
+                    saved_scope
+                        .get(&name)
+                        .cloned()
+                        .map(|ty| HirParam { name, ty })
+                })
+                .collect();
+            Ok(HirExpr::Lambda(
+                captures,
+                params,
+                return_type,
+                Box::new(body),
+            ))
         })();
         self.scope = saved_scope;
         self.bindings = saved_bindings;
@@ -4002,11 +4095,12 @@ mod tests {
         let HirStmt::Let(
             _,
             HirType::Function(param_types, return_type),
-            HirExpr::Lambda(params, lambda_return, lambda_body),
+            HirExpr::Lambda(captures, params, lambda_return, lambda_body),
         ) = &body[1]
         else {
             panic!("expected a lowered arrow function");
         };
+        assert!(captures.is_empty());
         assert_eq!(param_types, &[HirType::F64]);
         assert_eq!(return_type.as_ref(), &HirType::F64);
         assert_eq!(lambda_return, &HirType::F64);
@@ -4031,11 +4125,12 @@ mod tests {
                 const callback = (path: string): string => { return path; };
             }"#,
         );
-        let HirStmt::Let(_, _, HirExpr::Lambda(params, return_type, lambda_body)) =
+        let HirStmt::Let(_, _, HirExpr::Lambda(captures, params, return_type, lambda_body)) =
             &program.functions[0].body[0]
         else {
             panic!("expected a lowered arrow function");
         };
+        assert!(captures.is_empty());
         assert_eq!(params[0].ty, HirType::Str);
         assert_eq!(return_type, &HirType::Str);
         assert!(matches!(
@@ -4057,10 +4152,32 @@ mod tests {
         let function_type = HirType::Function(vec![HirType::F64], Box::new(HirType::F64));
         assert!(matches!(
             &program.functions[0].body[0],
-            HirStmt::Let(name, ty, HirExpr::Lambda(_, _, _))
+            HirStmt::Let(name, ty, HirExpr::Lambda(_, _, _, _))
                 if name == "increment" && ty == &function_type
         ));
         assert!(format!("{:?}", program.functions[0].body[1])
             .contains("Call(Var(\"increment\"), [Lit(F64(41.0))])"));
+    }
+
+    #[test]
+    fn records_arrow_capture_names_and_types() {
+        let program = lower(
+            r#"function main(): void {
+                const base: number = 40;
+                const add = (value: number): number => base + value;
+                console.log(add(2));
+            }"#,
+        );
+        let HirStmt::Let(_, _, HirExpr::Lambda(captures, _, _, _)) = &program.functions[0].body[1]
+        else {
+            panic!("expected captured lambda");
+        };
+        assert_eq!(
+            captures,
+            &[HirParam {
+                name: "base".into(),
+                ty: HirType::F64,
+            }]
+        );
     }
 }

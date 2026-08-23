@@ -1672,9 +1672,13 @@ mod tests {
             &entry,
             format!(
                 r#"
-                    import {{ serveOnce }} from "node:http";
+                    import {{ serveOnceWith }} from "node:http";
                     function main(): void {{
-                        const target: string = serveOnce({}, "hello from thaw");
+                        const prefix: string = "hello";
+                        const target: string = serveOnceWith(
+                            {},
+                            (requestTarget: string): string => prefix
+                        );
                         console.log(target);
                     }}
                 "#,
@@ -1722,7 +1726,7 @@ mod tests {
             String::from_utf8_lossy(&result.stderr)
         );
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(response.ends_with("hello from thaw"));
+        assert!(response.ends_with("hello"));
         assert_eq!(String::from_utf8_lossy(&result.stdout), "/health\n");
         let _ = std::fs::remove_dir_all(dir);
     }
