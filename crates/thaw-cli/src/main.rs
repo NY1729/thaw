@@ -80,8 +80,20 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
     } else {
         String::new()
     };
+    let deps_note = if added.dependency_versions.len() > 1 {
+        let mut deps: Vec<String> = added
+            .dependency_versions
+            .iter()
+            .filter(|(dep_name, _)| dep_name.as_str() != name)
+            .map(|(dep_name, version)| format!("{dep_name}@{version}"))
+            .collect();
+        deps.sort();
+        format!("\n  deps:  {}", deps.join(", "))
+    } else {
+        String::new()
+    };
     println!(
-        "added `{name}@{}` to `{}`\n  types: {}\n  main:  {}{bundle_note}",
+        "added `{name}@{}` to `{}`\n  types: {}\n  main:  {}{bundle_note}{deps_note}",
         added.resolved_version,
         registry_dir.join(name).display(),
         added.dts_relative_path,
