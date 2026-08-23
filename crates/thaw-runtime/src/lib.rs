@@ -36,6 +36,7 @@ pub const THAW_FD_WRITABLE: u8 = 2;
 pub type HandlerFn = extern "C" fn(*const c_char) -> *const c_char;
 pub type HandlerErrorSlot = *mut *const c_char;
 pub type PromiseResumeFn = extern "C" fn(*mut u8, *const u8);
+pub type PromiseTransformFn = extern "C" fn(*mut u8, *mut ThawPromise, *const u8);
 pub type FdWatcherFn = extern "C" fn(*mut u8, i16);
 
 #[derive(Clone, Copy)]
@@ -1486,6 +1487,92 @@ pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u
     settle_promise(promise, error, true)
 }
 
+struct PromiseChainState {
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+    callback: PromiseTransformFn,
+    context: *mut u8,
+    on_rejected: bool,
+}
+
+extern "C" fn resume_promise_chain(frame: *mut u8, result: *const u8) {
+    let state = unsafe { Box::from_raw(frame.cast::<PromiseChainState>()) };
+    let rejected = unsafe { thaw_promise_state(state.input) } == 2;
+    if rejected == state.on_rejected {
+        (state.callback)(state.context, state.output, result);
+    } else if rejected {
+        thaw_promise_reject(state.output, result);
+    } else {
+        thaw_promise_resolve(state.output, result);
+    }
+    unsafe { thaw_promise_destroy(state.input) };
+}
+
+/// Creates the Promise returned by `.then` or `.catch`. The input handle is
+/// consumed. The callback is invoked only for the selected settlement kind;
+/// the other kind is forwarded without changing its payload.
+///
+/// # Safety
+///
+/// `input` must point to a live `ThawPromise`. `context` must remain valid
+/// until `callback` runs.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_chain(
+    input: *mut ThawPromise,
+    callback: PromiseTransformFn,
+    context: *mut u8,
+    on_rejected: u8,
+) -> *mut ThawPromise {
+    let output = thaw_promise_new();
+    if input.is_null() {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let state = Box::into_raw(Box::new(PromiseChainState {
+        output,
+        input,
+        callback,
+        context,
+        on_rejected: on_rejected != 0,
+    }));
+    thaw_promise_subscribe(input, resume_promise_chain, state.cast());
+    output
+}
+
+struct PromiseAdoptState {
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+}
+
+extern "C" fn resume_promise_adopt(frame: *mut u8, result: *const u8) {
+    let state = unsafe { Box::from_raw(frame.cast::<PromiseAdoptState>()) };
+    if unsafe { thaw_promise_state(state.input) } == 2 {
+        thaw_promise_reject(state.output, result);
+    } else {
+        thaw_promise_resolve(state.output, result);
+    }
+    unsafe { thaw_promise_destroy(state.input) };
+}
+
+/// Makes `output` follow `input`, implementing Promise callback flattening.
+/// The input handle is consumed.
+///
+/// # Safety
+///
+/// Both arguments must point to distinct live promises.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_adopt(
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+) -> u8 {
+    if output.is_null() || input.is_null() || output == input {
+        return 0;
+    }
+    let state = Box::into_raw(Box::new(PromiseAdoptState { output, input }));
+    thaw_promise_subscribe(input, resume_promise_adopt, state.cast());
+    1
+}
+
 struct PromiseAllState {
     output: *mut ThawPromise,
     remaining: usize,
@@ -2218,6 +2305,24 @@ mod tests {
         record.result = result;
     }
 
+    struct ChainNumberContext {
+        calls: usize,
+        add: f64,
+    }
+
+    extern "C" fn transform_chain_number(
+        context: *mut u8,
+        output: *mut ThawPromise,
+        result: *const u8,
+    ) {
+        let context = unsafe { &mut *context.cast::<ChainNumberContext>() };
+        context.calls += 1;
+        let value = unsafe { *result.cast::<f64>() } + context.add;
+        let slot = thaw_arena::thaw_arena_alloc(size_of::<f64>(), align_of::<f64>()).cast::<f64>();
+        unsafe { slot.write(value) };
+        thaw_promise_resolve(output, slot.cast());
+    }
+
     struct TimedValueContext {
         timer: *mut ThawPromise,
         output: *mut ThawPromise,
@@ -2318,6 +2423,43 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
         (client, server)
+    }
+
+    #[test]
+    fn promise_chain_selects_callbacks_for_then_and_catch() {
+        let input = thaw_promise_new();
+        let mut then_context = ChainNumberContext { calls: 0, add: 2.0 };
+        let chained = unsafe {
+            thaw_promise_chain(
+                input,
+                transform_chain_number,
+                (&mut then_context as *mut ChainNumberContext).cast(),
+                0,
+            )
+        };
+        let value = 40.0f64;
+        thaw_promise_resolve(input, (&value as *const f64).cast());
+        let result = thaw_runtime_run_until_resolved(chained);
+        assert_eq!(unsafe { *result.cast::<f64>() }, 42.0);
+        assert_eq!(then_context.calls, 1);
+        unsafe { thaw_promise_destroy(chained) };
+
+        let input = thaw_promise_new();
+        let mut catch_context = ChainNumberContext { calls: 0, add: 1.0 };
+        let chained = unsafe {
+            thaw_promise_chain(
+                input,
+                transform_chain_number,
+                (&mut catch_context as *mut ChainNumberContext).cast(),
+                1,
+            )
+        };
+        let value = 7.0f64;
+        thaw_promise_resolve(input, (&value as *const f64).cast());
+        let result = thaw_runtime_run_until_resolved(chained);
+        assert_eq!(unsafe { *result.cast::<f64>() }, 7.0);
+        assert_eq!(catch_context.calls, 0);
+        unsafe { thaw_promise_destroy(chained) };
     }
 
     #[test]
