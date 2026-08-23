@@ -433,3 +433,22 @@ JSON文字列を`thaw_json_parse`してclosureをmain threadで呼ぶ。非同�
 `gen_salt`、`encrypt`、`compare`を並行実行する。成功値だけでなく不正saltのerror引数も
 生成lambdaへ戻ることを検査する。待機中workのcancelとcancelled statusはhost unit test
 で競合を固定して検証済みである。
+
+## 16. classベースaddon
+
+`napi_define_class`はconstructor Functionとprototype Objectを作り、instance propertyと
+`napi_static` propertyをそれぞれprototype／constructorへ定義する。
+`napi_new_instance`はprototype methodとaccessorを引き継ぐObjectを作成し、constructor
+callbackには`this`と`new_target`を渡す。`napi_instanceof`は生成元constructorをEnv内で
+追跡する。
+
+native instance dataは`napi_wrap`／`napi_unwrap`／`napi_remove_wrap`で管理する。同じ
+Objectへの二重wrapは拒否し、removeされなかったdataのfinalizerはObjectを所有するEnvの
+破棄時に一度だけ呼ぶ。weak reference用に返される`napi_ref`とreference count操作、
+external値の取得も実装する。
+
+実C addon testは`NativeBox` classを定義し、constructorでC heap dataをwrapする。
+prototype methodとgetter accessorの双方がunwrapした値を読み、`napi_new_instance`と
+`napi_instanceof`を経由して結果を返す。呼び出しEnv破棄後にはfinalizer countが1になる
+ことまで検査する。継承チェーン、property attributesの完全なdescriptor semantics、
+GCのweak-reference clearingは今後の拡張対象である。
