@@ -684,8 +684,11 @@ QuickJS-NG から呼び出せるようにする」になるが、それは N-API
   実装（Node の `path` も実ファイルシステムには触れないので、これで
   十分）。
 - `os`: `arch()`/`platform()`/`tmpdir()`/`EOL` の固定値。
-- `fs`: `existsSync` は常に `false`、`readdirSync`/`statSync`/
-  `readFileSync` は常に `ENOENT` 相当の例外を投げる -- このレジストリ
+- npm bundle内部の`fs` polyfillは、`existsSync`が常に`false`、
+  `readdirSync`/`statSync`/`readFileSync`が`ENOENT`相当を投げる保守的なshimの
+  ままである。一方、ユーザーの`node:fs` importは`thaw-std` Fast Pathへ接続し、
+  UTF-8 `readFileSync`/`writeFileSync`、`existsSync`、recursive `mkdirSync`を実際の
+  filesystemに対して実行する。このレジストリ
   は `package.d.ts`/`bundle.js` しか保存しないため（7章）、
   「実ファイルは何も無い」が文字通り正しい答えであり、
   `node-gyp-build.js` 自身がその前提で `try/catch` して `[]` を

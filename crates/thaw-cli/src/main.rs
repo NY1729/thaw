@@ -429,7 +429,7 @@ fn generate_registry_shims(
         // an unresolvable `declare function`, even though a working JS
         // implementation is sitting right there in `bundle.js`. See
         // `thaw_bridge::effective_classifications`'s doc comment.
-        let native_lib_available = package.native_lib.is_some();
+        let native_lib_available = package.native_lib.is_some() || package.name == "node:fs";
         let classifications =
             thaw_bridge::effective_classifications(&functions, native_lib_available);
         resolved.push(ResolvedPackage {
@@ -544,7 +544,7 @@ fn generate_registry_shims(
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
-        let native_lib_available = pkg.native_lib.is_some();
+        let native_lib_available = pkg.native_lib.is_some() || pkg.name == "node:fs";
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         for function in &pkg.functions {
             let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
@@ -1588,6 +1588,64 @@ mod tests {
             String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&result.stdout), "a/b\n42\n/\n4\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn node_fs_reads_and_writes_real_files_in_a_static_binary() {
+        if ensure_static_system_libraries().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("thaw-cli-node-fs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_dir = dir.join("data");
+        let data_file = data_dir.join("message.txt");
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+                    import {{ existsSync, readFileSync, writeFileSync, mkdirSync }} from "node:fs";
+                    function main(): void {{
+                        console.log(mkdirSync("{}"));
+                        console.log(writeFileSync("{}", "hello from thaw"));
+                        console.log(existsSync("{}"));
+                        console.log(readFileSync("{}", "utf8"));
+                    }}
+                "#,
+                data_dir.display(),
+                data_file.display(),
+                data_file.display(),
+                data_file.display()
+            ),
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build_with_link_mode(
+            &entry,
+            &output,
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+            true,
+        )
+        .unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "true\ntrue\ntrue\nhello from thaw\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(data_file).unwrap(),
+            "hello from thaw"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
