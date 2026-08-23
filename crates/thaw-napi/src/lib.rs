@@ -13,7 +13,7 @@ use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 use std::ptr;
-use std::sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -32,6 +32,9 @@ const NAPI_OK: NapiStatus = 0;
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
 const NAPI_CANCELLED: NapiStatus = 11;
+const NAPI_QUEUE_FULL: NapiStatus = 15;
+const NAPI_CLOSING: NapiStatus = 16;
+const NAPI_WOULD_DEADLOCK: NapiStatus = 21;
 const NAPI_NUMBER_EXPECTED: NapiStatus = 6;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
 const NAPI_BOOLEAN_EXPECTED: NapiStatus = 7;
@@ -60,6 +63,45 @@ struct AsyncPool {
 static ASYNC_COMPLETIONS: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 static ASYNC_POOL: OnceLock<Option<Arc<AsyncPool>>> = OnceLock::new();
 static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
+static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
+static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
+
+pub struct ThreadsafeFunction {
+    env: usize,
+    function: usize,
+    context: usize,
+    call_js: Option<NapiThreadsafeFunctionCallJs>,
+    finalize_data: usize,
+    finalize: Option<NapiFinalize>,
+    max_queue_size: usize,
+    creator: std::thread::ThreadId,
+    referenced: AtomicBool,
+    state: Mutex<ThreadsafeState>,
+    space_available: Condvar,
+}
+
+struct ThreadsafeState {
+    queue: VecDeque<usize>,
+    thread_count: usize,
+    closing: bool,
+    aborting: bool,
+    scheduled: bool,
+}
+
+fn threadsafe_ready() -> &'static Mutex<VecDeque<usize>> {
+    THREADSAFE_READY.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn schedule_threadsafe(function: *mut ThreadsafeFunction, state: &mut ThreadsafeState) {
+    if !state.scheduled {
+        state.scheduled = true;
+        threadsafe_ready()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(function as usize);
+    }
+}
 
 fn async_completions() -> &'static Mutex<VecDeque<usize>> {
     ASYNC_COMPLETIONS.get_or_init(|| Mutex::new(VecDeque::new()))
@@ -751,7 +793,9 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         } else {
             serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())?
         };
-        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0 {
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
+            || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+        {
             HOST.with(|host| host.borrow_mut().pending_call_envs.push(env));
         }
         Ok(value)
@@ -2239,64 +2283,179 @@ pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, _context: *mut c_void)
     }
 }
 
-// Thread-safe functions require a cross-thread JS callback queue and lifetime
-// tracking that the current single-threaded host does not yet provide. Export
-// the ABI entry points so addons which only use them on optional paths can be
-// loaded; attempting to create one fails explicitly instead of leaving an
-// unresolved dynamic symbol.
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_threadsafe_function(
     env: NapiEnv,
-    _function: NapiValue,
+    function: NapiValue,
     _async_resource: NapiValue,
     _async_resource_name: NapiValue,
-    _max_queue_size: usize,
-    _initial_thread_count: usize,
-    _thread_finalize_data: *mut c_void,
-    _thread_finalize_callback: Option<NapiFinalize>,
-    _context: *mut c_void,
-    _call_js_callback: Option<NapiThreadsafeFunctionCallJs>,
-    result: *mut *mut c_void,
+    max_queue_size: usize,
+    initial_thread_count: usize,
+    thread_finalize_data: *mut c_void,
+    thread_finalize_callback: Option<NapiFinalize>,
+    context: *mut c_void,
+    call_js_callback: Option<NapiThreadsafeFunctionCallJs>,
+    result: *mut *mut ThreadsafeFunction,
 ) -> NapiStatus {
-    if env.is_null() || result.is_null() {
-        NAPI_INVALID_ARG
-    } else {
-        *result = ptr::null_mut();
-        NAPI_GENERIC_FAILURE
+    if env.is_null()
+        || result.is_null()
+        || initial_thread_count == 0
+        || (function.is_null() && call_js_callback.is_none())
+    {
+        return NAPI_INVALID_ARG;
     }
+    if !function.is_null() && !matches!(value_ref(function), Ok(Value::Function(_))) {
+        return NAPI_INVALID_ARG;
+    }
+    let threadsafe = Box::new(ThreadsafeFunction {
+        env: env as usize,
+        function: function as usize,
+        context: context as usize,
+        call_js: call_js_callback,
+        finalize_data: thread_finalize_data as usize,
+        finalize: thread_finalize_callback,
+        max_queue_size,
+        creator: std::thread::current().id(),
+        referenced: AtomicBool::new(true),
+        state: Mutex::new(ThreadsafeState {
+            queue: VecDeque::new(),
+            thread_count: initial_thread_count,
+            closing: false,
+            aborting: false,
+            scheduled: false,
+        }),
+        space_available: Condvar::new(),
+    });
+    ACTIVE_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
+    LIVE_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
+    *result = Box::into_raw(threadsafe);
+    NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_call_threadsafe_function(
-    _function: *mut c_void,
-    _data: *mut c_void,
-    _mode: i32,
+    function: *mut ThreadsafeFunction,
+    data: *mut c_void,
+    mode: i32,
 ) -> NapiStatus {
-    NAPI_GENERIC_FAILURE
+    let Some(function_ref) = function.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    if mode != 0 && mode != 1 {
+        return NAPI_INVALID_ARG;
+    }
+    let mut state = function_ref
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        if state.closing {
+            return NAPI_CLOSING;
+        }
+        if function_ref.max_queue_size == 0 || state.queue.len() < function_ref.max_queue_size {
+            break;
+        }
+        if mode == 0 {
+            return NAPI_QUEUE_FULL;
+        }
+        if std::thread::current().id() == function_ref.creator {
+            return NAPI_WOULD_DEADLOCK;
+        }
+        state = function_ref
+            .space_available
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    state.queue.push_back(data as usize);
+    schedule_threadsafe(function, &mut state);
+    NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_release_threadsafe_function(
-    _function: *mut c_void,
-    _mode: i32,
+    function: *mut ThreadsafeFunction,
+    mode: i32,
 ) -> NapiStatus {
-    NAPI_GENERIC_FAILURE
+    let Some(function_ref) = function.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    if mode != 0 && mode != 1 {
+        return NAPI_INVALID_ARG;
+    }
+    let mut state = function_ref
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.closing || state.thread_count == 0 {
+        return NAPI_CLOSING;
+    }
+    if mode == 1 {
+        state.thread_count = 0;
+        state.closing = true;
+        state.aborting = true;
+    } else {
+        state.thread_count -= 1;
+        if state.thread_count == 0 {
+            state.closing = true;
+        }
+    }
+    function_ref.space_available.notify_all();
+    if state.closing {
+        schedule_threadsafe(function, &mut state);
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_acquire_threadsafe_function(
+    function: *mut ThreadsafeFunction,
+) -> NapiStatus {
+    let Some(function_ref) = function.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    let mut state = function_ref
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.closing {
+        return NAPI_CLOSING;
+    }
+    state.thread_count = state.thread_count.saturating_add(1);
+    NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_ref_threadsafe_function(
-    _env: NapiEnv,
-    _function: *mut c_void,
+    env: NapiEnv,
+    function: *mut ThreadsafeFunction,
 ) -> NapiStatus {
-    NAPI_GENERIC_FAILURE
+    let Some(function) = function.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    if env.is_null() || function.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
+    if !function.referenced.swap(true, Ordering::AcqRel) {
+        ACTIVE_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
+    }
+    NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_unref_threadsafe_function(
-    _env: NapiEnv,
-    _function: *mut c_void,
+    env: NapiEnv,
+    function: *mut ThreadsafeFunction,
 ) -> NapiStatus {
-    NAPI_GENERIC_FAILURE
+    let Some(function) = function.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    if env.is_null() || function.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
+    if function.referenced.swap(false, Ordering::AcqRel) {
+        ACTIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
+    }
+    NAPI_OK
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_open_escapable_handle_scope(
@@ -2433,18 +2592,109 @@ pub unsafe extern "C" fn napi_delete_async_work(env: NapiEnv, work: *mut AsyncWo
     NAPI_OK
 }
 
+fn run_one_threadsafe_callback() -> Option<bool> {
+    let address = threadsafe_ready()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .pop_front()?;
+    let function_ptr = address as *mut ThreadsafeFunction;
+    let function = unsafe { &*function_ptr };
+    let (data, aborting, finalize) = {
+        let mut state = function
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.scheduled = false;
+        let data = state.queue.pop_front();
+        if data.is_some() {
+            function.space_available.notify_one();
+        }
+        if !state.queue.is_empty() {
+            schedule_threadsafe(function_ptr, &mut state);
+        }
+        let finalize = state.closing && state.queue.is_empty();
+        (data, state.aborting, finalize)
+    };
+
+    if let Some(data) = data {
+        unsafe {
+            if let Some(call_js) = function.call_js {
+                if aborting {
+                    call_js(
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        function.context as *mut c_void,
+                        data as *mut c_void,
+                    );
+                } else {
+                    call_js(
+                        function.env as NapiEnv,
+                        function.function as NapiValue,
+                        function.context as *mut c_void,
+                        data as *mut c_void,
+                    );
+                }
+            } else if !aborting {
+                let env = function.env as NapiEnv;
+                let mut undefined = ptr::null_mut();
+                if napi_get_undefined(env, &mut undefined) == NAPI_OK {
+                    let _ = napi_call_function(
+                        env,
+                        undefined,
+                        function.function as NapiValue,
+                        0,
+                        ptr::null(),
+                        ptr::null_mut(),
+                    );
+                }
+            }
+        }
+    }
+
+    if finalize {
+        LIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
+        if function.referenced.swap(false, Ordering::AcqRel) {
+            ACTIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
+        }
+        if let Some(finalize) = function.finalize {
+            unsafe {
+                finalize(
+                    function.env as NapiEnv,
+                    function.finalize_data as *mut c_void,
+                    function.context as *mut c_void,
+                );
+            }
+        }
+        unsafe { drop(Box::from_raw(function_ptr)) };
+    }
+    Some(data.is_some() && !aborting)
+}
+
 /// Runs queued completion callbacks on the calling thread and waits until all
 /// work submitted by native addons has completed. Generated executables call
 /// this once user `main` returns.
 #[no_mangle]
 pub extern "C" fn thaw_napi_run_async_work() -> usize {
     let mut completed = 0;
-    while ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0 {
+    loop {
+        while let Some(called) = run_one_threadsafe_callback() {
+            completed += usize::from(called);
+        }
         let work_address = async_completions()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop_front();
         let Some(work_address) = work_address else {
+            let threadsafe_pending = !threadsafe_ready()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty();
+            if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
+                && ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+                && !threadsafe_pending
+            {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(1));
             continue;
         };
@@ -2460,7 +2710,9 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
             unsafe { complete(env, status, data) };
         }
     }
-    HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
+    if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0 {
+        HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
+    }
     completed
 }
 
@@ -2471,6 +2723,14 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     static BCRYPT_ASYNC_RESULT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
+        ASYNC_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     unsafe extern "C" fn bcrypt_async_callback(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
         let mut argc = 2;
@@ -2529,6 +2789,59 @@ mod tests {
         status: AtomicI32,
     }
 
+    struct ThreadsafeProbe {
+        main_thread: std::thread::ThreadId,
+        callback_threads: Mutex<Vec<std::thread::ThreadId>>,
+        values: Mutex<Vec<f64>>,
+        aborted: AtomicUsize,
+        finalized: AtomicBool,
+    }
+
+    unsafe extern "C" fn threadsafe_js_callback(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        let info = info.as_ref().unwrap();
+        let probe = &*(info.data as *const ThreadsafeProbe);
+        let value = match value_ref(info.args[0]).unwrap() {
+            Value::Number(value) => *value,
+            _ => panic!("thread-safe callback did not receive a number"),
+        };
+        probe.values.lock().unwrap().push(value);
+        probe
+            .callback_threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        let mut undefined = ptr::null_mut();
+        assert_eq!(napi_get_undefined(env, &mut undefined), NAPI_OK);
+        undefined
+    }
+
+    unsafe extern "C" fn threadsafe_call_js(
+        env: NapiEnv,
+        function: NapiValue,
+        context: *mut c_void,
+        data: *mut c_void,
+    ) {
+        let probe = &*(context as *const ThreadsafeProbe);
+        let value = *Box::from_raw(data as *mut f64);
+        if env.is_null() {
+            probe.aborted.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        let mut argument = ptr::null_mut();
+        assert_eq!(napi_create_double(env, value, &mut argument), NAPI_OK);
+        let mut undefined = ptr::null_mut();
+        assert_eq!(napi_get_undefined(env, &mut undefined), NAPI_OK);
+        assert_eq!(
+            napi_call_function(env, undefined, function, 1, &argument, ptr::null_mut()),
+            NAPI_OK
+        );
+    }
+
+    unsafe extern "C" fn threadsafe_finalize(_env: NapiEnv, data: *mut c_void, _hint: *mut c_void) {
+        let probe = &*(data as *const ThreadsafeProbe);
+        probe.finalized.store(true, Ordering::Release);
+    }
+
     unsafe extern "C" fn probe_execute(_env: NapiEnv, data: *mut c_void) {
         let probe = &*(data as *const AsyncProbe);
         *probe.execute_thread.lock().unwrap() = Some(std::thread::current().id());
@@ -2563,7 +2876,146 @@ mod tests {
     }
 
     #[test]
+    fn threadsafe_function_queues_worker_calls_and_finalizes_on_main_thread() {
+        let _guard = lock_async_test();
+        let mut env = Env::new();
+        let probe = Box::into_raw(Box::new(ThreadsafeProbe {
+            main_thread: std::thread::current().id(),
+            callback_threads: Mutex::new(Vec::new()),
+            values: Mutex::new(Vec::new()),
+            aborted: AtomicUsize::new(0),
+            finalized: AtomicBool::new(false),
+        }));
+        let function = env.alloc(Value::Function(Function {
+            callback: threadsafe_js_callback,
+            data: probe.cast(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+        }));
+        let mut threadsafe = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                napi_create_threadsafe_function(
+                    &mut env,
+                    function,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    1,
+                    1,
+                    probe.cast(),
+                    Some(threadsafe_finalize),
+                    probe.cast(),
+                    Some(threadsafe_call_js),
+                    &mut threadsafe,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(napi_acquire_threadsafe_function(threadsafe), NAPI_OK);
+            assert_eq!(napi_release_threadsafe_function(threadsafe, 0), NAPI_OK);
+        }
+        let address = threadsafe as usize;
+        let worker = std::thread::spawn(move || unsafe {
+            let threadsafe = address as *mut ThreadsafeFunction;
+            let first = Box::into_raw(Box::new(20.0));
+            assert_eq!(
+                napi_call_threadsafe_function(threadsafe, first.cast(), 0),
+                NAPI_OK
+            );
+            let second = Box::into_raw(Box::new(22.0));
+            assert_eq!(
+                napi_call_threadsafe_function(threadsafe, second.cast(), 1),
+                NAPI_OK
+            );
+            assert_eq!(napi_release_threadsafe_function(threadsafe, 0), NAPI_OK);
+        });
+
+        assert_eq!(thaw_napi_run_async_work(), 2);
+        worker.join().unwrap();
+        let probe = unsafe { Box::from_raw(probe) };
+        assert_eq!(*probe.values.lock().unwrap(), vec![20.0, 22.0]);
+        assert!(probe
+            .callback_threads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|thread| *thread == probe.main_thread));
+        assert!(probe.finalized.load(Ordering::Acquire));
+        assert_eq!(probe.aborted.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn threadsafe_function_reports_full_deadlock_and_abort_cleanup() {
+        let _guard = lock_async_test();
+        let mut env = Env::new();
+        let probe = Box::into_raw(Box::new(ThreadsafeProbe {
+            main_thread: std::thread::current().id(),
+            callback_threads: Mutex::new(Vec::new()),
+            values: Mutex::new(Vec::new()),
+            aborted: AtomicUsize::new(0),
+            finalized: AtomicBool::new(false),
+        }));
+        let function = env.alloc(Value::Function(Function {
+            callback: threadsafe_js_callback,
+            data: probe.cast(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+        }));
+        let mut threadsafe = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                napi_create_threadsafe_function(
+                    &mut env,
+                    function,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    1,
+                    1,
+                    probe.cast(),
+                    Some(threadsafe_finalize),
+                    probe.cast(),
+                    Some(threadsafe_call_js),
+                    &mut threadsafe,
+                ),
+                NAPI_OK
+            );
+            let queued = Box::into_raw(Box::new(1.0));
+            assert_eq!(
+                napi_call_threadsafe_function(threadsafe, queued.cast(), 0),
+                NAPI_OK
+            );
+            let full = Box::into_raw(Box::new(2.0));
+            assert_eq!(
+                napi_call_threadsafe_function(threadsafe, full.cast(), 0),
+                NAPI_QUEUE_FULL
+            );
+            drop(Box::from_raw(full));
+            let deadlock = Box::into_raw(Box::new(2.0));
+            assert_eq!(
+                napi_call_threadsafe_function(threadsafe, deadlock.cast(), 1),
+                NAPI_WOULD_DEADLOCK
+            );
+            drop(Box::from_raw(deadlock));
+            assert_eq!(
+                napi_unref_threadsafe_function(&mut env, threadsafe),
+                NAPI_OK
+            );
+            assert_eq!(napi_ref_threadsafe_function(&mut env, threadsafe), NAPI_OK);
+            assert_eq!(napi_release_threadsafe_function(threadsafe, 1), NAPI_OK);
+            assert_eq!(
+                napi_call_threadsafe_function(threadsafe, ptr::null_mut(), 0),
+                NAPI_CLOSING
+            );
+        }
+        assert_eq!(thaw_napi_run_async_work(), 0);
+        let probe = unsafe { Box::from_raw(probe) };
+        assert_eq!(probe.aborted.load(Ordering::Acquire), 1);
+        assert!(probe.finalized.load(Ordering::Acquire));
+        assert!(probe.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
+        let _guard = lock_async_test();
         let mut env = Env::new();
         let probe = Box::new(AsyncProbe {
             main_thread: std::thread::current().id(),
@@ -2805,6 +3257,90 @@ mod tests {
     }
 
     #[test]
+    fn real_c_addon_calls_back_through_a_threadsafe_function() {
+        let _guard = lock_async_test();
+        let dir = std::env::temp_dir().join(format!("thaw-napi-tsfn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("addon.c");
+        let addon = dir.join("addon.node");
+        std::fs::write(
+            &source,
+            r#"
+            #include <pthread.h>
+            #include <stddef.h>
+            #include <stdlib.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef void* napi_threadsafe_function; typedef int napi_status;
+            typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
+            typedef void (*napi_finalize)(napi_env,void*,void*);
+            typedef void (*napi_threadsafe_function_call_js)(napi_env,napi_value,void*,void*);
+            extern napi_status napi_get_cb_info(napi_env,napi_callback_info,size_t*,napi_value*,napi_value*,void**);
+            extern napi_status napi_get_null(napi_env,napi_value*);
+            extern napi_status napi_get_undefined(napi_env,napi_value*);
+            extern napi_status napi_create_double(napi_env,double,napi_value*);
+            extern napi_status napi_call_function(napi_env,napi_value,napi_value,size_t,const napi_value*,napi_value*);
+            extern napi_status napi_create_function(napi_env,const char*,size_t,napi_callback,void*,napi_value*);
+            extern napi_status napi_set_named_property(napi_env,napi_value,const char*,napi_value);
+            extern napi_status napi_create_threadsafe_function(napi_env,napi_value,napi_value,napi_value,size_t,size_t,void*,napi_finalize,void*,napi_threadsafe_function_call_js,napi_threadsafe_function*);
+            extern napi_status napi_call_threadsafe_function(napi_threadsafe_function,void*,int);
+            extern napi_status napi_release_threadsafe_function(napi_threadsafe_function,int);
+
+            static void call_js(napi_env env, napi_value callback, void* context, void* data) {
+                (void)context; napi_value recv, args[2];
+                napi_get_undefined(env, &recv); napi_get_null(env, &args[0]);
+                napi_create_double(env, *(double*)data, &args[1]); free(data);
+                napi_call_function(env, recv, callback, 2, args, 0);
+            }
+            static void* worker(void* raw) {
+                napi_threadsafe_function tsfn = raw;
+                double* value = malloc(sizeof(*value)); *value = 42;
+                napi_call_threadsafe_function(tsfn, value, 1);
+                napi_release_threadsafe_function(tsfn, 0); return 0;
+            }
+            static napi_value queue(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value callback, result; napi_threadsafe_function tsfn;
+                pthread_t thread; napi_get_cb_info(env, info, &argc, &callback, 0, 0);
+                if (napi_create_threadsafe_function(env, callback, 0, 0, 1, 1, 0, 0, 0, call_js, &tsfn) != 0) return 0;
+                pthread_create(&thread, 0, worker, tsfn); pthread_detach(thread);
+                napi_get_undefined(env, &result); return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value fn; napi_create_function(env, "tsfn_queue", 10, queue, 0, &fn);
+                napi_set_named_property(env, exports, "tsfn_queue", fn); return exports;
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .args(["-shared", "-fPIC", "-pthread"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&addon)
+            .status()
+            .unwrap()
+            .success());
+        let path = CString::new(addon.to_string_lossy().as_bytes()).unwrap();
+        let output: *mut Mutex<Option<(JsonValue, JsonValue)>> =
+            Box::into_raw(Box::new(Mutex::new(None)));
+        unsafe {
+            assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+            let queued = thaw_napi_call_with_callback_result(
+                c"tsfn_queue".as_ptr(),
+                c"[]".as_ptr(),
+                Some(bcrypt_bridge_callback),
+                output.cast(),
+            );
+            assert!(queued.error.is_null());
+            assert_eq!(thaw_napi_run_async_work(), 1);
+            let output = Box::from_raw(output);
+            let (error, result) = output.lock().unwrap().take().unwrap();
+            assert!(error.is_null());
+            assert_eq!(result, JsonValue::from(42.0));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn runs_utf8_validate_prebuild_when_supplied() {
         let Ok(path) = std::env::var("THAW_UTF8_VALIDATE_NODE") else {
             return;
@@ -2826,6 +3362,7 @@ mod tests {
 
     #[test]
     fn runs_bcrypt_prebuild_when_supplied() {
+        let _guard = lock_async_test();
         let Ok(path) = std::env::var("THAW_BCRYPT_NODE") else {
             return;
         };
