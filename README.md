@@ -294,8 +294,9 @@ The workspace crates have narrow responsibilities:
 - A fully general ABI-description format. String result/error ownership is
   supported, but `(pointer, length)` strings, aggregate-result ownership and
   calling-convention details are not yet described
-- Asynchronous Node N-API addons and the broader N-API surface beyond the
-  current synchronous number/string/boolean/JSON/Buffer host
+- The broader N-API surface beyond the current number/string/boolean/JSON/
+  Buffer and async-work host. The async-work lifecycle, including
+  `napi_cancel_async_work`, is supported by a bounded shared worker pool
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design
 
@@ -345,7 +346,9 @@ The dependency order for closing the major compatibility gaps is:
 7. Implement the minimal synchronous N-API host described in
    `native-addons.md`, then expand it from observed addon requirements.
 
-The first synchronous N-API host is now implemented. `thaw registry add`
+The first N-API host is now implemented, including shared worker-pool execution,
+main-thread completion and cancellation for the core async-work lifecycle.
+`thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
 `thaw_modules/<package>/native.node`, and records its target and SHA-256 in
@@ -357,6 +360,10 @@ match the current platform, architecture, or libc, `registry add` reports the
 mismatch and retains the JavaScript fallback.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
+The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
+the host with real synchronous hashing and callback-based asynchronous salt
+generation (`THAW_BCRYPT_NODE=/path/to/bcrypt.glibc.node cargo test -p
+thaw-napi runs_bcrypt_prebuild_when_supplied`).
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.

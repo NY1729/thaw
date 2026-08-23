@@ -131,6 +131,7 @@ pub struct HirCompiler<'ctx> {
     /// so callers and callees agree on the LLVM signature.
     frame_async_functions: HashMap<String, HirType>,
     next_lambda: usize,
+    uses_napi: bool,
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -145,6 +146,7 @@ impl<'ctx> HirCompiler<'ctx> {
             loop_stack: Vec::new(),
             frame_async_functions: HashMap::new(),
             next_lambda: 0,
+            uses_napi: false,
         }
     }
 
@@ -546,6 +548,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_napi_call_result",
             js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_run_async_work",
+            self.context.i64_type().fn_type(&[], false),
             Some(Linkage::External),
         );
 
@@ -4092,6 +4099,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_napi = true;
         if !(1..=2).contains(&args.len()) {
             return Err("loadNativeAddon expects a path and optional root export name".to_string());
         }
@@ -4127,6 +4135,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_napi = true;
         if args.len() != 2 {
             return Err(
                 "loadNativeAddonEmbedded expects addon bytes and a root export name".into(),
@@ -5178,6 +5187,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
+        if self.uses_napi {
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_napi_run_async_work")
+                        .unwrap(),
+                    &[],
+                    "drain_napi_async_work",
+                )
+                .unwrap();
+        }
         self.finish_c_main();
     }
 
@@ -6207,7 +6227,7 @@ mod tests {
     }
 
     #[test]
-    fn compiles_and_runs_a_synchronous_napi_addon() {
+    fn compiles_and_runs_a_napi_addon_with_async_work() {
         let dir =
             std::env::temp_dir().join(format!("thaw-hir-codegen-test-napi-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -6215,7 +6235,10 @@ mod tests {
         let addon = dir.join("addon.node");
         std::fs::write(&addon_c, r#"
             #include <stddef.h>
+            #include <stdio.h>
+            #include <stdlib.h>
             typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef void* napi_async_work;
             typedef int napi_status;
             extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
@@ -6223,6 +6246,11 @@ mod tests {
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
             extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             extern napi_status napi_throw_error(napi_env, const char*, const char*);
+            extern napi_status napi_get_undefined(napi_env, napi_value*);
+            extern napi_status napi_create_async_work(napi_env, napi_value, napi_value, void (*)(napi_env, void*), void (*)(napi_env, napi_status, void*), void*, napi_async_work*);
+            extern napi_status napi_queue_async_work(napi_env, napi_async_work);
+            extern napi_status napi_delete_async_work(napi_env, napi_async_work);
+            struct async_data { napi_env env; napi_async_work work; int answer; };
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -6232,12 +6260,33 @@ mod tests {
             static napi_value fail(napi_env env, napi_callback_info info) {
                 (void)info; napi_throw_error(env, 0, "native addon failed"); return 0;
             }
+            static void execute_async(napi_env env, void* raw) {
+                (void)env; ((struct async_data*)raw)->answer = 42;
+            }
+            static void complete_async(napi_env env, napi_status status, void* raw) {
+                struct async_data* data = raw;
+                printf("async %d status %d\n", data->answer, status);
+                napi_delete_async_work(env, data->work);
+                free(data);
+            }
+            static napi_value schedule(napi_env env, napi_callback_info info) {
+                (void)info;
+                struct async_data* data = calloc(1, sizeof(*data));
+                napi_value result;
+                data->env = env;
+                napi_create_async_work(env, 0, 0, execute_async, complete_async, data, &data->work);
+                napi_queue_async_work(env, data->work);
+                napi_get_undefined(env, &result);
+                return result;
+            }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-                napi_value add_fn, fail_fn;
+                napi_value add_fn, fail_fn, schedule_fn;
                 napi_create_function(env, "add", 3, add, 0, &add_fn);
                 napi_create_function(env, "fail", 4, fail, 0, &fail_fn);
+                napi_create_function(env, "schedule", 8, schedule, 0, &schedule_fn);
                 napi_set_named_property(env, exports, "add", add_fn);
-                napi_set_named_property(env, exports, "fail", fail_fn); return exports;
+                napi_set_named_property(env, exports, "fail", fail_fn);
+                napi_set_named_property(env, exports, "schedule", schedule_fn); return exports;
             }
         "#).unwrap();
         assert!(Command::new("cc")
@@ -6259,6 +6308,7 @@ mod tests {
                 }} catch (error) {{
                     console.log(error);
                 }}
+                const scheduled = callNativeAddon("schedule", JSON.parse("[]"));
             }}
         "#,
             addon.display()
@@ -6294,7 +6344,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "42\nnative addon failed\n"
+            "42\nnative addon failed\nasync 42 status 0\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
