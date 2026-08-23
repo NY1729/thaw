@@ -954,6 +954,7 @@ fn render_ts_type(ty: &HirType) -> String {
         HirType::Void => "void".to_string(),
         HirType::Str => "string".to_string(),
         HirType::Json => "Json".to_string(),
+        HirType::JsValue => "JsValue".to_string(),
         HirType::Array(elem) => format!("{}[]", render_ts_type(elem)),
         HirType::Tuple(elements) => format!(
             "[{}]",

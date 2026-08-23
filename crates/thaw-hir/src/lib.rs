@@ -22,6 +22,8 @@ pub enum HirType {
     Void,
     Str,
     Json,
+    /// Opaque callable/object value retained by the embedded JavaScript realm.
+    JsValue,
     Promise(Box<HirType>),
     Array(Box<HirType>),
     Tuple(Vec<HirType>),
