@@ -228,7 +228,8 @@ The workspace crates have narrow responsibilities:
 - A fully general ABI-description format. String result/error ownership is
   supported, but `(pointer, length)` strings, aggregate-result ownership and
   calling-convention details are not yet described
-- Loading Node N-API `.node` addons
+- Asynchronous Node N-API addons and the broader N-API surface beyond the
+  current synchronous number/string/boolean/JSON/Buffer host
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design
 
@@ -277,6 +278,12 @@ The dependency order for closing the major compatibility gaps is:
 6. Add a versioned ABI metadata format for fast-path libraries.
 7. Implement the minimal synchronous N-API host described in
    `native-addons.md`, then expand it from observed addon requirements.
+
+The first synchronous N-API host is now implemented. A registry package may
+place a Linux shared object at `thaw_modules/<package>/native.node`; `thaw
+build --use <package>` loads it at module initialization and routes fallback
+wrappers through its exported N-API functions. Loading native addons executes
+unrestricted native code in the generated process and is not sandboxed.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.
