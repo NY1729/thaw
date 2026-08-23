@@ -1070,6 +1070,7 @@ dependencies = [
 name = "thaw-hir"
 version = "0.1.0"
 dependencies = [
+ "swc_common",
  "swc_ecma_ast",
  "thaw-parser",
 ]
@@ -1112,6 +1113,12 @@ dependencies = [
 [[package]]
 name = "thaw-runtime"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustls",
+ "thaw-arena",
+ "webpki-roots",
+]
 
 [[package]]
 name = "thaw-std"

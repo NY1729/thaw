@@ -3,11 +3,10 @@
 //!
 //! This crate is linked into *compiled Thaw programs* as a plain static
 //! archive (see `thaw-cli`'s link step), not used as a normal Rust
-//! dependency -- generated LLVM IR calls `thaw_arena_alloc` directly by
-//! symbol name. Phase 1 codegen uses it to back number-array allocation;
-//! `thaw_arena_reset` exists per the design but isn't called by any
-//! generated code yet since Phase 1 programs have no Lambda request
-//! boundary to reset between (that's Phase 2).
+//! dependency for generated code -- generated LLVM IR calls
+//! `thaw_arena_alloc` directly by symbol name. `thaw-runtime` also depends
+//! on this crate so it can reset all request-owned allocations after every
+//! Lambda invocation.
 
 use std::alloc::Layout;
 use std::cell::RefCell;
@@ -33,8 +32,8 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
 }
 
 /// Reclaims all memory allocated from the thread-local arena in one shot.
-/// This is the "bulk-free, no GC pause" step from the design doc, meant to
-/// run once between Lambda invocations once Phase 2 has a request loop.
+/// This is the "bulk-free, no GC pause" step from the design doc.
+/// `thaw-runtime` runs it once at every Lambda invocation boundary.
 #[no_mangle]
 pub extern "C" fn thaw_arena_reset() {
     ARENA.with(|arena| arena.borrow_mut().reset());

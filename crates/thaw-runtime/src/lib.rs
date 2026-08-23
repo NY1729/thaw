@@ -9,19 +9,1362 @@
 //! HTTP endpoint with no concurrency to speak of (one invocation at a time
 //! per execution environment), and pulling in a full async runtime here
 //! would fight the entire point of Thaw -- small binaries, fast cold
-//! start. `fetch()` for user code is a separate, much bigger problem
-//! (arbitrary hosts, TLS, redirects) and isn't this crate's job; it's
-//! deferred along with async/await.
+//! start. User-code `fetch()` uses the separate fd-driven HTTP/TLS state
+//! machine later in this crate; the blocking client here remains specific to
+//! the Lambda Runtime API.
 //!
 //! Known limitations, acceptable for what this talks to: no TLS, no
 //! chunked transfer-encoding, one request per TCP connection.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::raw::c_char;
+use std::os::unix::io::RawFd;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore};
+
+pub const THAW_FD_READABLE: u8 = 1;
+pub const THAW_FD_WRITABLE: u8 = 2;
 
 pub type HandlerFn = extern "C" fn(*const c_char) -> *const c_char;
+pub type PromiseResumeFn = extern "C" fn(*mut u8, *const u8);
+
+#[derive(Clone, Copy)]
+struct PromiseSubscription {
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+}
+
+thread_local! {
+    static READY_CONTINUATIONS: RefCell<VecDeque<(PromiseSubscription, *const u8)>> =
+        RefCell::new(VecDeque::new());
+    static TIMERS: RefCell<Vec<PromiseTimer>> = RefCell::new(Vec::new());
+    static FD_WAITS: RefCell<Vec<PromiseFdWait>> = RefCell::new(Vec::new());
+}
+
+struct PromiseTimer {
+    deadline: Instant,
+    promise: *mut ThawPromise,
+}
+
+struct PromiseFdWait {
+    fd: libc::c_int,
+    interests: u8,
+    promise: *mut ThawPromise,
+    deadline: Option<Instant>,
+}
+
+static INVALID_FD_ERROR: &[u8] = b"invalid file descriptor\0";
+static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
+
+fn poll_fd_waits(timeout: Option<Duration>) -> usize {
+    let mut pollfds = FD_WAITS.with(|waits| {
+        waits
+            .borrow()
+            .iter()
+            .map(|wait| libc::pollfd {
+                fd: wait.fd,
+                events: (if wait.interests & THAW_FD_READABLE != 0 {
+                    libc::POLLIN
+                } else {
+                    0
+                }) | (if wait.interests & THAW_FD_WRITABLE != 0 {
+                    libc::POLLOUT
+                } else {
+                    0
+                }),
+                revents: 0,
+            })
+            .collect::<Vec<_>>()
+    });
+    if pollfds.is_empty() {
+        return 0;
+    }
+    let fd_delay = FD_WAITS.with(|waits| {
+        let now = Instant::now();
+        waits
+            .borrow()
+            .iter()
+            .filter_map(|wait| wait.deadline)
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
+    });
+    let timeout = match (timeout, fd_delay) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    };
+    let timeout_ms = match timeout {
+        Some(duration) => duration.as_millis().saturating_add(1).min(i32::MAX as u128) as i32,
+        None => -1,
+    };
+    let ready = unsafe {
+        libc::poll(
+            pollfds.as_mut_ptr(),
+            pollfds.len() as libc::nfds_t,
+            timeout_ms,
+        )
+    };
+    if ready < 0 {
+        return 0;
+    }
+
+    let completed = FD_WAITS.with(|waits| {
+        let mut waits = waits.borrow_mut();
+        let mut completed = Vec::new();
+        let now = Instant::now();
+        for index in (0..pollfds.len()).rev() {
+            let timed_out = waits[index]
+                .deadline
+                .is_some_and(|deadline| deadline <= now);
+            if pollfds[index].revents != 0 || timed_out {
+                completed.push((
+                    waits.swap_remove(index).promise,
+                    pollfds[index].revents,
+                    timed_out,
+                ));
+            }
+        }
+        completed
+    });
+    let count = completed.len();
+    for (promise, events, timed_out) in completed {
+        if timed_out && events == 0 {
+            thaw_promise_reject(promise, FD_TIMEOUT_ERROR.as_ptr());
+        } else if events & libc::POLLNVAL != 0 {
+            thaw_promise_reject(promise, INVALID_FD_ERROR.as_ptr());
+        } else {
+            thaw_promise_resolve(promise, std::ptr::dangling::<u8>());
+        }
+    }
+    count
+}
+
+fn has_fd_waits() -> bool {
+    FD_WAITS.with(|waits| !waits.borrow().is_empty())
+}
+
+fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
+    READY_CONTINUATIONS.with(|ready| ready.borrow_mut().push_back((subscription, result)));
+}
+
+fn promote_due_timers() {
+    let now = Instant::now();
+    let due = TIMERS.with(|timers| {
+        let mut timers = timers.borrow_mut();
+        let mut due = Vec::new();
+        let mut i = 0;
+        while i < timers.len() {
+            if timers[i].deadline <= now {
+                due.push(timers.swap_remove(i).promise);
+            } else {
+                i += 1;
+            }
+        }
+        due
+    });
+    for promise in due {
+        // A timer has no payload; a non-null sentinel distinguishes a
+        // resolved timer from an invalid/no-progress result at the ABI edge.
+        let result = std::ptr::dangling::<u8>();
+        thaw_promise_resolve(promise, result);
+    }
+}
+
+fn next_timer_delay() -> Option<Duration> {
+    let now = Instant::now();
+    TIMERS.with(|timers| {
+        timers
+            .borrow()
+            .iter()
+            .map(|timer| timer.deadline.saturating_duration_since(now))
+            .min()
+    })
+}
+
+/// Runs one ready continuation and returns 1, or returns 0 when the queue is
+/// empty. I/O and QuickJS integrations can alternate their own polling with
+/// this function without introducing a multi-threaded executor.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_poll_one() -> u8 {
+    promote_due_timers();
+    poll_fd_waits(Some(Duration::ZERO));
+    let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
+    let Some((subscription, result)) = next else {
+        return 0;
+    };
+    (subscription.resume)(subscription.frame, result);
+    1
+}
+
+/// Returns a Promise which settles when `fd` becomes readable or writable.
+/// `interests` is a bitmask of `THAW_FD_READABLE`/`THAW_FD_WRITABLE`.
+/// The caller retains ownership of the descriptor and must keep it open until
+/// settlement or Promise destruction.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_wait_fd(fd: libc::c_int, interests: u8) -> *mut ThawPromise {
+    thaw_runtime_wait_fd_until(fd, interests, None)
+}
+
+/// Like `thaw_runtime_wait_fd`, but rejects if readiness is not observed
+/// within `milliseconds`.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_wait_fd_timeout(
+    fd: libc::c_int,
+    interests: u8,
+    milliseconds: u64,
+) -> *mut ThawPromise {
+    thaw_runtime_wait_fd_until(
+        fd,
+        interests,
+        Some(Instant::now() + Duration::from_millis(milliseconds)),
+    )
+}
+
+fn thaw_runtime_wait_fd_until(
+    fd: libc::c_int,
+    interests: u8,
+    deadline: Option<Instant>,
+) -> *mut ThawPromise {
+    let promise = thaw_promise_new();
+    if fd < 0 || interests == 0 || interests & !(THAW_FD_READABLE | THAW_FD_WRITABLE) != 0 {
+        thaw_promise_reject(promise, INVALID_FD_ERROR.as_ptr());
+        return promise;
+    }
+    FD_WAITS.with(|waits| {
+        waits.borrow_mut().push(PromiseFdWait {
+            fd,
+            interests,
+            promise,
+            deadline,
+        });
+    });
+    promise
+}
+
+#[derive(Clone, Copy)]
+enum AsyncHttpState {
+    Resolving,
+    Connecting,
+    TlsHandshaking,
+    Writing,
+    Reading,
+}
+
+struct AsyncHttpGet {
+    fd: RawFd,
+    request: Vec<u8>,
+    written: usize,
+    response: Vec<u8>,
+    state: AsyncHttpState,
+    completion: *mut ThawPromise,
+    readiness: *mut ThawPromise,
+    deadline: Instant,
+    tls: Option<ClientConnection>,
+    tls_config: Arc<ClientConfig>,
+    use_tls: bool,
+    host: String,
+    port: u16,
+    path: String,
+    redirects: usize,
+    resolution: Option<Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>>,
+}
+
+impl Drop for AsyncHttpGet {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe { libc::close(self.fd) };
+        }
+    }
+}
+
+fn parse_http_url(url: &str) -> Result<(bool, String, u16, String), String> {
+    let (tls, rest, default_port) = if let Some(rest) = url.strip_prefix("http://") {
+        (false, rest, 80)
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        (true, rest, 443)
+    } else {
+        return Err("async fetch URL must use http:// or https://".to_string());
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    if authority.is_empty() {
+        return Err("HTTP URL is missing a host".to_string());
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, suffix) = bracketed
+            .split_once(']')
+            .ok_or("malformed bracketed IPv6 host")?;
+        let port = match suffix.strip_prefix(':') {
+            Some(port) => port.parse().map_err(|_| "invalid HTTP port")?,
+            None if suffix.is_empty() => default_port,
+            None => return Err("malformed bracketed IPv6 authority".to_string()),
+        };
+        (host.to_string(), port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if port.chars().all(|ch| ch.is_ascii_digit()) {
+            (
+                host.to_string(),
+                port.parse().map_err(|_| "invalid HTTP port")?,
+            )
+        } else {
+            (authority.to_string(), default_port)
+        }
+    } else {
+        (authority.to_string(), default_port)
+    };
+    let path = path
+        .split_once('#')
+        .map(|(path, _)| path.to_string())
+        .unwrap_or(path);
+    Ok((tls, host, port, path))
+}
+
+fn tls_client_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            )
+        })
+        .clone()
+}
+
+fn open_nonblocking_socket(address: SocketAddr) -> Result<RawFd, String> {
+    let domain = if address.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let fd = unsafe {
+        libc::socket(
+            domain,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "creating socket: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let result = match address {
+        SocketAddr::V4(address) => {
+            let raw = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: address.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(address.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            unsafe {
+                libc::connect(
+                    fd,
+                    (&raw as *const libc::sockaddr_in).cast(),
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            }
+        }
+        SocketAddr::V6(address) => {
+            let raw = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: address.port().to_be(),
+                sin6_flowinfo: address.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: address.ip().octets(),
+                },
+                sin6_scope_id: address.scope_id(),
+            };
+            unsafe {
+                libc::connect(
+                    fd,
+                    (&raw as *const libc::sockaddr_in6).cast(),
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                )
+            }
+        }
+    };
+    if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EINPROGRESS) {
+        Ok(fd)
+    } else {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        Err(format!("connecting HTTP socket: {error}"))
+    }
+}
+
+type DnsResult = Arc<Mutex<Option<Result<Vec<SocketAddr>, String>>>>;
+
+fn start_dns_resolution(host: String, port: u16) -> Result<(RawFd, DnsResult), String> {
+    let mut pipe = [-1; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "creating DNS completion pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let result = Arc::new(Mutex::new(None));
+    let worker_result = result.clone();
+    let read_fd = pipe[0];
+    let write_fd = pipe[1];
+    let spawn = thread::Builder::new()
+        .name("thaw-dns".to_string())
+        .spawn(move || {
+            let resolved = (host.as_str(), port)
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect::<Vec<_>>())
+                .map_err(|error| format!("resolving {host}: {error}"))
+                .and_then(|addresses| {
+                    if addresses.is_empty() {
+                        Err(format!("no address found for {host}"))
+                    } else {
+                        Ok(addresses)
+                    }
+                });
+            *worker_result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolved);
+            let byte = [1u8];
+            unsafe {
+                libc::write(write_fd, byte.as_ptr().cast(), byte.len());
+                libc::close(write_fd);
+            }
+        });
+    if let Err(error) = spawn {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(format!("starting DNS resolver: {error}"));
+    }
+    Ok((read_fd, result))
+}
+
+struct NonblockingSocket(RawFd);
+
+impl Read for NonblockingSocket {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = unsafe { libc::recv(self.0, buffer.as_mut_ptr().cast(), buffer.len(), 0) };
+        if read >= 0 {
+            Ok(read as usize)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+}
+
+impl Write for NonblockingSocket {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = unsafe {
+            libc::send(
+                self.0,
+                buffer.as_ptr().cast(),
+                buffer.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
+        if written >= 0 {
+            Ok(written as usize)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn flush_tls(task: *mut AsyncHttpGet) -> Result<bool, String> {
+    let fd = unsafe { (*task).fd };
+    let tls = unsafe { (*task).tls.as_mut().expect("TLS state is present") };
+    let mut socket = NonblockingSocket(fd);
+    while tls.wants_write() {
+        match tls.write_tls(&mut socket) {
+            Ok(0) => return Err("TLS socket closed while writing".to_string()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(format!("writing TLS records: {error}")),
+        }
+    }
+    Ok(true)
+}
+
+fn read_tls_records(task: *mut AsyncHttpGet) -> Result<bool, String> {
+    let fd = unsafe { (*task).fd };
+    let tls = unsafe { (*task).tls.as_mut().expect("TLS state is present") };
+    let mut socket = NonblockingSocket(fd);
+    loop {
+        match tls.read_tls(&mut socket) {
+            Ok(0) => return Ok(true),
+            Ok(_) => {
+                tls.process_new_packets()
+                    .map_err(|error| format!("processing TLS records: {error}"))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(format!("reading TLS records: {error}")),
+        }
+    }
+}
+
+fn tls_interests(task: *mut AsyncHttpGet) -> u8 {
+    let tls = unsafe { (*task).tls.as_ref().expect("TLS state is present") };
+    let mut interests = 0;
+    if tls.wants_read() {
+        interests |= THAW_FD_READABLE;
+    }
+    if tls.wants_write() {
+        interests |= THAW_FD_WRITABLE;
+    }
+    if interests == 0 {
+        THAW_FD_READABLE
+    } else {
+        interests
+    }
+}
+
+fn async_http_error(task: *mut AsyncHttpGet, message: String) {
+    let task = unsafe { Box::from_raw(task) };
+    let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
+    thaw_promise_reject(task.completion, error);
+}
+
+fn arena_c_string(value: &str) -> Option<*const u8> {
+    let value = CString::new(value).ok()?;
+    let bytes = value.as_bytes_with_nul();
+    let destination = thaw_arena::thaw_arena_alloc(bytes.len(), 1);
+    if destination.is_null() {
+        return None;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len()) };
+    Some(destination)
+}
+
+fn arena_pointer_slot(value: *const u8) -> Option<*const u8> {
+    let slot = thaw_arena::thaw_arena_alloc(
+        std::mem::size_of::<*const u8>(),
+        std::mem::align_of::<*const u8>(),
+    ) as *mut *const u8;
+    if slot.is_null() {
+        return None;
+    }
+    unsafe { slot.write(value) };
+    Some(slot.cast())
+}
+
+fn http_authority(use_tls: bool, host: &str, port: u16) -> String {
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    if port == if use_tls { 443 } else { 80 } {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn normalize_http_path(path: &str) -> String {
+    let (path, suffix) = path
+        .find(['?', '#'])
+        .map(|index| (&path[..index], &path[index..]))
+        .unwrap_or((path, ""));
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("/{}{suffix}", parts.join("/"))
+}
+
+fn redirect_url(task: &AsyncHttpGet, location: &str) -> Result<String, String> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let scheme = if task.use_tls { "https" } else { "http" };
+    if location.starts_with("//") {
+        return Ok(format!("{scheme}:{location}"));
+    }
+    let authority = http_authority(task.use_tls, &task.host, task.port);
+    let path = if location.starts_with('/') {
+        normalize_http_path(location)
+    } else if location.starts_with('?') || location.starts_with('#') {
+        let base = task
+            .path
+            .find(['?', '#'])
+            .map(|index| &task.path[..index])
+            .unwrap_or(&task.path);
+        format!("{base}{location}")
+    } else {
+        let directory = task.path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        normalize_http_path(&format!("{directory}/{location}"))
+    };
+    Ok(format!("{scheme}://{authority}{path}"))
+}
+
+fn restart_async_http(task: *mut AsyncHttpGet, location: &str) -> Result<(), String> {
+    let task_ref = unsafe { &mut *task };
+    if task_ref.redirects >= 10 {
+        return Err("HTTP redirect limit exceeded (10)".to_string());
+    }
+    let target = redirect_url(task_ref, location)?;
+    let (use_tls, host, port, path) = parse_http_url(&target)?;
+    let tls = if use_tls {
+        let server_name = ServerName::try_from(host.clone())
+            .map_err(|_| format!("invalid TLS server name `{host}`"))?;
+        Some(
+            ClientConnection::new(task_ref.tls_config.clone(), server_name)
+                .map_err(|error| format!("creating redirected TLS client: {error}"))?,
+        )
+    } else {
+        None
+    };
+    let (fd, resolution) = start_dns_resolution(host.clone(), port)?;
+    unsafe { libc::close(task_ref.fd) };
+    let authority = http_authority(use_tls, &host, port);
+    task_ref.fd = fd;
+    task_ref.request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
+    )
+    .into_bytes();
+    task_ref.written = 0;
+    task_ref.response.clear();
+    task_ref.state = AsyncHttpState::Resolving;
+    task_ref.tls = tls;
+    task_ref.use_tls = use_tls;
+    task_ref.host = host;
+    task_ref.port = port;
+    task_ref.path = path;
+    task_ref.redirects += 1;
+    task_ref.resolution = Some(resolution);
+    schedule_async_http(task, THAW_FD_READABLE);
+    Ok(())
+}
+
+struct ParsedHttpResponse {
+    status: u16,
+    body: Vec<u8>,
+    location: Option<String>,
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn decode_chunked(body: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut cursor = 0;
+    let mut decoded = Vec::new();
+    loop {
+        let Some(line_end) = find_bytes(&body[cursor..], b"\r\n") else {
+            return Ok(None);
+        };
+        let line_end = cursor + line_end;
+        let size_text =
+            std::str::from_utf8(&body[cursor..line_end]).map_err(|_| "chunk size is not ASCII")?;
+        let size_text = size_text.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|_| format!("invalid chunk size `{size_text}`"))?;
+        cursor = line_end + 2;
+        if size == 0 {
+            if body.len() < cursor + 2 {
+                return Ok(None);
+            }
+            if &body[cursor..cursor + 2] == b"\r\n" {
+                return Ok(Some(decoded));
+            }
+            return if find_bytes(&body[cursor..], b"\r\n\r\n").is_some() {
+                Ok(Some(decoded))
+            } else {
+                Ok(None)
+            };
+        }
+        let chunk_end = cursor
+            .checked_add(size)
+            .ok_or("chunk size overflows address space")?;
+        if body.len() < chunk_end + 2 {
+            return Ok(None);
+        }
+        if &body[chunk_end..chunk_end + 2] != b"\r\n" {
+            return Err("chunk data is missing its CRLF terminator".to_string());
+        }
+        decoded.extend_from_slice(&body[cursor..chunk_end]);
+        cursor = chunk_end + 2;
+    }
+}
+
+fn parse_http_response(response: &[u8], eof: bool) -> Result<Option<ParsedHttpResponse>, String> {
+    let Some(header_end) = find_bytes(response, b"\r\n\r\n") else {
+        return if eof {
+            Err("malformed HTTP response (incomplete headers)".to_string())
+        } else {
+            Ok(None)
+        };
+    };
+    let head = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "HTTP response headers are not valid UTF-8")?;
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or("malformed HTTP status line")?;
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut location = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(format!("malformed HTTP header `{line}`"));
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "invalid Content-Length header")?,
+            );
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        {
+            chunked = true;
+        }
+        if name.eq_ignore_ascii_case("location") {
+            location = Some(value.trim().to_string());
+        }
+    }
+    let body = &response[header_end + 4..];
+    if chunked {
+        return decode_chunked(body).map(|body| {
+            body.map(|body| ParsedHttpResponse {
+                status,
+                body,
+                location,
+            })
+        });
+    }
+    if let Some(length) = content_length {
+        if body.len() < length {
+            return if eof {
+                Err(format!(
+                    "HTTP body ended after {} bytes, expected {length}",
+                    body.len()
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+        return Ok(Some(ParsedHttpResponse {
+            status,
+            body: body[..length].to_vec(),
+            location,
+        }));
+    }
+    if eof {
+        Ok(Some(ParsedHttpResponse {
+            status,
+            body: body.to_vec(),
+            location,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn async_http_finish(task: *mut AsyncHttpGet, response: ParsedHttpResponse) {
+    if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+        if let Some(location) = &response.location {
+            if let Err(error) = restart_async_http(task, location) {
+                async_http_error(task, error);
+            }
+            return;
+        }
+    }
+    let task = unsafe { Box::from_raw(task) };
+    let completion = task.completion;
+    if !(200..=399).contains(&response.status) {
+        let message = format!("HTTP request failed with status {}", response.status);
+        drop(task);
+        let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
+        thaw_promise_reject(completion, error);
+        return;
+    }
+    let body = std::str::from_utf8(&response.body)
+        .ok()
+        .and_then(arena_c_string)
+        .ok_or(());
+    drop(task);
+    match body {
+        Ok(body) => {
+            if let Some(result_slot) = arena_pointer_slot(body) {
+                thaw_promise_resolve(completion, result_slot);
+            } else {
+                thaw_promise_reject(completion, INVALID_FD_ERROR.as_ptr());
+            }
+        }
+        Err(_) => {
+            let error = arena_c_string("HTTP body contains a NUL byte")
+                .unwrap_or(INVALID_FD_ERROR.as_ptr());
+            thaw_promise_reject(completion, error);
+        }
+    }
+}
+
+fn schedule_async_http(task: *mut AsyncHttpGet, interests: u8) {
+    let task_ref = unsafe { &*task };
+    let remaining = task_ref.deadline.saturating_duration_since(Instant::now());
+    let milliseconds = remaining.as_millis().max(1).min(u64::MAX as u128) as u64;
+    let readiness = thaw_runtime_wait_fd_timeout(task_ref.fd, interests, milliseconds);
+    unsafe { (*task).readiness = readiness };
+    thaw_promise_subscribe(readiness, resume_async_http, task.cast());
+}
+
+fn complete_async_http_if_ready(task: *mut AsyncHttpGet, eof: bool) -> bool {
+    let parsed = unsafe { parse_http_response(&(*task).response, eof) };
+    match parsed {
+        Ok(Some(response)) => {
+            async_http_finish(task, response);
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            async_http_error(task, error);
+            true
+        }
+    }
+}
+
+extern "C" fn resume_async_http(frame: *mut u8, _result: *const u8) {
+    let task = frame.cast::<AsyncHttpGet>();
+    let readiness = unsafe { (*task).readiness };
+    let readiness_state = thaw_promise_state(readiness);
+    unsafe { thaw_promise_destroy(readiness) };
+    unsafe { (*task).readiness = std::ptr::null_mut() };
+    if readiness_state == 2 {
+        async_http_error(
+            task,
+            "HTTP operation timed out or descriptor failed".to_string(),
+        );
+        return;
+    }
+
+    loop {
+        match unsafe { (*task).state } {
+            AsyncHttpState::Resolving => {
+                let mut byte = [0u8; 1];
+                unsafe {
+                    libc::read((*task).fd, byte.as_mut_ptr().cast(), byte.len());
+                    libc::close((*task).fd);
+                    (*task).fd = -1;
+                }
+                let resolution = unsafe { (*task).resolution.take() }.and_then(|result| {
+                    result
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                });
+                let addresses = match resolution {
+                    Some(Ok(addresses)) => addresses,
+                    Some(Err(error)) => {
+                        async_http_error(task, error);
+                        return;
+                    }
+                    None => {
+                        async_http_error(
+                            task,
+                            "DNS resolver completed without a result".to_string(),
+                        );
+                        return;
+                    }
+                };
+                let mut last_error = None;
+                let mut socket = None;
+                for address in addresses {
+                    match open_nonblocking_socket(address) {
+                        Ok(fd) => {
+                            socket = Some(fd);
+                            break;
+                        }
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                let Some(fd) = socket else {
+                    async_http_error(
+                        task,
+                        last_error.unwrap_or_else(|| "DNS returned no usable address".to_string()),
+                    );
+                    return;
+                };
+                unsafe {
+                    (*task).fd = fd;
+                    (*task).state = AsyncHttpState::Connecting;
+                }
+                schedule_async_http(task, THAW_FD_WRITABLE);
+                return;
+            }
+            AsyncHttpState::Connecting => {
+                let mut error = 0;
+                let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                let result = unsafe {
+                    libc::getsockopt(
+                        (*task).fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        (&mut error as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                };
+                if result != 0 || error != 0 {
+                    let error = if error != 0 {
+                        std::io::Error::from_raw_os_error(error)
+                    } else {
+                        std::io::Error::last_os_error()
+                    };
+                    async_http_error(task, format!("connecting HTTP socket: {error}"));
+                    return;
+                }
+                unsafe {
+                    (*task).state = if (*task).tls.is_some() {
+                        AsyncHttpState::TlsHandshaking
+                    } else {
+                        AsyncHttpState::Writing
+                    }
+                };
+            }
+            AsyncHttpState::TlsHandshaking => {
+                if let Err(error) = flush_tls(task) {
+                    async_http_error(task, error);
+                    return;
+                }
+                let eof = match read_tls_records(task) {
+                    Ok(eof) => eof,
+                    Err(error) => {
+                        async_http_error(task, error);
+                        return;
+                    }
+                };
+                if eof {
+                    async_http_error(task, "TLS peer closed during handshake".to_string());
+                    return;
+                }
+                if unsafe { !(*task).tls.as_ref().unwrap().is_handshaking() } {
+                    unsafe { (*task).state = AsyncHttpState::Writing };
+                    continue;
+                }
+                schedule_async_http(task, tls_interests(task));
+                return;
+            }
+            AsyncHttpState::Writing => {
+                if unsafe { (*task).tls.is_some() } {
+                    let task_ref = unsafe { &mut *task };
+                    while task_ref.written < task_ref.request.len() {
+                        let remaining = &task_ref.request[task_ref.written..];
+                        match task_ref.tls.as_mut().unwrap().writer().write(remaining) {
+                            Ok(0) => break,
+                            Ok(written) => task_ref.written += written,
+                            Err(error) => {
+                                async_http_error(task, format!("buffering TLS request: {error}"));
+                                return;
+                            }
+                        }
+                    }
+                    let flushed = match flush_tls(task) {
+                        Ok(flushed) => flushed,
+                        Err(error) => {
+                            async_http_error(task, error);
+                            return;
+                        }
+                    };
+                    if unsafe { (*task).written == (*task).request.len() } && flushed {
+                        unsafe { (*task).state = AsyncHttpState::Reading };
+                        continue;
+                    }
+                    schedule_async_http(task, tls_interests(task));
+                    return;
+                }
+                let task_ref = unsafe { &mut *task };
+                while task_ref.written < task_ref.request.len() {
+                    let remaining = &task_ref.request[task_ref.written..];
+                    let written = unsafe {
+                        libc::send(
+                            task_ref.fd,
+                            remaining.as_ptr().cast(),
+                            remaining.len(),
+                            libc::MSG_NOSIGNAL,
+                        )
+                    };
+                    if written > 0 {
+                        task_ref.written += written as usize;
+                        continue;
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        schedule_async_http(task, THAW_FD_WRITABLE);
+                    } else {
+                        async_http_error(task, format!("writing HTTP request: {error}"));
+                    }
+                    return;
+                }
+                task_ref.state = AsyncHttpState::Reading;
+            }
+            AsyncHttpState::Reading => {
+                if unsafe { (*task).tls.is_some() } {
+                    if let Err(error) = flush_tls(task) {
+                        async_http_error(task, error);
+                        return;
+                    }
+                    let eof = match read_tls_records(task) {
+                        Ok(eof) => eof,
+                        Err(error) => {
+                            async_http_error(task, error);
+                            return;
+                        }
+                    };
+                    let mut plaintext = [0u8; 8192];
+                    loop {
+                        let read =
+                            unsafe { (*task).tls.as_mut().unwrap().reader().read(&mut plaintext) };
+                        match read {
+                            Ok(0) => break,
+                            Ok(read) => {
+                                unsafe { &mut (*task).response }
+                                    .extend_from_slice(&plaintext[..read]);
+                                if complete_async_http_if_ready(task, false) {
+                                    return;
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                if complete_async_http_if_ready(task, true) {
+                                    return;
+                                }
+                                async_http_error(
+                                    task,
+                                    "TLS peer closed before the HTTP response completed"
+                                        .to_string(),
+                                );
+                                return;
+                            }
+                            Err(error) => {
+                                async_http_error(
+                                    task,
+                                    format!("reading decrypted HTTP response: {error}"),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    if complete_async_http_if_ready(task, eof) {
+                        return;
+                    }
+                    if eof {
+                        async_http_error(
+                            task,
+                            "TLS peer closed before the HTTP response completed".to_string(),
+                        );
+                        return;
+                    }
+                    schedule_async_http(task, tls_interests(task));
+                    return;
+                }
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let read = unsafe {
+                        libc::recv((*task).fd, buffer.as_mut_ptr().cast(), buffer.len(), 0)
+                    };
+                    if read > 0 {
+                        unsafe { &mut (*task).response }
+                            .extend_from_slice(&buffer[..read as usize]);
+                        if complete_async_http_if_ready(task, false) {
+                            return;
+                        }
+                        continue;
+                    }
+                    if read == 0 {
+                        if !complete_async_http_if_ready(task, true) {
+                            async_http_error(
+                                task,
+                                "HTTP peer closed before the response completed".to_string(),
+                            );
+                        }
+                        return;
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        schedule_async_http(task, THAW_FD_READABLE);
+                    } else {
+                        async_http_error(task, format!("reading HTTP response: {error}"));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Starts a non-blocking HTTP GET and returns its completion Promise. DNS,
+/// connect, write, and read completion are all driven through the event loop.
+#[no_mangle]
+pub extern "C" fn thaw_http_get_async(url: *const c_char) -> *mut ThawPromise {
+    thaw_http_get_async_timeout(url, 30_000)
+}
+
+/// Starts a non-blocking HTTP GET with a total connect/write/read timeout.
+#[no_mangle]
+pub extern "C" fn thaw_http_get_async_timeout(
+    url: *const c_char,
+    timeout_ms: u64,
+) -> *mut ThawPromise {
+    thaw_http_get_async_with_config(url, timeout_ms, None)
+}
+
+fn thaw_http_get_async_with_config(
+    url: *const c_char,
+    timeout_ms: u64,
+    tls_config: Option<Arc<ClientConfig>>,
+) -> *mut ThawPromise {
+    let completion = thaw_promise_new();
+    let start = (|| -> Result<*mut AsyncHttpGet, String> {
+        let url = unsafe { CStr::from_ptr(url) }
+            .to_str()
+            .map_err(|_| "HTTP URL is not valid UTF-8")?;
+        let (use_tls, host, port, path) = parse_http_url(url)?;
+        let tls_config = tls_config.unwrap_or_else(tls_client_config);
+        let tls = if use_tls {
+            let server_name = ServerName::try_from(host.clone())
+                .map_err(|_| format!("invalid TLS server name `{host}`"))?;
+            Some(
+                ClientConnection::new(tls_config.clone(), server_name)
+                    .map_err(|error| format!("creating TLS client: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let (fd, resolution) = start_dns_resolution(host.clone(), port)?;
+        let authority = http_authority(use_tls, &host, port);
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
+        )
+        .into_bytes();
+        Ok(Box::into_raw(Box::new(AsyncHttpGet {
+            fd,
+            request,
+            written: 0,
+            response: Vec::new(),
+            state: AsyncHttpState::Resolving,
+            completion,
+            readiness: std::ptr::null_mut(),
+            deadline: Instant::now() + Duration::from_millis(timeout_ms),
+            tls,
+            tls_config,
+            use_tls,
+            host,
+            port,
+            path,
+            redirects: 0,
+            resolution: Some(resolution),
+        })))
+    })();
+    match start {
+        Ok(task) => schedule_async_http(task, THAW_FD_READABLE),
+        Err(message) => {
+            let error = arena_c_string(&message).unwrap_or(INVALID_FD_ERROR.as_ptr());
+            thaw_promise_reject(completion, error);
+        }
+    }
+    completion
+}
+
+/// Drains all continuations which are ready now and returns how many ran.
+/// Callbacks may enqueue more work; that work is included in the same drain.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
+    let mut count = 0;
+    while thaw_runtime_poll_one() != 0 {
+        count += 1;
+    }
+    count
+}
+
+/// Creates a promise resolved by the runtime timer queue after at least
+/// `milliseconds`. No worker thread is created.
+#[no_mangle]
+pub extern "C" fn thaw_sleep_ms(milliseconds: u64) -> *mut ThawPromise {
+    let promise = thaw_promise_new();
+    TIMERS.with(|timers| {
+        timers.borrow_mut().push(PromiseTimer {
+            deadline: Instant::now() + Duration::from_millis(milliseconds),
+            promise,
+        });
+    });
+    promise
+}
+
+/// Drives ready continuations and timers until `promise` settles. Returns its
+/// result/error pointer; use `thaw_promise_state` to distinguish fulfillment
+/// from rejection. Returns null for an invalid handle or no possible progress.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {
+    loop {
+        let Some(promise_ref) = (unsafe { promise.as_ref() }) else {
+            return std::ptr::null();
+        };
+        if let Some(result) = promise_ref.result {
+            return result;
+        }
+        if thaw_runtime_poll_one() != 0 {
+            continue;
+        }
+        if thaw_promise_state(promise) != 0 {
+            continue;
+        }
+        let delay = next_timer_delay();
+        if has_fd_waits() {
+            poll_fd_waits(delay);
+        } else if let Some(delay) = delay {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+        } else {
+            return std::ptr::null();
+        }
+    }
+}
+
+/// Opaque C-ABI promise shared by generated coroutines and runtime bridges.
+/// Result ownership remains with the producer and must outlive all resume
+/// callbacks. V2 coroutine frames will normally keep results in the request
+/// arena, so the Lambda request boundary remains the lifetime boundary.
+#[repr(C)]
+pub struct ThawPromise {
+    result: Option<*const u8>,
+    rejected: bool,
+    subscribers: Vec<PromiseSubscription>,
+}
+
+/// Allocates an unresolved promise. Pair every successful call with
+/// `thaw_promise_destroy` after no coroutine can reference the handle.
+#[no_mangle]
+pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
+    Box::into_raw(Box::new(ThawPromise {
+        result: None,
+        rejected: false,
+        subscribers: Vec::new(),
+    }))
+}
+
+/// Returns 0 for pending, 1 for fulfilled, 2 for rejected, and 255 for an
+/// invalid handle.
+#[no_mangle]
+pub extern "C" fn thaw_promise_state(promise: *const ThawPromise) -> u8 {
+    let Some(promise) = (unsafe { promise.as_ref() }) else {
+        return u8::MAX;
+    };
+    match (promise.result.is_some(), promise.rejected) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) => 2,
+    }
+}
+
+/// Registers a coroutine continuation. If already resolved, the callback is
+/// queued immediately, but never invoked reentrantly inside this function.
+/// Returns 1 on success and 0 for an invalid handle.
+#[no_mangle]
+pub extern "C" fn thaw_promise_subscribe(
+    promise: *mut ThawPromise,
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+) -> u8 {
+    let Some(promise) = (unsafe { promise.as_mut() }) else {
+        return 0;
+    };
+    if let Some(result) = promise.result {
+        enqueue_continuation(PromiseSubscription { resume, frame }, result);
+    } else {
+        promise
+            .subscribers
+            .push(PromiseSubscription { resume, frame });
+    }
+    1
+}
+
+/// Resolves a promise exactly once and queues every current subscriber in
+/// registration order. Returns 0 for a null handle or repeated resolution.
+#[no_mangle]
+pub extern "C" fn thaw_promise_resolve(promise: *mut ThawPromise, result: *const u8) -> u8 {
+    settle_promise(promise, result, false)
+}
+
+/// Rejects a promise exactly once and queues all subscribers. The error is an
+/// opaque producer-owned pointer, using the same lifetime contract as a
+/// fulfilled result. Returns 0 for a null handle or repeated settlement.
+#[no_mangle]
+pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u8) -> u8 {
+    settle_promise(promise, error, true)
+}
+
+fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
+    let Some(promise) = (unsafe { promise.as_mut() }) else {
+        return 0;
+    };
+    if promise.result.is_some() {
+        return 0;
+    }
+    promise.result = Some(result);
+    promise.rejected = rejected;
+    let subscribers = std::mem::take(&mut promise.subscribers);
+    for subscriber in subscribers {
+        enqueue_continuation(subscriber, result);
+    }
+    1
+}
+
+/// Destroys a promise handle. Passing null is a no-op. The caller must not
+/// destroy a promise from inside one of its resume callbacks.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
+    if !promise.is_null() {
+        TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
+        FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
+        drop(Box::from_raw(promise));
+    }
+}
+
+/// Reclaims request-owned generated values on every exit path. The handler
+/// result is copied into a Rust `String` before this guard is dropped, so the
+/// response never borrows reclaimed arena memory.
+struct InvocationArenaReset;
+
+impl Drop for InvocationArenaReset {
+    fn drop(&mut self) {
+        thaw_arena::thaw_arena_reset();
+    }
+}
 
 /// Runs the event loop forever. Compiled by `thaw-llvm::hir_codegen` as the
 /// process entry point whenever a program defines `handler` instead of
@@ -41,7 +1384,13 @@ pub extern "C" fn thaw_runtime_run(handler: HandlerFn) -> ! {
 }
 
 fn handle_one_invocation(runtime_api: &str, handler: HandlerFn) -> Result<(), String> {
-    let next = http_request(runtime_api, "GET", "/2018-06-01/runtime/invocation/next", None)?;
+    let _arena_reset = InvocationArenaReset;
+    let next = http_request(
+        runtime_api,
+        "GET",
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )?;
 
     let request_id = next
         .header("lambda-runtime-aws-request-id")
@@ -50,6 +1399,9 @@ fn handle_one_invocation(runtime_api: &str, handler: HandlerFn) -> Result<(), St
 
     let event_cstring = CString::new(next.body).map_err(|e| e.to_string())?;
     let result_ptr = handler(event_cstring.as_ptr());
+    if result_ptr.is_null() {
+        return Err("handler failed with an uncaught Thaw exception".to_string());
+    }
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
         .into_owned();
@@ -149,13 +1501,712 @@ fn http_request(
 mod tests {
     use super::*;
     use std::net::TcpListener;
+    use std::process::Command;
+
+    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
 
+    static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     extern "C" fn echo_handler(event: *const c_char) -> *const c_char {
-        let event = unsafe { CStr::from_ptr(event) }.to_string_lossy().into_owned();
+        let event = unsafe { CStr::from_ptr(event) }
+            .to_string_lossy()
+            .into_owned();
         // Leaked on purpose: matches the arena/global-lifetime string model
         // compiled Thaw code uses (nothing frees heap strings yet).
         CString::new(format!("echo:{event}")).unwrap().into_raw() as *const c_char
+    }
+
+    #[repr(C)]
+    struct ResumeRecord {
+        calls: usize,
+        result: *const u8,
+    }
+
+    extern "C" fn record_resume(frame: *mut u8, result: *const u8) {
+        let record = unsafe { &mut *(frame as *mut ResumeRecord) };
+        record.calls += 1;
+        record.result = result;
+    }
+
+    fn local_tls_configs() -> (Arc<ClientConfig>, Arc<ServerConfig>) {
+        let sequence = TLS_TEST_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("thaw-tls-test-{}-{sequence}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_pem = dir.join("key.pem");
+        let cert_pem = dir.join("cert.pem");
+        let key_der = dir.join("key.der");
+        let cert_der = dir.join("cert.der");
+        assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-keyout",
+            ])
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_pem)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&cert_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&cert_der)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+            .arg(&key_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&key_der)
+            .status()
+            .unwrap()
+            .success());
+
+        let certificate = CertificateDer::from(std::fs::read(&cert_der).unwrap());
+        let private_key = PrivatePkcs8KeyDer::from(std::fs::read(&key_der).unwrap()).into();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate.clone()).unwrap();
+        let client = Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let server = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate], private_key)
+                .unwrap(),
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        (client, server)
+    }
+
+    #[test]
+    fn promise_resumes_subscribers_in_registration_order() {
+        let promise = thaw_promise_new();
+        assert_eq!(thaw_promise_state(promise), 0);
+
+        let mut first = ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        };
+        let mut second = ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        };
+        assert_eq!(
+            thaw_promise_subscribe(
+                promise,
+                record_resume,
+                (&mut first as *mut ResumeRecord).cast()
+            ),
+            1
+        );
+        assert_eq!(
+            thaw_promise_subscribe(
+                promise,
+                record_resume,
+                (&mut second as *mut ResumeRecord).cast()
+            ),
+            1
+        );
+
+        let result = 42u8;
+        assert_eq!(thaw_promise_resolve(promise, &result), 1);
+        assert_eq!(thaw_promise_state(promise), 1);
+        assert_eq!(first.calls, 0);
+        assert_eq!(second.calls, 0);
+        assert_eq!(thaw_runtime_run_until_idle(), 2);
+        assert_eq!(first.calls, 1);
+        assert_eq!(second.calls, 1);
+        assert_eq!(first.result, &result);
+        assert_eq!(second.result, &result);
+        assert_eq!(thaw_promise_resolve(promise, &result), 0);
+
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn subscribing_after_resolution_queues_resume_immediately() {
+        let promise = thaw_promise_new();
+        let result = 7u8;
+        assert_eq!(thaw_promise_resolve(promise, &result), 1);
+
+        let mut record = ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        };
+        assert_eq!(
+            thaw_promise_subscribe(
+                promise,
+                record_resume,
+                (&mut record as *mut ResumeRecord).cast()
+            ),
+            1
+        );
+        assert_eq!(record.calls, 0);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_eq!(record.calls, 1);
+        assert_eq!(record.result, &result);
+        assert_eq!(thaw_runtime_poll_one(), 0);
+
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn promise_abi_rejects_invalid_handles() {
+        assert_eq!(thaw_promise_state(std::ptr::null()), u8::MAX);
+        assert_eq!(
+            thaw_promise_subscribe(std::ptr::null_mut(), record_resume, std::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            thaw_promise_resolve(std::ptr::null_mut(), std::ptr::null()),
+            0
+        );
+        assert_eq!(
+            thaw_promise_reject(std::ptr::null_mut(), std::ptr::null()),
+            0
+        );
+        unsafe { thaw_promise_destroy(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn rejected_promise_queues_subscribers_and_settles_once() {
+        let promise = thaw_promise_new();
+        let mut record = ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        };
+        assert_eq!(
+            thaw_promise_subscribe(
+                promise,
+                record_resume,
+                (&mut record as *mut ResumeRecord).cast()
+            ),
+            1
+        );
+        let error = 99u8;
+        assert_eq!(thaw_promise_reject(promise, &error), 1);
+        assert_eq!(thaw_promise_state(promise), 2);
+        assert_eq!(thaw_promise_resolve(promise, &error), 0);
+        assert_eq!(record.calls, 0);
+        assert_eq!(thaw_runtime_run_until_idle(), 1);
+        assert_eq!(record.calls, 1);
+        assert_eq!(record.result, &error);
+        assert_eq!(thaw_runtime_run_until_resolved(promise), &error);
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn timer_promise_is_driven_without_a_worker_thread() {
+        let promise = thaw_sleep_ms(1);
+        let mut record = ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        };
+        assert_eq!(
+            thaw_promise_subscribe(
+                promise,
+                record_resume,
+                (&mut record as *mut ResumeRecord).cast()
+            ),
+            1
+        );
+
+        let result = thaw_runtime_run_until_resolved(promise);
+        assert!(!result.is_null());
+        assert_eq!(record.calls, 1);
+        assert_eq!(record.result, result);
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn fd_readiness_resolves_and_resumes_a_subscriber() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let promise = thaw_runtime_wait_fd(fds[0], THAW_FD_READABLE);
+        let mut record = ResumeRecord {
+            calls: 0,
+            result: std::ptr::null(),
+        };
+        assert_eq!(
+            thaw_promise_subscribe(
+                promise,
+                record_resume,
+                (&mut record as *mut ResumeRecord).cast(),
+            ),
+            1
+        );
+        assert_eq!(
+            unsafe { libc::write(fds[1], b"ready".as_ptr().cast(), 5) },
+            5
+        );
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 1);
+        assert_eq!(record.calls, 1);
+        assert_eq!(thaw_runtime_run_until_idle(), 0);
+        unsafe { thaw_promise_destroy(promise) };
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn timer_can_finish_while_an_fd_wait_remains_pending() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let fd_promise = thaw_runtime_wait_fd(fds[0], THAW_FD_READABLE);
+        let timer = thaw_sleep_ms(1);
+        assert!(!thaw_runtime_run_until_resolved(timer).is_null());
+        assert_eq!(thaw_promise_state(timer), 1);
+        assert_eq!(thaw_promise_state(fd_promise), 0);
+        unsafe {
+            thaw_promise_destroy(timer);
+            thaw_promise_destroy(fd_promise);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn dns_resolution_completes_through_the_fd_event_loop() {
+        let (fd, result) = start_dns_resolution("localhost".to_string(), 80).unwrap();
+        let readiness = thaw_runtime_wait_fd_timeout(fd, THAW_FD_READABLE, 5_000);
+        assert!(!thaw_runtime_run_until_resolved(readiness).is_null());
+        assert_eq!(thaw_promise_state(readiness), 1);
+        let resolved = result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("DNS worker must publish before notifying the pipe")
+            .unwrap();
+        assert!(!resolved.is_empty());
+        unsafe {
+            thaw_promise_destroy(readiness);
+            libc::close(fd);
+        }
+    }
+
+    #[test]
+    fn invalid_fd_wait_is_rejected() {
+        let promise = thaw_runtime_wait_fd(-1, THAW_FD_READABLE);
+        assert_eq!(thaw_promise_state(promise), 2);
+        assert_eq!(
+            thaw_runtime_run_until_resolved(promise),
+            INVALID_FD_ERROR.as_ptr()
+        );
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn fd_wait_timeout_rejects_without_readiness() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let promise = thaw_runtime_wait_fd_timeout(fds[0], THAW_FD_READABLE, 1);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 2);
+        unsafe {
+            thaw_promise_destroy(promise);
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn parses_async_http_urls() {
+        assert_eq!(
+            parse_http_url("http://example.com:8080/api?q=1").unwrap(),
+            (
+                false,
+                "example.com".to_string(),
+                8080,
+                "/api?q=1".to_string()
+            )
+        );
+        assert_eq!(
+            parse_http_url("https://[::1]/").unwrap(),
+            (true, "::1".to_string(), 443, "/".to_string())
+        );
+    }
+
+    #[test]
+    fn incrementally_parses_content_length_response() {
+        let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe";
+        assert!(parse_http_response(partial, false).unwrap().is_none());
+        let complete = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloignored";
+        let parsed = parse_http_response(complete, false).unwrap().unwrap();
+        assert_eq!(parsed.status, 200);
+        assert_eq!(parsed.body, b"hello");
+        assert!(parse_http_response(partial, true).is_err());
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: ../next\r\nContent-Length: 0\r\n\r\n";
+        let parsed = parse_http_response(redirect, false).unwrap().unwrap();
+        assert_eq!(parsed.location.as_deref(), Some("../next"));
+    }
+
+    #[test]
+    fn incrementally_decodes_chunked_response() {
+        let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWi";
+        assert!(parse_http_response(partial, false).unwrap().is_none());
+        let complete = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;name=value\r\nWiki\r\n5\r\npedia\r\n0\r\nX-End: yes\r\n\r\n";
+        let parsed = parse_http_response(complete, false).unwrap().unwrap();
+        assert_eq!(parsed.body, b"Wikipedia");
+    }
+
+    #[test]
+    fn async_http_rejects_unsupported_scheme_without_blocking() {
+        let url = CString::new("ftp://example.com/").unwrap();
+        let promise = thaw_http_get_async(url.as_ptr());
+        assert_eq!(thaw_promise_state(promise), 2);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_and_timer_share_the_event_loop() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+        let url = CString::new(format!("http://{addr}/data")).unwrap();
+        let http = thaw_http_get_async_timeout(url.as_ptr(), 1_000);
+        let timer = thaw_sleep_ms(1);
+        assert!(!thaw_runtime_run_until_resolved(timer).is_null());
+        assert_eq!(thaw_promise_state(timer), 1);
+        assert_eq!(thaw_promise_state(http), 0);
+        let result_slot = thaw_runtime_run_until_resolved(http) as *const *const c_char;
+        assert_eq!(thaw_promise_state(http), 1);
+        let body = unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy();
+        assert_eq!(body, "ok");
+        server.join().unwrap();
+        unsafe {
+            thaw_promise_destroy(timer);
+            thaw_promise_destroy(http);
+        }
+    }
+
+    #[test]
+    fn async_http_finishes_content_length_before_keep_alive_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+            connection
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello",
+                )
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let url = CString::new(format!("http://{addr}/keep-alive")).unwrap();
+        let started = Instant::now();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 500);
+        let result = thaw_runtime_run_until_resolved(promise);
+        assert_eq!(
+            thaw_promise_state(promise),
+            1,
+            "HTTP fetch rejected: {}",
+            unsafe { CStr::from_ptr(result.cast()) }.to_string_lossy()
+        );
+        let result_slot = result as *const *const c_char;
+        assert!(started.elapsed() < Duration::from_millis(150));
+        assert_eq!(
+            unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy(),
+            "hello"
+        );
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_decodes_chunked_keep_alive_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n5\r\nhello\r\n1\r\n \r\n5\r\nworld\r\n0\r\n\r\n")
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        });
+        let url = CString::new(format!("http://{addr}/chunked")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 500);
+        let result_slot = thaw_runtime_run_until_resolved(promise) as *const *const c_char;
+        assert_eq!(thaw_promise_state(promise), 1);
+        assert_eq!(
+            unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy(),
+            "hello world"
+        );
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_https_handshakes_and_reads_a_verified_response() {
+        let (client_config, server_config) = local_tls_configs();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            let tls = ServerConnection::new(server_config).unwrap();
+            let mut stream = StreamOwned::new(tls, connection);
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: keep-alive\r\n\r\nsecure",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        });
+        let url = CString::new(format!("https://{addr}/secure")).unwrap();
+        let promise = thaw_http_get_async_with_config(url.as_ptr(), 1_000, Some(client_config));
+        let result = thaw_runtime_run_until_resolved(promise);
+        assert_eq!(
+            thaw_promise_state(promise),
+            1,
+            "TLS fetch rejected: {}",
+            unsafe { CStr::from_ptr(result.cast()) }.to_string_lossy()
+        );
+        let result_slot = result as *const *const c_char;
+        assert_eq!(
+            unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy(),
+            "secure"
+        );
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_https_rejects_an_untrusted_certificate() {
+        let (_client_config, server_config) = local_tls_configs();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            let tls = ServerConnection::new(server_config).unwrap();
+            let mut stream = StreamOwned::new(tls, connection);
+            let mut request = [0u8; 64];
+            let _ = stream.read(&mut request);
+        });
+        let url = CString::new(format!("https://{addr}/untrusted")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 1_000);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 2);
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_https_handshake_obeys_the_total_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_connection, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let url = CString::new(format!("https://{addr}/stall")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 5);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 2);
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_redirect_can_upgrade_to_https() {
+        let (client_config, server_config) = local_tls_configs();
+        let http_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_addr = http_listener.local_addr().unwrap();
+        let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let tls_addr = tls_listener.local_addr().unwrap();
+        let redirect_server = std::thread::spawn(move || {
+            let (mut connection, _) = http_listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+            connection
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: https://{tls_addr}/secure\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        let tls_server = std::thread::spawn(move || {
+            let (connection, _) = tls_listener.accept().unwrap();
+            let tls = ServerConnection::new(server_config).unwrap();
+            let mut stream = StreamOwned::new(tls, connection);
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nupgraded")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+        let url = CString::new(format!("http://{http_addr}/upgrade")).unwrap();
+        let promise = thaw_http_get_async_with_config(url.as_ptr(), 2_000, Some(client_config));
+        let result_slot = thaw_runtime_run_until_resolved(promise) as *const *const c_char;
+        assert_eq!(thaw_promise_state(promise), 1);
+        assert_eq!(
+            unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy(),
+            "upgraded"
+        );
+        redirect_server.join().unwrap();
+        tls_server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_timeout_rejects_a_stalled_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let url = CString::new(format!("http://{addr}/slow")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 5);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 2);
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_rejects_when_peer_disconnects_without_a_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+        });
+        let url = CString::new(format!("http://{addr}/disconnect")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 1_000);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 2);
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_follows_a_relative_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let read = first.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /one/start "));
+            first
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: ../final\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let read = second.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /final "));
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nredirected")
+                .unwrap();
+        });
+        let url = CString::new(format!("http://{addr}/one/start")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 1_000);
+        let result_slot = thaw_runtime_run_until_resolved(promise) as *const *const c_char;
+        assert_eq!(thaw_promise_state(promise), 1);
+        assert_eq!(
+            unsafe { CStr::from_ptr(*result_slot) }.to_string_lossy(),
+            "redirected"
+        );
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn async_http_redirect_limit_rejects_a_loop() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..11 {
+                let (mut connection, _) = listener.accept().unwrap();
+                let mut request = [0u8; 1024];
+                let _ = connection.read(&mut request).unwrap();
+                connection
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+        });
+        let url = CString::new(format!("http://{addr}/loop")).unwrap();
+        let promise = thaw_http_get_async_timeout(url.as_ptr(), 2_000);
+        assert!(!thaw_runtime_run_until_resolved(promise).is_null());
+        assert_eq!(thaw_promise_state(promise), 2);
+        server.join().unwrap();
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn unresolved_promise_without_an_event_source_reports_no_progress() {
+        let promise = thaw_promise_new();
+        assert!(thaw_runtime_run_until_resolved(promise).is_null());
+        unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn invocation_guard_resets_request_arena() {
+        thaw_arena::thaw_arena_reset();
+        let first = thaw_arena::thaw_arena_alloc(32, 8);
+        assert!(!first.is_null());
+
+        {
+            let _guard = InvocationArenaReset;
+            let second = thaw_arena::thaw_arena_alloc(32, 8);
+            assert_ne!(first, second);
+        }
+
+        let after_reset = thaw_arena::thaw_arena_alloc(32, 8);
+        assert_eq!(first, after_reset);
+        thaw_arena::thaw_arena_reset();
     }
 
     #[test]
@@ -185,7 +2236,8 @@ mod tests {
             conn.read_to_end(&mut buf).unwrap();
             tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
 
-            let response = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let response =
+                "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             conn.write_all(response.as_bytes()).unwrap();
         });
 

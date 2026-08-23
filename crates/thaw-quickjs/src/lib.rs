@@ -37,7 +37,9 @@ thread_local! {
 }
 
 fn to_str(ptr: *const c_char) -> String {
-    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
@@ -86,7 +88,10 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
 /// Returns the JSON-encoded result (or an error object -- see the module
 /// doc comment).
 #[no_mangle]
-pub extern "C" fn thaw_js_call(func_name: *const c_char, args_json: *const c_char) -> *const c_char {
+pub extern "C" fn thaw_js_call(
+    func_name: *const c_char,
+    args_json: *const c_char,
+) -> *const c_char {
     let func_name = to_str(func_name);
     let args_json = to_str(args_json);
 
@@ -186,7 +191,9 @@ mod tests {
         let func_name = CString::new(func_name).unwrap();
         let args_json = CString::new(args_json).unwrap();
         let result_ptr = thaw_js_call(func_name.as_ptr(), args_json.as_ptr());
-        unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn load(source: &str) -> u8 {
@@ -221,14 +228,20 @@ mod tests {
     #[test]
     fn unknown_function_reports_an_error_object_instead_of_crashing() {
         let result = call("doesNotExist", "[]");
-        assert!(result.contains("__thaw_error__"), "unexpected result: {result}");
+        assert!(
+            result.contains("__thaw_error__"),
+            "unexpected result: {result}"
+        );
     }
 
     #[test]
     fn thrown_exception_reports_an_error_object_instead_of_crashing() {
         assert_eq!(load("function boom() { throw new Error('kaboom'); }"), 1);
         let result = call("boom", "[]");
-        assert!(result.contains("__thaw_error__"), "unexpected result: {result}");
+        assert!(
+            result.contains("__thaw_error__"),
+            "unexpected result: {result}"
+        );
         assert!(result.contains("kaboom"), "unexpected result: {result}");
     }
 

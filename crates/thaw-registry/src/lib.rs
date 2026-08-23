@@ -189,7 +189,10 @@ pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
         std::process::id()
     ));
     fs::create_dir_all(&scratch).map_err(|e| {
-        format!("failed to create scratch directory `{}`: {e}", scratch.display())
+        format!(
+            "failed to create scratch directory `{}`: {e}",
+            scratch.display()
+        )
     })?;
 
     let result = fetch_and_copy(&scratch, registry_dir, package);
@@ -247,14 +250,17 @@ fn fetch_and_copy(
         .unwrap_or("0.0.0")
         .to_string();
 
-    let main_field = manifest.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
+    let main_field = manifest
+        .get("main")
+        .and_then(|v| v.as_str())
+        .unwrap_or("index.js");
     let (js_source, js_relative_path, bundled_file_count, dependency_versions) =
         bundle_commonjs_package(&node_modules_dir, name, &package_dir, main_field)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
         Some((rel, abs)) => {
-            let source = fs::read_to_string(&abs)
-                .map_err(|e| format!("failed to read `{rel}`: {e}"))?;
+            let source =
+                fs::read_to_string(&abs).map_err(|e| format!("failed to read `{rel}`: {e}"))?;
             (rel, source)
         }
         None => fetch_types_package_dts(scratch, name)?,
@@ -263,12 +269,24 @@ fn fetch_and_copy(
     let dest_dir = registry_dir.join(name);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("failed to create `{}`: {e}", dest_dir.display()))?;
-    fs::write(dest_dir.join("package.d.ts"), dts_source)
-        .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("package.d.ts").display()))?;
-    fs::write(dest_dir.join("bundle.js"), js_source)
-        .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("bundle.js").display()))?;
-    fs::write(dest_dir.join("version.txt"), &resolved_version)
-        .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("version.txt").display()))?;
+    fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
+        format!(
+            "failed to write `{}`: {e}",
+            dest_dir.join("package.d.ts").display()
+        )
+    })?;
+    fs::write(dest_dir.join("bundle.js"), js_source).map_err(|e| {
+        format!(
+            "failed to write `{}`: {e}",
+            dest_dir.join("bundle.js").display()
+        )
+    })?;
+    fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
+        format!(
+            "failed to write `{}`: {e}",
+            dest_dir.join("version.txt").display()
+        )
+    })?;
     // Only worth a `lock.json` at all once there's something beyond
     // `package`'s own entry (which `version.txt` already covers) --
     // a single-file package with no dependencies would otherwise get an
@@ -277,8 +295,12 @@ fn fetch_and_copy(
     if dependency_versions.len() > 1 {
         let lock_json = serde_json::to_string_pretty(&dependency_versions)
             .map_err(|e| format!("failed to serialize `lock.json` for `{name}`: {e}"))?;
-        fs::write(dest_dir.join("lock.json"), lock_json)
-            .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("lock.json").display()))?;
+        fs::write(dest_dir.join("lock.json"), lock_json).map_err(|e| {
+            format!(
+                "failed to write `{}`: {e}",
+                dest_dir.join("lock.json").display()
+            )
+        })?;
     }
 
     Ok(AddedPackage {
@@ -347,7 +369,10 @@ fn fetch_types_package_dts(scratch: &Path, package: &str) -> Result<(String, Str
 /// `@scope/name` -> `@types/scope__name` (the `/` becomes `__`, since a
 /// types package itself is unscoped).
 fn types_package_name(package: &str) -> String {
-    match package.strip_prefix('@').and_then(|rest| rest.split_once('/')) {
+    match package
+        .strip_prefix('@')
+        .and_then(|rest| rest.split_once('/'))
+    {
         Some((scope, name)) => format!("@types/{scope}__{name}"),
         None => format!("@types/{package}"),
     }
@@ -514,12 +539,19 @@ fn bundle_commonjs_package(
             // don't cover) is left out of the map on purpose -- that one
             // call falls through to the external-require stub at
             // runtime instead of aborting the whole bundle.
-            if let Ok((resolved_relative, resolved_abs)) = resolve_module_path(&pkg_dir, &normalized) {
+            if let Ok((resolved_relative, resolved_abs)) =
+                resolve_module_path(&pkg_dir, &normalized)
+            {
                 let resolved_key = format!("{pkg_name}/{resolved_relative}");
                 requires.push((spec, resolved_key.clone()));
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
-                    worklist.push((resolved_key, resolved_abs, pkg_name.clone(), pkg_dir.clone()));
+                    worklist.push((
+                        resolved_key,
+                        resolved_abs,
+                        pkg_name.clone(),
+                        pkg_dir.clone(),
+                    ));
                 }
             }
         }
@@ -555,7 +587,11 @@ fn bundle_commonjs_package(
             // external-require stub, same as always.
         }
 
-        modules.push(BundledModule { key, source, requires });
+        modules.push(BundledModule {
+            key,
+            source,
+            requires,
+        });
     }
 
     let file_count = modules.len();
@@ -705,7 +741,10 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                 let var_name = format!("__thaw_esm_import_{synthetic_count}");
                 synthetic_count += 1;
                 let spec = import.src.value.to_string_lossy();
-                prologue.push_str(&format!("var {var_name} = require({});\n", js_string_literal(&spec)));
+                prologue.push_str(&format!(
+                    "var {var_name} = require({});\n",
+                    js_string_literal(&spec)
+                ));
                 for specifier in &import.specifiers {
                     match specifier {
                         ImportSpecifier::Default(d) => {
@@ -758,11 +797,18 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                     let var_name = format!("__thaw_esm_reexport_{synthetic_count}");
                     synthetic_count += 1;
                     let spec = src.value.to_string_lossy();
-                    prologue.push_str(&format!("var {var_name} = require({});\n", js_string_literal(&spec)));
+                    prologue.push_str(&format!(
+                        "var {var_name} = require({});\n",
+                        js_string_literal(&spec)
+                    ));
                     for spec in &named.specifiers {
                         if let ExportSpecifier::Named(n) = spec {
                             let orig = export_name(&n.orig);
-                            let exported = n.exported.as_ref().map(&export_name).unwrap_or_else(|| orig.clone());
+                            let exported = n
+                                .exported
+                                .as_ref()
+                                .map(&export_name)
+                                .unwrap_or_else(|| orig.clone());
                             rest.push_str(&format!("exports.{exported} = {var_name}.{orig};\n"));
                         }
                         // `export * as ns from './y'`/`export v from './y'`:
@@ -773,7 +819,11 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                     for spec in &named.specifiers {
                         if let ExportSpecifier::Named(n) = spec {
                             let orig = export_name(&n.orig);
-                            let exported = n.exported.as_ref().map(&export_name).unwrap_or_else(|| orig.clone());
+                            let exported = n
+                                .exported
+                                .as_ref()
+                                .map(&export_name)
+                                .unwrap_or_else(|| orig.clone());
                             rest.push_str(&format!("exports.{exported} = {orig};\n"));
                         }
                     }
@@ -783,7 +833,10 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                 let var_name = format!("__thaw_esm_reexport_all_{synthetic_count}");
                 synthetic_count += 1;
                 let spec = export_all.src.value.to_string_lossy();
-                prologue.push_str(&format!("var {var_name} = require({});\n", js_string_literal(&spec)));
+                prologue.push_str(&format!(
+                    "var {var_name} = require({});\n",
+                    js_string_literal(&spec)
+                ));
                 rest.push_str(&format!(
                     "for (var __thaw_esm_key in {var_name}) {{ exports[__thaw_esm_key] = {var_name}[__thaw_esm_key]; }}\n"
                 ));
@@ -980,7 +1033,10 @@ fn resolve_bare_require(
         Some(sub) => resolve_module_path(&dep_dir, sub).ok()?,
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            let main = manifest.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
+            let main = manifest
+                .get("main")
+                .and_then(|v| v.as_str())
+                .unwrap_or("index.js");
             resolve_module_path(&dep_dir, main).ok()?
         }
     };
@@ -1150,7 +1206,11 @@ mod tests {
             "export declare function stringify(x: string): string;",
         )
         .unwrap();
-        fs::write(pkg_dir.join("bundle.js"), "function stringify(x){return x;}").unwrap();
+        fs::write(
+            pkg_dir.join("bundle.js"),
+            "function stringify(x){return x;}",
+        )
+        .unwrap();
         fs::write(pkg_dir.join("version.txt"), "6.11.0").unwrap();
         fs::write(
             pkg_dir.join("lock.json"),
@@ -1218,7 +1278,8 @@ mod tests {
     /// here.
     #[test]
     fn finds_dts_from_types_field() {
-        let manifest: serde_json::Value = serde_json::from_str(r#"{"types": "dist/index.d.ts"}"#).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(r#"{"types": "dist/index.d.ts"}"#).unwrap();
         let dir = temp_registry("dts_types_field");
         let (rel, abs) = find_own_dts(&manifest, &dir).unwrap();
         assert_eq!(rel, "dist/index.d.ts");
@@ -1228,7 +1289,8 @@ mod tests {
 
     #[test]
     fn finds_dts_from_typings_field_when_types_is_absent() {
-        let manifest: serde_json::Value = serde_json::from_str(r#"{"typings": "index.d.ts"}"#).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(r#"{"typings": "index.d.ts"}"#).unwrap();
         let dir = temp_registry("dts_typings_field");
         let (rel, _) = find_own_dts(&manifest, &dir).unwrap();
         assert_eq!(rel, "index.d.ts");
@@ -1320,9 +1382,8 @@ mod tests {
 
     #[test]
     fn finds_single_and_double_quoted_relative_requires() {
-        let specs = find_relative_require_specs(
-            r#"var a = require('./a'); var b = require("../lib/b");"#,
-        );
+        let specs =
+            find_relative_require_specs(r#"var a = require('./a'); var b = require("../lib/b");"#);
         assert_eq!(specs, vec!["./a".to_string(), "../lib/b".to_string()]);
     }
 
@@ -1337,14 +1398,20 @@ mod tests {
         let specs = find_bare_require_specs(
             r#"var a = require('side-channel'); var b = require('@babel/core'); var c = require('./local');"#,
         );
-        assert_eq!(specs, vec!["side-channel".to_string(), "@babel/core".to_string()]);
+        assert_eq!(
+            specs,
+            vec!["side-channel".to_string(), "@babel/core".to_string()]
+        );
     }
 
     #[test]
     fn splits_bare_specs_into_package_and_subpath() {
         assert_eq!(split_bare_spec("lodash"), ("lodash", None));
         assert_eq!(split_bare_spec("lodash/fp"), ("lodash", Some("fp")));
-        assert_eq!(split_bare_spec("es-errors/type"), ("es-errors", Some("type")));
+        assert_eq!(
+            split_bare_spec("es-errors/type"),
+            ("es-errors", Some("type"))
+        );
         assert_eq!(split_bare_spec("@babel/core"), ("@babel/core", None));
         assert_eq!(
             split_bare_spec("@babel/core/lib/index"),
@@ -1390,7 +1457,11 @@ mod tests {
             r#"{"main": "index.js"}"#,
         )
         .unwrap();
-        fs::write(node_modules.join("es-errors/index.js"), "module.exports = {};").unwrap();
+        fs::write(
+            node_modules.join("es-errors/index.js"),
+            "module.exports = {};",
+        )
+        .unwrap();
         fs::write(
             node_modules.join("es-errors/type.js"),
             "module.exports = TypeError;",
@@ -1456,7 +1527,11 @@ mod tests {
              module.exports = { parse: parse, stringify: stringify };",
         )
         .unwrap();
-        fs::write(dir.join("lib/parse.js"), "module.exports = function parse(s) { return s; };").unwrap();
+        fs::write(
+            dir.join("lib/parse.js"),
+            "module.exports = function parse(s) { return s; };",
+        )
+        .unwrap();
         fs::write(
             dir.join("lib/stringify.js"),
             "module.exports = function stringify(s) { return s; };",
@@ -1537,7 +1612,11 @@ mod tests {
             r#"{"name": "solo-pkg", "version": "0.1.0", "main": "index.js"}"#,
         )
         .unwrap();
-        fs::write(dir.join("index.js"), "module.exports = function () { return 1; };").unwrap();
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = function () { return 1; };",
+        )
+        .unwrap();
 
         let empty_node_modules = temp_registry("bundle_versions_solo_node_modules");
         let (_, _, _, dependency_versions) =
@@ -1556,7 +1635,11 @@ mod tests {
     #[test]
     fn bundle_of_a_single_file_package_still_has_one_module() {
         let dir = temp_registry("bundle_single_file");
-        fs::write(dir.join("index.js"), "module.exports = function f() { return 1; };").unwrap();
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = function f() { return 1; };",
+        )
+        .unwrap();
 
         let empty_node_modules = temp_registry("bundle_single_file_node_modules");
         let (_, main_key, file_count, _) =
@@ -1640,7 +1723,10 @@ mod tests {
 
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&node_modules_dir, "pkg", &dir, "lib/index.js").unwrap();
-        assert_eq!(file_count, 3, "pkg's index.js + double.js + triple-dep's index.js");
+        assert_eq!(
+            file_count, 3,
+            "pkg's index.js + double.js + triple-dep's index.js"
+        );
 
         // Same environment thaw-bridge's `wrap_as_commonjs_module` sets
         // up: global `module`/`exports`/`require` before running the
@@ -1654,12 +1740,18 @@ mod tests {
         );
 
         let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "bundle failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "bundle failed to load"
+        );
 
         let func = CString::new("run").unwrap();
         let args = CString::new("[7]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             result, "42",
             "relative require (double) and cross-package bare require (triple-dep) must both resolve correctly"
@@ -1700,7 +1792,11 @@ mod tests {
             bundle_commonjs_package(&node_modules_dir, "pkg-a", &dir_a, "index.js").unwrap();
 
         let dir_b = temp_registry("multi_pkg_b");
-        fs::write(dir_b.join("index.js"), "module.exports = function () { return 'b'; };").unwrap();
+        fs::write(
+            dir_b.join("index.js"),
+            "module.exports = function () { return 'b'; };",
+        )
+        .unwrap();
         let (bundle_b, _, _, _) =
             bundle_commonjs_package(&node_modules_dir, "pkg-b", &dir_b, "index.js").unwrap();
 
@@ -1715,17 +1811,27 @@ mod tests {
         };
 
         let source_a = CString::new(wrap(&bundle_a, "getLazy")).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source_a.as_ptr()), 1, "package A failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source_a.as_ptr()),
+            1,
+            "package A failed to load"
+        );
 
         // Loaded into the same shared global context *after* A.
         let source_b = CString::new(wrap(&bundle_b, "pkgB")).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source_b.as_ptr()), 1, "package B failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source_b.as_ptr()),
+            1,
+            "package B failed to load"
+        );
 
         // Call A's lazily-requiring function *after* B has loaded.
         let func = CString::new("getLazy").unwrap();
         let args = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             result, "\"from lazy\"",
             "package A's lazy internal require must still resolve against its own module map, \
@@ -1789,12 +1895,18 @@ mod tests {
              globalThis.getPlatform = module.exports.default;\n"
         );
         let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "failed to load"
+        );
 
         let func = CString::new("getPlatform").unwrap();
         let args = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, "\"linux\"");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1829,12 +1941,18 @@ mod tests {
              globalThis.checkInspectCustom = module.exports;\n"
         );
         let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "bundle failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "bundle failed to load"
+        );
 
         let func = CString::new("checkInspectCustom").unwrap();
         let args = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, "\"symbol\"");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1884,12 +2002,18 @@ mod tests {
              globalThis.locate = module.exports;\n"
         );
         let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "bundle failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "bundle failed to load"
+        );
 
         let func = CString::new("locate").unwrap();
         let args = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, "\"linux/x64//thaw_modules/0\"");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1903,21 +2027,25 @@ mod tests {
 
     #[test]
     fn rewrites_default_export_to_module_exports_default() {
-        let rewritten = rewrite_esm_to_commonjs("export default function greet() { return 'hi'; }").unwrap();
+        let rewritten =
+            rewrite_esm_to_commonjs("export default function greet() { return 'hi'; }").unwrap();
         assert!(rewritten.contains("module.exports.default = function greet() { return 'hi'; }"));
         assert!(rewritten.contains("module.exports.__esModule = true;"));
     }
 
     #[test]
     fn rewrites_named_export_and_binds_it_too() {
-        let rewritten = rewrite_esm_to_commonjs("export function add(a, b) { return a + b; }").unwrap();
+        let rewritten =
+            rewrite_esm_to_commonjs("export function add(a, b) { return a + b; }").unwrap();
         assert!(rewritten.contains("function add(a, b) { return a + b; }"));
         assert!(rewritten.contains("exports.add = add;"));
     }
 
     #[test]
     fn rewrites_named_import_to_a_require_call() {
-        let rewritten = rewrite_esm_to_commonjs("import { add } from './math';\nconsole.log(add(1, 2));").unwrap();
+        let rewritten =
+            rewrite_esm_to_commonjs("import { add } from './math';\nconsole.log(add(1, 2));")
+                .unwrap();
         assert!(rewritten.contains("require(\"./math\")"));
         assert!(rewritten.contains("console.log(add(1, 2));"));
     }
@@ -1955,12 +2083,18 @@ mod tests {
              globalThis.run = module.exports.default;\n"
         );
         let source = CString::new(script).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "ESM bundle failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "ESM bundle failed to load"
+        );
 
         let func = CString::new("run").unwrap();
         let args = CString::new("[21]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, "42");
 
         let _ = fs::remove_dir_all(&dir);

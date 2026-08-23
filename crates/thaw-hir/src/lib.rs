@@ -10,7 +10,7 @@
 
 mod lower;
 
-pub use lower::lower_module;
+pub use lower::{lower_module, lower_module_with_source_map, LowerDiagnostic, SourceRange};
 
 pub type Symbol = String;
 
@@ -146,12 +146,15 @@ pub enum HirStmt {
     Let(Symbol, HirType, HirExpr),
     If(HirExpr, Vec<HirStmt>, Vec<HirStmt>),
     While(HirExpr, Vec<HirStmt>),
+    Break,
+    Continue,
     Throw(HirExpr),
-    /// Phase 1 try/catch is intentionally limited: a `throw` only unwinds to
-    /// the nearest lexically-enclosing `try` *in the same HIR function* --
-    /// there is no real stack unwinding across function calls yet (that
-    /// needs either LLVM's invoke/landingpad machinery or a setjmp/longjmp
-    /// runtime, both deferred). `catch` binds the thrown value as a string.
+    /// `throw` unwinds through generated Thaw function calls to the nearest
+    /// lexical `try`. Codegen implements this with a pending-exception slot,
+    /// preserving the ordinary function and C FFI ABIs. `catch` binds the
+    /// thrown value as a string. `finally` is expanded around normal and
+    /// abrupt exits during lowering, so it does not require a separate HIR
+    /// variant.
     Try(Vec<HirStmt>, Symbol, Vec<HirStmt>),
 }
 

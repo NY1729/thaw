@@ -1,6 +1,11 @@
 # async/await 設計ドキュメント
 
-- ステータス: 設計のみ（未実装）
+- ステータス: V1実装済み。V2はPromise ABIと単一スレッド継続キューまで実装済み、
+  タイマーイベント源、トップレベル駆動ループ、`await sleep(ms)`を持つ
+  async mainのramp/resumeフレーム分割まで実装済み。
+  トップレベルおよびネストした制御フローのローカルframe slot、一般async関数、
+  async try/catchの例外伝播、fdのI/O readiness登録とpollイベントループ統合も
+  実装済み。非ブロッキングHTTP状態機械とasync fetch接続も実装済み
 - 前提: [thaw-hir](../../crates/thaw-hir), [thaw-llvm/hir_codegen](../../crates/thaw-llvm/src/hir_codegen.rs), [thaw-runtime](../../crates/thaw-runtime) の現状（Phase 0〜2一部）を前提にする
 
 ## 1. 目的とスコープ
@@ -239,6 +244,99 @@ extern "C" fn thaw_promise_subscribe(
 extern "C" fn thaw_promise_resolve(promise: *mut ThawPromise, result: *const u8);
 ```
 
+このABIは `thaw-runtime` に実装済み。`resolve`/解決済みPromiseへの`subscribe`
+は継続を直接再入呼び出しせず、FIFOのランキューへ積む。
+`thaw_runtime_poll_one` / `thaw_runtime_run_until_idle` が同じスレッド上で継続を
+実行するため、今後QuickJSジョブキューとI/O readinessを交互にpollできる。
+Promise状態はpending=0、fulfilled=1、rejected=2で、`thaw_promise_reject`も
+resolveと同じFIFO継続キューを一度だけ起動する。settled結果ポインタが通常値か
+エラーかは`thaw_promise_state`で判別する。
+async状態内のthrowは完了Promiseをrejectする。awaitのresume入口は待機Promiseを
+破棄する前に状態を確認し、rejectedなら型付き結果slotを読まず、同じエラーポインタで
+呼び出し元の完了Promiseもrejectする。これによりcatchがない多段awaitで拒否が伝播する。
+同一async関数のtry本体にある直接のthrowはcatch変数frame slotへエラーを保存し、
+try guardを無効化してcatch guardを有効化する。catch本体自体もawaitできる。
+try内の各await後resume状態にはcatchメタデータを付ける。子Promiseがrejectedなら
+型付き結果を読まず、catch変数slotへエラーを保存してtry guardを落とし、catch guardを
+立てて同じ状態を再開する。try外のrejectionは従来どおり上位Promiseへ伝播する。
+try/finallyだけの場合はloweringが生成した合成catchを同じ仕組みで有効化し、注入済み
+finalizerを実行してから完了Promiseを再rejectする。catch/finallyではcatchが正常完了
+した後に通常経路のfinalizerを一度だけ実行する。
+catch内のrethrowはcatch guard付きのreject分岐へ変換する。catch内で再度awaitした後でも
+新しいエラーポインタを上位Promiseへ伝播し、finallyがある場合はloweringがrethrow直前へ
+注入したfinalizerを一度だけ実行する。
+ネストtryでは内側tryのresume状態に内側catch、内側catch内のresume状態に外側catchの
+メタデータを付ける。これにより各rejectionは実行位置から最も近いcatchへ送られる。
+`thaw_sleep_ms` はワーカースレッドを作らずタイマーPromiseを登録し、
+`thaw_runtime_run_until_resolved` がランキューとタイマーを駆動してトップレベルの
+Promise完了まで待つ。これによりLLVM coroutine loweringを接続する実イベント源が
+用意された。
+
+`thaw_runtime_wait_fd(fd, interests)` はreadable/writable待機をPromiseとして登録する。
+イベントループはタイマーの次回期限をtimeoutにして`poll(2)`を呼び、fd readinessと
+タイマーを同じスレッドで駆動する。Promise破棄時にはfd登録も解除され、無効fdは
+rejectionになる。pollへブロックする直前には対象Promiseを再確認し、同じ反復で
+満了したタイマーを見落として別fdを無期限待機しない。
+
+`thaw_http_get_async`は平文HTTP GETをconnect/write/readの状態機械へ分解し、各段階を
+fd readiness Promiseで再開する。`await fetch(...)` のframe分割時だけこのABIを使い、
+awaitされない既存fetchは互換性のため同期ABIを維持する。HTTP全体期限はfd待機期限へ
+引き継がれ、接続エラー、peer切断、不正応答、HTTPエラー、タイムアウトはcompletion
+Promiseのrejectionになる。レスポンス解析はreadごとに増分実行し、`Content-Length`分の
+本文またはchunked終端を検出した時点でkeep-alive接続の切断を待たず完了する。
+chunk extensionとtrailerを含む`Transfer-Encoding: chunked`をデコードして、呼び出し側には
+連結済み本文を返す。`https://`はrustlsのハンドシェイク・暗号化write/readを同じfd readiness
+状態機械へ統合し、WebPKIルート、SNI、証明書名・署名・有効性を検証する。TLSエラーと
+ハンドシェイク中の期限切れもPromise rejectionになる。301/302/303/307/308はLocationを
+絶対URL、scheme-relative、絶対パス、相対パスとして解決し、同じcompletion Promise、
+TLS設定、全体期限を維持したまま状態機械を再接続する。HTTPからHTTPSへの遷移にも対応し、
+10回を超えるリダイレクトはrejectionにする。DNS解決は専用ワーカースレッドで実行し、
+非ブロッキングpipeのreadable通知を既存のfdイベントループへ接続する。初回接続と
+リダイレクト後の再接続は同じ経路を使い、名前解決中もタイマーと他のI/Oを駆動できる。
+DNS時間もHTTP全体期限に含み、解決失敗や空のアドレス集合はPromise rejectionになる。
+
+async関数内のトップレベル`HirExpr::Await(Call("sleep", ...))` はframe分割へ
+接続済み。関数引数はrampで型付きframe slotへコピーされ、resume後も同じ変数として
+参照できる。ramp関数は
+完了Promiseを即座に返し、独立した内部resume関数がフレームの状態番号をswitchして
+複数awaitの続きを実行する。フレームは完了Promise、状態番号、現在待機中のPromiseを
+保持し、待機Promiseはresume時に破棄される。C mainが完了Promiseまでイベントループを
+駆動する。関数トップレベルの`let`/`const`は型ごとの固定frame slotへ保存され、
+resume関数の全状態が同じslotを変数表として使うため、awaitをまたぐ読み書きができる。
+`Promise<void>`の明示`return;`は完了Promiseを解決して後続状態を実行せず終了する。
+値を返す関数ではframe内の専用結果slotへreturn値を保存し、そのslotへのポインタで
+完了Promiseを解決する。`const value = await compute()` の形では、呼び出し元のresume
+関数が継続引数の結果ポインタから型付き値を読み、呼び出し元frameのlocal slotへ保存する。
+どの関数がframe ABIを使うかは、`sleep`を起点にawait呼び出し関係を固定点までたどって
+宣言前に決定するため、V1の同期脱糖だけを使う既存async関数のABIは変わらない。
+式の途中にあるawaitは左から順に抽出し、型付きの一時frame slotとresume状態へ展開する。
+このため、1つの式に複数のawaitがある場合も評価順を保ったまま中断・再開できる。
+ifの条件式にあるawaitも同じ方法で抽出し、resume後に分岐を評価する。then/else本体は
+分岐guard付きの状態列へ展開し、選ばれなかった側ではPromiseを生成せず次状態へ進む。
+分岐内のローカル宣言は関数のframe slotへ収集され、awaitをまたいで保持される。
+分岐内のreturnは完了Promiseを解決してresume関数を終了し、throwは現在の例外handlerへ
+遷移する（handlerがなければ完了Promiseをrejectする）。while本体のawaitは条件状態、本体のguard付き状態、
+条件状態へ戻る後退エッジへ展開する。ループ条件のawaitも条件状態列の一部になり、
+反復ごとにPromiseを作り直して結果を再評価する。breakは本体guardと後退edge guardを
+落として合流状態へ進み、continueは本体guardだけを落として条件状態へ戻る。
+ループ内のローカル宣言・return・例外も同じguard付き展開を使う。
+
+ネストしたifは親guardから子のthen/else guardを生成する。親が非選択なら子の条件式も
+評価せず、任意段数のif本体にあるawaitをguard付き状態へ展開できる。async while内の
+ネストifからのbreak/continueは外側ループの本体guard・後退edge guardへ伝播する。
+ネストifの条件式にあるawaitも親guard付き状態へ展開するため、親が非選択なら条件の
+Promise自体を生成しない。条件とthen/else本体の両方にawaitがある場合にも対応する。
+ネストしたwhileは親guardからloop-enabled guardを作り、内側ループ専用の条件状態、
+本体guard、後退edgeを再帰的に生成する。親が非選択なら内側の条件Promiseも作らない。
+例外を投げないtry/finallyはlowering済みHIRのfinally複製を利用し、try本体を通常の
+async状態列へ展開する。正常完了ではtry後のfinalizer、returnではreturn直前へ注入済みの
+finalizerが実行される。throw/rejectionを伴うtry/catch/finallyも、await状態ごとの
+rejection handlerとtry/catch guardで処理する。try/catchは任意の深さにネストでき、
+if/while内のtry/catchとtry/catch内のif/whileの双方を再帰的に展開する。
+ネストした宣言とcatch引数はlowering時に字句スコープを追跡し、同名の外側bindingを
+シャドーイングする場合は一意なHIR名へ変換する。それぞれ独立したframe slotを使うため、
+awaitをまたいでも内外の値が混同されない。
+
 QuickJS-NG 自体はシングルスレッド・ノンブロッキングな評価モデルなので、
 Thaw 側のイベントループと QuickJS のジョブキュー（`JS_ExecutePendingJob`）
 を同じスレッド上でラウンドロビンさせる必要がある -- これは thaw-bridge
@@ -252,10 +350,12 @@ Thaw 側のイベントループと QuickJS のジョブキュー（`JS_ExecuteP
   inkwell が `coro.*` intrinsics をどこまで安全にラップしているか未調査
   -- 最悪 raw な `LLVMAddFunction`/`LLVMBuildCall2` で intrinsic 宣言を
   手動構築する必要がある。
-- `CoroSplit` 等の最適化パスを走らせる最小のパスパイプライン構築方法
-  （新しい PassManager API を inkwell 経由でどこまで叩けるか）。
-- エラー伝播（`try/catch` は現状 [同一関数内限定](../../crates/thaw-llvm/src/hir_codegen.rs)
-  -- コルーチンがサスペンドを挟んで再開された後の catch は「同一関数」の
+- `CoroSplit` 等の最適化パスを走らせる最小パイプラインは実装済み。
+  `write_object_file` が新Pass Manager APIで
+  `coro-early,coro-split,coro-cleanup` を実行する。コルーチンを含まない
+  V1プログラムではno-opとなる。
+- エラー伝播（同期関数間の `try/catch` は保留例外スロット方式で実装済みだが、
+  コルーチンがサスペンドを挟んで再開された後の catch は「同一関数」の
   定義が曖昧になる。resume function 内で再度 try/catch の分岐を再構築
   する必要があり、Phase 1 の try/catch 実装を素直に拡張できない可能性が高い）。
 - キャンセル（Lambda のタイムアウトで実行中のコルーチンを中断する場合、
