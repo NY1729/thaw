@@ -82,6 +82,9 @@ static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid prom
 static PROMISE_RACE_EMPTY_ERROR: &[u8] = b"Promise.race requires at least one promise\0";
 static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
 static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"All promises were rejected\0";
+static PROMISE_SETTLED_FULFILLED: &[u8] = b"fulfilled\0";
+static PROMISE_SETTLED_REJECTED: &[u8] = b"rejected\0";
+static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
 
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
@@ -1816,6 +1819,134 @@ pub unsafe extern "C" fn thaw_promise_any(
     output
 }
 
+struct PromiseAllSettledState {
+    output: *mut ThawPromise,
+    remaining: usize,
+    result_slot: *mut *const u8,
+    result: *mut u64,
+    objects: *mut u64,
+    element_size: usize,
+}
+
+struct PromiseAllSettledChild {
+    state: *mut PromiseAllSettledState,
+    promise: *mut ThawPromise,
+    indices: Vec<usize>,
+}
+
+extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8) {
+    let child = unsafe { Box::from_raw(frame.cast::<PromiseAllSettledChild>()) };
+    let state = unsafe { &mut *child.state };
+    let rejected = unsafe { thaw_promise_state(child.promise) } == 2;
+    for index in &child.indices {
+        let object = unsafe { state.objects.add(index * 3) };
+        unsafe {
+            object.write(if rejected {
+                PROMISE_SETTLED_REJECTED.as_ptr() as u64
+            } else {
+                PROMISE_SETTLED_FULFILLED.as_ptr() as u64
+            });
+            object.add(1).write(0);
+            if !rejected {
+                std::ptr::copy_nonoverlapping(
+                    value,
+                    object.add(1).cast::<u8>(),
+                    state.element_size,
+                );
+            }
+            object.add(2).write(if rejected {
+                value as u64
+            } else {
+                PROMISE_SETTLED_EMPTY_REASON.as_ptr() as u64
+            });
+            state.result.add(index + 1).write(object as u64);
+        }
+    }
+    unsafe { thaw_promise_destroy(child.promise) };
+    state.remaining -= 1;
+    if state.remaining == 0 {
+        thaw_promise_resolve(state.output, state.result_slot.cast());
+        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        unsafe { drop(Box::from_raw(child.state)) };
+    }
+}
+
+/// Waits for every distinct input and resolves with an input-ordered array of
+/// `{ status, value, reason }` object pointers. Rejections become result
+/// entries and never reject the output Promise.
+///
+/// # Safety
+///
+/// `promises` must reference `len` readable Promise handles. Each distinct
+/// handle is consumed. `element_size` must fit one eight-byte value slot.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_all_settled(
+    promises: *const *mut ThawPromise,
+    len: usize,
+    element_size: usize,
+) -> *mut ThawPromise {
+    let output = thaw_promise_new();
+    if element_size == 0 || element_size > size_of::<u64>() || (len != 0 && promises.is_null()) {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let allocation =
+        thaw_arena::thaw_arena_alloc((len + 2) * size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    let objects = thaw_arena::thaw_arena_alloc(
+        len.saturating_mul(3).saturating_mul(size_of::<u64>()),
+        align_of::<u64>(),
+    )
+    .cast::<u64>();
+    if allocation.is_null() || (len != 0 && objects.is_null()) {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let result_slot = allocation.cast::<*const u8>();
+    let result = unsafe { allocation.add(1) };
+    unsafe {
+        result_slot.write(result.cast());
+        result.write(len as u64);
+    }
+    if len == 0 {
+        thaw_promise_resolve(output, result_slot.cast());
+        return output;
+    }
+    let mut grouped = Vec::<(*mut ThawPromise, Vec<usize>)>::new();
+    for index in 0..len {
+        let promise = unsafe { *promises.add(index) };
+        if promise.is_null() {
+            thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+            return output;
+        }
+        if let Some((_, indices)) = grouped
+            .iter_mut()
+            .find(|(existing, _)| *existing == promise)
+        {
+            indices.push(index);
+        } else {
+            grouped.push((promise, vec![index]));
+        }
+    }
+    let state = Box::into_raw(Box::new(PromiseAllSettledState {
+        output,
+        remaining: grouped.len(),
+        result_slot,
+        result,
+        objects,
+        element_size,
+    }));
+    ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
+    for (promise, indices) in grouped {
+        let child = Box::into_raw(Box::new(PromiseAllSettledChild {
+            state,
+            promise,
+            indices,
+        }));
+        unsafe { thaw_promise_subscribe(promise, resume_promise_all_settled_child, child.cast()) };
+    }
+    output
+}
+
 fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
@@ -2504,6 +2635,78 @@ mod tests {
             PROMISE_ANY_REJECTED_ERROR.as_ptr()
         );
         unsafe { thaw_promise_destroy(any) };
+    }
+
+    #[test]
+    fn promise_all_settled_preserves_order_and_turns_rejections_into_values() {
+        let fulfilled = thaw_promise_new();
+        let rejected = thaw_promise_new();
+        let children = [fulfilled, rejected, fulfilled];
+        let settled = unsafe {
+            thaw_promise_all_settled(children.as_ptr(), children.len(), size_of::<f64>())
+        };
+        let error = b"settled failure\0";
+        let number = 7.0f64;
+        assert_eq!(thaw_promise_reject(rejected, error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(settled), 0);
+        assert_eq!(
+            thaw_promise_resolve(fulfilled, (&number as *const f64).cast()),
+            1
+        );
+        thaw_runtime_run_until_idle();
+        let result = unsafe { *thaw_runtime_run_until_resolved(settled).cast::<*const u64>() };
+        assert_eq!(unsafe { result.read() }, 3);
+        let first = unsafe { result.add(1).read() as *const u64 };
+        let second = unsafe { result.add(2).read() as *const u64 };
+        let third = unsafe { result.add(3).read() as *const u64 };
+        assert_eq!(
+            unsafe { first.read() as *const u8 },
+            PROMISE_SETTLED_FULFILLED.as_ptr()
+        );
+        assert_eq!(f64::from_bits(unsafe { first.add(1).read() }), 7.0);
+        assert_eq!(
+            unsafe { first.add(2).read() as *const u8 },
+            PROMISE_SETTLED_EMPTY_REASON.as_ptr()
+        );
+        assert_eq!(
+            unsafe { second.read() as *const u8 },
+            PROMISE_SETTLED_REJECTED.as_ptr()
+        );
+        assert_eq!(unsafe { second.add(1).read() }, 0);
+        assert_eq!(unsafe { second.add(2).read() as *const u8 }, error.as_ptr());
+        assert_eq!(
+            unsafe { third.read() as *const u8 },
+            PROMISE_SETTLED_FULFILLED.as_ptr()
+        );
+        assert_eq!(f64::from_bits(unsafe { third.add(1).read() }), 7.0);
+        unsafe { thaw_promise_destroy(settled) };
+    }
+
+    #[test]
+    fn promise_all_settled_resolves_an_empty_input() {
+        let settled = unsafe { thaw_promise_all_settled(std::ptr::null(), 0, size_of::<f64>()) };
+        assert_eq!(thaw_promise_state(settled), 1);
+        let result = unsafe { *thaw_runtime_run_until_resolved(settled).cast::<*const u64>() };
+        assert_eq!(unsafe { result.read() }, 0);
+        unsafe { thaw_promise_destroy(settled) };
+    }
+
+    #[test]
+    fn promise_all_settled_fulfills_when_every_input_rejects() {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let settled = unsafe {
+            thaw_promise_all_settled(children.as_ptr(), children.len(), size_of::<f64>())
+        };
+        let first_error = [b'f', b'i', b'r', b's', b't', 0];
+        let second_error = [b's', b'e', b'c', b'o', b'n', b'd', 0];
+        assert_eq!(thaw_promise_reject(first, first_error.as_ptr()), 1);
+        assert_eq!(thaw_promise_reject(second, second_error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(settled), 1);
+        unsafe { thaw_promise_destroy(settled) };
     }
 
     #[test]
