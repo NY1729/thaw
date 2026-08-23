@@ -206,6 +206,7 @@ fn json_escape_string(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

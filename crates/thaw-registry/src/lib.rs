@@ -157,7 +157,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
         "http" => {
-            "export interface IncomingMessage { method: string; url: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => boolean): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => boolean): Server;\n"
+            "export interface IncomingMessage { method: string; url: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: string) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => boolean): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => boolean): Server;\n"
         }
         _ => return Err(format!("unsupported Node built-in module `{specifier}`")),
     };
@@ -438,7 +438,7 @@ fn add_installed_inner(
         .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
     let (js_source, js_relative_path, bundled_file_count, mut dependency_versions) =
-        bundle_commonjs_package(&node_modules_dir, name, &package_dir, main_field)?;
+        bundle_commonjs_package(node_modules_dir, name, &package_dir, main_field)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
         Some((rel, abs)) => {
@@ -527,7 +527,7 @@ fn add_installed_inner(
     for export in package_subpath_exports(&manifest, &package_dir)? {
         let subpath = export.subpath;
         let (subpath_js, _, _, subpath_dependencies) =
-            bundle_commonjs_package(&node_modules_dir, name, &package_dir, &export.runtime_entry)?;
+            bundle_commonjs_package(node_modules_dir, name, &package_dir, &export.runtime_entry)?;
         dependency_versions.extend(subpath_dependencies);
         let types_path = package_dir.join(&export.types_entry);
         let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {
