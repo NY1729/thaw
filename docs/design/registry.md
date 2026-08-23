@@ -969,16 +969,23 @@ native側へ戻して、単一実行ファイルが`42`を出力するところ�
 
 この経路はnative HIRのPromise constructor/chainテストとは独立しており、実パッケージ内の
 class/function closure、CommonJS dependency、QuickJS Promise、Json marshalが同時に成立する
-ことを確認する。`JsValue`はQuickJS realm内のcallableをopaque handleとして保持し、closure
-identityを失わず`callDynamicValue(handle, Json)`で呼び出す。p-limit workloadもこのhandle
-経路を通す。引数と結果は引き続きJSONであり、呼び出し結果として返る別のcallable handleや
-任意objectのproperty操作は次段階である。
+ことを確認する。`JsValue`はQuickJS realm内のcallable/objectをopaque handleとして保持する。
+callableの戻り値を別handleとして受け取り、handleを引数として渡し、property取得・設定、
+`this`を保ったmethod呼び出し、Promise解決、明示releaseができる。getter/methodのthrowは
+Thawのcatchへ伝播する。`.d.ts`でcallable戻り値を判定できるFallback wrapperは自動的に
+`JsValue`を返す。
+
+p-limit workloadはpackage exportをhandleとして取得し、`pLimit(2)`が返したlimiterを別handleに
+保持し、async taskのhandleを直接渡す。結果PromiseをJSONへ解決して単一実行ファイルが42を
+出力するため、package内部だけに閉じたwrapperには依存しない。
 
 ## 25. Node風の構造化listen error
 
 `node:http`の`server.on("error", callback)`は文字列ではなく、`message`、`code`、`syscall`、
 `address`、`port`を持つobjectを渡す。単一実行ファイルの実socketテストで、不正portと
 bind競合のcodeをfield accessして検証する。
+listenerが一つもない場合はstderrへ`Unhandled 'error' event`を出し、生成実行ファイルの終了値を
+非ゼロにする。failure flagは一度だけconsumeされ、listenerがある場合は従来どおり継続する。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

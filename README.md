@@ -329,10 +329,10 @@ The workspace crates have narrow responsibilities:
 - Full Node.js module resolution, all core modules and the complete Node global
   API
 - Full ESM semantics and a parser-backed production bundler
-- General JavaScript object/property operations across the native boundary.
-  `JsValue` currently retains callable globals and invokes them with JSON
-  arguments/results; handles returned from calls and non-callable objects are
-  the next extension
+- `JsValue` retains callable/object identity across the native boundary,
+  including callable return values, handle arguments, properties, methods,
+  Promise resolution and explicit release. Arguments/results that are not
+  handles still use JSON; automatic lifetime analysis remains future work
 - A fully general ABI-description format. Version 3 covers string layouts,
   number-array result ownership and common LLVM calling conventions, but
   target-specific struct packing, variadics and nested aggregate ownership
