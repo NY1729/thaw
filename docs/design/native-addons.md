@@ -452,3 +452,18 @@ prototype methodとgetter accessorの双方がunwrapした値を読み、`napi_n
 `napi_instanceof`を経由して結果を返す。呼び出しEnv破棄後にはfinalizer countが1になる
 ことまで検査する。継承チェーン、property attributesの完全なdescriptor semantics、
 GCのweak-reference clearingは今後の拡張対象である。
+
+## 17. serialport実package検証
+
+`@serialport/bindings-cpp@12.0.1`の公式Linux x64 glibc prebuildを、
+`THAW_SERIALPORT_NODE`で有効になるhost testでロードする。addonは
+`node-addon-api`の`ObjectWrap`を使って`Poller` classを定義するため、手書きC fixture
+だけでなく実packageのclass exportまで検証できる。
+
+この検証で`napi_add_finalizer`、environment単位の
+`napi_set_instance_data`／`napi_get_instance_data`、coercion、int64、named-property
+query、`napi_make_callback`の不足が判明し、hostへ追加した。serialportはNode本体が
+公開する`uv_poll_*`等も直接参照するため、Linuxではaddonの解決前にsystem
+`libuv.so.1`をglobal visibilityでロードする。thread-safe functionのABI symbolも
+公開するが、cross-thread JS queueは未実装であり、作成要求には
+`napi_generic_failure`を返す。
