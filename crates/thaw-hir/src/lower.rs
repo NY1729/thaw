@@ -34,8 +34,8 @@ use swc_ecma_ast::{
 };
 
 use crate::{
-    BinOp, FfiErrorAbi, FfiSignature, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt,
-    HirType, Symbol,
+    BinOp, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr, HirFunction, HirLit, HirParam,
+    HirProgram, HirStmt, HirType, Symbol,
 };
 
 /// Signature info needed to type calls to other top-level functions during
@@ -339,6 +339,8 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             params: sig.params.clone(),
             ret: sig.ret.clone(),
             error_abi: FfiErrorAbi::Direct,
+            return_ownership: FfiOwnership::Borrowed,
+            error_ownership: FfiOwnership::Borrowed,
         })
         .collect();
 
@@ -2430,6 +2432,8 @@ impl<'a> FnLowerer<'a> {
                 params: sig.params,
                 ret: sig.ret,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             };
             return Ok(HirExpr::FfiCall(ffi_signature, args));
         }
@@ -3394,6 +3398,8 @@ mod tests {
                 params: vec![HirType::F64, HirType::F64],
                 ret: HirType::F64,
                 error_abi: crate::FfiErrorAbi::Direct,
+                return_ownership: crate::FfiOwnership::Borrowed,
+                error_ownership: crate::FfiOwnership::Borrowed,
             }]
         );
 
@@ -3408,6 +3414,8 @@ mod tests {
                         params: vec![HirType::F64, HirType::F64],
                         ret: HirType::F64,
                         error_abi: crate::FfiErrorAbi::Direct,
+                        return_ownership: crate::FfiOwnership::Borrowed,
+                        error_ownership: crate::FfiOwnership::Borrowed,
                     },
                     vec![
                         HirExpr::Lit(HirLit::F64(2.0)),
