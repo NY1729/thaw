@@ -348,6 +348,8 @@ The dependency order for closing the major compatibility gaps is:
 
 The first N-API host is now implemented, including shared worker-pool execution,
 main-thread completion and cancellation for the core async-work lifecycle.
+Class-style addons can use `napi_define_class`, wrapped native instance data,
+prototype methods/accessors, construction, `instanceof`, and wrap finalizers.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to

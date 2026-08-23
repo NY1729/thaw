@@ -25,6 +25,7 @@ type NapiCallback = unsafe extern "C" fn(NapiEnv, NapiCallbackInfo) -> NapiValue
 type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
+type NapiFinalize = unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void);
 const NAPI_OK: NapiStatus = 0;
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
@@ -186,6 +187,22 @@ unsafe impl Sync for NapiExtendedErrorInfo {}
 pub struct Env {
     values: Vec<NapiValue>,
     exception: Option<NapiValue>,
+    wraps: HashMap<usize, WrapRecord>,
+    instances: HashMap<usize, usize>,
+    accessors: HashMap<(usize, String), Accessor>,
+}
+
+struct WrapRecord {
+    data: *mut c_void,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+}
+
+#[derive(Clone, Copy)]
+struct Accessor {
+    getter: Option<NapiCallback>,
+    setter: Option<NapiCallback>,
+    data: *mut c_void,
 }
 
 impl Env {
@@ -193,6 +210,9 @@ impl Env {
         Self {
             values: Vec::new(),
             exception: None,
+            wraps: HashMap::new(),
+            instances: HashMap::new(),
+            accessors: HashMap::new(),
         }
     }
 
@@ -205,6 +225,14 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        let wraps = std::mem::take(&mut self.wraps);
+        for wrap in wraps.into_values() {
+            if let Some(finalize) = wrap.finalize {
+                unsafe {
+                    finalize(self, wrap.data, wrap.hint);
+                }
+            }
+        }
         for value in self.values.drain(..) {
             unsafe {
                 drop(Box::from_raw(value));
@@ -216,6 +244,7 @@ impl Drop for Env {
 pub struct CallbackInfo {
     args: Vec<NapiValue>,
     this_arg: NapiValue,
+    new_target: NapiValue,
     data: *mut c_void,
 }
 
@@ -281,6 +310,48 @@ unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {
 
 unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
     value.as_ref().ok_or(NAPI_INVALID_ARG)
+}
+
+unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &str) -> Option<Accessor> {
+    if let Some(accessor) = env.as_ref().and_then(|env| {
+        env.accessors
+            .get(&(object as usize, name.to_string()))
+            .copied()
+    }) {
+        return Some(accessor);
+    }
+    HOST.with(|host| {
+        host.borrow().module_envs.iter().find_map(|module_env| {
+            module_env
+                .accessors
+                .get(&(object as usize, name.to_string()))
+                .copied()
+        })
+    })
+}
+
+unsafe fn find_accessors(env: NapiEnv, object: NapiValue) -> Vec<(String, Accessor)> {
+    let from = |env: &Env| {
+        env.accessors
+            .iter()
+            .filter(|((owner, _), _)| *owner == object as usize)
+            .map(|((_, name), accessor)| (name.clone(), *accessor))
+            .collect::<Vec<_>>()
+    };
+    let current = env.as_ref().map(from).unwrap_or_default();
+    if !current.is_empty() {
+        return current;
+    }
+    HOST.with(|host| {
+        host.borrow()
+            .module_envs
+            .iter()
+            .find_map(|module_env| {
+                let accessors = from(module_env);
+                (!accessors.is_empty()).then_some(accessors)
+            })
+            .unwrap_or_default()
+    })
 }
 
 unsafe fn write_value(out: *mut NapiValue, value: NapiValue) -> NapiStatus {
@@ -537,6 +608,7 @@ unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
     let mut info = CallbackInfo {
         args,
         this_arg,
+        new_target: ptr::null_mut(),
         data: function.data,
     };
     let result = (function.callback)(&mut *env, &mut info);
@@ -632,6 +704,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
         let mut info = CallbackInfo {
             args: values,
             this_arg,
+            new_target: ptr::null_mut(),
             data: function.data,
         };
         let value = (function.callback)(&mut *env, &mut info);
@@ -804,6 +877,24 @@ pub unsafe extern "C" fn napi_create_external(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_get_value_external(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut *mut c_void,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    match value_ref(value) {
+        Ok(Value::External(data)) => {
+            *out = *data;
+            NAPI_OK
+        }
+        _ => NAPI_INVALID_ARG,
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_create_object(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -882,8 +973,24 @@ pub unsafe extern "C" fn napi_get_cb_info(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_set_named_property(
+pub unsafe extern "C" fn napi_get_new_target(
     _env: NapiEnv,
+    info: NapiCallbackInfo,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Some(info) = info.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = info.new_target;
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_set_named_property(
+    env: NapiEnv,
     object: NapiValue,
     name: *const c_char,
     value: NapiValue,
@@ -891,6 +998,24 @@ pub unsafe extern "C" fn napi_set_named_property(
     let Ok(name) = text(name) else {
         return NAPI_INVALID_ARG;
     };
+    let accessor = find_accessor(env, object, &name);
+    if let Some(setter) = accessor.and_then(|accessor| accessor.setter) {
+        let mut info = CallbackInfo {
+            args: vec![value],
+            this_arg: object,
+            new_target: ptr::null_mut(),
+            data: accessor.unwrap().data,
+        };
+        setter(env, &mut info);
+        return if env_mut(env)
+            .map(|env| env.exception.is_some())
+            .unwrap_or(false)
+        {
+            NAPI_PENDING_EXCEPTION
+        } else {
+            NAPI_OK
+        };
+    }
     match object.as_mut() {
         Some(Value::Object(values)) => {
             values.insert(name, value);
@@ -919,6 +1044,25 @@ pub unsafe extern "C" fn napi_get_named_property(
         Ok(Value::Function(function)) => function.properties.get(&name).copied(),
         _ => None,
     };
+    if value.is_none() {
+        let accessor = find_accessor(env, object, &name);
+        if let Some(getter) = accessor.and_then(|accessor| accessor.getter) {
+            let mut info = CallbackInfo {
+                args: Vec::new(),
+                this_arg: object,
+                new_target: ptr::null_mut(),
+                data: accessor.unwrap().data,
+            };
+            let value = getter(env, &mut info);
+            if env_mut(env)
+                .map(|env| env.exception.is_some())
+                .unwrap_or(false)
+            {
+                return NAPI_PENDING_EXCEPTION;
+            }
+            return write_value(out, value);
+        }
+    }
     match value {
         Some(value) => write_value(out, value),
         None => napi_get_undefined(env, out),
@@ -968,7 +1112,7 @@ pub unsafe extern "C" fn napi_get_property(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_has_property(
-    _env: NapiEnv,
+    env: NapiEnv,
     object: NapiValue,
     key: NapiValue,
     out: *mut bool,
@@ -983,7 +1127,7 @@ pub unsafe extern "C" fn napi_has_property(
         Ok(Value::Object(values)) => values.contains_key(&key),
         Ok(Value::Function(function)) => function.properties.contains_key(&key),
         _ => false,
-    };
+    } || find_accessor(env, object, &key).is_some();
     NAPI_OK
 }
 
@@ -1015,6 +1159,23 @@ pub unsafe extern "C" fn napi_define_properties(
         let Ok(key) = key else {
             return NAPI_INVALID_ARG;
         };
+        if descriptor.getter.is_some() || descriptor.setter.is_some() {
+            let Ok(key_name) = property_key(key) else {
+                return NAPI_INVALID_ARG;
+            };
+            let Ok(env) = env_mut(env) else {
+                return NAPI_INVALID_ARG;
+            };
+            env.accessors.insert(
+                (object as usize, key_name),
+                Accessor {
+                    getter: descriptor.getter,
+                    setter: descriptor.setter,
+                    data: descriptor.data,
+                },
+            );
+            continue;
+        }
         let value = if let Some(method) = descriptor.method {
             let mut value = ptr::null_mut();
             let status = napi_create_function(
@@ -1037,6 +1198,207 @@ pub unsafe extern "C" fn napi_define_properties(
             return status;
         }
     }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_wrap(
+    env: NapiEnv,
+    object: NapiValue,
+    data: *mut c_void,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+    result: *mut *mut Reference,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if !matches!(object.as_ref(), Some(Value::Object(_) | Value::Function(_))) {
+        return NAPI_INVALID_ARG;
+    }
+    if env.wraps.contains_key(&(object as usize)) {
+        return NAPI_GENERIC_FAILURE;
+    }
+    env.wraps.insert(
+        object as usize,
+        WrapRecord {
+            data,
+            finalize,
+            hint,
+        },
+    );
+    if !result.is_null() {
+        *result = Box::into_raw(Box::new(Reference {
+            value: object,
+            count: 0,
+        }));
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_unwrap(
+    env: NapiEnv,
+    object: NapiValue,
+    result: *mut *mut c_void,
+) -> NapiStatus {
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Some(wrap) = env.wraps.get(&(object as usize)) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = wrap.data;
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_remove_wrap(
+    env: NapiEnv,
+    object: NapiValue,
+    result: *mut *mut c_void,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Some(wrap) = env.wraps.remove(&(object as usize)) else {
+        return NAPI_INVALID_ARG;
+    };
+    if !result.is_null() {
+        *result = wrap.data;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_define_class(
+    env: NapiEnv,
+    name: *const c_char,
+    length: usize,
+    constructor: Option<NapiCallback>,
+    data: *mut c_void,
+    property_count: usize,
+    properties: *const NapiPropertyDescriptor,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    if env.is_null()
+        || name.is_null()
+        || constructor.is_none()
+        || result.is_null()
+        || (property_count != 0 && properties.is_null())
+    {
+        return NAPI_INVALID_ARG;
+    }
+    let status = napi_create_function(env, name, length, constructor, data, result);
+    if status != NAPI_OK {
+        return status;
+    }
+    let mut prototype = ptr::null_mut();
+    let status = napi_create_object(env, &mut prototype);
+    if status != NAPI_OK {
+        return status;
+    }
+    let prototype_name = c"prototype";
+    let status = napi_set_named_property(env, *result, prototype_name.as_ptr(), prototype);
+    if status != NAPI_OK {
+        return status;
+    }
+    if property_count != 0 {
+        for descriptor in std::slice::from_raw_parts(properties, property_count) {
+            const NAPI_STATIC: u32 = 1 << 10;
+            let target = if descriptor.attributes & NAPI_STATIC != 0 {
+                *result
+            } else {
+                prototype
+            };
+            let status = napi_define_properties(env, target, 1, descriptor);
+            if status != NAPI_OK {
+                return status;
+            }
+        }
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_new_instance(
+    env: NapiEnv,
+    constructor: NapiValue,
+    argc: usize,
+    argv: *const NapiValue,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    if result.is_null() || (argc != 0 && argv.is_null()) {
+        return NAPI_INVALID_ARG;
+    }
+    let function = match value_ref(constructor) {
+        Ok(Value::Function(function)) => function.clone(),
+        _ => return NAPI_INVALID_ARG,
+    };
+    let Ok(host_env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let prototype = function.properties.get("prototype").copied();
+    let properties = prototype
+        .and_then(|value| match value_ref(value) {
+            Ok(Value::Object(properties)) => Some(properties.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let prototype_accessors = prototype
+        .map(|prototype| find_accessors(env, prototype))
+        .unwrap_or_default();
+    let instance = host_env.alloc(Value::Object(properties));
+    host_env
+        .instances
+        .insert(instance as usize, constructor as usize);
+    for (name, accessor) in prototype_accessors {
+        host_env
+            .accessors
+            .insert((instance as usize, name), accessor);
+    }
+    let args = if argc == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(argv, argc).to_vec()
+    };
+    let mut info = CallbackInfo {
+        args,
+        this_arg: instance,
+        new_target: constructor,
+        data: function.data,
+    };
+    let returned = (function.callback)(env, &mut info);
+    if env_mut(env)
+        .map(|env| env.exception.is_some())
+        .unwrap_or(false)
+    {
+        return NAPI_PENDING_EXCEPTION;
+    }
+    *result = match returned.as_ref() {
+        Some(Value::Object(_) | Value::Function(_)) => returned,
+        _ => instance,
+    };
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_instanceof(
+    env: NapiEnv,
+    object: NapiValue,
+    constructor: NapiValue,
+    result: *mut bool,
+) -> NapiStatus {
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = env.instances.get(&(object as usize)).copied() == Some(constructor as usize);
     NAPI_OK
 }
 
@@ -1414,6 +1776,41 @@ pub unsafe extern "C" fn napi_get_reference_value(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_reference_ref(
+    _env: NapiEnv,
+    reference: *mut Reference,
+    result: *mut u32,
+) -> NapiStatus {
+    let Some(reference) = reference.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    reference.count = reference.count.saturating_add(1);
+    if !result.is_null() {
+        *result = reference.count;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_reference_unref(
+    _env: NapiEnv,
+    reference: *mut Reference,
+    result: *mut u32,
+) -> NapiStatus {
+    let Some(reference) = reference.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    if reference.count == 0 {
+        return NAPI_GENERIC_FAILURE;
+    }
+    reference.count -= 1;
+    if !result.is_null() {
+        *result = reference.count;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_call_function(
     env: NapiEnv,
     this_arg: NapiValue,
@@ -1436,6 +1833,7 @@ pub unsafe extern "C" fn napi_call_function(
     let mut info = CallbackInfo {
         args,
         this_arg,
+        new_target: ptr::null_mut(),
         data: function.data,
     };
     let result = (function.callback)(env, &mut info);
@@ -1974,6 +2372,7 @@ mod tests {
         let addon = dir.join("addon.node");
         std::fs::write(&source, r#"
             #include <stddef.h>
+            #include <stdlib.h>
             typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
             typedef int napi_status;
             extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
@@ -1985,6 +2384,50 @@ mod tests {
             extern napi_status napi_create_string_utf8(napi_env, const char*, size_t, napi_value*);
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
             extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            extern napi_status napi_get_named_property(napi_env, napi_value, const char*, napi_value*);
+            extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
+            extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
+            extern napi_status napi_unwrap(napi_env, napi_value, void**);
+            extern napi_status napi_define_class(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, size_t, const void*, napi_value*);
+            extern napi_status napi_new_instance(napi_env, napi_value, size_t, const napi_value*, napi_value*);
+            extern napi_status napi_instanceof(napi_env, napi_value, napi_value, _Bool*);
+            typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
+            typedef struct { const char* utf8name; napi_value name; napi_callback method; napi_callback getter; napi_callback setter; napi_value value; unsigned attributes; void* data; } napi_property_descriptor;
+            typedef struct { double value; } native_box;
+            static napi_value box_constructor;
+            static int finalized_count;
+            static void finalize_box(napi_env env, void* data, void* hint) {
+                (void)env; (void)hint; free(data); finalized_count++;
+            }
+            static napi_value box_new(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, self; double value;
+                napi_get_cb_info(env, info, &argc, &arg, &self, 0);
+                napi_get_value_double(env, arg, &value);
+                native_box* box = malloc(sizeof(*box)); box->value = value;
+                napi_wrap(env, self, box, finalize_box, 0, 0); return self;
+            }
+            static napi_value box_get(napi_env env, napi_callback_info info) {
+                size_t argc = 0; napi_value self, result; native_box* box;
+                napi_get_cb_info(env, info, &argc, 0, &self, 0);
+                napi_unwrap(env, self, (void**)&box);
+                napi_create_double(env, box->value, &result); return result;
+            }
+            static napi_value roundtrip(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, instance, method, result, property; double a, b; _Bool matches;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_new_instance(env, box_constructor, 1, &arg, &instance);
+                napi_instanceof(env, instance, box_constructor, &matches);
+                if (!matches) return 0;
+                napi_get_named_property(env, instance, "get", &method);
+                napi_call_function(env, instance, method, 0, 0, &result);
+                napi_get_named_property(env, instance, "value", &property);
+                napi_get_value_double(env, result, &a); napi_get_value_double(env, property, &b);
+                napi_create_double(env, a + b, &result); return result;
+            }
+            static napi_value finalized(napi_env env, napi_callback_info info) {
+                (void)info; napi_value result;
+                napi_create_double(env, finalized_count, &result); return result;
+            }
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -2003,7 +2446,14 @@ mod tests {
                 napi_create_string_utf8(env, text, length, &result); return result;
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
-                napi_value fn;
+                napi_value fn; napi_property_descriptor properties[2] = {
+                    { "get", 0, box_get, 0, 0, 0, 0, 0 },
+                    { "value", 0, 0, box_get, 0, 0, 0, 0 }
+                };
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 2, properties, &box_constructor);
+                napi_set_named_property(env, exports, "NativeBox", box_constructor);
+                napi_create_function(env, "roundtrip", 9, roundtrip, 0, &fn); napi_set_named_property(env, exports, "roundtrip", fn);
+                napi_create_function(env, "finalized", 9, finalized, 0, &fn); napi_set_named_property(env, exports, "finalized", fn);
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
                 napi_create_function(env, "negate", 6, negate, 0, &fn); napi_set_named_property(env, exports, "negate", fn);
                 napi_create_function(env, "echo", 4, echo, 0, &fn); napi_set_named_property(env, exports, "echo", fn);
@@ -2034,6 +2484,12 @@ mod tests {
             let string = CString::new("[\"hello\"]").unwrap();
             let result = thaw_napi_call_result(echo.as_ptr(), string.as_ptr());
             assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "\"hello\"");
+            let result = thaw_napi_call_result(c"roundtrip".as_ptr(), c"[42]".as_ptr());
+            assert!(result.error.is_null());
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "84.0");
+            let result = thaw_napi_call_result(c"finalized".as_ptr(), c"[]".as_ptr());
+            assert!(result.error.is_null());
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "1.0");
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2108,6 +2564,7 @@ mod tests {
             let mut info = CallbackInfo {
                 args: vec![minor, rounds, seed, callback],
                 this_arg: ptr::null_mut(),
+                new_target: ptr::null_mut(),
                 data: function.data,
             };
             (function.callback)(env, &mut info);
