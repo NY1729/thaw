@@ -24,6 +24,7 @@ type NapiStatus = i32;
 type NapiCallback = unsafe extern "C" fn(NapiEnv, NapiCallbackInfo) -> NapiValue;
 type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
+type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
 const NAPI_OK: NapiStatus = 0;
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
@@ -126,6 +127,12 @@ pub struct Function {
     callback: NapiCallback,
     data: *mut c_void,
     properties: HashMap<String, NapiValue>,
+    _thaw_bridge: Option<Arc<ThawCallbackBridge>>,
+}
+
+struct ThawCallbackBridge {
+    callback: ThawNativeCallback,
+    context: usize,
 }
 
 pub enum Value {
@@ -219,6 +226,10 @@ struct Host {
     // would invalidate foreign pointers. The Box provides stable addresses.
     #[allow(clippy::vec_box)]
     module_envs: Vec<Box<Env>>,
+    // Async addons retain the `napi_env`; boxes keep those addresses stable
+    // while unrelated calls grow the pending vector.
+    #[allow(clippy::vec_box)]
+    pending_call_envs: Vec<Box<Env>>,
     last_error: String,
 }
 
@@ -228,6 +239,7 @@ impl Host {
             functions: HashMap::new(),
             libraries: Vec::new(),
             module_envs: Vec::new(),
+            pending_call_envs: Vec::new(),
             last_error: String::new(),
         }
     }
@@ -556,6 +568,102 @@ pub unsafe extern "C" fn thaw_napi_call_result(
     }
 }
 
+unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let Some(info) = info.as_ref() else {
+        return ptr::null_mut();
+    };
+    let Some(bridge) = (info.data as *const ThawCallbackBridge).as_ref() else {
+        return ptr::null_mut();
+    };
+    let error = info
+        .args
+        .first()
+        .copied()
+        .map(|value| json_from_value(value).unwrap_or(JsonValue::Null))
+        .unwrap_or(JsonValue::Null);
+    let result = info
+        .args
+        .get(1)
+        .copied()
+        .map(|value| json_from_value(value).unwrap_or(JsonValue::Null))
+        .unwrap_or(JsonValue::Null);
+    let error = CString::new(serde_json::to_string(&error).unwrap()).unwrap();
+    let result = CString::new(serde_json::to_string(&result).unwrap()).unwrap();
+    (bridge.callback)(
+        bridge.context as *mut c_void,
+        error.as_ptr(),
+        result.as_ptr(),
+    );
+    ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
+    name: *const c_char,
+    args: *const c_char,
+    callback: Option<ThawNativeCallback>,
+    context: *mut c_void,
+) -> ThawResult {
+    let result = (|| -> Result<String, String> {
+        let name = text(name)?;
+        let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
+            .map_err(|error| format!("invalid argument JSON: {error}"))?;
+        let function = HOST
+            .with(|host| host.borrow().functions.get(&name).cloned())
+            .ok_or_else(|| format!("no such native addon function `{name}`"))?;
+        let callback = callback.ok_or("native addon callback is null")?;
+        let mut env = Box::new(Env::new());
+        let mut values: Vec<NapiValue> = args
+            .iter()
+            .map(|value| value_from_json(&mut env, value))
+            .collect();
+        let bridge = Arc::new(ThawCallbackBridge {
+            callback,
+            context: context as usize,
+        });
+        let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
+        values.push(env.alloc(Value::Function(Function {
+            callback: thaw_compiled_callback,
+            data: bridge_data,
+            properties: HashMap::new(),
+            _thaw_bridge: Some(bridge),
+        })));
+        let this_arg = env.alloc(Value::Undefined);
+        let mut info = CallbackInfo {
+            args: values,
+            this_arg,
+            data: function.data,
+        };
+        let value = (function.callback)(&mut *env, &mut info);
+        if let Some(exception) = env.exception {
+            let message = match value_ref(exception).map_err(|_| "invalid exception")? {
+                Value::Error(message) | Value::String(message) => message.clone(),
+                _ => json_from_value(exception)?.to_string(),
+            };
+            return Err(message);
+        }
+        let value = if value.is_null() {
+            "null".to_string()
+        } else {
+            serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())?
+        };
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0 {
+            HOST.with(|host| host.borrow_mut().pending_call_envs.push(env));
+        }
+        Ok(value)
+    })();
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap().into_raw(),
+            error: ptr::null_mut(),
+        },
+        Err(error) => ThawResult {
+            value: ptr::null_mut(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_call(name: *const c_char, args: *const c_char) -> *const c_char {
     let result = thaw_napi_call_result(name, args);
@@ -740,6 +848,7 @@ pub unsafe extern "C" fn napi_create_function(
         callback,
         data,
         properties: HashMap::new(),
+        _thaw_bridge: None,
     }));
     write_value(out, value)
 }
@@ -1643,6 +1752,7 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
             unsafe { complete(env, status, data) };
         }
     }
+    HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
     completed
 }
 
@@ -1680,6 +1790,18 @@ mod tests {
         let mut undefined = ptr::null_mut();
         assert_eq!(napi_get_undefined(env, &mut undefined), NAPI_OK);
         undefined
+    }
+
+    unsafe extern "C" fn bcrypt_bridge_callback(
+        context: *mut c_void,
+        error: *const c_char,
+        result: *const c_char,
+    ) {
+        let output = &*(context as *const Mutex<Option<(JsonValue, JsonValue)>>);
+        *output.lock().unwrap() = Some((
+            serde_json::from_str(CStr::from_ptr(error).to_str().unwrap()).unwrap(),
+            serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap(),
+        ));
     }
 
     struct AsyncProbe {
@@ -1981,6 +2103,7 @@ mod tests {
                 callback: bcrypt_async_callback,
                 data: ptr::null_mut(),
                 properties: HashMap::new(),
+                _thaw_bridge: None,
             }));
             let mut info = CallbackInfo {
                 args: vec![minor, rounds, seed, callback],
@@ -1997,6 +2120,25 @@ mod tests {
                 .take()
                 .unwrap();
             assert!(async_salt.starts_with("$2b$04$"), "{async_salt}");
+
+            let bridge_output: *mut Mutex<Option<(JsonValue, JsonValue)>> =
+                Box::into_raw(Box::new(Mutex::new(None)));
+            let bridge_args = CString::new(
+                r#"["b",4,{"type":"Buffer","data":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}]"#,
+            )
+            .unwrap();
+            let queued = thaw_napi_call_with_callback_result(
+                c"gen_salt".as_ptr(),
+                bridge_args.as_ptr(),
+                Some(bcrypt_bridge_callback),
+                bridge_output.cast(),
+            );
+            assert!(queued.error.is_null());
+            assert_eq!(thaw_napi_run_async_work(), 1);
+            let bridge_output = Box::from_raw(bridge_output);
+            let (error, result) = bridge_output.lock().unwrap().take().unwrap();
+            assert!(error.is_null());
+            assert!(result.as_str().unwrap().starts_with("$2b$04$"));
         }
     }
 }

@@ -364,6 +364,12 @@ The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
 the host with real synchronous hashing and callback-based asynchronous salt
 generation (`THAW_BCRYPT_NODE=/path/to/bcrypt.glibc.node cargo test -p
 thaw-napi runs_bcrypt_prebuild_when_supplied`).
+Compiled programs can pass a `(Json, Json) => Json` closure through
+`callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
+alive until async-work drain, and N-API error/result values are converted back
+to `Json` on the generated program's main thread. The optional bcrypt CLI E2E
+embeds the official prebuild and exercises asynchronous salt, encrypt, compare,
+and error callbacks after deleting the registry directory.
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
 to a real `napi_value` Buffer, and addons that return a function as their
 module root are bound to the single declaration name from `package.d.ts`.
