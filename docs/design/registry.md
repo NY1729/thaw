@@ -888,7 +888,10 @@ namespace import はpackage固有のshim symbolへ変換されるため、同名
 `types`/`typings` と `main` にフォールバックする。`./feature` のような正確な
 package subpath exportは、登録時に専用の型定義とruntime bundleを
 `subpaths/feature/`へ保存し、`pkg/feature` importからrootとは独立して解決する。
-`./features/*` のようなwildcard exportはまだ対象外である。
+`./features/*` のような単一wildcard exportも、型定義targetに一致する実在
+ファイルを登録時に列挙し、同じ置換値をruntime targetへ適用する。すでに
+依存を取得済みのvendor/offline workflowでは `add_installed` が同じ登録処理を
+公開する。複数wildcardやpackage export arrayはまだ対象外である。
 
 `node:path`、`node:util`、`node:process`、`node:buffer` は11章でnpm内部の
 `require`向けに使ってきたpolyfillを、ユーザーのimportにも公開する。

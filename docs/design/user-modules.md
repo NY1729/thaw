@@ -52,7 +52,7 @@ across source-file boundaries without a second type system.
 ## Current boundaries
 
 Classes, anonymous default functions, runtime top-level statements, package
-wildcard subpath exports, and full ESM live bindings are outside the current typed AOT
+package export arrays, and full ESM live bindings are outside the current typed AOT
 subset. Cyclic user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
 are explicit compatibility limits, not silently rewritten semantics.

@@ -391,8 +391,34 @@ fn fetch_and_copy(
     let (name, _version_spec) = split_package_spec(package);
 
     npm_install(scratch, package)?;
-
     let node_modules_dir = scratch.join("node_modules");
+    let package_dir = node_modules_dir.join(name);
+    let manifest = read_manifest(&package_dir)?;
+    let fallback_dts = if find_own_dts(&manifest, &package_dir).is_none() {
+        Some(fetch_types_package_dts(scratch, name)?)
+    } else {
+        None
+    };
+    add_installed_inner(registry_dir, &node_modules_dir, name, fallback_dts)
+}
+
+/// Registers a package that already exists under `node_modules_dir`.
+/// This is the filesystem half of [`add`], exposed for offline/vendor
+/// workflows that have already performed dependency installation.
+pub fn add_installed(
+    registry_dir: &Path,
+    node_modules_dir: &Path,
+    name: &str,
+) -> Result<AddedPackage, String> {
+    add_installed_inner(registry_dir, node_modules_dir, name, None)
+}
+
+fn add_installed_inner(
+    registry_dir: &Path,
+    node_modules_dir: &Path,
+    name: &str,
+    fallback_dts: Option<(String, String)>,
+) -> Result<AddedPackage, String> {
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
 
@@ -414,7 +440,11 @@ fn fetch_and_copy(
                 fs::read_to_string(&abs).map_err(|e| format!("failed to read `{rel}`: {e}"))?;
             (rel, source)
         }
-        None => fetch_types_package_dts(scratch, name)?,
+        None => fallback_dts.ok_or_else(|| {
+            format!(
+                "`{name}` has no bundled type declarations; install its `@types` package or use `registry add`"
+            )
+        })?,
     };
 
     let dest_dir = registry_dir.join(name);
@@ -488,16 +518,12 @@ fn fetch_and_copy(
             )
         })?;
     }
-    for subpath in package_export_subpaths(&manifest)? {
-        let runtime_entry =
-            package_export_target(&manifest, Some(&subpath), &["require", "import", "default"])
-                .ok_or_else(|| format!("package export `./{subpath}` has no runtime target"))?;
-        let types_entry = package_export_target(&manifest, Some(&subpath), &["types"])
-            .ok_or_else(|| format!("package export `./{subpath}` has no `types` target"))?;
+    for export in package_subpath_exports(&manifest, &package_dir)? {
+        let subpath = export.subpath;
         let (subpath_js, _, _, subpath_dependencies) =
-            bundle_commonjs_package(&node_modules_dir, name, &package_dir, runtime_entry)?;
+            bundle_commonjs_package(&node_modules_dir, name, &package_dir, &export.runtime_entry)?;
         dependency_versions.extend(subpath_dependencies);
-        let types_path = package_dir.join(types_entry);
+        let types_path = package_dir.join(&export.types_entry);
         let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {
             format!(
                 "failed to read package export `./{subpath}` types `{}`: {error}",
@@ -587,22 +613,6 @@ fn package_export_target<'a>(
     subpath: Option<&str>,
     conditions: &[&str],
 ) -> Option<&'a str> {
-    fn select<'a>(value: &'a serde_json::Value, conditions: &[&str]) -> Option<&'a str> {
-        if let Some(path) = value.as_str() {
-            return Some(path);
-        }
-        let object = value.as_object()?;
-        for condition in conditions {
-            if let Some(path) = object
-                .get(*condition)
-                .and_then(|value| select(value, conditions))
-            {
-                return Some(path);
-            }
-        }
-        None
-    }
-
     let exports = manifest.get("exports")?;
     let target = match subpath {
         None => {
@@ -617,7 +627,33 @@ fn package_export_target<'a>(
         }
         Some(subpath) => exports.as_object()?.get(&format!("./{subpath}"))?,
     };
-    select(target, conditions)
+    select_export_condition(target, conditions)
+}
+
+fn select_export_condition<'a>(
+    value: &'a serde_json::Value,
+    conditions: &[&str],
+) -> Option<&'a str> {
+    if let Some(path) = value.as_str() {
+        return Some(path);
+    }
+    let object = value.as_object()?;
+    for condition in conditions {
+        if let Some(path) = object
+            .get(*condition)
+            .and_then(|value| select_export_condition(value, conditions))
+        {
+            return Some(path);
+        }
+    }
+    if conditions == ["types"] {
+        for child in object.values() {
+            if let Some(path) = select_export_condition(child, conditions) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn validate_export_subpath(subpath: &str) -> Result<(), String> {
@@ -632,22 +668,95 @@ fn validate_export_subpath(subpath: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn package_export_subpaths(manifest: &serde_json::Value) -> Result<Vec<String>, String> {
+#[derive(Debug, PartialEq)]
+struct PackageSubpathExport {
+    subpath: String,
+    runtime_entry: String,
+    types_entry: String,
+}
+
+fn collect_relative_files(root: &Path, dir: &Path, output: &mut Vec<String>) -> Result<(), String> {
+    for entry in
+        fs::read_dir(dir).map_err(|error| format!("failed to read `{}`: {error}", dir.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_relative_files(root, &path, output)?;
+        } else if path.is_file() {
+            output.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn wildcard_capture<'a>(pattern: &str, path: &'a str) -> Option<&'a str> {
+    let pattern = pattern.strip_prefix("./").unwrap_or(pattern);
+    let (prefix, suffix) = pattern.split_once('*')?;
+    if suffix.contains('*') || !path.starts_with(prefix) || !path.ends_with(suffix) {
+        return None;
+    }
+    Some(&path[prefix.len()..path.len() - suffix.len()])
+}
+
+fn package_subpath_exports(
+    manifest: &serde_json::Value,
+    package_dir: &Path,
+) -> Result<Vec<PackageSubpathExport>, String> {
     let Some(exports) = manifest.get("exports").and_then(|value| value.as_object()) else {
         return Ok(Vec::new());
     };
+    let mut files = Vec::new();
+    collect_relative_files(package_dir, package_dir, &mut files)?;
     let mut subpaths = Vec::new();
-    for key in exports.keys() {
+    for (key, target) in exports {
         let Some(subpath) = key.strip_prefix("./") else {
             continue;
         };
+        let Some(runtime) = select_export_condition(target, &["require", "import", "default"])
+        else {
+            continue;
+        };
+        let Some(types) = select_export_condition(target, &["types"]) else {
+            continue;
+        };
         if subpath.contains('*') {
+            if subpath.matches('*').count() != 1
+                || runtime.matches('*').count() != 1
+                || types.matches('*').count() != 1
+            {
+                return Err(format!(
+                    "package export pattern `{key}` must contain exactly one `*` in its key, runtime, and types targets"
+                ));
+            }
+            for file in &files {
+                let Some(capture) = wildcard_capture(types, file) else {
+                    continue;
+                };
+                let expanded = subpath.replacen('*', capture, 1);
+                validate_export_subpath(&expanded)?;
+                subpaths.push(PackageSubpathExport {
+                    subpath: expanded,
+                    runtime_entry: runtime.replacen('*', capture, 1),
+                    types_entry: types.replacen('*', capture, 1),
+                });
+            }
             continue;
         }
         validate_export_subpath(subpath)?;
-        subpaths.push(subpath.to_string());
+        subpaths.push(PackageSubpathExport {
+            subpath: subpath.to_string(),
+            runtime_entry: runtime.to_string(),
+            types_entry: types.to_string(),
+        });
     }
-    subpaths.sort();
+    subpaths.sort_by(|left, right| left.subpath.cmp(&right.subpath));
+    subpaths.dedup_by(|left, right| left.subpath == right.subpath);
     Ok(subpaths)
 }
 
@@ -1513,7 +1622,89 @@ mod tests {
             package_export_target(&manifest, Some("feature"), &["types"]),
             Some("./dist/feature.d.ts")
         );
-        assert_eq!(package_export_subpaths(&manifest).unwrap(), vec!["feature"]);
+    }
+
+    #[test]
+    fn expands_wildcard_package_exports_from_type_files() {
+        let package_dir = temp_registry("wildcard-exports");
+        fs::create_dir_all(package_dir.join("dist/features")).unwrap();
+        fs::write(package_dir.join("dist/features/alpha.d.ts"), "").unwrap();
+        fs::write(package_dir.join("dist/features/alpha.cjs"), "").unwrap();
+        fs::write(package_dir.join("dist/features/beta.d.ts"), "").unwrap();
+        fs::write(package_dir.join("dist/features/beta.cjs"), "").unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"exports":{"./features/*":{"types":"./dist/features/*.d.ts","require":"./dist/features/*.cjs"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            package_subpath_exports(&manifest, &package_dir).unwrap(),
+            vec![
+                PackageSubpathExport {
+                    subpath: "features/alpha".to_string(),
+                    runtime_entry: "./dist/features/alpha.cjs".to_string(),
+                    types_entry: "./dist/features/alpha.d.ts".to_string(),
+                },
+                PackageSubpathExport {
+                    subpath: "features/beta".to_string(),
+                    runtime_entry: "./dist/features/beta.cjs".to_string(),
+                    types_entry: "./dist/features/beta.d.ts".to_string(),
+                },
+            ]
+        );
+        let _ = fs::remove_dir_all(package_dir);
+    }
+
+    #[test]
+    fn installed_npm_layout_registers_wildcard_subpath_artifacts() {
+        let scratch = temp_registry("installed-wildcard-scratch");
+        let registry = temp_registry("installed-wildcard-registry");
+        let package = scratch.join("node_modules/feature-kit");
+        fs::create_dir_all(package.join("dist/features")).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{
+                "name":"feature-kit",
+                "version":"1.2.3",
+                "types":"./index.d.ts",
+                "main":"./index.js",
+                "exports":{
+                    ".":{"types":"./index.d.ts","require":"./index.js"},
+                    "./features/*":{
+                        "types":"./dist/features/*.d.ts",
+                        "require":"./dist/features/*.js"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            package.join("index.d.ts"),
+            "export declare function root(): number;",
+        )
+        .unwrap();
+        fs::write(
+            package.join("index.js"),
+            "module.exports = { root: function() { return 1; } };",
+        )
+        .unwrap();
+        fs::write(
+            package.join("dist/features/double.d.ts"),
+            "export default function double(value: number): number;",
+        )
+        .unwrap();
+        fs::write(
+            package.join("dist/features/double.js"),
+            "module.exports = function(value) { return value * 2; };",
+        )
+        .unwrap();
+
+        let added = add_installed(&registry, &scratch.join("node_modules"), "feature-kit").unwrap();
+        assert_eq!(added.resolved_version, "1.2.3");
+        let subpath = resolve(&registry, "feature-kit/features/double").unwrap();
+        assert!(subpath.dts_source.contains("double"));
+        assert!(subpath.bundle_js.unwrap().contains("value * 2"));
+        let _ = fs::remove_dir_all(scratch);
+        let _ = fs::remove_dir_all(registry);
     }
 
     #[test]
