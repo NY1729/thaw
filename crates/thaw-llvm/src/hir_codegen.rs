@@ -595,6 +595,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_runtime_drain_detached",
+            i64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_promise_new",
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
@@ -5719,6 +5724,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function("thaw_promise_destroy").unwrap(),
                     &[completion.into()],
                     "destroy_async_main",
+                )
+                .unwrap();
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_runtime_drain_detached")
+                        .unwrap(),
+                    &[],
+                    "drain_detached_promises",
                 )
                 .unwrap();
         }

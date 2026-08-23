@@ -16,8 +16,8 @@
 //! Known limitations, acceptable for what this talks to: no TLS, no
 //! chunked transfer-encoding, one request per TCP connection.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -50,6 +50,7 @@ thread_local! {
     static TIMERS: RefCell<Vec<PromiseTimer>> = const { RefCell::new(Vec::new()) };
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
     static FD_WATCHERS: RefCell<Vec<FdWatcher>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_PROMISE_JOINS: Cell<usize> = const { Cell::new(0) };
 }
 
 struct PromiseTimer {
@@ -1321,6 +1322,31 @@ pub extern "C" fn thaw_runtime_run_until_idle() -> usize {
     count
 }
 
+/// Drives detached Promise combinator children to completion. A rejected
+/// parent may already have resumed user code, but its child async frames still
+/// borrow the current request arena and must finish before that arena resets.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_drain_detached() -> usize {
+    let mut count = 0;
+    while ACTIVE_PROMISE_JOINS.with(Cell::get) != 0 {
+        if thaw_runtime_poll_one() != 0 {
+            count += 1;
+            continue;
+        }
+        let delay = next_timer_delay();
+        if has_fd_waits() {
+            poll_fd_waits(delay);
+        } else if let Some(delay) = delay {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+        } else {
+            break;
+        }
+    }
+    count
+}
+
 /// Creates a promise resolved by the runtime timer queue after at least
 /// `milliseconds`. No worker thread is created.
 #[no_mangle]
@@ -1477,6 +1503,7 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
         if !state.rejected {
             state.rejected = true;
             state.first_error = result;
+            thaw_promise_reject(state.output, result);
         }
     } else if !state.rejected {
         let value = unsafe { result.cast::<u64>().read_unaligned() };
@@ -1487,11 +1514,10 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
     unsafe { thaw_promise_destroy(child.promise) };
     state.remaining -= 1;
     if state.remaining == 0 {
-        if state.rejected {
-            thaw_promise_reject(state.output, state.first_error);
-        } else {
+        if !state.rejected {
             thaw_promise_resolve(state.output, state.result_slot.cast());
         }
+        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
         unsafe { drop(Box::from_raw(child.state)) };
     }
 }
@@ -1529,18 +1555,21 @@ pub unsafe extern "C" fn thaw_promise_all_f64(
         thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
-    let mut grouped = HashMap::<usize, (*mut ThawPromise, Vec<usize>)>::new();
+    let mut grouped = Vec::<(*mut ThawPromise, Vec<usize>)>::new();
     let mut invalid = false;
     for index in 0..len {
         let promise = unsafe { *promises.add(index) };
         if promise.is_null() {
             invalid = true;
         } else {
-            grouped
-                .entry(promise as usize)
-                .or_insert_with(|| (promise, Vec::new()))
-                .1
-                .push(index);
+            if let Some((_, indices)) = grouped
+                .iter_mut()
+                .find(|(existing, _)| *existing == promise)
+            {
+                indices.push(index);
+            } else {
+                grouped.push((promise, vec![index]));
+            }
         }
     }
     let state = Box::into_raw(Box::new(PromiseAllState {
@@ -1555,7 +1584,13 @@ pub unsafe extern "C" fn thaw_promise_all_f64(
         result,
         result_slot,
     }));
-    for (_, (promise, indices)) in grouped {
+    if !grouped.is_empty() {
+        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
+    }
+    if invalid {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+    }
+    for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAllChild {
             state,
             promise,
@@ -1612,6 +1647,7 @@ struct InvocationArenaReset;
 
 impl Drop for InvocationArenaReset {
     fn drop(&mut self) {
+        thaw_runtime_drain_detached();
         thaw_arena::thaw_arena_reset();
     }
 }
@@ -2103,7 +2139,7 @@ mod tests {
         let error = b"joined failure\0";
         assert_eq!(thaw_promise_reject(second, error.as_ptr()), 1);
         thaw_runtime_run_until_idle();
-        assert_eq!(thaw_promise_state(joined), 0);
+        assert_eq!(thaw_promise_state(joined), 2);
         let value = 1.0f64;
         assert_eq!(
             thaw_promise_resolve(first, (&value as *const f64).cast()),
@@ -2113,6 +2149,22 @@ mod tests {
         assert_eq!(thaw_promise_state(joined), 2);
         assert_eq!(thaw_runtime_run_until_resolved(joined), error.as_ptr());
         unsafe { thaw_promise_destroy(joined) };
+    }
+
+    #[test]
+    fn rejected_promise_all_drains_children_after_parent_destruction() {
+        let failed = thaw_promise_new();
+        let slow = timed_value(25, 4.0);
+        let children = [failed, slow];
+        let joined = unsafe { thaw_promise_all_f64(children.as_ptr(), children.len()) };
+        let error = b"early failure\0";
+        assert_eq!(thaw_promise_reject(failed, error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(joined), 2);
+        unsafe { thaw_promise_destroy(joined) };
+        assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 1);
+        thaw_runtime_drain_detached();
+        assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
     }
 
     #[test]
