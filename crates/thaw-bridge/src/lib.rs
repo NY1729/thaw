@@ -1124,6 +1124,26 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          // needs an actual (empty) constructor stand-in instead, which\n\
          // gets a `.prototype` object for free like any JS function.\n\
          if (typeof globalThis.URL === 'undefined') {{ globalThis.URL = function URL() {{}}; }}\n\
+         // Node exposes `process` as an *ambient global*, not only as a\n\
+         // requirable core module (thaw-registry's `builtin_module_source`\n\
+         // covers the `require('process')` half) -- real packages\n\
+         // (`node-gyp-build.js`, chasing a native addon's load path) read\n\
+         // `process.config`/`process.env`/`process.versions`/\n\
+         // `process.execPath` as a bare global with no guard at all, which\n\
+         // would otherwise throw `ReferenceError: process is not defined`\n\
+         // the same way an unguarded `Buffer`/`URL` reference would.\n\
+         if (typeof globalThis.process === 'undefined') {{\n\
+         \x20\x20globalThis.process = {{ argv: [], env: {{}}, platform: 'linux', version: '', execPath: '/usr/bin/node', config: {{ variables: {{}} }}, versions: {{ node: '', modules: '', uv: '' }}, nextTick: function(fn) {{ fn(); }} }};\n\
+         }}\n\
+         // Likewise `__dirname`/`__filename`: real per-module Node\n\
+         // locals, but every package here already runs unwrapped at\n\
+         // global scope (see this function's doc comment), so a shared\n\
+         // global stand-in is consistent with the rest of this wrapper.\n\
+         // The exact path is inert -- `fs` above always reports \"nothing\n\
+         // here\", so no real lookup ever depends on this value being\n\
+         // accurate, only present as a string.\n\
+         if (typeof globalThis.__dirname === 'undefined') {{ globalThis.__dirname = '/thaw_modules/package'; }}\n\
+         if (typeof globalThis.__filename === 'undefined') {{ globalThis.__filename = '/thaw_modules/package/index.js'; }}\n\
          {js_source}\n\
          if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
          {bind_default_exports}"
@@ -1905,6 +1925,38 @@ mod tests {
 
         let source = CString::new(wrapped).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+    }
+
+    /// The exact pattern chasing a real native addon's load path
+    /// (`bcrypt`, via its `node-gyp-build` dependency's real, unmodified
+    /// `node-gyp-build.js`): several bare `process.*` reads with no
+    /// `require('process')` and no guard at all -- `process` needs to
+    /// exist as an ambient *global*, not just as thaw-registry's
+    /// requirable `process` module, or this throws `ReferenceError:
+    /// process is not defined` the same way an unguarded `Buffer`/`URL`
+    /// reference would without their global stand-ins.
+    #[test]
+    fn unguarded_process_global_reference_does_not_throw() {
+        use std::ffi::{CStr, CString};
+
+        let wrapped = wrap_as_commonjs_module(
+            "module.exports = function readIt() {\n\
+             \x20\x20var vars = (process.config && process.config.variables) || {};\n\
+             \x20\x20var abi = process.versions.modules;\n\
+             \x20\x20var uv = (process.versions.uv || '').split('.')[0];\n\
+             \x20\x20return typeof process.env + ',' + typeof process.execPath + ',' + typeof __dirname + ',' + typeof __filename;\n\
+             };",
+            &["readIt".to_string()],
+        );
+
+        let source = CString::new(wrapped).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+
+        let func = CString::new("readIt").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "\"object,string,string,string\"");
     }
 
     /// Same bar as `generated_shim_round_trips_through_real_lowering`: the

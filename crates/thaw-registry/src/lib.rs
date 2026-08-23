@@ -732,6 +732,88 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = __thaw_process;\n\
              module.exports.__esModule = true;\n",
         ),
+        // Found necessary chasing a real native addon's load path
+        // (`bcrypt`, `utf-8-validate`): both depend on `node-gyp-build`,
+        // which unconditionally does `require('path')`/`require('os')`/
+        // `require('fs')` at the top of its own real, unmodified source
+        // (`node-gyp-build.js`) before it ever gets to the actual
+        // native-addon lookup. Pure string manipulation, no dependency on
+        // any crate -- `path` never touches a real filesystem in Node
+        // either (that's what `fs` is for).
+        "path" => Some(
+            "function __thaw_path_normalize(p) {\n\
+             \x20\x20var parts = p.split('/'); var out = [];\n\
+             \x20\x20for (var i = 0; i < parts.length; i++) {\n\
+             \x20\x20\x20\x20var part = parts[i];\n\
+             \x20\x20\x20\x20if (part === '' || part === '.') continue;\n\
+             \x20\x20\x20\x20if (part === '..') { out.pop(); } else { out.push(part); }\n\
+             \x20\x20}\n\
+             \x20\x20var abs = p.charAt(0) === '/';\n\
+             \x20\x20return (abs ? '/' : '') + out.join('/');\n\
+             }\n\
+             function resolve() {\n\
+             \x20\x20var p = '';\n\
+             \x20\x20for (var i = 0; i < arguments.length; i++) {\n\
+             \x20\x20\x20\x20var seg = String(arguments[i]);\n\
+             \x20\x20\x20\x20if (seg.charAt(0) === '/') { p = seg; } else { p = p ? p + '/' + seg : seg; }\n\
+             \x20\x20}\n\
+             \x20\x20var n = __thaw_path_normalize(p);\n\
+             \x20\x20return n.charAt(0) === '/' ? n : '/' + n;\n\
+             }\n\
+             function join() {\n\
+             \x20\x20return __thaw_path_normalize(Array.prototype.join.call(arguments, '/'));\n\
+             }\n\
+             function dirname(p) {\n\
+             \x20\x20var n = __thaw_path_normalize(p);\n\
+             \x20\x20var idx = n.lastIndexOf('/');\n\
+             \x20\x20if (idx <= 0) return n.charAt(0) === '/' ? '/' : '.';\n\
+             \x20\x20return n.substring(0, idx);\n\
+             }\n\
+             function basename(p) {\n\
+             \x20\x20var n = __thaw_path_normalize(p);\n\
+             \x20\x20var idx = n.lastIndexOf('/');\n\
+             \x20\x20return idx === -1 ? n : n.substring(idx + 1);\n\
+             }\n\
+             module.exports = { resolve: resolve, join: join, dirname: dirname, basename: basename, normalize: __thaw_path_normalize, sep: '/' };\n\
+             module.exports.default = module.exports;\n\
+             module.exports.__esModule = true;\n",
+        ),
+        // Same real dependency chain as `path` above (`node-gyp-build.js`
+        // reads `os.arch()`/`os.platform()` to build its target string).
+        "os" => Some(
+            "var __thaw_os = { arch: function() { return 'x64'; }, platform: function() { return 'linux'; }, type: function() { return 'Linux'; }, tmpdir: function() { return '/tmp'; }, EOL: '\\n' };\n\
+             module.exports = __thaw_os;\n\
+             module.exports.default = __thaw_os;\n\
+             module.exports.__esModule = true;\n",
+        ),
+        // Same chain again: `node-gyp-build.js` uses `fs.readdirSync` to
+        // look for a prebuilt `.node` binary in `build/Release`,
+        // `build/Debug`, and `prebuilds/`, always wrapped in its own
+        // `try { fs.readdirSync(...) } catch (err) { return [] }` --
+        // consistently reporting "nothing here" (the honest answer: the
+        // registry never bundles real binaries, only `package.d.ts`/
+        // `bundle.js`, see the "not yet supported" section) lets that real,
+        // unmodified upstream logic run to completion and produce its own
+        // specific `Error('No native build was found for ...')` -- a much
+        // clearer failure than a generic "require('fs') is not supported"
+        // would be, without Thaw needing to know anything about native
+        // addons itself.
+        "fs" => Some(
+            "function __thaw_fs_enoent(op, p) {\n\
+             \x20\x20var e = new Error('ENOENT: no such file or directory, ' + op + ' \\'' + p + '\\'');\n\
+             \x20\x20e.code = 'ENOENT';\n\
+             \x20\x20throw e;\n\
+             }\n\
+             var __thaw_fs = {\n\
+             \x20\x20existsSync: function(p) { return false; },\n\
+             \x20\x20readdirSync: function(p) { __thaw_fs_enoent('scandir', p); },\n\
+             \x20\x20statSync: function(p) { __thaw_fs_enoent('stat', p); },\n\
+             \x20\x20readFileSync: function(p) { __thaw_fs_enoent('open', p); },\n\
+             };\n\
+             module.exports = __thaw_fs;\n\
+             module.exports.default = __thaw_fs;\n\
+             module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -1468,6 +1550,61 @@ mod tests {
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
         assert_eq!(result, "\"symbol\"");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    /// The exact real-world pattern that motivated `path`/`os`/`fs`: a real
+    /// native addon package (`bcrypt`, `utf-8-validate`, ...) depends on
+    /// `node-gyp-build`, whose real, unmodified source reads
+    /// `fs.readdirSync` (always wrapped in its own try/catch expecting
+    /// `[]` back on failure), `path.join`/`path.resolve`/`path.dirname`,
+    /// and `os.arch`/`os.platform` while hunting for a prebuilt `.node`
+    /// binary that this registry never bundles. Confirms all three
+    /// polyfills actually run together through real QuickJS-NG and that
+    /// `fs.readdirSync` failing is silently absorbed exactly the way real
+    /// Node's `ENOENT` would be, rather than crashing the whole load.
+    #[test]
+    fn path_os_fs_polyfills_actually_run_through_quickjs() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_addon_chase");
+        fs::write(
+            dir.join("index.js"),
+            "var fs = require('fs');\n\
+             var path = require('path');\n\
+             var os = require('os');\n\
+             function readdirSync(d) { try { return fs.readdirSync(d); } catch (err) { return []; } }\n\
+             module.exports = function locate() {\n\
+             \x20\x20var dir = path.resolve(__dirname);\n\
+             \x20\x20var release = readdirSync(path.join(dir, 'build/Release'));\n\
+             \x20\x20return os.platform() + '/' + os.arch() + '/' + path.dirname(dir) + '/' + release.length;\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_addon_chase_node_modules");
+
+        let (bundle, _, file_count) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4, "pkg's index.js + fs/path/os polyfills");
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             globalThis.__dirname = '/thaw_modules/pkg';\n\
+             {bundle}\n\
+             globalThis.locate = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "bundle failed to load");
+
+        let func = CString::new("locate").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "\"linux/x64//thaw_modules/0\"");
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
