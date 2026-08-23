@@ -379,8 +379,8 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    脱糖する」対象を増やしていく。
 3. 主要なPromise結合子は7〜10章の形で実装済み。ユーザー定義async関数、
    深い制御フロー、式・リテラル中の複数await、Promise値の保持と受け渡しまで
-   適用範囲を拡張済み。残る主要課題はPromise executor、`.then`/`.catch`、
-   外部Promise実装との相互運用である。
+   適用範囲を拡張済み。Promise executor、`.then`/`.catch`と返却Promiseの
+   flattenも実装済み。残る主要課題は`.finally`と外部Promise実装との相互運用である。
 
 ## 7. Promise.all fan-in
 
@@ -455,3 +455,23 @@ async呼び出しだけでなく任意のtyped Promise式をサスペンド境�
 array/object literal内のawaitは左から右へ抽出され、ネストしたif/while/tryとblock scopeを
 またぐreturnもframe guardとtyped slotを通じて保持される。HIR/LLVM E2Eに加え、複数の
 TypeScript moduleを束ねたLambda実行テストでPromiseのfield保持とimport境界を検証する。
+
+## 12. Promise constructorとcontinuation chain
+
+`new Promise<T>((resolve, reject) => ...)`は明示的な`T`からexecutorの引数を
+`resolve: (T) => void`、`reject: (string) => void`として文脈型付けする。LLVMは
+runtime Promise handleを先に作り、handleをcaptureした2つのnative closureをexecutorへ渡す。
+複数回settleは既存のPromise ABIが最初の1回だけを受理する。executor内のthrowはpending
+exception slotから回収し、同じPromiseのrejectへ変換する。
+
+`.then(callback)`と`.catch(callback)`は入力Promiseをconsumeし、runtimeの
+`thaw_promise_chain`で新しい出力Promiseを作る。thenはfulfilledだけ、catchはrejectedだけで
+callbackを呼び、それ以外のsettlementはpayloadを変えずに転送する。生成したLLVM adapterは
+typed result slotを読み、closureを呼び、戻り値を新しいtyped slotへ格納して出力をresolveする。
+callbackのthrowは出力のrejectになる。callbackが`Promise<U>`を返した場合は
+`thaw_promise_adopt`がそのsettlementを出力へ転送するため、結果は`Promise<U>`へflattenされる。
+
+現段階ではconstructorとcontinuationはいずれもarrow functionを要求し、constructorの`T`は
+明示が必要である。`.finally`、thenable assimilation、任意の外部Promise実装との相互運用は
+引き続き未対応である。HIR、runtime、LLVMのテストに加え、複数TypeScript moduleのLambda
+バイナリでconstructor→then→async関数→field保存→awaitを通して検証する。

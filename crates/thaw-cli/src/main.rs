@@ -1534,7 +1534,10 @@ mod tests {
                     return event;
                 }
                 export async function transform(event: Json): Promise<Json> {
-                    const pending: PendingEvent = { value: delayed(event) };
+                    const chained: Promise<Json> = new Promise<Json>((resolve, reject) => {
+                        resolve(event);
+                    }).then(value => delayed(value));
+                    const pending: PendingEvent = { value: chained };
                     return await pending.value;
                 }
             "#,

@@ -146,6 +146,11 @@ pub enum HirExpr {
     PromiseAllSettled(Vec<HirExpr>, HirType),
     /// A homogeneous `Promise.allSettled` supplied through an array value.
     PromiseAllSettledArray(Box<HirExpr>, HirType),
+    /// `new Promise<T>((resolve, reject) => ...)`.
+    PromiseNew(Box<HirExpr>, HirType),
+    /// A typed `.then`/`.catch` continuation. `on_rejected` distinguishes
+    /// catch from then while retaining the input and output native layouts.
+    PromiseThen(Box<HirExpr>, Box<HirExpr>, HirType, HirType, bool, bool),
     /// A legacy/direct await form, retained for void event sources and the
     /// synchronous fallback path. Frame splitting extracts real suspension
     /// points before ordinary expression code generation.
@@ -321,6 +326,11 @@ pub fn set_ffi_error_abi(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
+            HirExpr::PromiseNew(executor, _) => visit_expr(executor, symbol, abi, found),
+            HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+                visit_expr(source, symbol, abi, found);
+                visit_expr(callback, symbol, abi, found);
+            }
             HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
             HirExpr::ArrayLit(values)
             | HirExpr::PromiseAll(values, _)
@@ -451,6 +461,13 @@ pub fn set_ffi_ownership(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner) => update_expr(inner, symbol, returns, errors, found),
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
+            HirExpr::PromiseNew(executor, _) => {
+                update_expr(executor, symbol, returns, errors, found)
+            }
+            HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+                update_expr(source, symbol, returns, errors, found);
+                update_expr(callback, symbol, returns, errors, found);
+            }
             HirExpr::Block(stmts) => update_stmts(stmts, symbol, returns, errors, found),
             HirExpr::IndexAssign(a, b, c) => {
                 update_expr(a, symbol, returns, errors, found);
@@ -596,6 +613,13 @@ pub fn set_ffi_string_abi(
             }
             HirExpr::Lambda(_, _, _, body) => {
                 update_expr(body, symbol, params, returns, calling_convention, found)
+            }
+            HirExpr::PromiseNew(executor, _) => {
+                update_expr(executor, symbol, params, returns, calling_convention, found)
+            }
+            HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+                update_expr(source, symbol, params, returns, calling_convention, found);
+                update_expr(callback, symbol, params, returns, calling_convention, found);
             }
             HirExpr::Block(stmts) => {
                 update_stmts(stmts, symbol, params, returns, calling_convention, found)
