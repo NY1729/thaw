@@ -1900,6 +1900,34 @@ mod tests {
             String::from_utf8_lossy(&result.stdout),
             "/ready\n2\ntrue\nfalse\ntrue\nevent:listening\nlistening\nERR_SOCKET_BAD_PORT\nEADDRINUSE\nevent:close\nclosed\n"
         );
+
+        std::fs::write(
+            &entry,
+            r#"import { createServer } from "node:http";
+            function main(): void {
+                const server = createServer((
+                    request: { method: string; url: string },
+                    response: { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean }
+                ): boolean => true);
+                server.listen(70000);
+            }"#,
+        )
+        .unwrap();
+        let unhandled = dir.join("unhandled-error");
+        build_with_link_mode(
+            &entry,
+            &unhandled,
+            &[],
+            &[],
+            &[],
+            &dir.join("registry-unhandled"),
+            &[],
+            true,
+        )
+        .unwrap();
+        let failed = Command::new(&unhandled).output().unwrap();
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("Unhandled 'error' event"));
         drop(occupied_listener);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2552,11 +2580,7 @@ mod tests {
         let bundle = bundle.replacen("module.exports = ", "globalThis.__thawPLimit = ", 1);
         let script = format!(
             r#"{bundle}
-            globalThis.runThawPLimit = async function() {{
-                const limit = globalThis.__thawPLimit(2);
-                const value = await limit(async function() {{ return 42; }});
-                return {{ sum: value }};
-            }};"#
+            globalThis.__thawPLimitTask = async function() {{ return {{ sum: 42 }}; }};"#
         );
         let script_literal = serde_json::to_string(&script).unwrap();
         let source = dir.join("main.ts");
@@ -2567,8 +2591,10 @@ mod tests {
             format!(
                 r#"function main(): void {{
                     loadScript({script_literal});
-                    const workload: JsValue = getDynamicValue("runThawPLimit");
-                    const result: Json = callDynamicValue(workload, JSON.parse("[]"));
+                    const factory: JsValue = getDynamicValue("__thawPLimit");
+                    const limit: JsValue = callDynamicValueHandle(factory, JSON.parse("[2]"));
+                    const task: JsValue = getDynamicValue("__thawPLimitTask");
+                    const result: Json = callDynamicValueWithValue(limit, task);
                     console.log(Number(result.sum));
                 }}"#
             ),
