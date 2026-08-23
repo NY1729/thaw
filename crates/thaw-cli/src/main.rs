@@ -22,13 +22,81 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("inspect") => {
+            if let Err(err) = run_inspect(&args[2..]) {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
         _ => {
             eprintln!(
-                "usage: thaw build <input.ts> [-o <output>] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw registry add <package>[@<version>] [--registry <dir>]"
+                "usage: thaw build <input.ts> [-o <output>] [--static] [--link <path>]... [--bridge <path.d.ts>]... [--ffi-metadata <path.json>]... [--registry <dir>] [--use <package>]...\n       thaw inspect <executable>\n       thaw registry add <package>[@<version>] [--registry <dir>]"
             );
             std::process::exit(1);
         }
     }
+}
+
+const ARTIFACT_MARKER: &str = "THAW_ARTIFACT_V1:";
+
+fn run_inspect(args: &[String]) -> Result<(), String> {
+    if args.len() != 1 {
+        return Err("usage: thaw inspect <executable>".into());
+    }
+    let path = Path::new(&args[0]);
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
+    if bytes.len() < 20 || &bytes[..4] != b"\x7fELF" {
+        return Err(format!("`{}` is not an ELF executable", path.display()));
+    }
+    let architecture = match u16::from_le_bytes([bytes[18], bytes[19]]) {
+        0x3e => "x86_64",
+        0xb7 => "aarch64",
+        _ => "unknown",
+    };
+    let linkage = if elf_has_program_interpreter(path)? {
+        "dynamic-system"
+    } else {
+        "fully-static"
+    };
+    let manifest = artifact_manifest_from_bytes(&bytes)?;
+    println!("file: {}", path.display());
+    println!("format: ELF64");
+    println!("architecture: {architecture}");
+    println!("linkage: {linkage}");
+    println!(
+        "packages: {}",
+        manifest["packages"]
+            .as_array()
+            .map(|packages| packages
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join(", "))
+            .unwrap_or_default()
+    );
+    println!(
+        "quickjs: {}",
+        manifest["quickjs"].as_bool().unwrap_or(false)
+    );
+    println!("napi: {}", manifest["napi"].as_bool().unwrap_or(false));
+    Ok(())
+}
+
+fn artifact_manifest_from_bytes(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    let marker = ARTIFACT_MARKER.as_bytes();
+    let offset = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .ok_or("executable does not contain Thaw artifact metadata")?
+        + marker.len();
+    let end = bytes[offset..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|length| offset + length)
+        .ok_or("Thaw artifact metadata is not null terminated")?;
+    serde_json::from_slice(&bytes[offset..end])
+        .map_err(|error| format!("invalid Thaw artifact metadata: {error}"))
 }
 
 fn run_registry(args: &[String]) -> Result<(), String> {
@@ -122,6 +190,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
     let mut ffi_metadata: Vec<PathBuf> = Vec::new();
     let mut registry_dir = PathBuf::from("thaw_modules");
     let mut use_packages: Vec<String> = Vec::new();
+    let mut static_link = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -160,6 +229,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
                     .ok_or("--use requires a package name argument")?;
                 use_packages.push(value.clone());
             }
+            "--static" => static_link = true,
             other => {
                 if input.is_some() {
                     return Err(format!("unexpected extra argument `{other}`"));
@@ -176,7 +246,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
         PathBuf::from(stem)
     });
 
-    build(
+    build_with_link_mode(
         &input,
         &output,
         &extra_links,
@@ -184,6 +254,7 @@ fn run_build(args: &[String]) -> Result<(), String> {
         &ffi_metadata,
         &registry_dir,
         &use_packages,
+        static_link,
     )
 }
 
@@ -793,6 +864,7 @@ fn read_ffi_metadata(
     Ok(configured)
 }
 
+#[cfg(test)]
 fn build(
     input: &Path,
     output: &Path,
@@ -802,6 +874,42 @@ fn build(
     registry_dir: &Path,
     use_packages: &[String],
 ) -> Result<(), String> {
+    build_with_link_mode(
+        input,
+        output,
+        extra_links,
+        bridge_dts,
+        ffi_metadata,
+        registry_dir,
+        use_packages,
+        false,
+    )
+}
+
+fn build_with_link_mode(
+    input: &Path,
+    output: &Path,
+    extra_links: &[PathBuf],
+    bridge_dts: &[PathBuf],
+    ffi_metadata: &[PathBuf],
+    registry_dir: &Path,
+    use_packages: &[String],
+    static_link: bool,
+) -> Result<(), String> {
+    if static_link {
+        ensure_static_system_libraries()?;
+        for path in extra_links {
+            if matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("so" | "dylib")
+            ) {
+                return Err(format!(
+                    "--static cannot link shared library `{}`; provide a static archive (`.a`)",
+                    path.display()
+                ));
+            }
+        }
+    }
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
     let external_specifiers = module_graph::external_specifiers(input, &user_source)?;
@@ -834,7 +942,24 @@ fn build(
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
-    let shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
+    let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
+    if static_link && shim_source.contains("loadNativeAddonEmbedded(") {
+        return Err(
+            "--static cannot include an N-API addon: `.node` modules require the dynamic loader; use the package's JavaScript fallback or a static `native.a` backend"
+                .into(),
+        );
+    }
+    let manifest = serde_json::json!({
+        "packages": resolved_packages,
+        "quickjs": shim_source.contains("loadScript("),
+        "napi": shim_source.contains("loadNativeAddonEmbedded("),
+    });
+    let marker = format!("{ARTIFACT_MARKER}{manifest}");
+    let marker_literal = serde_json::to_string(&marker)
+        .map_err(|error| format!("failed to encode artifact metadata: {error}"))?;
+    shim_source.push_str(&format!(
+        "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
+    ));
     let mut module = module_graph::bundle(input, &user_source, &external_exports)?;
     if !shim_source.is_empty() {
         let mut shim = thaw_parser::parse_typescript(&shim_source)?;
@@ -876,7 +1001,14 @@ fn build(
     // `--link <path>` lets a program using `declare function` (see
     // docs/design/bridge.md section 6) actually resolve at link time,
     // until thaw-registry can fetch/build that library automatically.
-    let link_status = Command::new("cc")
+    let mut linker = Command::new("cc");
+    if static_link {
+        linker
+            .arg("-static")
+            .arg("-no-pie")
+            .arg("-Wl,--no-dynamic-linker");
+    }
+    linker
         .arg(&obj_path)
         .arg(&arena_lib)
         .arg(&runtime_lib)
@@ -888,22 +1020,90 @@ fn build(
         // but this is a manual `cc` invocation instead.
         .arg("-lm")
         .arg("-ldl")
-        .arg("-Wl,--export-dynamic")
         .args(&registry_native_libs)
-        .args(extra_links)
+        .args(extra_links);
+    if !static_link {
+        linker.arg("-Wl,--export-dynamic");
+    }
+    let link_output = linker
         .arg("-o")
         .arg(output)
-        .status()
+        .output()
         .map_err(|e| format!("failed to invoke system `cc` linker: {e}"))?;
 
     let _ = std::fs::remove_file(&obj_path);
 
-    if !link_status.success() {
-        return Err("linking failed".to_string());
+    if !link_output.status.success() {
+        let stderr = String::from_utf8_lossy(&link_output.stderr);
+        let hint = if static_link {
+            "\nstatic linking requires the target's static libc/libm/libdl archives (on Fedora, install glibc-static; alternatively use a musl toolchain)"
+        } else {
+            ""
+        };
+        return Err(format!("linking failed:\n{stderr}{hint}"));
+    }
+    if static_link && elf_has_program_interpreter(output)? {
+        return Err(format!(
+            "static link produced `{}` with a dynamic ELF interpreter",
+            output.display()
+        ));
     }
 
     println!("built `{}`", output.display());
     Ok(())
+}
+
+fn ensure_static_system_libraries() -> Result<(), String> {
+    let mut missing = Vec::new();
+    for library in ["libc.a", "libm.a", "libdl.a"] {
+        let output = Command::new("cc")
+            .arg(format!("-print-file-name={library}"))
+            .output()
+            .map_err(|error| format!("failed to inspect the system C toolchain: {error}"))?;
+        let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() || resolved == library || !Path::new(&resolved).is_file() {
+            missing.push(library);
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "--static requires missing system archives: {} (on Fedora, install glibc-static; alternatively use a musl toolchain)",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn elf_has_program_interpreter(path: &Path) -> Result<bool, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
+    if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" {
+        return Err(format!("`{}` is not an ELF executable", path.display()));
+    }
+    if bytes[4] != 2 || bytes[5] != 1 {
+        return Err("static output verification currently requires little-endian ELF64".into());
+    }
+    let read_u16 = |offset: usize| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+    let read_u64 =
+        |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let program_offset = read_u64(32) as usize;
+    let entry_size = read_u16(54) as usize;
+    let entry_count = read_u16(56) as usize;
+    for index in 0..entry_count {
+        let offset = program_offset + index * entry_size;
+        if offset + 4 > bytes.len() {
+            return Err(format!(
+                "`{}` has a truncated ELF program table",
+                path.display()
+            ));
+        }
+        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        if kind == 3 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Builds `pkg` as a staticlib (thaw-arena, thaw-runtime, ...) and returns
@@ -948,6 +1148,162 @@ mod tests {
     use std::process::Stdio;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn detects_dynamic_interpreters_in_elf_outputs() {
+        let dir = std::env::temp_dir().join(format!("thaw-cli-elf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app");
+        let mut elf = vec![0_u8; 120];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&3_u32.to_le_bytes());
+        std::fs::write(&path, &elf).unwrap();
+        assert!(elf_has_program_interpreter(&path).unwrap());
+
+        elf[64..68].copy_from_slice(&1_u32.to_le_bytes());
+        std::fs::write(&path, &elf).unwrap();
+        assert!(!elf_has_program_interpreter(&path).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn static_toolchain_check_is_actionable_or_complete() {
+        if let Err(error) = ensure_static_system_libraries() {
+            assert!(error.contains("--static"), "{error}");
+            assert!(error.contains("glibc-static"), "{error}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn builds_and_runs_a_fully_static_elf() {
+        if ensure_static_system_libraries().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("thaw-cli-static-elf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(&source, "function main(): void { console.log(42); }\n").unwrap();
+        build_with_link_mode(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(!elf_has_program_interpreter(&output).unwrap());
+        let manifest = artifact_manifest_from_bytes(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(manifest["packages"], serde_json::json!([]));
+        assert_eq!(manifest["quickjs"], false);
+        assert_eq!(manifest["napi"], false);
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn static_build_rejects_dynamic_napi_addons() {
+        if ensure_static_system_libraries().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("thaw-cli-static-napi-{}", std::process::id()));
+        let package = dir.join("registry/native-add");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export declare function add(a: number, b: number): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("native.node"),
+            b"not loaded during compilation",
+        )
+        .unwrap();
+        let source = dir.join("main.ts");
+        std::fs::write(
+            &source,
+            "import { add } from \"native-add\"; function main(): void {}\n",
+        )
+        .unwrap();
+        let error = build_with_link_mode(
+            &source,
+            &dir.join("app"),
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("N-API addon"), "{error}");
+        assert!(error.contains("native.a"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fully_static_binary_runs_in_an_isolated_container_when_enabled() {
+        if std::env::var("THAW_RUN_CONTAINER_INTEGRATION").as_deref() != Ok("1")
+            || ensure_static_system_libraries().is_err()
+        {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-static-container-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(&source, "function main(): void { console.log(42); }\n").unwrap();
+        build_with_link_mode(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+            true,
+        )
+        .unwrap();
+        let result = Command::new("podman")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--security-opt",
+                "label=disable",
+                "-v",
+            ])
+            .arg(format!("{}:/app:ro", output.display()))
+            .args(["registry.fedoraproject.org/fedora:41", "/app"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn builds_relative_typescript_module_graph_with_generics_and_aliases() {

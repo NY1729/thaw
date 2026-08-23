@@ -891,7 +891,9 @@ package subpath exportは、登録時に専用の型定義とruntime bundleを
 `./features/*` のような単一wildcard exportも、型定義targetに一致する実在
 ファイルを登録時に列挙し、同じ置換値をruntime targetへ適用する。すでに
 依存を取得済みのvendor/offline workflowでは `add_installed` が同じ登録処理を
-公開する。複数wildcardやpackage export arrayはまだ対象外である。
+公開する。package export arrayは先頭から利用可能なtargetを選び、runtime／types
+target内に`*`が複数現れる場合は同じcaptureをすべてへ適用する。export key自体に
+複数の独立wildcardを持たせる形式は曖昧性があるため対象外である。
 
 `node:path`、`node:util`、`node:process`、`node:buffer` は11章でnpm内部の
 `require`向けに使ってきたpolyfillを、ユーザーのimportにも公開する。

@@ -637,6 +637,11 @@ fn select_export_condition<'a>(
     if let Some(path) = value.as_str() {
         return Some(path);
     }
+    if let Some(candidates) = value.as_array() {
+        return candidates
+            .iter()
+            .find_map(|candidate| select_export_condition(candidate, conditions));
+    }
     let object = value.as_object()?;
     for condition in conditions {
         if let Some(path) = object
@@ -727,11 +732,11 @@ fn package_subpath_exports(
         };
         if subpath.contains('*') {
             if subpath.matches('*').count() != 1
-                || runtime.matches('*').count() != 1
-                || types.matches('*').count() != 1
+                || runtime.matches('*').count() < 1
+                || types.matches('*').count() < 1
             {
                 return Err(format!(
-                    "package export pattern `{key}` must contain exactly one `*` in its key, runtime, and types targets"
+                    "package export pattern `{key}` must contain exactly one `*` in its key and at least one in its runtime and types targets"
                 ));
             }
             for file in &files {
@@ -742,8 +747,8 @@ fn package_subpath_exports(
                 validate_export_subpath(&expanded)?;
                 subpaths.push(PackageSubpathExport {
                     subpath: expanded,
-                    runtime_entry: runtime.replacen('*', capture, 1),
-                    types_entry: types.replacen('*', capture, 1),
+                    runtime_entry: runtime.replace('*', capture),
+                    types_entry: types.replace('*', capture),
                 });
             }
             continue;
@@ -1621,6 +1626,19 @@ mod tests {
         assert_eq!(
             package_export_target(&manifest, Some("feature"), &["types"]),
             Some("./dist/feature.d.ts")
+        );
+
+        let array: serde_json::Value = serde_json::from_str(
+            r#"{"exports":{".":[null,{"types":"./fallback.d.ts","require":"./fallback.cjs"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            package_export_target(&array, None, &["types"]),
+            Some("./fallback.d.ts")
+        );
+        assert_eq!(
+            package_export_target(&array, None, &["require", "default"]),
+            Some("./fallback.cjs")
         );
     }
 

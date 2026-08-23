@@ -376,3 +376,16 @@ registry、`native-addon.json`、元の`.node`をコピーする必要はない�
 埋め込まれたaddonだけで呼び出せることを確認する。非Linuxでは互換経路として
 一時ファイルへ展開するが、配布成果物そのものは同じく実行ファイル1個である。
 OSの標準dynamic loader、libc、libm、libdlまで静的同梱する保証とは分けて扱う。
+
+Linuxでは`thaw build --static`を指定すると、最終リンクに`-static`を加え、
+生成ELFに`PT_INTERP`が存在しないことまでCLI自身が検査する。`libc.a`、
+`libm.a`、`libdl.a`がない環境ではコンパイル開始前に導入方法を含む診断を返す。
+手動`--link`で`.so`/`.dylib`を渡す構成は完全静的という契約に反するため拒否する。
+同じ理由でN-API `.node`を含むbuildも`--static`では拒否し、JavaScript
+fallbackまたは`native.a` backendの利用を診断する。通常の単一ファイルbuildは
+引き続きaddon bytesを内包するが、完全静的ELFとは異なる配布モードである。
+
+`thaw inspect <executable>`は埋め込みmetadataを読み、ELF architecture、
+`PT_INTERP`に基づくlinkage、npm package一覧、QuickJS／N-API有無を表示する。
+`THAW_RUN_CONTAINER_INTEGRATION=1`で有効になるE2Eは、成果物1個だけをread-onlyで
+networkなしのFedora containerへmountし、完全静的binaryの起動を検証する。

@@ -26,6 +26,28 @@ target/release/thaw build app.ts -o app
 ./app
 ```
 
+On Linux, `--static` requests a completely static ELF and verifies that the
+result has no dynamic interpreter:
+
+```sh
+target/release/thaw build app.ts --static -o app
+```
+
+The selected C toolchain must provide `libc.a`, `libm.a`, and `libdl.a`
+(for example Fedora's `glibc-static`, or an equivalent musl toolchain).
+`--static` rejects `.so`/`.dylib` arguments passed through `--link` and N-API
+`.node` addons, which require a dynamic loader; JavaScript fallbacks and
+static `native.a` backends remain compatible.
+
+Inspect a produced artifact without running it:
+
+```sh
+target/release/thaw inspect app
+```
+
+This reports its ELF architecture, static/dynamic system linkage, embedded npm
+packages, and whether QuickJS or N-API support is present.
+
 Compile the Lambda example:
 
 ```sh
@@ -134,7 +156,8 @@ The workspace crates have narrow responsibilities:
   points during `registry add`, with `types`/`typings` and `main` fallbacks
 - Exact and single-wildcard package subpath exports such as `pkg/feature` and
   `pkg/features/*` are registered with their own conditional type/runtime
-  entries and can be imported alongside the root
+  entries and can be imported alongside the root; export arrays and repeated
+  wildcard substitutions in their targets are resolved in declaration order
 - Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
   modules backed by the same QuickJS polyfills used by npm dependencies
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
@@ -237,7 +260,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
-  tuples, broad union/intersection support, package export arrays, anonymous
+  tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
 - Block-scoped locals inside nested control flow, nested/control-flow await,
   value-returning/general user-defined Promise async functions and concurrent
@@ -306,8 +329,8 @@ The first synchronous N-API host is now implemented. `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
 `thaw_modules/<package>/native.node`, and records its target and SHA-256 in
-`native-addon.json`. `thaw build --use <package>` loads it at module
-initialization and routes fallback wrappers through its exported N-API
+`native-addon.json`. `thaw build --use <package>` embeds it into the produced
+executable, loads the bytes at module initialization, and routes fallback wrappers through its exported N-API
 functions. Loading native addons executes unrestricted native code in the
 generated process and is not sandboxed. If bundled prebuilds exist but none
 match the current platform, architecture, or libc, `registry add` reports the
