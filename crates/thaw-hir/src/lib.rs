@@ -73,6 +73,25 @@ pub enum FfiOwnership {
     ArenaCopy { destroy: Option<Symbol> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiStringAbi {
+    NullTerminated,
+    PointerLength,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiCallingConvention {
+    C,
+    Fast,
+    Cold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiAggregateAbi {
+    Internal,
+    Portable,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FfiSignature {
     pub symbol: Symbol,
@@ -81,6 +100,10 @@ pub struct FfiSignature {
     pub error_abi: FfiErrorAbi,
     pub return_ownership: FfiOwnership,
     pub error_ownership: FfiOwnership,
+    pub param_string_abis: Vec<FfiStringAbi>,
+    pub return_string_abi: FfiStringAbi,
+    pub calling_convention: FfiCallingConvention,
+    pub aggregate_return_abi: FfiAggregateAbi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,6 +476,202 @@ pub fn set_ffi_ownership(
     } else {
         Err(format!(
             "FFI ownership metadata references unknown ambient function `{symbol}`"
+        ))
+    }
+}
+
+pub fn set_ffi_string_abi(
+    program: &mut HirProgram,
+    symbol: &str,
+    param_abis: Vec<FfiStringAbi>,
+    return_abi: FfiStringAbi,
+    calling_convention: FfiCallingConvention,
+    aggregate_return_abi: FfiAggregateAbi,
+) -> Result<(), String> {
+    fn update_expr(
+        expr: &mut HirExpr,
+        symbol: &str,
+        params: &[FfiStringAbi],
+        returns: FfiStringAbi,
+        calling_convention: FfiCallingConvention,
+        found: &mut bool,
+    ) {
+        if let HirExpr::FfiCall(signature, _) = expr {
+            if signature.symbol == symbol {
+                signature.param_string_abis = params.to_vec();
+                signature.return_string_abi = returns;
+                signature.calling_convention = calling_convention;
+                *found = true;
+            }
+        }
+        match expr {
+            HirExpr::FfiCall(_, values) | HirExpr::ArrayLit(values) => {
+                for value in values {
+                    update_expr(value, symbol, params, returns, calling_convention, found);
+                }
+            }
+            HirExpr::Call(callee, values) => {
+                update_expr(callee, symbol, params, returns, calling_convention, found);
+                for value in values {
+                    update_expr(value, symbol, params, returns, calling_convention, found);
+                }
+            }
+            HirExpr::DynamicCall(_, values) => {
+                for value in values {
+                    update_expr(value, symbol, params, returns, calling_convention, found);
+                }
+            }
+            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+                update_expr(left, symbol, params, returns, calling_convention, found);
+                update_expr(right, symbol, params, returns, calling_convention, found);
+            }
+            HirExpr::Await(inner)
+            | HirExpr::Assign(_, inner)
+            | HirExpr::ArrayLen(inner)
+            | HirExpr::JsonAsNumber(inner)
+            | HirExpr::JsonAsString(inner)
+            | HirExpr::JsonAsBool(inner) => {
+                update_expr(inner, symbol, params, returns, calling_convention, found)
+            }
+            HirExpr::Lambda(_, _, _, body) => {
+                update_expr(body, symbol, params, returns, calling_convention, found)
+            }
+            HirExpr::Block(stmts) => {
+                update_stmts(stmts, symbol, params, returns, calling_convention, found)
+            }
+            HirExpr::IndexAssign(a, b, c) => {
+                update_expr(a, symbol, params, returns, calling_convention, found);
+                update_expr(b, symbol, params, returns, calling_convention, found);
+                update_expr(c, symbol, params, returns, calling_convention, found);
+            }
+            HirExpr::ObjectLit(fields) => {
+                for (_, value) in fields {
+                    update_expr(value, symbol, params, returns, calling_convention, found);
+                }
+            }
+            HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => {
+                update_expr(object, symbol, params, returns, calling_convention, found)
+            }
+            HirExpr::PropAssign(object, _, _, value) | HirExpr::JsonIndex(object, value) => {
+                update_expr(object, symbol, params, returns, calling_convention, found);
+                update_expr(value, symbol, params, returns, calling_convention, found);
+            }
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) => {}
+        }
+    }
+    fn update_stmts(
+        stmts: &mut [HirStmt],
+        symbol: &str,
+        params: &[FfiStringAbi],
+        returns: FfiStringAbi,
+        calling_convention: FfiCallingConvention,
+        found: &mut bool,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
+                    update_expr(expr, symbol, params, returns, calling_convention, found)
+                }
+                HirStmt::Return(Some(expr)) => {
+                    update_expr(expr, symbol, params, returns, calling_convention, found)
+                }
+                HirStmt::If(condition, then_body, else_body) => {
+                    update_expr(
+                        condition,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        found,
+                    );
+                    update_stmts(
+                        then_body,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        found,
+                    );
+                    update_stmts(
+                        else_body,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        found,
+                    );
+                }
+                HirStmt::While(condition, body) => {
+                    update_expr(
+                        condition,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        found,
+                    );
+                    update_stmts(body, symbol, params, returns, calling_convention, found);
+                }
+                HirStmt::Try(body, _, catch_body) => {
+                    update_stmts(body, symbol, params, returns, calling_convention, found);
+                    update_stmts(
+                        catch_body,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        found,
+                    );
+                }
+                HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+            }
+        }
+    }
+
+    let mut found = false;
+    for signature in &mut program.extern_functions {
+        if signature.symbol == symbol {
+            if param_abis.len() != signature.params.len() {
+                return Err(format!(
+                    "FFI string ABI metadata for `{symbol}` has {} parameter layouts, expected {}",
+                    param_abis.len(),
+                    signature.params.len()
+                ));
+            }
+            for (index, (ty, abi)) in signature.params.iter().zip(&param_abis).enumerate() {
+                if *abi == FfiStringAbi::PointerLength && *ty != HirType::Str {
+                    return Err(format!(
+                        "FFI parameter {index} of `{symbol}` uses string pointer-length ABI but is not a string"
+                    ));
+                }
+            }
+            if return_abi == FfiStringAbi::PointerLength && signature.ret != HirType::Str {
+                return Err(format!(
+                    "FFI return of `{symbol}` uses string pointer-length ABI but is not a string"
+                ));
+            }
+            signature.param_string_abis = param_abis.clone();
+            signature.return_string_abi = return_abi;
+            signature.calling_convention = calling_convention;
+            signature.aggregate_return_abi = aggregate_return_abi;
+            found = true;
+        }
+    }
+    for function in &mut program.functions {
+        update_stmts(
+            &mut function.body,
+            symbol,
+            &param_abis,
+            return_abi,
+            calling_convention,
+            &mut found,
+        );
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "FFI string ABI metadata references unknown ambient function `{symbol}`"
         ))
     }
 }

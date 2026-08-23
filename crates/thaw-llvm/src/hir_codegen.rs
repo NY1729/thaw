@@ -47,8 +47,9 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, Poi
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use thaw_hir::{
-    BinOp, DynamicBackend, DynamicSignature, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr,
-    HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
+    BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
+    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram,
+    HirStmt, HirType,
 };
 
 /// The user's `main`, if any, is compiled under this symbol instead of
@@ -773,17 +774,19 @@ impl<'ctx> HirCompiler<'ctx> {
     /// parameter: `Array`/`Object` params are expanded into the real C ABI
     /// shape a native library actually expects (see `ffi_param_types`),
     /// matching the argument list `compile_ffi_call` builds at each call
-    /// site. Only parameters are adapted this way -- a return value still
-    /// uses Thaw's own internal representation (`basic_type`) unchanged;
-    /// marshaling an `Array`/`Object` *return* into a real C convention is
-    /// still out of scope (docs/design/registry.md section 18).
+    /// site. Aggregate returns use an explicit, portable C shape and are
+    /// copied into Thaw's arena representation after the call:
+    /// `number[]` is `{ const double *data; int64_t len; }`, while an object
+    /// is a value struct whose fields remain in declaration order.
     fn declare_extern_function(
         &mut self,
         sig: &FfiSignature,
     ) -> Result<FunctionValue<'ctx>, String> {
-        if sig.return_ownership != FfiOwnership::Borrowed && sig.ret != HirType::Str {
+        let supports_owned_return = sig.ret == HirType::Str
+            || matches!(&sig.ret, HirType::Array(element) if **element == HirType::F64);
+        if sig.return_ownership != FfiOwnership::Borrowed && !supports_owned_return {
             return Err(format!(
-                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string returns",
+                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string and number[] returns",
                 sig.symbol
             ));
         }
@@ -810,7 +813,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
         }
-        let param_types = self.ffi_param_types(&sig.params)?;
+        let param_types = self.ffi_param_types(&sig.params, &sig.param_string_abis)?;
 
         let fn_type = match (&sig.error_abi, &sig.ret) {
             (FfiErrorAbi::ThawResult, HirType::Void) => {
@@ -823,7 +826,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .context
                 .struct_type(
                     &[
-                        self.basic_type(ret)?,
+                        self.ffi_return_type(ret, sig.return_string_abi, sig.aggregate_return_abi)?,
                         self.context.ptr_type(AddressSpace::default()).into(),
                     ],
                     false,
@@ -832,12 +835,69 @@ impl<'ctx> HirCompiler<'ctx> {
             (FfiErrorAbi::Direct, HirType::Void) => {
                 self.context.void_type().fn_type(&param_types, false)
             }
-            (FfiErrorAbi::Direct, ret) => self.basic_type(ret)?.fn_type(&param_types, false),
+            (FfiErrorAbi::Direct, ret) => self
+                .ffi_return_type(ret, sig.return_string_abi, sig.aggregate_return_abi)?
+                .fn_type(&param_types, false),
         };
 
-        Ok(self
+        let function = self
             .module
-            .add_function(&sig.symbol, fn_type, Some(Linkage::External)))
+            .add_function(&sig.symbol, fn_type, Some(Linkage::External));
+        function.set_call_conventions(Self::ffi_calling_convention(sig.calling_convention));
+        Ok(function)
+    }
+
+    fn ffi_calling_convention(convention: FfiCallingConvention) -> u32 {
+        match convention {
+            FfiCallingConvention::C => 0,
+            FfiCallingConvention::Fast => 8,
+            FfiCallingConvention::Cold => 9,
+        }
+    }
+
+    fn ffi_return_type(
+        &self,
+        ty: &HirType,
+        string_abi: FfiStringAbi,
+        aggregate_abi: FfiAggregateAbi,
+    ) -> Result<BasicTypeEnum<'ctx>, String> {
+        match ty {
+            HirType::Str if string_abi == FfiStringAbi::PointerLength => Ok(self
+                .context
+                .struct_type(
+                    &[
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                )
+                .into()),
+            HirType::Array(element)
+                if **element == HirType::F64 && aggregate_abi == FfiAggregateAbi::Portable =>
+            {
+                Ok(self
+                    .context
+                    .struct_type(
+                        &[
+                            self.context.ptr_type(AddressSpace::default()).into(),
+                            self.context.i64_type().into(),
+                        ],
+                        false,
+                    )
+                    .into())
+            }
+            HirType::Object(fields) if aggregate_abi == FfiAggregateAbi::Portable => {
+                let fields = fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        self.basic_type(ty)
+                            .map_err(|error| format!("FFI object field `{name}`: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self.context.struct_type(&fields, false).into())
+            }
+            other => self.basic_type(other),
+        }
     }
 
     /// The real C ABI parameter list a Fast path native symbol is declared
@@ -870,10 +930,15 @@ impl<'ctx> HirCompiler<'ctx> {
     fn ffi_param_types(
         &self,
         params: &[HirType],
+        string_abis: &[FfiStringAbi],
     ) -> Result<Vec<BasicMetadataTypeEnum<'ctx>>, String> {
         let mut out = Vec::with_capacity(params.len());
-        for ty in params {
+        for (index, ty) in params.iter().enumerate() {
             match ty {
+                HirType::Str if string_abis.get(index) == Some(&FfiStringAbi::PointerLength) => {
+                    out.push(self.context.ptr_type(AddressSpace::default()).into());
+                    out.push(self.context.i64_type().into());
+                }
                 HirType::Array(elem) if **elem == HirType::F64 => {
                     out.push(self.context.ptr_type(AddressSpace::default()).into());
                     out.push(self.context.i64_type().into());
@@ -5105,6 +5170,204 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(phi.as_basic_value().into_pointer_value())
     }
 
+    fn marshal_ffi_return(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+        string_abi: FfiStringAbi,
+        ownership: &FfiOwnership,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match ty {
+            HirType::Str if string_abi == FfiStringAbi::PointerLength => {
+                let native = value.into_struct_value();
+                let source = self
+                    .builder
+                    .build_extract_value(native, 0, "ffi_string_data")
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                let length = self
+                    .builder
+                    .build_extract_value(native, 1, "ffi_string_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let i64_type = self.context.i64_type();
+                let size = self
+                    .builder
+                    .build_int_add(length, i64_type.const_int(1, false), "ffi_string_size")
+                    .map_err(|error| error.to_string())?;
+                let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+                let result = self
+                    .builder
+                    .build_call(
+                        arena_alloc,
+                        &[size.into(), i64_type.const_int(1, false).into()],
+                        "ffi_string_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_pointer_value();
+                let memcpy = self.module.get_function("memcpy").unwrap();
+                self.builder
+                    .build_call(
+                        memcpy,
+                        &[result.into(), source.into(), length.into()],
+                        "ffi_string_copy",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let terminator = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            result,
+                            &[length],
+                            "ffi_string_terminator",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                self.builder
+                    .build_store(terminator, self.context.i8_type().const_zero())
+                    .map_err(|error| error.to_string())?;
+                let destroy = match ownership {
+                    FfiOwnership::Owned { destroy } => Some(destroy),
+                    FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
+                    FfiOwnership::Borrowed => None,
+                };
+                if let Some(destroy) = destroy {
+                    let destroy_fn = self.module.get_function(destroy).ok_or_else(|| {
+                        format!("FFI ownership destructor `{destroy}` was not declared")
+                    })?;
+                    self.builder
+                        .build_call(destroy_fn, &[source.into()], "ffi_string_destroy")
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(result.into())
+            }
+            HirType::Array(element) if **element == HirType::F64 && value.is_struct_value() => {
+                let native = value.into_struct_value();
+                let data = self
+                    .builder
+                    .build_extract_value(native, 0, "ffi_array_data")
+                    .map_err(|error| error.to_string())?
+                    .into_pointer_value();
+                let length = self
+                    .builder
+                    .build_extract_value(native, 1, "ffi_array_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let i64_type = self.context.i64_type();
+                let bytes = self
+                    .builder
+                    .build_int_mul(
+                        length,
+                        i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                        "ffi_array_bytes",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let size = self
+                    .builder
+                    .build_int_add(
+                        bytes,
+                        i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                        "ffi_array_size",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+                let result = self
+                    .builder
+                    .build_call(
+                        arena_alloc,
+                        &[size.into(), i64_type.const_int(8, false).into()],
+                        "ffi_array_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_pointer_value();
+                self.builder
+                    .build_store(result, length)
+                    .map_err(|error| error.to_string())?;
+                let elements = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            result,
+                            &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
+                            "ffi_array_elements",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let memcpy = self.module.get_function("memcpy").unwrap();
+                self.builder
+                    .build_call(
+                        memcpy,
+                        &[elements.into(), data.into(), bytes.into()],
+                        "ffi_array_copy",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let destroy = match ownership {
+                    FfiOwnership::Owned { destroy } => Some(destroy),
+                    FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
+                    FfiOwnership::Borrowed => None,
+                };
+                if let Some(destroy) = destroy {
+                    let destroy_fn = self.module.get_function(destroy).ok_or_else(|| {
+                        format!("FFI ownership destructor `{destroy}` was not declared")
+                    })?;
+                    self.builder
+                        .build_call(destroy_fn, &[data.into()], "ffi_array_destroy")
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(result.into())
+            }
+            HirType::Object(fields) if value.is_struct_value() => {
+                let native = value.into_struct_value();
+                let i64_type = self.context.i64_type();
+                let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+                let result = self
+                    .builder
+                    .build_call(
+                        arena_alloc,
+                        &[
+                            i64_type
+                                .const_int(OBJECT_FIELD_BYTES * fields.len() as u64, false)
+                                .into(),
+                            i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
+                        ],
+                        "ffi_object_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap()
+                    .into_pointer_value();
+                for (index, (name, _)) in fields.iter().enumerate() {
+                    let field = self
+                        .builder
+                        .build_extract_value(native, index as u32, &format!("ffi_{name}"))
+                        .map_err(|error| error.to_string())?;
+                    let slot = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                self.context.i8_type(),
+                                result,
+                                &[i64_type.const_int(OBJECT_FIELD_BYTES * index as u64, false)],
+                                "ffi_object_field",
+                            )
+                            .map_err(|error| error.to_string())?
+                    };
+                    self.builder
+                        .build_store(slot, field)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(result.into())
+            }
+            _ => Ok(value),
+        }
+    }
+
     /// `HirExpr::FfiCall` -- an ambient `declare function` call (see
     /// docs/design/bridge.md). By the time codegen sees this, the symbol
     /// is already declared (`declare_extern_function` ran in the
@@ -5124,9 +5387,24 @@ impl<'ctx> HirCompiler<'ctx> {
             .expect("extern function was declared in compile_program's pre-pass");
 
         let mut compiled_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
-        for (param_ty, arg) in sig.params.iter().zip(args) {
+        for (index, (param_ty, arg)) in sig.params.iter().zip(args).enumerate() {
             let value = self.compile_expr(arg)?;
             match param_ty {
+                HirType::Str
+                    if sig.param_string_abis.get(index) == Some(&FfiStringAbi::PointerLength) =>
+                {
+                    let pointer = value.into_pointer_value();
+                    let strlen = self.module.get_function("strlen").unwrap();
+                    let length = self
+                        .builder
+                        .build_call(strlen, &[pointer.into()], "ffi_string_length")
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap();
+                    compiled_args.push(pointer.into());
+                    compiled_args.push(length.into());
+                }
                 // Thaw's own array value is a pointer to `[i64
                 // len][f64 elements...]` (`compile_array_lit`) --
                 // read the length back out of that header and pass
@@ -5191,12 +5469,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(function, &compiled_args, "ffi_calltmp")
             .map_err(|e| e.to_string())?;
+        call_site.set_call_convention(Self::ffi_calling_convention(sig.calling_convention));
         let returned = call_site
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| format!("`{}` does not return a value", sig.symbol))?;
         if sig.error_abi == FfiErrorAbi::Direct {
-            if sig.ret == HirType::Str {
+            if sig.ret == HirType::Str && sig.return_string_abi == FfiStringAbi::NullTerminated {
                 return self
                     .apply_ffi_string_ownership(
                         returned.into_pointer_value(),
@@ -5205,7 +5484,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map(BasicValueEnum::from);
             }
-            return Ok(returned);
+            return self.marshal_ffi_return(
+                returned,
+                &sig.ret,
+                sig.return_string_abi,
+                &sig.return_ownership,
+            );
         }
 
         let result = returned.into_struct_value();
@@ -5223,7 +5507,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|e| e.to_string())?;
         self.branch_on_pending_exception()?;
-        if sig.ret == HirType::Str {
+        if sig.ret == HirType::Str && sig.return_string_abi == FfiStringAbi::NullTerminated {
             return self
                 .apply_ffi_string_ownership(
                     value.into_pointer_value(),
@@ -5232,7 +5516,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map(BasicValueEnum::from);
         }
-        Ok(value)
+        self.marshal_ffi_return(
+            value,
+            &sig.ret,
+            sig.return_string_abi,
+            &sig.return_ownership,
+        )
     }
 
     /// Compiles `args`, calls `function` with them, and extracts the
@@ -7932,7 +8221,6 @@ mod tests {
             },
         )
         .unwrap();
-
         let context = Context::create();
         let mut compiler = HirCompiler::new(&context, "ffi_owned_result");
         compiler.compile_program(&program).unwrap();
@@ -7986,6 +8274,166 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             "owned value\n1\nowned error\n1\n"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
+        let source = r#"
+            declare function native_values(): number[];
+            declare function native_point(): { x: number; y: number };
+            declare function array_destroy_count(): number;
+
+            function main(): void {
+                const values: number[] = native_values();
+                const point: { x: number; y: number } = native_point();
+                console.log(values[0] + values[1] + values[2]);
+                console.log(point.x + point.y);
+                console.log(array_destroy_count());
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_ownership(
+            &mut program,
+            "native_values",
+            thaw_hir::FfiOwnership::Owned {
+                destroy: "destroy_values".into(),
+            },
+            thaw_hir::FfiOwnership::Borrowed,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_values",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_point",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_aggregate_returns");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-aggregate-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdint.h>\n#include <stdlib.h>\n\
+             typedef struct { double *data; int64_t len; } ThawF64Array;\n\
+             typedef struct { double x; double y; } Point;\n\
+             static int destroys;\n\
+             ThawF64Array native_values(void) { double *p = malloc(3 * sizeof(double)); p[0] = 2; p[1] = 3; p[2] = 5; return (ThawF64Array){p, 3}; }\n\
+             void destroy_values(void *p) { ++destroys; free(p); }\n\
+             double array_destroy_count(void) { return destroys; }\n\
+             Point native_point(void) { return (Point){7, 11}; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "10\n18\n1\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
+        let source = r#"
+            declare function native_slice(value: string): string;
+
+            function main(): void {
+                console.log(native_slice("hello"));
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_slice",
+            vec![thaw_hir::FfiStringAbi::PointerLength],
+            thaw_hir::FfiStringAbi::PointerLength,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Internal,
+        )
+        .unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_string_slice");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-string-slice-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdint.h>\n\
+             typedef struct { const char *data; int64_t len; } ThawStringSlice;\n\
+             static const char result[] = {'O', 'K', '!'};\n\
+             ThawStringSlice native_slice(const char *value, int64_t len) {\n\
+               return value[0] == 'h' && len == 5 ? (ThawStringSlice){result, 3} : (ThawStringSlice){result, 0};\n\
+             }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "OK!\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
