@@ -18,6 +18,10 @@
 //!                                  `generate_module_init` so it's loaded
 //!                                  automatically at program startup
 //!                                  (replaces a manual `loadScript` call)
+//!   subpaths/<path>/package.d.ts -- declarations for an exact `exports`
+//!                                  subpath such as `./feature`
+//!   subpaths/<path>/bundle.js    -- independently bundled runtime entry
+//!                                  for that subpath
 //!   version.txt    (optional)  -- the exact version `add` resolved and
 //!                                  fetched for the package itself (see
 //!                                  `add`'s doc comment); purely
@@ -85,7 +89,12 @@ pub struct ResolvedPackage {
 /// file, since a package with neither a native lib nor a bundle would
 /// have nothing for thaw-bridge's shim to call.
 pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, String> {
-    let dir = registry_dir.join(name);
+    let (package, subpath) = split_bare_spec(name);
+    let mut dir = registry_dir.join(package);
+    if let Some(subpath) = subpath {
+        validate_export_subpath(subpath)?;
+        dir = dir.join("subpaths").join(subpath);
+    }
 
     let dts_path = dir.join("package.d.ts");
     let dts_source = fs::read_to_string(&dts_path).map_err(|e| {
@@ -393,10 +402,10 @@ fn fetch_and_copy(
         .unwrap_or("0.0.0")
         .to_string();
 
-    let main_field = package_export_target(&manifest, &["require", "import", "default"])
+    let main_field = package_export_target(&manifest, None, &["require", "import", "default"])
         .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
-    let (js_source, js_relative_path, bundled_file_count, dependency_versions) =
+    let (js_source, js_relative_path, bundled_file_count, mut dependency_versions) =
         bundle_commonjs_package(&node_modules_dir, name, &package_dir, main_field)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
@@ -470,6 +479,47 @@ fn fetch_and_copy(
             dest_dir.join("bundle.js").display()
         )
     })?;
+    let subpaths_dir = dest_dir.join("subpaths");
+    if subpaths_dir.is_dir() {
+        fs::remove_dir_all(&subpaths_dir).map_err(|error| {
+            format!(
+                "failed to remove stale `{}`: {error}",
+                subpaths_dir.display()
+            )
+        })?;
+    }
+    for subpath in package_export_subpaths(&manifest)? {
+        let runtime_entry =
+            package_export_target(&manifest, Some(&subpath), &["require", "import", "default"])
+                .ok_or_else(|| format!("package export `./{subpath}` has no runtime target"))?;
+        let types_entry = package_export_target(&manifest, Some(&subpath), &["types"])
+            .ok_or_else(|| format!("package export `./{subpath}` has no `types` target"))?;
+        let (subpath_js, _, _, subpath_dependencies) =
+            bundle_commonjs_package(&node_modules_dir, name, &package_dir, runtime_entry)?;
+        dependency_versions.extend(subpath_dependencies);
+        let types_path = package_dir.join(types_entry);
+        let subpath_dts = fs::read_to_string(&types_path).map_err(|error| {
+            format!(
+                "failed to read package export `./{subpath}` types `{}`: {error}",
+                types_path.display()
+            )
+        })?;
+        let subpath_dest = subpaths_dir.join(&subpath);
+        fs::create_dir_all(&subpath_dest)
+            .map_err(|error| format!("failed to create `{}`: {error}", subpath_dest.display()))?;
+        fs::write(subpath_dest.join("package.d.ts"), subpath_dts).map_err(|error| {
+            format!(
+                "failed to write `{}`: {error}",
+                subpath_dest.join("package.d.ts").display()
+            )
+        })?;
+        fs::write(subpath_dest.join("bundle.js"), subpath_js).map_err(|error| {
+            format!(
+                "failed to write `{}`: {error}",
+                subpath_dest.join("bundle.js").display()
+            )
+        })?;
+    }
     fs::write(dest_dir.join("version.txt"), &resolved_version).map_err(|e| {
         format!(
             "failed to write `{}`: {e}",
@@ -534,6 +584,7 @@ fn read_manifest(package_dir: &Path) -> Result<serde_json::Value, String> {
 
 fn package_export_target<'a>(
     manifest: &'a serde_json::Value,
+    subpath: Option<&str>,
     conditions: &[&str],
 ) -> Option<&'a str> {
     fn select<'a>(value: &'a serde_json::Value, conditions: &[&str]) -> Option<&'a str> {
@@ -553,14 +604,51 @@ fn package_export_target<'a>(
     }
 
     let exports = manifest.get("exports")?;
-    if exports.is_string() {
-        return exports.as_str();
+    let target = match subpath {
+        None => {
+            if exports.is_string() {
+                exports
+            } else {
+                exports
+                    .as_object()
+                    .and_then(|object| object.get("."))
+                    .unwrap_or(exports)
+            }
+        }
+        Some(subpath) => exports.as_object()?.get(&format!("./{subpath}"))?,
+    };
+    select(target, conditions)
+}
+
+fn validate_export_subpath(subpath: &str) -> Result<(), String> {
+    if subpath.is_empty()
+        || Path::new(subpath).is_absolute()
+        || subpath
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(format!("invalid package export subpath `{subpath}`"));
     }
-    let root = exports
-        .as_object()
-        .and_then(|object| object.get("."))
-        .unwrap_or(exports);
-    select(root, conditions)
+    Ok(())
+}
+
+fn package_export_subpaths(manifest: &serde_json::Value) -> Result<Vec<String>, String> {
+    let Some(exports) = manifest.get("exports").and_then(|value| value.as_object()) else {
+        return Ok(Vec::new());
+    };
+    let mut subpaths = Vec::new();
+    for key in exports.keys() {
+        let Some(subpath) = key.strip_prefix("./") else {
+            continue;
+        };
+        if subpath.contains('*') {
+            continue;
+        }
+        validate_export_subpath(subpath)?;
+        subpaths.push(subpath.to_string());
+    }
+    subpaths.sort();
+    Ok(subpaths)
 }
 
 /// `package` has no bundled type declarations of its own -- fetch the
@@ -606,7 +694,7 @@ fn types_package_name(package: &str) -> String {
 /// convention, e.g. left-pad/slugify). Returns both the path as recorded
 /// (relative to `package_dir`) and the resolved absolute path to read.
 fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(String, PathBuf)> {
-    if let Some(path) = package_export_target(manifest, &["types"]) {
+    if let Some(path) = package_export_target(manifest, None, &["types"]) {
         let absolute = package_dir.join(path);
         if absolute.is_file() {
             return Some((path.to_string(), absolute));
@@ -1267,7 +1355,7 @@ fn resolve_bare_require(
         Some(sub) => resolve_module_path(&dep_dir, sub).ok()?,
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            let main = package_export_target(&manifest, &["require", "import", "default"])
+            let main = package_export_target(&manifest, None, &["require", "import", "default"])
                 .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
                 .unwrap_or("index.js");
             resolve_module_path(&dep_dir, main).ok()?
@@ -1398,23 +1486,57 @@ mod tests {
             r#"{
                 "main": "legacy.js",
                 "types": "legacy.d.ts",
-                "exports": { ".": {
-                    "types": "./dist/index.d.ts",
-                    "import": "./dist/index.mjs",
-                    "require": "./dist/index.cjs",
-                    "default": "./dist/index.js"
-                }}
+                "exports": {
+                    ".": {
+                        "types": "./dist/index.d.ts",
+                        "import": "./dist/index.mjs",
+                        "require": "./dist/index.cjs",
+                        "default": "./dist/index.js"
+                    },
+                    "./feature": {
+                        "types": "./dist/feature.d.ts",
+                        "require": "./dist/feature.cjs"
+                    }
+                }
             }"#,
         )
         .unwrap();
         assert_eq!(
-            package_export_target(&manifest, &["require", "import", "default"]),
+            package_export_target(&manifest, None, &["require", "import", "default"]),
             Some("./dist/index.cjs")
         );
         assert_eq!(
-            package_export_target(&manifest, &["types"]),
+            package_export_target(&manifest, None, &["types"]),
             Some("./dist/index.d.ts")
         );
+        assert_eq!(
+            package_export_target(&manifest, Some("feature"), &["types"]),
+            Some("./dist/feature.d.ts")
+        );
+        assert_eq!(package_export_subpaths(&manifest).unwrap(), vec!["feature"]);
+    }
+
+    #[test]
+    fn resolves_an_installed_package_subpath() {
+        let registry = temp_registry("subpath");
+        let dir = registry.join("math-kit/subpaths/advanced");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.d.ts"),
+            "export declare function square(value: number): number;",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("bundle.js"),
+            "module.exports = { square: function(value) { return value * value; } };",
+        )
+        .unwrap();
+
+        let package = resolve(&registry, "math-kit/advanced").unwrap();
+        assert_eq!(package.name, "math-kit/advanced");
+        assert!(package.dts_source.contains("square"));
+        assert!(package.bundle_js.unwrap().contains("value * value"));
+        let _ = fs::remove_dir_all(registry);
     }
 
     fn temp_registry(test_name: &str) -> PathBuf {

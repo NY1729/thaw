@@ -319,21 +319,6 @@ fn qualifier_identifier(package: &str) -> &str {
     package.rsplit('/').next().unwrap_or(package)
 }
 
-fn bare_package_name(specifier: &str) -> &str {
-    if specifier.starts_with('@') {
-        specifier
-            .match_indices('/')
-            .nth(1)
-            .map(|(index, _)| &specifier[..index])
-            .unwrap_or(specifier)
-    } else {
-        specifier
-            .split_once('/')
-            .map(|(name, _)| name)
-            .unwrap_or(specifier)
-    }
-}
-
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -821,12 +806,7 @@ fn build(
                 .map_err(|error| format!("{location}: {error}"))?;
             specifier.clone()
         } else {
-            let package = bare_package_name(specifier).to_string();
-            if package != *specifier {
-                return Err(format!(
-                    "{location}: package subpath import `{specifier}` is not supported yet"
-                ));
-            }
+            let package = specifier.clone();
             thaw_registry::resolve(registry_dir, &package)
                 .map_err(|error| format!("{location}: {error}"))?;
             package
@@ -835,14 +815,8 @@ fn build(
             resolved_packages.push(package);
         }
     }
-    let (registry_shim, registry_native_libs, qualified_call_rewrites, mut external_exports) =
+    let (registry_shim, registry_native_libs, qualified_call_rewrites, external_exports) =
         generate_registry_shims(registry_dir, &resolved_packages)?;
-    for (specifier, _) in &external_specifiers {
-        let package = bare_package_name(specifier);
-        if let Some(exports) = external_exports.get(package).cloned() {
-            external_exports.insert(specifier.clone(), exports);
-        }
-    }
     // `qs.stringify(x)`-style calls, for a name that collided across two
     // `--use`d packages, only exist as source-level syntax sugar over the
     // package-qualified alias `generate_registry_shims` actually
@@ -1147,6 +1121,17 @@ mod tests {
             "module.exports = { add: function(a,b){ return a+b; }, sub: function(a,b){ return a-b; }, greet: function(name){ return 'hello ' + name; }, negate: function(value){ return !value; }, echo: function(value){ return value; }, sum: function(values){ return values.reduce(function(a,b){ return a+b; }, 0); }, reverse: function(values){ return values.reverse(); }, shift: function(point){ return { x: point.x + 1, y: point.y + 2 }; }, fail: function(){ throw new Error('typed dynamic failed'); } };\n",
         )
         .unwrap();
+        std::fs::create_dir_all(registry.join("math-kit/subpaths/advanced")).unwrap();
+        std::fs::write(
+            registry.join("math-kit/subpaths/advanced/package.d.ts"),
+            "export declare function square(value: number): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            registry.join("math-kit/subpaths/advanced/bundle.js"),
+            "module.exports = { square: function(value){ return value * value; } };\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(registry.join("twice")).unwrap();
         std::fs::write(
             registry.join("twice/package.d.ts"),
@@ -1165,12 +1150,14 @@ mod tests {
             r#"
                 import { add, greet, negate, echo, sum, reverse, shift, fail } from "math-kit";
                 import * as math from "math-kit";
+                import { square } from "math-kit/advanced";
                 import twice from "twice";
                 function main(): void {
                     const sum: number = add(10, 11);
                     const difference: number = math.sub(13, 2);
                     console.log(twice(21));
                     console.log(sum + difference);
+                    console.log(square(7));
                     console.log(greet("thaw"));
                     console.log(negate(false));
                     console.log(String(echo(JSON.parse("{\"ok\":true}")).ok));
@@ -1198,7 +1185,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\n32\nhello thaw\ntrue\ntrue\n42\n3\n46\n`math-kit::fail` threw: typed dynamic failed\n"
+            "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\n`math-kit::fail` threw: typed dynamic failed\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
