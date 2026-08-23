@@ -424,6 +424,17 @@ module.exports = { inspect: inspect };
 それらを要求する別のパッケージにぶつかった時点で、同じ要領
 （`builtin_module_source` に1エントリ追加する）で対応していく。
 
+追記: 14章の ESM 対応の一環で `process` も同じ要領で追加した。
+実際の ESM パッケージ（`has-flag`）が `import process from 'process'`
+と、モジュールとして import していたため（Node は `process` を
+グローバルとコアモジュールの両方として提供する）。`argv`/`env`/
+`platform`/`nextTick` など、実際に読まれたフィールドだけを持つ
+最小限のオブジェクトで、`.default` も同じオブジェクトを指すように
+しておくことで、ESM の default import 相互運用規約とも噛み合う。
+`thaw registry add has-flag` → `thaw build --use has-flag` で
+実際に `hasFlag('unicorn', ['--unicorn', '--foo=bar'])` → `true` を
+確認した。
+
 ## 12. スコープ付きパッケージの実地検証、プラットフォームグローバルの対応
 
 `@scope/name` 形式のスコープ付きパッケージは、これまで
