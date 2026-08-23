@@ -17,7 +17,7 @@
 //! chunked transfer-encoding, one request per TCP connection.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -77,6 +77,7 @@ static NEXT_FD_WATCHER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 static INVALID_FD_ERROR: &[u8] = b"invalid file descriptor\0";
 static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
+static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
 
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
@@ -1453,6 +1454,125 @@ pub extern "C" fn thaw_promise_reject(promise: *mut ThawPromise, error: *const u
     settle_promise(promise, error, true)
 }
 
+struct PromiseAllState {
+    output: *mut ThawPromise,
+    remaining: usize,
+    rejected: bool,
+    first_error: *const u8,
+    result: *mut u64,
+    result_slot: *mut *const u8,
+}
+
+struct PromiseAllChild {
+    state: *mut PromiseAllState,
+    promise: *mut ThawPromise,
+    indices: Vec<usize>,
+}
+
+extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
+    let child = unsafe { Box::from_raw(frame.cast::<PromiseAllChild>()) };
+    let state = unsafe { &mut *child.state };
+    let child_state = unsafe { thaw_promise_state(child.promise) };
+    if child_state == 2 {
+        if !state.rejected {
+            state.rejected = true;
+            state.first_error = result;
+        }
+    } else if !state.rejected {
+        let value = unsafe { result.cast::<u64>().read_unaligned() };
+        for index in &child.indices {
+            unsafe { state.result.add(index + 1).write(value) };
+        }
+    }
+    unsafe { thaw_promise_destroy(child.promise) };
+    state.remaining -= 1;
+    if state.remaining == 0 {
+        if state.rejected {
+            thaw_promise_reject(state.output, state.first_error);
+        } else {
+            thaw_promise_resolve(state.output, state.result_slot.cast());
+        }
+        unsafe { drop(Box::from_raw(child.state)) };
+    }
+}
+
+/// Joins homogeneous `Promise<number>` handles without serializing them.
+/// The result uses Thaw's `[i64 len][f64 elements...]` array layout in the
+/// request arena and therefore remains valid after the returned promise is
+/// destroyed. Child handles are consumed by this call.
+///
+/// # Safety
+///
+/// `promises` must reference `len` live handles returned by Thaw async
+/// functions. Each handle must be unique and must not be used after this call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_all_f64(
+    promises: *const *mut ThawPromise,
+    len: usize,
+) -> *mut ThawPromise {
+    let output = thaw_promise_new();
+    let allocation =
+        thaw_arena::thaw_arena_alloc((len + 2) * size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    if allocation.is_null() {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let result_slot = allocation.cast::<*const u8>();
+    let result = unsafe { allocation.add(1) };
+    unsafe { result_slot.write(result.cast()) };
+    unsafe { result.write(len as u64) };
+    if len == 0 {
+        thaw_promise_resolve(output, result_slot.cast());
+        return output;
+    }
+    if promises.is_null() {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let mut grouped = HashMap::<usize, (*mut ThawPromise, Vec<usize>)>::new();
+    let mut invalid = false;
+    for index in 0..len {
+        let promise = unsafe { *promises.add(index) };
+        if promise.is_null() {
+            invalid = true;
+        } else {
+            grouped
+                .entry(promise as usize)
+                .or_insert_with(|| (promise, Vec::new()))
+                .1
+                .push(index);
+        }
+    }
+    let state = Box::into_raw(Box::new(PromiseAllState {
+        output,
+        remaining: grouped.len(),
+        rejected: invalid,
+        first_error: if invalid {
+            PROMISE_ALL_INVALID_ERROR.as_ptr()
+        } else {
+            std::ptr::null()
+        },
+        result,
+        result_slot,
+    }));
+    for (_, (promise, indices)) in grouped {
+        let child = Box::into_raw(Box::new(PromiseAllChild {
+            state,
+            promise,
+            indices,
+        }));
+        unsafe {
+            thaw_promise_subscribe(promise, resume_promise_all_child, child.cast());
+        }
+    }
+    if unsafe { (*state).remaining } == 0 {
+        let error = unsafe { (*state).first_error };
+        thaw_promise_reject(output, error);
+        unsafe { drop(Box::from_raw(state)) };
+    }
+    output
+}
+
 fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
@@ -1723,6 +1843,35 @@ mod tests {
         record.result = result;
     }
 
+    struct TimedValueContext {
+        timer: *mut ThawPromise,
+        output: *mut ThawPromise,
+        value: *const u8,
+    }
+
+    extern "C" fn resolve_timed_value(frame: *mut u8, _: *const u8) {
+        let context = unsafe { Box::from_raw(frame.cast::<TimedValueContext>()) };
+        unsafe { thaw_promise_destroy(context.timer) };
+        thaw_promise_resolve(context.output, context.value);
+    }
+
+    fn timed_value(milliseconds: u64, value: f64) -> *mut ThawPromise {
+        let timer = thaw_sleep_ms(milliseconds);
+        let output = thaw_promise_new();
+        let slot = thaw_arena::thaw_arena_alloc(size_of::<f64>(), align_of::<f64>()).cast::<f64>();
+        unsafe { slot.write(value) };
+        let context = Box::into_raw(Box::new(TimedValueContext {
+            timer,
+            output,
+            value: slot.cast(),
+        }));
+        assert_eq!(
+            thaw_promise_subscribe(timer, resolve_timed_value, context.cast()),
+            1
+        );
+        output
+    }
+
     fn local_tls_configs() -> (Arc<ClientConfig>, Arc<ServerConfig>) {
         let sequence = TLS_TEST_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let dir =
@@ -1911,6 +2060,95 @@ mod tests {
         assert_eq!(record.result, &error);
         assert_eq!(thaw_runtime_run_until_resolved(promise), &error);
         unsafe { thaw_promise_destroy(promise) };
+    }
+
+    #[test]
+    fn promise_all_preserves_input_order_and_resolves_empty_inputs() {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let joined = unsafe { thaw_promise_all_f64(children.as_ptr(), children.len()) };
+        let first_value = 3.0f64;
+        let second_value = 7.0f64;
+        assert_eq!(
+            thaw_promise_resolve(second, (&second_value as *const f64).cast()),
+            1
+        );
+        assert_eq!(thaw_promise_state(joined), 0);
+        assert_eq!(
+            thaw_promise_resolve(first, (&first_value as *const f64).cast()),
+            1
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(joined), 1);
+        let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u64>() };
+        assert_eq!(unsafe { result.read() }, 2);
+        assert_eq!(f64::from_bits(unsafe { result.add(1).read() }), 3.0);
+        assert_eq!(f64::from_bits(unsafe { result.add(2).read() }), 7.0);
+        unsafe { thaw_promise_destroy(joined) };
+
+        let empty = unsafe { thaw_promise_all_f64(std::ptr::null(), 0) };
+        assert_eq!(thaw_promise_state(empty), 1);
+        let result = unsafe { *thaw_runtime_run_until_resolved(empty).cast::<*const u64>() };
+        assert_eq!(unsafe { result.read() }, 0);
+        unsafe { thaw_promise_destroy(empty) };
+    }
+
+    #[test]
+    fn promise_all_rejects_with_the_first_observed_error() {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let joined = unsafe { thaw_promise_all_f64(children.as_ptr(), children.len()) };
+        let error = b"joined failure\0";
+        assert_eq!(thaw_promise_reject(second, error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(joined), 0);
+        let value = 1.0f64;
+        assert_eq!(
+            thaw_promise_resolve(first, (&value as *const f64).cast()),
+            1
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(joined), 2);
+        assert_eq!(thaw_runtime_run_until_resolved(joined), error.as_ptr());
+        unsafe { thaw_promise_destroy(joined) };
+    }
+
+    #[test]
+    fn promise_all_drives_children_concurrently() {
+        let started = Instant::now();
+        let children = [
+            timed_value(80, 1.0),
+            timed_value(80, 2.0),
+            timed_value(80, 3.0),
+        ];
+        let joined = unsafe { thaw_promise_all_f64(children.as_ptr(), children.len()) };
+        assert!(!thaw_runtime_run_until_resolved(joined).is_null());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(180),
+            "three 80ms children ran serially: {elapsed:?}"
+        );
+        unsafe { thaw_promise_destroy(joined) };
+    }
+
+    #[test]
+    fn promise_all_deduplicates_repeated_handles() {
+        let child = thaw_promise_new();
+        let children = [child, child];
+        let joined = unsafe { thaw_promise_all_f64(children.as_ptr(), children.len()) };
+        let value = 9.0f64;
+        assert_eq!(
+            thaw_promise_resolve(child, (&value as *const f64).cast()),
+            1
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(joined), 1);
+        let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u64>() };
+        assert_eq!(f64::from_bits(unsafe { result.add(1).read() }), 9.0);
+        assert_eq!(f64::from_bits(unsafe { result.add(2).read() }), 9.0);
+        unsafe { thaw_promise_destroy(joined) };
     }
 
     #[test]
