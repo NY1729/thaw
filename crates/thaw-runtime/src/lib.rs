@@ -79,6 +79,8 @@ static NEXT_FD_WATCHER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 static INVALID_FD_ERROR: &[u8] = b"invalid file descriptor\0";
 static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
+static PROMISE_RACE_EMPTY_ERROR: &[u8] = b"Promise.race requires at least one promise\0";
+static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
 
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
@@ -1660,6 +1662,88 @@ pub unsafe extern "C" fn thaw_promise_all_f64(
     unsafe { thaw_promise_all_slots(promises, len, size_of::<f64>()) }
 }
 
+struct PromiseRaceState {
+    output: *mut ThawPromise,
+    remaining: usize,
+    settled: bool,
+}
+
+struct PromiseRaceChild {
+    state: *mut PromiseRaceState,
+    promise: *mut ThawPromise,
+}
+
+extern "C" fn resume_promise_race_child(frame: *mut u8, result: *const u8) {
+    let child = unsafe { Box::from_raw(frame.cast::<PromiseRaceChild>()) };
+    let state = unsafe { &mut *child.state };
+    if !state.settled {
+        state.settled = true;
+        if unsafe { thaw_promise_state(child.promise) } == 2 {
+            thaw_promise_reject(state.output, result);
+        } else {
+            thaw_promise_resolve(state.output, result);
+        }
+    }
+    unsafe { thaw_promise_destroy(child.promise) };
+    state.remaining -= 1;
+    if state.remaining == 0 {
+        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        unsafe { drop(Box::from_raw(child.state)) };
+    }
+}
+
+/// Settles with the first input Promise to fulfill or reject. Input handles
+/// are deduplicated and consumed; slower children continue to be drained.
+///
+/// # Safety
+///
+/// `promises` must reference `len` readable Promise handles. Each distinct
+/// handle must be live and must not be used after this call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_race(
+    promises: *const *mut ThawPromise,
+    len: usize,
+) -> *mut ThawPromise {
+    let output = thaw_promise_new();
+    if len == 0 {
+        thaw_promise_reject(output, PROMISE_RACE_EMPTY_ERROR.as_ptr());
+        return output;
+    }
+    if promises.is_null() {
+        thaw_promise_reject(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let mut unique = Vec::<*mut ThawPromise>::new();
+    let mut invalid = false;
+    for index in 0..len {
+        let promise = unsafe { *promises.add(index) };
+        if promise.is_null() {
+            invalid = true;
+        } else if !unique.contains(&promise) {
+            unique.push(promise);
+        }
+    }
+    let state = Box::into_raw(Box::new(PromiseRaceState {
+        output,
+        remaining: unique.len(),
+        settled: invalid,
+    }));
+    if !unique.is_empty() {
+        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
+    }
+    if invalid {
+        thaw_promise_reject(output, PROMISE_RACE_INVALID_ERROR.as_ptr());
+    }
+    for promise in unique {
+        let child = Box::into_raw(Box::new(PromiseRaceChild { state, promise }));
+        unsafe { thaw_promise_subscribe(promise, resume_promise_race_child, child.cast()) };
+    }
+    if unsafe { (*state).remaining } == 0 {
+        unsafe { drop(Box::from_raw(state)) };
+    }
+    output
+}
+
 fn settle_promise(promise: *mut ThawPromise, result: *const u8, rejected: bool) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
@@ -2259,6 +2343,47 @@ mod tests {
             "three 80ms children ran serially: {elapsed:?}"
         );
         unsafe { thaw_promise_destroy(joined) };
+    }
+
+    #[test]
+    fn promise_race_uses_completion_order_and_drains_the_loser() {
+        let slow = timed_value(30, 1.0);
+        let fast = timed_value(2, 2.0);
+        let children = [slow, fast];
+        let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
+        let result = thaw_runtime_run_until_resolved(raced);
+        assert_eq!(unsafe { result.cast::<f64>().read_unaligned() }, 2.0);
+        assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 1);
+        unsafe { thaw_promise_destroy(raced) };
+        thaw_runtime_drain_detached();
+        assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn promise_race_forwards_first_rejection_and_deduplicates_handles() {
+        let failed = thaw_promise_new();
+        let slow = timed_value(20, 4.0);
+        let children = [failed, slow, failed];
+        let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
+        let error = b"race failure\0";
+        assert_eq!(thaw_promise_reject(failed, error.as_ptr()), 1);
+        thaw_runtime_run_until_idle();
+        assert_eq!(thaw_promise_state(raced), 2);
+        assert_eq!(thaw_runtime_run_until_resolved(raced), error.as_ptr());
+        unsafe { thaw_promise_destroy(raced) };
+        thaw_runtime_drain_detached();
+        assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn promise_race_rejects_an_empty_input() {
+        let raced = unsafe { thaw_promise_race(std::ptr::null(), 0) };
+        assert_eq!(thaw_promise_state(raced), 2);
+        assert_eq!(
+            thaw_runtime_run_until_resolved(raced),
+            PROMISE_RACE_EMPTY_ERROR.as_ptr()
+        );
+        unsafe { thaw_promise_destroy(raced) };
     }
 
     #[test]
