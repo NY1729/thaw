@@ -34,6 +34,7 @@ pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 
 pub type HandlerFn = extern "C" fn(*const c_char) -> *const c_char;
+pub type HandlerErrorSlot = *mut *const c_char;
 pub type PromiseResumeFn = extern "C" fn(*mut u8, *const u8);
 
 #[derive(Clone, Copy)]
@@ -1371,19 +1372,23 @@ impl Drop for InvocationArenaReset {
 /// `main` (see that module for the `int main(void)` wrapper that calls
 /// this).
 #[no_mangle]
-pub extern "C" fn thaw_runtime_run(handler: HandlerFn) -> ! {
+pub extern "C" fn thaw_runtime_run(handler: HandlerFn, error_slot: HandlerErrorSlot) -> ! {
     let runtime_api = std::env::var("AWS_LAMBDA_RUNTIME_API").expect(
         "AWS_LAMBDA_RUNTIME_API is not set -- is this running inside a Lambda execution environment?",
     );
 
     loop {
-        if let Err(err) = handle_one_invocation(&runtime_api, handler) {
+        if let Err(err) = handle_one_invocation(&runtime_api, handler, error_slot) {
             eprintln!("thaw-runtime: {err}");
         }
     }
 }
 
-fn handle_one_invocation(runtime_api: &str, handler: HandlerFn) -> Result<(), String> {
+fn handle_one_invocation(
+    runtime_api: &str,
+    handler: HandlerFn,
+    error_slot: HandlerErrorSlot,
+) -> Result<(), String> {
     let _arena_reset = InvocationArenaReset;
     let next = http_request(
         runtime_api,
@@ -1398,9 +1403,25 @@ fn handle_one_invocation(runtime_api: &str, handler: HandlerFn) -> Result<(), St
         .to_string();
 
     let event_cstring = CString::new(next.body).map_err(|e| e.to_string())?;
+    if !error_slot.is_null() {
+        unsafe { *error_slot = std::ptr::null() };
+    }
     let result_ptr = handler(event_cstring.as_ptr());
     if result_ptr.is_null() {
-        return Err("handler failed with an uncaught Thaw exception".to_string());
+        let message = if error_slot.is_null() || unsafe { (*error_slot).is_null() } {
+            "handler failed with an uncaught Thaw exception".to_string()
+        } else {
+            unsafe { CStr::from_ptr(*error_slot) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let error_path = format!("/2018-06-01/runtime/invocation/{request_id}/error");
+        let body = format!(
+            "{{\"errorMessage\":{},\"errorType\":\"ThawError\"}}",
+            json_string(&message)
+        );
+        http_request(runtime_api, "POST", &error_path, Some(&body))?;
+        return Ok(());
     }
     let result = unsafe { CStr::from_ptr(result_ptr) }
         .to_string_lossy()
@@ -1409,6 +1430,24 @@ fn handle_one_invocation(runtime_api: &str, handler: HandlerFn) -> Result<(), St
     let response_path = format!("/2018-06-01/runtime/invocation/{request_id}/response");
     http_request(runtime_api, "POST", &response_path, Some(&result))?;
     Ok(())
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 struct HttpResponse {
@@ -1517,6 +1556,14 @@ mod tests {
         // Leaked on purpose: matches the arena/global-lifetime string model
         // compiled Thaw code uses (nothing frees heap strings yet).
         CString::new(format!("echo:{event}")).unwrap().into_raw() as *const c_char
+    }
+
+    static TEST_HANDLER_ERROR: &[u8] = b"handler exploded\0";
+    static mut TEST_PENDING_EXCEPTION: *const c_char = std::ptr::null();
+
+    extern "C" fn failing_handler(_: *const c_char) -> *const c_char {
+        unsafe { TEST_PENDING_EXCEPTION = TEST_HANDLER_ERROR.as_ptr().cast() };
+        std::ptr::null()
     }
 
     #[repr(C)]
@@ -2241,12 +2288,45 @@ mod tests {
             conn.write_all(response.as_bytes()).unwrap();
         });
 
-        handle_one_invocation(&addr, echo_handler).unwrap();
+        handle_one_invocation(&addr, echo_handler, std::ptr::null_mut()).unwrap();
         server.join().unwrap();
 
         let post_request = rx.recv().unwrap();
         assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/req-123/response"));
         assert!(post_request.ends_with("echo:\"hello\""));
+    }
+
+    #[test]
+    fn posts_uncaught_handler_exception_to_the_lambda_error_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = conn.read(&mut request).unwrap();
+            conn.write_all(
+                b"HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: req-error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+
+        handle_one_invocation(&addr, failing_handler, &raw mut TEST_PENDING_EXCEPTION).unwrap();
+        server.join().unwrap();
+        let request = rx.recv().unwrap();
+        assert!(request.starts_with("POST /2018-06-01/runtime/invocation/req-error/error"));
+        assert!(request.contains(r#"{"errorMessage":"handler exploded","errorType":"ThawError"}"#));
     }
 
     #[test]
@@ -2267,7 +2347,7 @@ mod tests {
             conn.write_all(response.as_bytes()).unwrap();
         });
 
-        let err = handle_one_invocation(&addr, echo_handler).unwrap_err();
+        let err = handle_one_invocation(&addr, echo_handler, std::ptr::null_mut()).unwrap_err();
         assert!(err.contains("500"));
         server.join().unwrap();
     }

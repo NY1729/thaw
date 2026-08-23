@@ -20,10 +20,10 @@
 //! async/await already takes (docs/design/async-await.md), consistent
 //! rather than a special case.
 //!
-//! There is no exception channel wired from here into Thaw's `try`/`catch`
-//! yet: a failure (unknown function, thrown JS exception, malformed args)
-//! comes back as a JSON error object (`{"__thaw_error__": "..."}`) instead
-//! of aborting, so the caller can at least inspect what happened.
+//! Generated code uses `thaw_js_call_result` to route unknown functions,
+//! thrown JS exceptions, malformed arguments, and Promise rejections through
+//! Thaw's `try`/`catch`. The original `thaw_js_call` JSON-error-object API is
+//! retained for C ABI compatibility with older callers.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -101,6 +101,28 @@ pub extern "C" fn thaw_js_call(
     });
 
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
+}
+
+/// Result-ABI companion to [`thaw_js_call`]. Unlike the legacy JSON error
+/// object API, failures occupy the error channel so generated Thaw code can
+/// route JavaScript throws and Promise rejections through `try`/`catch`.
+#[no_mangle]
+pub extern "C" fn thaw_js_call_result(
+    func_name: *const c_char,
+    args_json: *const c_char,
+) -> ThawResult {
+    let func_name = to_str(func_name);
+    let args_json = to_str(args_json);
+    match with_context(|ctx| call_impl(ctx, &func_name, &args_json)) {
+        Ok(text) => ThawResult {
+            value: CString::new(text).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(reason) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(reason).unwrap_or_default().into_raw(),
+        },
+    }
 }
 
 fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, String> {
@@ -246,6 +268,25 @@ mod tests {
     }
 
     #[test]
+    fn result_abi_separates_success_from_javascript_exceptions() {
+        assert_eq!(
+            load("function ok() { return 42; } function boom() { throw new Error('kaboom'); }"),
+            1
+        );
+        let ok_name = CString::new("ok").unwrap();
+        let boom_name = CString::new("boom").unwrap();
+        let args = CString::new("[]").unwrap();
+        let ok = thaw_js_call_result(ok_name.as_ptr(), args.as_ptr());
+        assert!(ok.error.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(ok.value) }.to_str().unwrap(), "42");
+
+        let failed = thaw_js_call_result(boom_name.as_ptr(), args.as_ptr());
+        assert!(failed.value.is_null());
+        let error = unsafe { CStr::from_ptr(failed.error) }.to_string_lossy();
+        assert!(error.contains("kaboom"), "{error}");
+    }
+
+    #[test]
     fn syntax_error_fails_to_load_instead_of_crashing() {
         assert_eq!(load("function( this is not valid js"), 0);
     }
@@ -264,4 +305,12 @@ mod tests {
             assert_eq!(err, "boom");
         });
     }
+}
+/// Common C ABI result for external operations that can either return a
+/// pointer-shaped value or throw. Both pointers are owned by the callee for
+/// the current request; exactly one is non-null.
+#[repr(C)]
+pub struct ThawResult {
+    pub value: *const c_char,
+    pub error: *const c_char,
 }
