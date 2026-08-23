@@ -384,7 +384,7 @@ fn generate_registry_shims(
     let mut shim = String::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
-    let mut native_addons: Vec<(String, String)> = Vec::new();
+    let mut native_addons: Vec<(String, String, Option<String>)> = Vec::new();
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
@@ -410,6 +410,7 @@ fn generate_registry_shims(
             native_addons.push((
                 pkg.name.clone(),
                 native_addon.to_string_lossy().into_owned(),
+                (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone()),
             ));
         } else if let Some(bundle_js) = &pkg.bundle_js {
             // Only Fallback functions need binding inside the loaded
@@ -451,9 +452,10 @@ fn generate_registry_shims(
     shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
     let native_addons: Vec<thaw_bridge::NativeAddon<'_>> = native_addons
         .iter()
-        .map(|(name, path)| thaw_bridge::NativeAddon {
+        .map(|(name, path, root_export)| thaw_bridge::NativeAddon {
             package_name: name,
             path,
+            root_export: root_export.as_deref(),
         })
         .collect();
     shim.push_str(&thaw_bridge::generate_native_addon_init(&native_addons));
@@ -906,7 +908,6 @@ mod tests {
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
             extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
-            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -914,8 +915,9 @@ mod tests {
                 napi_create_double(env, a + b, &result); return result;
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                (void)exports;
                 napi_value fn; napi_create_function(env, "add", 3, add, 0, &fn);
-                napi_set_named_property(env, exports, "add", fn); return exports;
+                return fn;
             }
         "#).unwrap();
         assert!(Command::new("cc")
@@ -950,6 +952,53 @@ mod tests {
             String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registry_runs_utf8_validate_prebuild_when_supplied() {
+        let Ok(prebuild) = std::env::var("THAW_UTF8_VALIDATE_NODE") else {
+            return;
+        };
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-utf8-validate-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let package = registry.join("utf-8-validate");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "declare function isValidUTF8(buffer: any): boolean;\n",
+        )
+        .unwrap();
+        std::fs::copy(prebuild, package.join("native.node")).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            r#"function main(): void {
+                console.log(Boolean(isValidUTF8(JSON.parse("[{\"type\":\"Buffer\",\"data\":[240,144,128,128]}]"))));
+                console.log(Boolean(isValidUTF8(JSON.parse("[{\"type\":\"Buffer\",\"data\":[255]}]"))));
+            }
+            "#,
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["utf-8-validate".into()],
+        )
+        .unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 

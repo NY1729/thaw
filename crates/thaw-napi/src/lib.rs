@@ -147,7 +147,7 @@ pub unsafe extern "C" fn napi_module_register(module: *mut NapiModule) {
 
 type RegisterV1 = unsafe extern "C" fn(NapiEnv, NapiValue) -> NapiValue;
 
-unsafe fn load_impl(path: &str) -> Result<(), String> {
+unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     let path = CString::new(path).map_err(|_| "addon path contains NUL".to_string())?;
     PENDING_MODULE.with(|slot| slot.borrow_mut().take());
     libc::dlerror();
@@ -189,15 +189,21 @@ unsafe fn load_impl(path: &str) -> Result<(), String> {
         libc::dlclose(handle);
         return Err(format!("addon initialization threw: {message}"));
     }
-    let object = match value_ref(exports).map_err(|_| "invalid exports value")? {
-        Value::Object(object) => object,
-        _ => return Err("addon initialization did not return exports object".into()),
-    };
     let mut functions = Vec::new();
-    for (name, value) in object {
-        if let Value::Function(function) = value_ref(*value).map_err(|_| "invalid export value")? {
-            functions.push((name.clone(), function.clone()));
+    match value_ref(exports).map_err(|_| "invalid exports value")? {
+        Value::Object(object) => {
+            for (name, value) in object {
+                if let Value::Function(function) =
+                    value_ref(*value).map_err(|_| "invalid export value")?
+                {
+                    functions.push((name.clone(), function.clone()));
+                }
+            }
         }
+        Value::Function(function) => {
+            functions.push((root_name.unwrap_or("default").to_string(), function.clone()))
+        }
+        _ => return Err("addon initialization returned neither an object nor a function".into()),
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
@@ -210,7 +216,21 @@ unsafe fn load_impl(path: &str) -> Result<(), String> {
 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_load(path: *const c_char) -> u8 {
-    match text(path).and_then(|path| load_impl(&path)) {
+    match text(path).and_then(|path| load_impl(&path, None)) {
+        Ok(()) => 1,
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *const c_char) -> u8 {
+    let result = text(path)
+        .and_then(|path| text(root_name).and_then(|root_name| load_impl(&path, Some(&root_name))));
+    match result {
         Ok(()) => 1,
         Err(error) => {
             HOST.with(|host| host.borrow_mut().last_error = error.clone());
@@ -234,6 +254,16 @@ fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
             env.alloc(Value::Array(values))
         }
         JsonValue::Object(values) => {
+            if values.get("type").and_then(JsonValue::as_str) == Some("Buffer") {
+                if let Some(bytes) = values.get("data").and_then(JsonValue::as_array) {
+                    return env.alloc(Value::Buffer(
+                        bytes
+                            .iter()
+                            .map(|value| value.as_u64().unwrap_or(0) as u8)
+                            .collect(),
+                    ));
+                }
+            }
             let values = values
                 .iter()
                 .map(|(key, value)| (key.clone(), value_from_json(env, value)))
@@ -977,5 +1007,25 @@ mod tests {
             assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "\"hello\"");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn runs_utf8_validate_prebuild_when_supplied() {
+        let Ok(path) = std::env::var("THAW_UTF8_VALIDATE_NODE") else {
+            return;
+        };
+        let path = CString::new(path).unwrap();
+        let name = CString::new("isValidUTF8").unwrap();
+        let valid = CString::new(r#"[{"type":"Buffer","data":[240,144,128,128]}]"#).unwrap();
+        let invalid = CString::new(r#"[{"type":"Buffer","data":[255]}]"#).unwrap();
+        unsafe {
+            assert_eq!(thaw_napi_load_named(path.as_ptr(), name.as_ptr()), 1);
+            let result = thaw_napi_call_result(name.as_ptr(), valid.as_ptr());
+            assert!(result.error.is_null());
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "true");
+            let result = thaw_napi_call_result(name.as_ptr(), invalid.as_ptr());
+            assert!(result.error.is_null());
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "false");
+        }
     }
 }
