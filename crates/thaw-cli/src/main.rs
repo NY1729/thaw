@@ -815,8 +815,13 @@ fn build(
             resolved_packages.push(package);
         }
     }
-    let (registry_shim, registry_native_libs, qualified_call_rewrites, external_exports) =
+    let (registry_shim, registry_native_libs, mut qualified_call_rewrites, external_exports) =
         generate_registry_shims(registry_dir, &resolved_packages)?;
+    let use_qualifiers: std::collections::HashSet<&str> = use_packages
+        .iter()
+        .map(|package| qualifier_identifier(package))
+        .collect();
+    qualified_call_rewrites.retain(|(qualifier, _, _)| use_qualifiers.contains(qualifier.as_str()));
     // `qs.stringify(x)`-style calls, for a name that collided across two
     // `--use`d packages, only exist as source-level syntax sugar over the
     // package-qualified alias `generate_registry_shims` actually
@@ -1249,6 +1254,144 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("main.ts:3:"), "{error}");
         assert!(error.contains("not-installed"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn imports_a_scoped_package_subpath_with_default_and_namespace_forms() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-scoped-subpath-import-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("registry");
+        let package = registry.join("@scope/tools/subpaths/feature");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export default function double(value: number): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("bundle.js"),
+            "module.exports = function(value) { return value * 2; };\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import double from "@scope/tools/feature";
+                import * as feature from "@scope/tools/feature";
+                function main(): void {
+                    console.log(double(20));
+                    console.log(feature.double(21));
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "40\n42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registers_builds_and_runs_an_installed_npm_wildcard_subpath() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-installed-wildcard-{}",
+            std::process::id()
+        ));
+        let node_modules = dir.join("node_modules");
+        let package = node_modules.join("feature-kit");
+        std::fs::create_dir_all(package.join("dist/features")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+                "name":"feature-kit",
+                "version":"1.2.3",
+                "types":"./index.d.ts",
+                "main":"./index.js",
+                "exports":{
+                    ".":{"types":"./index.d.ts","require":"./index.js"},
+                    "./features/*":{
+                        "types":"./dist/features/*.d.ts",
+                        "require":"./dist/features/*.js"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("index.d.ts"),
+            "export declare function root(): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("index.js"),
+            "module.exports = { root: function() { return 1; } };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("dist/features/triple.d.ts"),
+            "export default function triple(value: number): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("dist/features/triple.js"),
+            "module.exports = function(value) { return value * 3; };\n",
+        )
+        .unwrap();
+        let registry = dir.join("registry");
+        thaw_registry::add_installed(&registry, &node_modules, "feature-kit").unwrap();
+
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import triple from "feature-kit/features/triple";
+                function main(): void { console.log(triple(14)); }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_package_subpath_reports_the_import_location() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-missing-subpath-{}", std::process::id()));
+        let registry = dir.join("registry");
+        std::fs::create_dir_all(registry.join("math-kit")).unwrap();
+        std::fs::write(
+            registry.join("math-kit/package.d.ts"),
+            "export declare function add(a: number, b: number): number;\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            "\n\nimport { square } from \"math-kit/missing\";\nfunction main(): void {}\n",
+        )
+        .unwrap();
+        let error = build(&entry, &dir.join("app"), &[], &[], &[], &registry, &[]).unwrap_err();
+        assert!(error.contains("main.ts:3:"), "{error}");
+        assert!(error.contains("math-kit/missing"), "{error}");
+        assert!(error.contains("package.d.ts"), "{error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
