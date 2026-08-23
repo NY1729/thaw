@@ -117,7 +117,9 @@ The workspace crates have narrow responsibilities:
 - QuickJS fallback for signatures which cannot use the C ABI path
 - CommonJS dependency bundling, a limited ESM-to-CommonJS rewrite, selected
   Node built-in polyfills, scoped packages and package version locking
-- Native AWS Lambda Runtime API polling
+- Native AWS Lambda Runtime API polling with synchronous or resumable async
+  `(event: Json): Json` handlers; events are parsed before invocation and
+  results are serialized for the response endpoint
 - A C ABI promise handle and single-thread continuation queue for the future
   resumable `async` implementation
 - Promise handles distinguish pending, fulfilled and rejected settlement;
@@ -204,8 +206,9 @@ The workspace crates have narrow responsibilities:
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result
   ABI and propagate through Thaw `try/catch/finally`
-- Uncaught Lambda handler exceptions are posted to the Runtime API invocation
-  error endpoint with their original message
+- Uncaught synchronous exceptions and async rejections from Lambda handlers
+  are posted to the Runtime API invocation error endpoint with their original
+  message
 - Versioned FFI metadata can opt native functions into a typed
   `{ value, error }` result ABI whose errors propagate through Thaw catch paths
 - Metadata v2 copies owned native string results/errors into the request arena
