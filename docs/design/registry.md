@@ -649,18 +649,88 @@ thaw-quickjs（QuickJS-NG）で実行するテスト、`module.exports.default`
 （`parse(...)`）でも同じ結果になることも確認済み -- 13章で
 見つかった問題が、ユーザーが書けるコードの形で最終的に解決された。
 
-## 16. その他、今回やらなかったこと（意図的なスコープ外）
+## 16. ネイティブアドオンの失敗を、意味の分かる失敗にする
+
+「ネイティブアドオンへの対応」を素直に取ると「`.node` バイナリを
+QuickJS-NG から呼び出せるようにする」になるが、それは N-API/V8 の
+呼び出し規約を丸ごとホストするに等しく、8章で明示的にスコープ外と
+決めた「ネイティブライブラリのビルドパイプライン」よりさらに重い。
+今回はそこまでは踏み込まず、**実際に2つの実物パッケージで何が
+起きるかを観察してから**、現実的に価値のある一手だけを取った。
+
+- `utf-8-validate`（`node-gyp-build` に依存、ネイティブ読み込みに
+  失敗したら `require('./fallback')` という純粋 JS 実装に
+  フォールバックする設計）: 6章の `require` スタブが
+  `require('node-gyp-build')` の時点で例外を投げる → パッケージ自身の
+  `try/catch` がそれを正しく捕まえてフォールバック実装を使う、という
+  形で**何も変更せずに最初から正しく動いていた**。
+- `bcrypt`（同じく `node-gyp-build` に依存するが、`try/catch` なしで
+  無条件に呼び出す設計）: `bindings = require('node-gyp-build')(...)`
+  より前に、`bcrypt.js` 自身が書く `require('path')` で早々に
+  スタブへ落ち、`require('path') is not supported in the Fallback
+  path yet` という、ユーザーから見て原因の分からないエラーになった。
+
+後者を実際に追いかけると、`node-gyp-build` の実体
+（`node-gyp-build.js`、これも無改造のまま `bundle.js` に含まれている）
+は `fs`/`path`/`os` を使ってプリビルド済みバイナリを探し、
+見つからなければ**それ自身が**
+`throw new Error('No native build was found for ' + target + ...)`
+という、原因が一目で分かるエラーを投げるようになっている。つまり
+「ネイティブアドオンの検出」を Thaw 側で新たに作り込まなくても、
+`fs`/`path`/`os` の最小限の polyfill さえあれば、**実物の npm
+エコシステムのコード自身に正しい診断を最後まで出させられる**。
+
+- `path`: `resolve`/`join`/`dirname`/`basename` を文字列操作だけで
+  実装（Node の `path` も実ファイルシステムには触れないので、これで
+  十分）。
+- `os`: `arch()`/`platform()`/`tmpdir()`/`EOL` の固定値。
+- `fs`: `existsSync` は常に `false`、`readdirSync`/`statSync`/
+  `readFileSync` は常に `ENOENT` 相当の例外を投げる -- このレジストリ
+  は `package.d.ts`/`bundle.js` しか保存しないため（7章）、
+  「実ファイルは何も無い」が文字通り正しい答えであり、
+  `node-gyp-build.js` 自身がその前提で `try/catch` して `[]` を
+  返す設計になっている。
+- `process` を**グローバルとしても**定義（11章では `require('process')`
+  用のモジュールとしてのみ存在していた）: `node-gyp-build.js` は
+  `require` せずに `process.config`/`process.versions`/`process.env`/
+  `process.execPath` をいきなり参照するため、Buffer/URL と同じ理由で
+  未定義グローバル参照が `ReferenceError` になっていた。
+- `__dirname`/`__filename` もグローバルとして定義（`fs` が常に
+  「何も無い」と答える以上、実際の値は結果に影響しない -- 存在する
+  ことだけが必要）。
+
+**検証**: `bcrypt` を無改造のまま `--use` して `genSaltSync` を
+呼び出すと、修正前は `require('path') is not supported in the
+Fallback path yet` という無関係な一次エラーで落ちていたのが、修正後は
+`node-gyp-build` 自身が書いた
+`No native build was found for platform=linux arch=x64 runtime=node
+...` という、原因が一目で分かるメッセージに変わることを確認した。
+`utf-8-validate` 側は同じ変更後も引き続き `isValidUTF8("hello")` →
+`true` と正しく動くことを確認済み（`fs`/`path`/`os`/グローバル
+`process` の追加が、既に動いていた JS フォールバック経路を壊して
+いないことの回帰確認）。`path`/`os`/`fs` polyfill 自体と、
+グローバル `process`/`__dirname`/`__filename` が実際に QuickJS-NG 上で
+動くことは、`node-gyp-build.js` の実際の探索ロジック（`try/catch` で
+`fs.readdirSync` の失敗を吸収する部分を含む）を模したオフライン
+ユニットテストでも確認している。
+
+**まだ埋まっていない穴**: これは「失敗の質を上げた」だけであり、
+「ネイティブアドオンを実行できるようにした」わけではない --
+`.node` バイナリを実際にロードして呼び出すことは、依然として明確に
+スコープ外（本章冒頭の理由の通り）。
+
+## 17. その他、今回やらなかったこと（意図的なスコープ外）
 
 - **バージョン解決**: パッケージ名だけを見る。`package.json`/lockfile
   相当のものは存在しない。`npm install` は常に最新版を取得する
   （`@types/*` へのフォールバックも同様、本体パッケージとの
   バージョン整合は見ていない）。
-- **ネイティブライブラリのビルド**: `native.a` は事前にビルド済みの
-  ものを置く前提。「実際の npm パッケージのネイティブアドオンを
-  Thaw 向けにビルドする」パイプラインはまだない。
+- **ネイティブアドオンの実行そのもの**: 16章の通り、失敗時の診断は
+  改善したが、`.node` バイナリを Thaw から実際に呼び出すパイプライン
+  （N-API 相当のホスト実装）はまだない。
 - namespace 内で宣言された `interface`/`type`（9章末尾）。
-- **その他のプラットフォームグローバル**: `Buffer`/`URL` 以外にも
-  `process`/`TextEncoder`/`setTimeout` など、実際に参照する
+- **その他のプラットフォームグローバル**: `Buffer`/`URL`/`process`
+  以外にも `TextEncoder`/`setTimeout` など、実際に参照する
   パッケージにぶつかった時点で都度追加していく前提（12章と同じ方針）。
   網羅的な対応表は用意していない。
 - bridge.md 5章で述べた実際の C ABI（`(ptr, len)` 分割など）に合わせた
@@ -676,6 +746,7 @@ thaw-quickjs（QuickJS-NG）で実行するテスト、`module.exports.default`
 書き方が多少雑でも、他パッケージに依存していても）そのまま動く」こと
 -- つまり npm を使う感覚と地続きの体験にすること。ESM 専用パッケージも
 書いてある順に近い状態で動くようになり、複数パッケージ間の名前衝突も
-namespace 修飾構文（15章）で自動的に解決できるようになったが、
-ネイティブアドオンやバージョン解決など、まだ埋まっていない穴はある。
-優先順位は「実際に試して見つかった順」で決めていく。
+namespace 修飾構文（15章）で自動的に解決できるようになった。ネイティブ
+アドオンは実行そのものにはまだ手を出していないが、失敗した時に原因が
+一目で分かるところまでは来た（16章）。バージョン解決など、まだ埋まって
+いない穴はある。優先順位は「実際に試して見つかった順」で決めていく。
