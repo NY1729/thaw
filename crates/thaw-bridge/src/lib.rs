@@ -26,7 +26,10 @@ use swc_ecma_ast::{
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody,
     TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
-use thaw_hir::{FfiErrorAbi, FfiOwnership, FfiSignature, HirType};
+use thaw_hir::{
+    FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi,
+    HirType,
+};
 
 /// One function signature extracted from a `.d.ts` file, before
 /// classification.
@@ -887,6 +890,10 @@ pub fn classify(func: &DtsFunction) -> Classification {
         error_abi: FfiErrorAbi::Direct,
         return_ownership: FfiOwnership::Borrowed,
         error_ownership: FfiOwnership::Borrowed,
+        param_string_abis: vec![FfiStringAbi::NullTerminated; func.params.len()],
+        return_string_abi: FfiStringAbi::NullTerminated,
+        calling_convention: FfiCallingConvention::C,
+        aggregate_return_abi: FfiAggregateAbi::Internal,
     })
 }
 
@@ -1386,6 +1393,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 2],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
     }
@@ -1421,6 +1432,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 1],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
         assert_eq!(
@@ -1435,6 +1450,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 1],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
     }
@@ -1629,6 +1648,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 1],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
     }
@@ -1691,6 +1714,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 1],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
     }
@@ -1731,6 +1758,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 1],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
     }
@@ -1791,6 +1822,10 @@ mod tests {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; 1],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
     }

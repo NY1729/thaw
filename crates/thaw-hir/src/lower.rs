@@ -35,8 +35,9 @@ use swc_ecma_ast::{
 };
 
 use crate::{
-    BinOp, DynamicBackend, DynamicSignature, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr,
-    HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType, Symbol,
+    BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
+    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram,
+    HirStmt, HirType, Symbol,
 };
 
 fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
@@ -362,6 +363,10 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             error_abi: FfiErrorAbi::Direct,
             return_ownership: FfiOwnership::Borrowed,
             error_ownership: FfiOwnership::Borrowed,
+            param_string_abis: vec![FfiStringAbi::NullTerminated; sig.params.len()],
+            return_string_abi: FfiStringAbi::NullTerminated,
+            calling_convention: FfiCallingConvention::C,
+            aggregate_return_abi: FfiAggregateAbi::Internal,
         })
         .collect();
 
@@ -2791,6 +2796,7 @@ impl<'a> FnLowerer<'a> {
                     args,
                 ));
             }
+            let param_count = sig.params.len();
             let ffi_signature = FfiSignature {
                 symbol: callee_name,
                 params: sig.params,
@@ -2798,6 +2804,10 @@ impl<'a> FnLowerer<'a> {
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
                 error_ownership: FfiOwnership::Borrowed,
+                param_string_abis: vec![FfiStringAbi::NullTerminated; param_count],
+                return_string_abi: FfiStringAbi::NullTerminated,
+                calling_convention: FfiCallingConvention::C,
+                aggregate_return_abi: FfiAggregateAbi::Internal,
             };
             return Ok(HirExpr::FfiCall(ffi_signature, args));
         }
@@ -3795,6 +3805,10 @@ mod tests {
                 error_abi: crate::FfiErrorAbi::Direct,
                 return_ownership: crate::FfiOwnership::Borrowed,
                 error_ownership: crate::FfiOwnership::Borrowed,
+                param_string_abis: vec![crate::FfiStringAbi::NullTerminated; 2],
+                return_string_abi: crate::FfiStringAbi::NullTerminated,
+                calling_convention: crate::FfiCallingConvention::C,
+                aggregate_return_abi: crate::FfiAggregateAbi::Internal,
             }]
         );
 
@@ -3811,6 +3825,10 @@ mod tests {
                         error_abi: crate::FfiErrorAbi::Direct,
                         return_ownership: crate::FfiOwnership::Borrowed,
                         error_ownership: crate::FfiOwnership::Borrowed,
+                        param_string_abis: vec![crate::FfiStringAbi::NullTerminated; 2],
+                        return_string_abi: crate::FfiStringAbi::NullTerminated,
+                        calling_convention: crate::FfiCallingConvention::C,
+                        aggregate_return_abi: crate::FfiAggregateAbi::Internal,
                     },
                     vec![
                         HirExpr::Lit(HirLit::F64(2.0)),

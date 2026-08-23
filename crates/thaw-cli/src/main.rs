@@ -754,6 +754,25 @@ struct FfiMetadata {
     error_abi: thaw_hir::FfiErrorAbi,
     return_ownership: thaw_hir::FfiOwnership,
     error_ownership: thaw_hir::FfiOwnership,
+    param_string_abis: Option<Vec<thaw_hir::FfiStringAbi>>,
+    return_string_abi: thaw_hir::FfiStringAbi,
+    calling_convention: thaw_hir::FfiCallingConvention,
+    aggregate_return_abi: thaw_hir::FfiAggregateAbi,
+}
+
+fn parse_string_abi(
+    value: &str,
+    symbol: &str,
+    path: &Path,
+) -> Result<thaw_hir::FfiStringAbi, String> {
+    match value {
+        "null-terminated" => Ok(thaw_hir::FfiStringAbi::NullTerminated),
+        "pointer-length" => Ok(thaw_hir::FfiStringAbi::PointerLength),
+        other => Err(format!(
+            "unknown string ABI `{other}` for `{symbol}` in `{}`",
+            path.display()
+        )),
+    }
 }
 
 fn parse_ffi_ownership(
@@ -801,9 +820,9 @@ fn read_ffi_metadata(
         let document: serde_json::Value = serde_json::from_str(&source)
             .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
         let version = document.get("version").and_then(|value| value.as_u64());
-        if !matches!(version, Some(1 | 2)) {
+        if !matches!(version, Some(1..=3)) {
             return Err(format!(
-                "`{}` must declare FFI metadata version 1 or 2",
+                "`{}` must declare FFI metadata version 1, 2 or 3",
                 path.display()
             ));
         }
@@ -833,7 +852,7 @@ fn read_ffi_metadata(
             };
             let metadata = FfiMetadata {
                 error_abi: abi,
-                return_ownership: if version == Some(2) {
+                return_ownership: if matches!(version, Some(2 | 3)) {
                     parse_ffi_ownership(
                         entry,
                         "returnOwnership",
@@ -845,7 +864,7 @@ fn read_ffi_metadata(
                 } else {
                     thaw_hir::FfiOwnership::Borrowed
                 },
-                error_ownership: if version == Some(2) {
+                error_ownership: if matches!(version, Some(2 | 3)) {
                     parse_ffi_ownership(
                         entry,
                         "errorOwnership",
@@ -856,6 +875,83 @@ fn read_ffi_metadata(
                     )?
                 } else {
                     thaw_hir::FfiOwnership::Borrowed
+                },
+                param_string_abis: if version == Some(3) {
+                    entry
+                        .get("parameterStringAbis")
+                        .map(|value| {
+                            value
+                                .as_array()
+                                .ok_or_else(|| {
+                                    format!(
+                                        "FFI metadata for `{symbol}` in `{}` requires `parameterStringAbis` to be an array",
+                                        path.display()
+                                    )
+                                })?
+                                .iter()
+                                .map(|value| {
+                                    let value = value.as_str().ok_or_else(|| {
+                                        format!(
+                                            "FFI metadata for `{symbol}` in `{}` requires string ABI names",
+                                            path.display()
+                                        )
+                                    })?;
+                                    parse_string_abi(value, symbol, path)
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .transpose()?
+                } else {
+                    None
+                },
+                return_string_abi: if version == Some(3) {
+                    parse_string_abi(
+                        entry
+                            .get("returnStringAbi")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("null-terminated"),
+                        symbol,
+                        path,
+                    )?
+                } else {
+                    thaw_hir::FfiStringAbi::NullTerminated
+                },
+                calling_convention: if version == Some(3) {
+                    match entry
+                        .get("callingConvention")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("c")
+                    {
+                        "c" => thaw_hir::FfiCallingConvention::C,
+                        "fast" => thaw_hir::FfiCallingConvention::Fast,
+                        "cold" => thaw_hir::FfiCallingConvention::Cold,
+                        other => {
+                            return Err(format!(
+                                "unknown calling convention `{other}` for `{symbol}` in `{}`",
+                                path.display()
+                            ))
+                        }
+                    }
+                } else {
+                    thaw_hir::FfiCallingConvention::C
+                },
+                aggregate_return_abi: if version == Some(3) {
+                    match entry
+                        .get("aggregateReturnAbi")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("internal")
+                    {
+                        "internal" => thaw_hir::FfiAggregateAbi::Internal,
+                        "portable" => thaw_hir::FfiAggregateAbi::Portable,
+                        other => {
+                            return Err(format!(
+                                "unknown aggregate return ABI `{other}` for `{symbol}` in `{}`",
+                                path.display()
+                            ))
+                        }
+                    }
+                } else {
+                    thaw_hir::FfiAggregateAbi::Internal
                 },
             };
             if let Some(previous) = configured.insert(symbol.clone(), metadata.clone()) {
@@ -975,12 +1071,30 @@ fn build_with_link_mode(
     }
     let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
+        let param_count = program
+            .extern_functions
+            .iter()
+            .find(|signature| signature.symbol == symbol)
+            .map(|signature| signature.params.len())
+            .ok_or_else(|| {
+                format!("FFI metadata references unknown ambient function `{symbol}`")
+            })?;
         thaw_hir::set_ffi_error_abi(&mut program, &symbol, metadata.error_abi)?;
         thaw_hir::set_ffi_ownership(
             &mut program,
             &symbol,
             metadata.return_ownership,
             metadata.error_ownership,
+        )?;
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            &symbol,
+            metadata
+                .param_string_abis
+                .unwrap_or_else(|| vec![thaw_hir::FfiStringAbi::NullTerminated; param_count]),
+            metadata.return_string_abi,
+            metadata.calling_convention,
+            metadata.aggregate_return_abi,
         )?;
     }
 
@@ -2078,6 +2192,10 @@ mod tests {
                 error_abi: thaw_hir::FfiErrorAbi::ThawResult,
                 return_ownership: thaw_hir::FfiOwnership::Borrowed,
                 error_ownership: thaw_hir::FfiOwnership::Borrowed,
+                param_string_abis: None,
+                return_string_abi: thaw_hir::FfiStringAbi::NullTerminated,
+                calling_convention: thaw_hir::FfiCallingConvention::C,
+                aggregate_return_abi: thaw_hir::FfiAggregateAbi::Internal,
             }
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -2091,7 +2209,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let version = dir.join("version.json");
-        std::fs::write(&version, r#"{"version":3,"functions":{}}"#).unwrap();
+        std::fs::write(&version, r#"{"version":4,"functions":{}}"#).unwrap();
         assert!(read_ffi_metadata(&[version])
             .unwrap_err()
             .contains("version 1"));
@@ -2129,6 +2247,37 @@ mod tests {
                 error_ownership: thaw_hir::FfiOwnership::ArenaCopy {
                     destroy: Some("free_error".into())
                 },
+                param_string_abis: None,
+                return_string_abi: thaw_hir::FfiStringAbi::NullTerminated,
+                calling_convention: thaw_hir::FfiCallingConvention::C,
+                aggregate_return_abi: thaw_hir::FfiAggregateAbi::Internal,
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_version_three_string_abi_metadata() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-ffi-string-abi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ffi.json");
+        std::fs::write(
+            &path,
+            r#"{"version":3,"functions":{"slice":{"errorAbi":"direct","parameterStringAbis":["pointer-length"],"returnStringAbi":"pointer-length","callingConvention":"fast","aggregateReturnAbi":"portable"}}}"#,
+        )
+        .unwrap();
+        let metadata = read_ffi_metadata(&[path]).unwrap();
+        assert_eq!(
+            metadata["slice"],
+            FfiMetadata {
+                error_abi: thaw_hir::FfiErrorAbi::Direct,
+                return_ownership: thaw_hir::FfiOwnership::Borrowed,
+                error_ownership: thaw_hir::FfiOwnership::Borrowed,
+                param_string_abis: Some(vec![thaw_hir::FfiStringAbi::PointerLength]),
+                return_string_abi: thaw_hir::FfiStringAbi::PointerLength,
+                calling_convention: thaw_hir::FfiCallingConvention::Fast,
+                aggregate_return_abi: thaw_hir::FfiAggregateAbi::Portable,
             }
         );
         let _ = std::fs::remove_dir_all(dir);

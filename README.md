@@ -134,8 +134,12 @@ The workspace crates have narrow responsibilities:
 - `process.env`, `console.log`, JSON operations, and both legacy blocking and
   Promise-based non-blocking HTTP GET
 - Synchronous lowering of `async` functions and `await`
-- Ambient declarations and C ABI calls; number arrays become `(pointer,
-  length)` and object fields become scalar arguments
+- Ambient declarations and C ABI calls; number-array parameters become
+  `(pointer, length)`, object parameters become scalar fields, and metadata-
+  selected portable array/object return structs are copied into the Thaw arena
+- FFI metadata v3 selects null-terminated or `(pointer, length)` string ABIs
+  per parameter and return, internal/portable aggregate returns, plus
+  C/fast/cold LLVM calling conventions
 - QuickJS fallback for signatures which cannot use the C ABI path
 - CommonJS dependency bundling, a limited ESM-to-CommonJS rewrite, selected
   Node built-in polyfills, scoped packages and package version locking
@@ -291,9 +295,10 @@ The workspace crates have narrow responsibilities:
 - Full Node.js module resolution, all core modules and the complete Node global
   API
 - Full ESM semantics and a parser-backed production bundler
-- A fully general ABI-description format. String result/error ownership is
-  supported, but `(pointer, length)` strings, aggregate-result ownership and
-  calling-convention details are not yet described
+- A fully general ABI-description format. Version 3 covers string layouts,
+  number-array result ownership and common LLVM calling conventions, but
+  target-specific struct packing, variadics and nested aggregate ownership
+  are not yet described
 - The broader N-API surface beyond the current number/string/boolean/JSON/
   Buffer and async-work host. The async-work lifecycle, including
   `napi_cancel_async_work`, is supported by a bounded shared worker pool
