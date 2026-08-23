@@ -2379,6 +2379,72 @@ mod tests {
     }
 
     #[test]
+    fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
+        if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-auto-parcel-watcher-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        let watched = dir.join("watched");
+        let snapshot = dir.join("snapshot.bin");
+        std::fs::create_dir_all(&watched).unwrap();
+        std::fs::write(watched.join("before.txt"), "before").unwrap();
+        let added = thaw_registry::add(&registry, "@parcel/watcher@2.5.1").unwrap();
+        let native = added
+            .native_addon
+            .expect("the platform optional dependency contains a prebuild");
+        assert_eq!(native.platform, "linux");
+        assert_eq!(native.arch, "x64");
+        assert_eq!(native.libc, "glibc");
+        assert!(native
+            .source
+            .contains("watcher-linux-x64-glibc/watcher.node"));
+
+        let args = serde_json::to_string(&serde_json::json!([
+            watched.to_string_lossy(),
+            snapshot.to_string_lossy(),
+            {}
+        ]))
+        .unwrap();
+        let args_literal = serde_json::to_string(&args).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            format!(
+                "function main(): void {{ const result: Json = writeSnapshot(JSON.parse({args_literal})); console.log(\"snapshot-created\"); }}\n"
+            ),
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["@parcel/watcher".into()],
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "snapshot-created\n"
+        );
+        assert!(snapshot.is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
         let source = "function main(): void { console.log(qs.stringify(x)); }";
         assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);

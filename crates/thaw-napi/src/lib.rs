@@ -13,6 +13,7 @@ use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -192,7 +193,19 @@ pub enum Value {
     External(*mut c_void),
     Symbol(String),
     Function(Function),
+    Promise(Rc<RefCell<PromiseState>>),
     Error(String),
+}
+
+pub enum PromiseState {
+    Pending,
+    Resolved(NapiValue),
+    Rejected(NapiValue),
+}
+
+pub struct Deferred {
+    env: usize,
+    state: Rc<RefCell<PromiseState>>,
 }
 
 pub struct Reference {
@@ -663,7 +676,49 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
         Value::External(_) => return Err("cannot JSON-encode an external value".into()),
+        Value::Promise(state) => match &*state.borrow() {
+            PromiseState::Pending => return Err("native addon returned a pending Promise".into()),
+            PromiseState::Resolved(value) => json_from_value(*value)?,
+            PromiseState::Rejected(value) => {
+                let message = match value_ref(*value).map_err(|_| "invalid Promise rejection")? {
+                    Value::Error(message) | Value::String(message) => message.clone(),
+                    _ => json_from_value(*value)?.to_string(),
+                };
+                return Err(message);
+            }
+        },
     })
+}
+
+fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
+    let state = match unsafe { value_ref(value) } {
+        Ok(Value::Promise(state)) => Rc::clone(state),
+        _ => return Ok(value),
+    };
+    loop {
+        let settled = {
+            let state = state.borrow();
+            match *state {
+                PromiseState::Pending => None,
+                PromiseState::Resolved(value) => return Ok(value),
+                PromiseState::Rejected(value) => Some(value),
+            }
+        };
+        if let Some(value) = settled {
+            let message = unsafe {
+                match value_ref(value).map_err(|_| "invalid Promise rejection")? {
+                    Value::Error(message) | Value::String(message) => message.clone(),
+                    _ => json_from_value(value)?.to_string(),
+                }
+            };
+            return Err(message);
+        }
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0 {
+            return Err("native addon returned a Promise with no pending work".into());
+        }
+        thaw_napi_poll_async_work();
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
@@ -692,6 +747,7 @@ unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
         };
         return Err(message);
     }
+    let result = wait_for_promise(result)?;
     serde_json::to_string(&json_from_value(result)?).map_err(|error| error.to_string())
 }
 
@@ -788,6 +844,7 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
             };
             return Err(message);
         }
+        let value = wait_for_promise(value)?;
         let value = if value.is_null() {
             "null".to_string()
         } else {
@@ -1571,6 +1628,27 @@ pub unsafe extern "C" fn napi_instanceof(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_strict_equals(
+    _env: NapiEnv,
+    left: NapiValue,
+    right: NapiValue,
+    result: *mut bool,
+) -> NapiStatus {
+    if left.is_null() || right.is_null() || result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *result = match (value_ref(left), value_ref(right)) {
+        (Ok(Value::Undefined), Ok(Value::Undefined)) | (Ok(Value::Null), Ok(Value::Null)) => true,
+        (Ok(Value::Bool(left)), Ok(Value::Bool(right))) => left == right,
+        (Ok(Value::Number(left)), Ok(Value::Number(right))) => left == right,
+        (Ok(Value::String(left)), Ok(Value::String(right))) => left == right,
+        (Ok(_), Ok(_)) => left == right,
+        _ => false,
+    };
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_value_double(
     _env: NapiEnv,
     value: NapiValue,
@@ -2217,6 +2295,18 @@ pub unsafe extern "C" fn napi_fatal_error(
     std::process::abort()
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn napi_fatal_exception(env: NapiEnv, error: NapiValue) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if error.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    env.exception = Some(error);
+    NAPI_OK
+}
+
 #[repr(C)]
 pub struct NapiNodeVersion {
     major: u32,
@@ -2482,6 +2572,71 @@ pub unsafe extern "C" fn napi_escape_handle(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_promise(
+    env: NapiEnv,
+    deferred: *mut *mut Deferred,
+    promise: *mut NapiValue,
+) -> NapiStatus {
+    if deferred.is_null() || promise.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let state = Rc::new(RefCell::new(PromiseState::Pending));
+    *promise = env_ref.alloc(Value::Promise(Rc::clone(&state)));
+    *deferred = Box::into_raw(Box::new(Deferred {
+        env: env as usize,
+        state,
+    }));
+    NAPI_OK
+}
+
+unsafe fn settle_deferred(
+    env: NapiEnv,
+    deferred: *mut Deferred,
+    value: NapiValue,
+    rejected: bool,
+) -> NapiStatus {
+    let Some(deferred_ref) = deferred.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    if env.is_null() || value.is_null() || deferred_ref.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
+    let mut state = deferred_ref.state.borrow_mut();
+    if !matches!(*state, PromiseState::Pending) {
+        return NAPI_GENERIC_FAILURE;
+    }
+    *state = if rejected {
+        PromiseState::Rejected(value)
+    } else {
+        PromiseState::Resolved(value)
+    };
+    drop(state);
+    drop(Box::from_raw(deferred));
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_resolve_deferred(
+    env: NapiEnv,
+    deferred: *mut Deferred,
+    value: NapiValue,
+) -> NapiStatus {
+    settle_deferred(env, deferred, value, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_reject_deferred(
+    env: NapiEnv,
+    deferred: *mut Deferred,
+    value: NapiValue,
+) -> NapiStatus {
+    settle_deferred(env, deferred, value, true)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_create_async_work(
     env: NapiEnv,
     _async_resource: NapiValue,
@@ -2670,6 +2825,45 @@ fn run_one_threadsafe_callback() -> Option<bool> {
     Some(data.is_some() && !aborting)
 }
 
+fn run_one_async_completion() -> Option<()> {
+    let work_address = async_completions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .pop_front()?;
+    let work = unsafe { &*(work_address as *const AsyncWork) };
+    let env = work.env as NapiEnv;
+    let data = work.data as *mut c_void;
+    let complete = work.complete;
+    let status = work.completion_status.load(Ordering::Acquire);
+    work.state.store(ASYNC_COMPLETED, Ordering::Release);
+    ACTIVE_ASYNC_WORK.fetch_sub(1, Ordering::AcqRel);
+    if let Some(complete) = complete {
+        unsafe { complete(env, status, data) };
+    }
+    Some(())
+}
+
+/// Runs every callback which is ready now without waiting for producers.
+#[no_mangle]
+pub extern "C" fn thaw_napi_poll_async_work() -> usize {
+    let mut completed = 0;
+    loop {
+        let mut progressed = false;
+        while let Some(called) = run_one_threadsafe_callback() {
+            completed += usize::from(called);
+            progressed = true;
+        }
+        while run_one_async_completion().is_some() {
+            completed += 1;
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+    completed
+}
+
 /// Runs queued completion callbacks on the calling thread and waits until all
 /// work submitted by native addons has completed. Generated executables call
 /// this once user `main` returns.
@@ -2677,38 +2871,18 @@ fn run_one_threadsafe_callback() -> Option<bool> {
 pub extern "C" fn thaw_napi_run_async_work() -> usize {
     let mut completed = 0;
     loop {
-        while let Some(called) = run_one_threadsafe_callback() {
-            completed += usize::from(called);
-        }
-        let work_address = async_completions()
+        completed += thaw_napi_poll_async_work();
+        let threadsafe_pending = !threadsafe_ready()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pop_front();
-        let Some(work_address) = work_address else {
-            let threadsafe_pending = !threadsafe_ready()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty();
-            if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
-                && ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
-                && !threadsafe_pending
-            {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
-        };
-        let work = unsafe { &*(work_address as *const AsyncWork) };
-        let env = work.env as NapiEnv;
-        let data = work.data as *mut c_void;
-        let complete = work.complete;
-        let status = work.completion_status.load(Ordering::Acquire);
-        work.state.store(ASYNC_COMPLETED, Ordering::Release);
-        ACTIVE_ASYNC_WORK.fetch_sub(1, Ordering::AcqRel);
-        completed += 1;
-        if let Some(complete) = complete {
-            unsafe { complete(env, status, data) };
+            .is_empty();
+        if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
+            && ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
+            && !threadsafe_pending
+        {
+            break;
         }
+        std::thread::sleep(Duration::from_millis(1));
     }
     if LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0 {
         HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
@@ -2795,6 +2969,54 @@ mod tests {
         values: Mutex<Vec<f64>>,
         aborted: AtomicUsize,
         finalized: AtomicBool,
+    }
+
+    struct ParcelWatcherProbe {
+        events: Mutex<Vec<(String, String)>>,
+    }
+
+    unsafe extern "C" fn parcel_watcher_callback(
+        env: NapiEnv,
+        info: NapiCallbackInfo,
+    ) -> NapiValue {
+        let info = info.as_ref().unwrap();
+        let probe = &*(info.data as *const ParcelWatcherProbe);
+        if let Some(events) = info.args.get(1).and_then(|value| match value_ref(*value) {
+            Ok(Value::Array(events)) => Some(events),
+            _ => None,
+        }) {
+            let mut collected = probe.events.lock().unwrap();
+            for event in events {
+                let Ok(Value::Object(fields)) = value_ref(*event) else {
+                    continue;
+                };
+                let path = fields
+                    .get("path")
+                    .and_then(|value| match value_ref(*value) {
+                        Ok(Value::String(value)) => Some(value.clone()),
+                        _ => None,
+                    });
+                let kind = fields
+                    .get("type")
+                    .and_then(|value| match value_ref(*value) {
+                        Ok(Value::String(value)) => Some(value.clone()),
+                        _ => None,
+                    });
+                if let (Some(path), Some(kind)) = (path, kind) {
+                    collected.push((path, kind));
+                }
+            }
+        }
+        let mut undefined = ptr::null_mut();
+        assert_eq!(napi_get_undefined(env, &mut undefined), NAPI_OK);
+        undefined
+    }
+
+    fn promise_is_resolved(value: NapiValue) -> bool {
+        let Ok(Value::Promise(state)) = (unsafe { value_ref(value) }) else {
+            return false;
+        };
+        matches!(*state.borrow(), PromiseState::Resolved(_))
     }
 
     unsafe extern "C" fn threadsafe_js_callback(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -3011,6 +3233,72 @@ mod tests {
         assert_eq!(probe.aborted.load(Ordering::Acquire), 1);
         assert!(probe.finalized.load(Ordering::Acquire));
         assert!(probe.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn threadsafe_function_serializes_multiple_producers() {
+        let _guard = lock_async_test();
+        let mut env = Env::new();
+        let probe = Box::into_raw(Box::new(ThreadsafeProbe {
+            main_thread: std::thread::current().id(),
+            callback_threads: Mutex::new(Vec::new()),
+            values: Mutex::new(Vec::new()),
+            aborted: AtomicUsize::new(0),
+            finalized: AtomicBool::new(false),
+        }));
+        let function = env.alloc(Value::Function(Function {
+            callback: threadsafe_js_callback,
+            data: probe.cast(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+        }));
+        let mut threadsafe = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                napi_create_threadsafe_function(
+                    &mut env,
+                    function,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    8,
+                    4,
+                    probe.cast(),
+                    Some(threadsafe_finalize),
+                    probe.cast(),
+                    Some(threadsafe_call_js),
+                    &mut threadsafe,
+                ),
+                NAPI_OK
+            );
+        }
+        let address = threadsafe as usize;
+        let workers = (0..4)
+            .map(|producer| {
+                std::thread::spawn(move || unsafe {
+                    let threadsafe = address as *mut ThreadsafeFunction;
+                    for index in 0..25 {
+                        let value = Box::into_raw(Box::new((producer * 25 + index) as f64));
+                        assert_eq!(
+                            napi_call_threadsafe_function(threadsafe, value.cast(), 1),
+                            NAPI_OK
+                        );
+                    }
+                    assert_eq!(napi_release_threadsafe_function(threadsafe, 0), NAPI_OK);
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(thaw_napi_run_async_work(), 100);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let probe = unsafe { Box::from_raw(probe) };
+        let mut values = probe.values.lock().unwrap().clone();
+        values.sort_by(|left, right| left.total_cmp(right));
+        assert_eq!(
+            values,
+            (0..100).map(|value| value as f64).collect::<Vec<_>>()
+        );
+        assert!(probe.finalized.load(Ordering::Acquire));
     }
 
     #[test]
@@ -3459,6 +3747,153 @@ mod tests {
                 poller.is_some(),
                 "serialport did not export its Poller class"
             );
+        }
+    }
+
+    #[test]
+    fn loads_parcel_watcher_prebuild_when_supplied() {
+        let _guard = lock_async_test();
+        let Ok(path) = std::env::var("THAW_PARCEL_WATCHER_NODE") else {
+            return;
+        };
+        let path = CString::new(path).unwrap();
+        unsafe {
+            assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+            for name in [
+                "subscribe",
+                "unsubscribe",
+                "writeSnapshot",
+                "getEventsSince",
+            ] {
+                assert!(
+                    HOST.with(|host| host.borrow().functions.contains_key(name)),
+                    "parcel watcher did not export `{name}`"
+                );
+            }
+
+            let snapshot_dir = std::env::temp_dir().join(format!(
+                "thaw-parcel-snapshot-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&snapshot_dir).unwrap();
+            std::fs::write(snapshot_dir.join("before.txt"), "before").unwrap();
+            let snapshot = snapshot_dir.join("snapshot.bin");
+            let args = CString::new(
+                serde_json::to_string(&serde_json::json!([
+                    snapshot_dir.to_string_lossy(),
+                    snapshot.to_string_lossy(),
+                    {}
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+            let result = thaw_napi_call_result(c"writeSnapshot".as_ptr(), args.as_ptr());
+            assert!(
+                result.error.is_null(),
+                "{}",
+                if result.error.is_null() {
+                    "unknown error".into()
+                } else {
+                    CStr::from_ptr(result.error).to_string_lossy().into_owned()
+                }
+            );
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "null");
+            assert!(snapshot.is_file());
+            let missing = snapshot_dir.join("missing-snapshot.bin");
+            let args = CString::new(
+                serde_json::to_string(&serde_json::json!([
+                    snapshot_dir.to_string_lossy(),
+                    missing.to_string_lossy(),
+                    {}
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+            let rejected = thaw_napi_call_result(c"getEventsSince".as_ptr(), args.as_ptr());
+            assert!(
+                !rejected.error.is_null(),
+                "missing snapshot Promise resolved"
+            );
+
+            let (subscribe, unsubscribe, env_address) = HOST.with(|host| {
+                let mut host = host.borrow_mut();
+                let subscribe = host.functions.get("subscribe").unwrap().clone();
+                let unsubscribe = host.functions.get("unsubscribe").unwrap().clone();
+                let env = host.module_envs.last_mut().unwrap();
+                (subscribe, unsubscribe, (&mut **env as *mut Env) as usize)
+            });
+            let env = &mut *(env_address as NapiEnv);
+            let dir = std::env::temp_dir().join(format!(
+                "thaw-parcel-watcher-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let directory = env.alloc(Value::String(dir.to_string_lossy().into_owned()));
+            let options = env.alloc(Value::Object(HashMap::new()));
+            let probe = Box::into_raw(Box::new(ParcelWatcherProbe {
+                events: Mutex::new(Vec::new()),
+            }));
+            let callback = env.alloc(Value::Function(Function {
+                callback: parcel_watcher_callback,
+                data: probe.cast(),
+                properties: HashMap::new(),
+                _thaw_bridge: None,
+            }));
+            let this_arg = env.alloc(Value::Undefined);
+            let mut subscribe_info = CallbackInfo {
+                args: vec![directory, callback, options],
+                this_arg,
+                new_target: ptr::null_mut(),
+                data: subscribe.data,
+            };
+            let subscribed = (subscribe.callback)(env, &mut subscribe_info);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !promise_is_resolved(subscribed) {
+                thaw_napi_poll_async_work();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "subscribe Promise timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+
+            let watched_file = dir.join("created.txt");
+            std::fs::write(&watched_file, "thaw").unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while (*probe).events.lock().unwrap().is_empty() {
+                thaw_napi_poll_async_work();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "watch event timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!((*probe).events.lock().unwrap().iter().any(|(event, kind)| {
+                event == &watched_file.to_string_lossy() && (kind == "create" || kind == "update")
+            }));
+
+            let mut unsubscribe_info = CallbackInfo {
+                args: vec![directory, callback, options],
+                this_arg,
+                new_target: ptr::null_mut(),
+                data: unsubscribe.data,
+            };
+            let unsubscribed = (unsubscribe.callback)(env, &mut unsubscribe_info);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !promise_is_resolved(unsubscribed) {
+                thaw_napi_poll_async_work();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "unsubscribe Promise timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            thaw_napi_run_async_work();
+            drop(Box::from_raw(probe));
+            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_dir_all(snapshot_dir);
         }
     }
 }
