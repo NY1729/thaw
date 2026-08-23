@@ -375,8 +375,8 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    Lambda ハンドラでの逐次 `await` はこれで完全にカバーできる。
 2. `fetch`/`std` の実装と合わせて、V1 の「ブロッキング呼び出しに
    脱糖する」対象を増やしていく。
-3. `Promise.all`と`Promise.race`は7・8章の形で実装済み。次は同じschedulerを
-   `Promise.any`と`Promise.allSettled`へ一般化する。
+3. `Promise.all`、`Promise.race`、`Promise.any`は7〜9章の形で実装済み。
+   次は同じschedulerを`Promise.allSettled`へ一般化する。
 
 ## 7. Promise.all fan-in
 
@@ -409,3 +409,17 @@ runtimeは同じhandleの重複を一度だけsubscribeし、勝者決定後も�
 Lambda arena reset前に残りを駆動する。LLVMはliteralでは全child callを先に評価し、配列変数では
 既存の`[i64 len][8-byte slots...]`からhandle領域を取り出して`thaw_promise_race`へ渡す。
 E2E testは完了順、array variable、全native value shape、rejectの`try/catch`伝播を単一実行ファイルで検査する。
+
+## 9. Promise.any
+
+`Promise.any([p0, ...])`と`Promise.any(promises)`はhomogeneousなPromise入力を同時に
+subscribeする。rejectは親を確定させず、最初のfulfilled値だけを親Promiseへ転送する。
+全distinct childがrejectした場合は、現在の文字列ベース例外ABIに合わせて
+`All promises were rejected`を集約エラーとして親をrejectする。
+
+空のリテラル、非Promise、void Promise、異なる解決型の混在はloweringで拒否する。
+実行時の空配列も集約エラーになる。重複handleは一度だけsubscribeし、成功確定後の敗者も
+join stateに保持して`thaw_runtime_drain_detached`で回収する。LLVMは`Promise.race`と共有する
+handle-array生成経路から`thaw_promise_any`を呼び出す。Runtime testは先行reject、後続成功、
+全reject、空入力、重複とdrainを、E2E testはarray variable、全native value shape、全失敗の
+`try/catch`伝播を単一実行ファイルで検査する。
