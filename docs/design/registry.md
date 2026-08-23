@@ -885,9 +885,10 @@ namespace import はpackage固有のshim symbolへ変換されるため、同名
 `registry add` のroot entry選択では、`package.json` の `exports["."]` を
 読み、型は `types` condition、実行時は `require`、`import`、`default` の
 順で選ぶ。該当conditionがなければ従来通りトップレベルの
-`types`/`typings` と `main` にフォールバックする。package subpath exports
-はまだ誤ってrootへ結び付けず、import元のファイル・行・列を含む診断として
-拒否する。
+`types`/`typings` と `main` にフォールバックする。`./feature` のような正確な
+package subpath exportは、登録時に専用の型定義とruntime bundleを
+`subpaths/feature/`へ保存し、`pkg/feature` importからrootとは独立して解決する。
+`./features/*` のようなwildcard exportはまだ対象外である。
 
 `node:path`、`node:util`、`node:process`、`node:buffer` は11章でnpm内部の
 `require`向けに使ってきたpolyfillを、ユーザーのimportにも公開する。

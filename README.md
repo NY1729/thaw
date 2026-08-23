@@ -129,6 +129,8 @@ The workspace crates have narrow responsibilities:
   native type; legacy unsupported signatures retain the explicit `Json` ABI
 - Root package `exports` conditions select `types` and `require`/`import` entry
   points during `registry add`, with `types`/`typings` and `main` fallbacks
+- Exact package subpath exports such as `pkg/feature` are registered with their
+  own conditional type/runtime entries and can be imported alongside the root
 - Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
   modules backed by the same QuickJS polyfills used by npm dependencies
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
@@ -231,7 +233,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
-  tuples, broad union/intersection support, package subpath exports, anonymous
+  tuples, broad union/intersection support, wildcard package exports, anonymous
   default functions and the complete JavaScript expression/statement set
 - Block-scoped locals inside nested control flow, nested/control-flow await,
   value-returning/general user-defined Promise async functions and concurrent
