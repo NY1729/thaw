@@ -375,20 +375,21 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    Lambda ハンドラでの逐次 `await` はこれで完全にカバーできる。
 2. `fetch`/`std` の実装と合わせて、V1 の「ブロッキング呼び出しに
    脱糖する」対象を増やしていく。
-3. `Promise.all`のhomogeneous fan-inは7章の形で実装済み。次は同じschedulerを
-   heterogeneous tupleと他のPromise結合子へ一般化する。
+3. `Promise.all`のhomogeneous fan-inとheterogeneous tupleは7章の形で実装済み。
+   次は同じschedulerを他のPromise結合子へ一般化する。
 
 ## 7. Promise.all fan-in
 
 `Promise.all([p0, p1, ...])`と`Promise.all(promises)`は、homogeneousなPromise配列として
 HIRへ取り込む。number/string/boolean/object/arrayを解決値にでき、HIRは要素型を保持する。
-空配列はnumber配列として扱い、非Promise、void Promise、または混在する解決型は要素番号を
-含むコンパイルエラーにする。
+リテラル内の解決型が異なる場合は`Promise<[T0, T1, ...]>`として位置ごとの型を保持する。
+空配列はnumber配列として扱い、非Promiseとvoid Promiseは要素番号を含むコンパイルエラーにする。
 
 LLVMは全child callを先に評価し、handle配列を`thaw_promise_all_slots`へ渡す。runtimeは全handleへ
 同時にsubscribeし、入力indexのarena slotへ結果をコピーするため、完了順が変わっても結果順は
 変わらない。結果は`[i64 len][8-byte slots...]`へのpointerを格納したtyped result slotとして親Promiseへ
-渡し、通常のframe resume ABIから読み取る。
+渡し、通常のframe resume ABIから読み取る。異種タプルは`thaw_promise_all_typed`へ位置ごとの
+コピー幅を渡し、1-byte booleanと8-byteの数値・pointerを安全に同じ結果へ格納する。
 
 最初に観測したreject pointerで親を即座にrejectし、それ以後の成功値は無視する。未完了childは
 親handle破棄後も独立したjoin stateで保持する。`thaw_runtime_drain_detached`を通常mainの終了前と

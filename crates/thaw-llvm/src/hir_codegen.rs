@@ -266,7 +266,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Await(inner) => {
                 matches!(
                     inner.as_ref(),
-                    HirExpr::PromiseAll(_, _) | HirExpr::PromiseAllArray(_, _)
+                    HirExpr::PromiseAll(_, _)
+                        | HirExpr::PromiseAllArray(_, _)
+                        | HirExpr::PromiseAllTuple(_, _)
                 ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
@@ -288,7 +290,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::FfiCall(_, args)
             | HirExpr::DynamicCall(_, args)
             | HirExpr::ArrayLit(args)
-            | HirExpr::PromiseAll(args, _) => args
+            | HirExpr::PromiseAll(args, _)
+            | HirExpr::PromiseAllTuple(args, _) => args
                 .iter()
                 .any(|arg| Self::expr_awaits_frame_source(arg, frame_functions)),
             HirExpr::IndexAssign(a, b, c) => {
@@ -647,6 +650,11 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i64_type.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_promise_all_typed",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
     }
 
     fn llvm_symbol_for(name: &str) -> String {
@@ -668,6 +676,12 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Array(elem) => {
                 self.basic_type(elem)?;
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
+            HirType::Tuple(elements) => {
+                for element in elements {
+                    self.basic_type(element)?;
+                }
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             // Objects are represented the same way: a single opaque pointer
@@ -1866,7 +1880,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Await(inner) => {
                 matches!(
                     inner.as_ref(),
-                    HirExpr::PromiseAll(_, _) | HirExpr::PromiseAllArray(_, _)
+                    HirExpr::PromiseAll(_, _)
+                        | HirExpr::PromiseAllArray(_, _)
+                        | HirExpr::PromiseAllTuple(_, _)
                 ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "fetch" || name == "Promise.all" || frame_names.contains(name)))
@@ -1892,7 +1908,9 @@ impl<'ctx> HirCompiler<'ctx> {
     fn is_frame_await_source(&self, expr: &HirExpr) -> bool {
         matches!(
             expr,
-            HirExpr::PromiseAll(_, _) | HirExpr::PromiseAllArray(_, _)
+            HirExpr::PromiseAll(_, _)
+                | HirExpr::PromiseAllArray(_, _)
+                | HirExpr::PromiseAllTuple(_, _)
         ) || matches!(expr, HirExpr::Call(callee, _)
             if matches!(callee.as_ref(), HirExpr::Var(name)
                 if name == "sleep" || name == "fetch" || name == "Promise.all" || self.frame_async_functions.contains_key(name)))
@@ -1932,6 +1950,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
                         HirType::Array(Box::new(element.clone()))
                     }
+                    HirExpr::PromiseAllTuple(_, elements) => HirType::Tuple(elements.clone()),
                     HirExpr::Call(callee, _) => {
                         let HirExpr::Var(name) = callee.as_ref() else {
                             unreachable!()
@@ -1972,7 +1991,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::FfiCall(_, args)
             | HirExpr::DynamicCall(_, args)
             | HirExpr::ArrayLit(args)
-            | HirExpr::PromiseAll(args, _) => {
+            | HirExpr::PromiseAll(args, _)
+            | HirExpr::PromiseAllTuple(args, _) => {
                 for arg in args {
                     if let Some(found) = self.extract_first_frame_await(arg, temporary)? {
                         return Ok(Some(found));
@@ -3683,6 +3703,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::PromiseAllArray(array, element) => {
                 self.compile_promise_all_array(array, element)
             }
+            HirExpr::PromiseAllTuple(args, elements) => {
+                self.compile_promise_all_tuple(args, elements)
+            }
             HirExpr::Lambda(captures, params, ret, body) => {
                 self.compile_lambda(captures, params, ret, body)
             }
@@ -5176,6 +5199,75 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_promise_all_slots did not return a promise".to_string())
+    }
+
+    fn compile_promise_all_tuple(
+        &mut self,
+        args: &[HirExpr],
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if args.len() != elements.len() {
+            return Err("Promise.all tuple value/type arity mismatch".into());
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+        let allocate_words = |compiler: &mut Self, words: usize, name: &str| {
+            compiler
+                .builder
+                .build_call(
+                    arena_alloc,
+                    &[
+                        i64_type.const_int((words * 8) as u64, false).into(),
+                        i64_type.const_int(8, false).into(),
+                    ],
+                    name,
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("{name} allocation returned void"))
+                .map(|value| value.into_pointer_value())
+        };
+        let promises = allocate_words(self, args.len(), "promise_all_tuple_promises")?;
+        let sizes = allocate_words(self, elements.len(), "promise_all_tuple_sizes")?;
+        for (index, (arg, element)) in args.iter().zip(elements).enumerate() {
+            let offset = i64_type.const_int(index as u64, false);
+            let promise_slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(ptr_type, promises, &[offset], "promise_tuple_slot")
+                    .map_err(|error| error.to_string())?
+            };
+            let promise = self.compile_expr(arg)?.into_pointer_value();
+            self.builder
+                .build_store(promise_slot, promise)
+                .map_err(|error| error.to_string())?;
+            let size_slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(i64_type, sizes, &[offset], "promise_tuple_size")
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(
+                    size_slot,
+                    i64_type.const_int(if *element == HirType::Bool { 1 } else { 8 }, false),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_all_typed").unwrap(),
+                &[
+                    promises.into(),
+                    sizes.into(),
+                    i64_type.const_int(args.len() as u64, false).into(),
+                ],
+                "promise_all_tuple",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_promise_all_typed did not return a promise".to_string())
     }
 
     fn compile_await(&mut self, inner: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
@@ -7467,6 +7559,62 @@ mod tests {
     }
 
     #[test]
+    fn frame_split_promise_all_supports_heterogeneous_tuples() {
+        let source = r#"
+            async function numberValue(): Promise<number> {
+                await sleep(15);
+                return 12;
+            }
+            async function stringValue(): Promise<string> {
+                await sleep(1);
+                return "thaw";
+            }
+            async function boolValue(): Promise<boolean> {
+                await sleep(5);
+                return true;
+            }
+
+            async function main(): Promise<void> {
+                const values: [number, string, boolean] = await Promise.all([
+                    numberValue(), stringValue(), boolValue()
+                ]);
+                console.log(values[0]);
+                console.log(values[1]);
+                console.log(values[2]);
+                console.log(values.length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_heterogeneous_tuple"),
+            "12\nthaw\ntrue\n3\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_tuple_supports_aggregate_members() {
+        let source = r#"
+            interface Item { value: number; }
+            async function item(): Promise<Item> {
+                await sleep(8);
+                return { value: 21 };
+            }
+            async function row(): Promise<number[]> {
+                await sleep(1);
+                return [30, 31];
+            }
+            async function main(): Promise<void> {
+                const values: [Item, number[]] = await Promise.all([item(), row()]);
+                console.log(values[0].value);
+                console.log(values[1][1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_tuple_aggregates"),
+            "21\n31\n"
+        );
+    }
+
+    #[test]
     fn frame_split_promise_all_rejection_enters_nearest_catch() {
         let source = r#"
             async function succeeds(): Promise<number> {
@@ -7491,6 +7639,32 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "promise_all_rejection"),
             "joined failure\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_promise_all_tuple_rejection_enters_nearest_catch() {
+        let source = r#"
+            async function succeeds(): Promise<number> {
+                await sleep(15);
+                return 1;
+            }
+            async function fails(): Promise<string> {
+                await sleep(1);
+                throw "tuple failure";
+            }
+            async function main(): Promise<void> {
+                try {
+                    const values: [number, string] = await Promise.all([succeeds(), fails()]);
+                    console.log(values[0]);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_all_tuple_rejection"),
+            "tuple failure\n"
         );
     }
 

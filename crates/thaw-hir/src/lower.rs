@@ -449,6 +449,7 @@ fn supports_generic_native_layout(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => true,
         HirType::Array(inner) => **inner == HirType::F64,
+        HirType::Tuple(elements) => elements.iter().all(supports_generic_native_layout),
         HirType::Object(fields) => fields
             .iter()
             .all(|(_, ty)| supports_generic_native_layout(ty)),
@@ -465,6 +466,14 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
             HirType::Str => "str".into(),
             HirType::Json => "json".into(),
             HirType::Array(inner) => format!("array_{}", fingerprint(inner)),
+            HirType::Tuple(elements) => format!(
+                "tuple_{}",
+                elements
+                    .iter()
+                    .map(fingerprint)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            ),
             HirType::Object(fields) => format!(
                 "object_{}",
                 fields
@@ -1117,6 +1126,13 @@ fn lower_ts_type(
             interfaces,
             generic_interfaces,
         )?))),
+        TsType::TsTupleType(tuple) => Ok(HirType::Tuple(
+            tuple
+                .elem_types
+                .iter()
+                .map(|element| lower_ts_type(&element.ty, interfaces, generic_interfaces))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
             if function.type_params.is_some() {
                 return Err("generic function types are not supported yet".into());
@@ -1402,6 +1418,21 @@ fn resolve_ts_type_with_substitution(
                 in_progress,
             )?)))
         }
+        TsType::TsTupleType(tuple) => Ok(HirType::Tuple(
+            tuple
+                .elem_types
+                .iter()
+                .map(|element| {
+                    resolve_ts_type_with_substitution(
+                        &element.ty,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         TsType::TsTypeLit(type_lit) => {
             let fields = type_lit
                 .members
@@ -1498,7 +1529,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::FfiCall(_, args)
         | HirExpr::DynamicCall(_, args)
         | HirExpr::ArrayLit(args)
-        | HirExpr::PromiseAll(args, _) => {
+        | HirExpr::PromiseAll(args, _)
+        | HirExpr::PromiseAllTuple(args, _) => {
             for arg in args {
                 collect_referenced_bindings(arg, names);
             }
@@ -2190,6 +2222,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::PromiseAllArray(_, element) => Ok(HirType::Promise(Box::new(HirType::Array(
                 Box::new(element.clone()),
             )))),
+            HirExpr::PromiseAllTuple(_, elements) => {
+                Ok(HirType::Promise(Box::new(HirType::Tuple(elements.clone()))))
+            }
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
                 let Some(first) = values.first() else {
@@ -2470,6 +2505,21 @@ impl<'a> FnLowerer<'a> {
                         Box::new(index),
                         *element,
                     )),
+                    HirType::Tuple(elements) => {
+                        let HirExpr::Lit(HirLit::F64(position)) = index else {
+                            return Err("tuple index must be a numeric literal".into());
+                        };
+                        let position = position as usize;
+                        let element = elements
+                            .get(position)
+                            .cloned()
+                            .ok_or_else(|| format!("tuple index {position} is out of bounds"))?;
+                        Ok(HirExpr::TypedIndex(
+                            Box::new(obj),
+                            Box::new(HirExpr::Lit(HirLit::F64(position as f64))),
+                            element,
+                        ))
+                    }
                     HirType::Json => Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index))),
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
@@ -2478,7 +2528,7 @@ impl<'a> FnLowerer<'a> {
                 let obj = self.lower_expr(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 match &obj_ty {
-                    HirType::Array(_) if prop.sym == *"length" => {
+                    HirType::Array(_) | HirType::Tuple(_) if prop.sym == *"length" => {
                         Ok(HirExpr::ArrayLen(Box::new(obj)))
                     }
                     HirType::Object(fields) => {
@@ -2750,7 +2800,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 return Ok(HirExpr::PromiseAllArray(Box::new(values), *element));
             };
-            let mut element_type = None;
+            let mut element_types = Vec::new();
             let promises = array
                 .elems
                 .iter()
@@ -2776,22 +2826,15 @@ impl<'a> FnLowerer<'a> {
                     if resolved == HirType::Void {
                         return Err(format!("Promise.all element {index} resolves to void"));
                     }
-                    if let Some(expected) = &element_type {
-                        if expected != &resolved {
-                            return Err(format!(
-                                "Promise.all element {index} resolves to {resolved:?}, expected {expected:?}"
-                            ));
-                        }
-                    } else {
-                        element_type = Some(resolved);
-                    }
+                    element_types.push(resolved);
                     Ok(value)
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            return Ok(HirExpr::PromiseAll(
-                promises,
-                element_type.unwrap_or(HirType::F64),
-            ));
+            let first = element_types.first().cloned().unwrap_or(HirType::F64);
+            if element_types.iter().all(|element| element == &first) {
+                return Ok(HirExpr::PromiseAll(promises, first));
+            }
+            return Ok(HirExpr::PromiseAllTuple(promises, element_types));
         }
 
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
