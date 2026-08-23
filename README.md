@@ -160,6 +160,8 @@ The workspace crates have narrow responsibilities:
   wildcard substitutions in their targets are resolved in declaration order
 - Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
   modules backed by the same QuickJS polyfills used by npm dependencies
+- `node:fs` exposes native synchronous UTF-8 `existsSync`, `readFileSync`,
+  `writeFileSync`, and recursive `mkdirSync`, including fully static builds
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint
