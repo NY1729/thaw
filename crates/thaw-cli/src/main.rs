@@ -4,6 +4,8 @@ use std::process::Command;
 use inkwell::context::Context;
 use thaw_llvm::HirCompiler;
 
+mod module_graph;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -696,12 +698,14 @@ fn build(
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
-    let source = registry_shim + &generate_bridge_shims(bridge_dts)? + &user_source;
-
-    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
-    let mut program =
-        thaw_hir::lower_module_with_source_map(&module, &source_map, input.display().to_string())
-            .map_err(|diagnostic| diagnostic.to_string())?;
+    let shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
+    let mut module = module_graph::bundle(input, &user_source)?;
+    if !shim_source.is_empty() {
+        let mut shim = thaw_parser::parse_typescript(&shim_source)?;
+        shim.body.extend(module.body);
+        module.body = shim.body;
+    }
+    let mut program = thaw_hir::lower_module(&module)?;
     for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
         thaw_hir::set_ffi_error_abi(&mut program, &symbol, metadata.error_abi)?;
         thaw_hir::set_ffi_ownership(
@@ -803,6 +807,177 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn builds_relative_typescript_module_graph_with_generics_and_aliases() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-user-modules-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(
+            dir.join("lib/pair.ts"),
+            r#"
+                export interface Pair<T, U> { first: T; second: U; }
+                export function makePair<T, U>(first: T, second: U): Pair<T, U> {
+                    return { first: first, second: second };
+                }
+                export function chooseFirst<T, U>(first: T, second: U): T {
+                    return first;
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib/values.ts"),
+            "export function value(): number { return 40; }\nexport default function offset(): number { return 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib/index.ts"),
+            "export { makePair, chooseFirst } from './pair';\nexport { value } from './values';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib/other.ts"),
+            "export function value(): number { return 2; }\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { makePair, chooseFirst as first, value } from "./lib";
+                import offset, { value as sameValue } from "./lib/values";
+                import { value as otherValue } from "./lib/other";
+                function main(): void {
+                    const pair = makePair(value(), "ok");
+                    console.log(pair.first + otherValue());
+                    console.log(first("selected", sameValue() + offset()));
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nselected\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_relative_typescript_import_cycles_with_the_full_chain() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-user-module-cycle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { b } from './b'; function main(): void { b(); }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.ts"),
+            "import { c } from './c'; export function b(): void { c(); }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("c.ts"),
+            "import { b } from './b'; export function c(): void { b(); }",
+        )
+        .unwrap();
+        let error = module_graph::bundle(
+            &dir.join("main.ts"),
+            &std::fs::read_to_string(dir.join("main.ts")).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.contains("cyclic user-module import"));
+        assert!(error.contains("b.ts"));
+        assert!(error.contains("c.ts"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn builds_and_runs_a_multifile_async_json_lambda_handler() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-user-module-lambda-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("transform.ts"),
+            r#"
+                export async function transform(event: Json): Promise<Json> {
+                    await sleep(1);
+                    return event;
+                }
+            "#,
+        )
+        .unwrap();
+        let entry = dir.join("handler.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { transform } from "./transform";
+                async function handler(event: Json): Promise<Json> {
+                    return await transform(event);
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("bootstrap");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = conn.read(&mut request).unwrap();
+            let event = "{\"message\":\"module lambda\"}";
+            conn.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: module-request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    event.len(), event
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            conn.read_to_end(&mut request).unwrap();
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+        let mut child = Command::new(&output)
+            .env("AWS_LAMBDA_RUNTIME_API", addr)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let request = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("multifile Lambda handler did not post a response");
+        server.join().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(request.starts_with("POST /2018-06-01/runtime/invocation/module-request/response"));
+        assert!(request.ends_with("{\"message\":\"module lambda\"}"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn qualifier_identifier_passes_through_unscoped_names() {
