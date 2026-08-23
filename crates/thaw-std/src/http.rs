@@ -422,10 +422,8 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
 
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection = unsafe { &mut *(context as *mut ConnectionState) };
-    if connection.response.is_empty() {
-        if !read_request(connection) {
-            return;
-        }
+    if connection.response.is_empty() && !read_request(connection) {
+        return;
     }
     write_response(connection);
 }
