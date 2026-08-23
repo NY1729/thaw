@@ -97,6 +97,123 @@ pub extern "C" fn thaw_json_as_bool(value: *mut Value) -> u8 {
     value.as_bool().unwrap_or(false) as u8
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_json_array_new() -> *mut Value {
+    leak(Value::Array(Vec::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
+    if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
+        items.push(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_array_push_string(array: *mut Value, value: *const c_char) {
+    if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
+        items.push(Value::String(to_str(value)));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_array_push_bool(array: *mut Value, value: u8) {
+    if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
+        items.push(Value::Bool(value != 0));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value) {
+    let Some(value) = (unsafe { value.as_ref() }).cloned() else {
+        return;
+    };
+    if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
+        items.push(value);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
+    if array.is_null() {
+        return leak(Value::Array(Vec::new()));
+    }
+    let length = unsafe { (array as *const i64).read() }.max(0) as usize;
+    let values = (0..length)
+        .map(|index| {
+            let value = unsafe { (array.add(8 + index * 8) as *const f64).read() };
+            serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
+        })
+        .collect();
+    leak(Value::Array(values))
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
+    let values = unsafe { value.as_ref() }
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
+    if output.is_null() {
+        return output;
+    }
+    unsafe { (output as *mut i64).write(values.len() as i64) };
+    for (index, value) in values.iter().enumerate() {
+        unsafe {
+            (output.add(8 + index * 8) as *mut f64).write(value.as_f64().unwrap_or(0.0));
+        }
+    }
+    output
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_object_new() -> *mut Value {
+    leak(Value::Object(serde_json::Map::new()))
+}
+
+fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
+    if let Some(fields) = (unsafe { object.as_mut() }).and_then(Value::as_object_mut) {
+        fields.insert(to_str(key), value);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_object_set_number(object: *mut Value, key: *const c_char, value: f64) {
+    object_insert(
+        object,
+        key,
+        serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number),
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_object_set_string(
+    object: *mut Value,
+    key: *const c_char,
+    value: *const c_char,
+) {
+    object_insert(object, key, Value::String(to_str(value)));
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_object_set_bool(object: *mut Value, key: *const c_char, value: u8) {
+    object_insert(object, key, Value::Bool(value != 0));
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_object_set_json(
+    object: *mut Value,
+    key: *const c_char,
+    value: *mut Value,
+) {
+    object_insert(
+        object,
+        key,
+        unsafe { value.as_ref() }.cloned().unwrap_or(Value::Null),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +296,49 @@ mod tests {
     fn invalid_json_parses_as_null_instead_of_crashing() {
         let value = parse("{not valid json");
         assert_eq!(read_c_string(thaw_json_stringify(value)), "null");
+    }
+
+    #[test]
+    fn constructs_dynamic_call_arrays_and_objects() {
+        let arguments = thaw_json_array_new();
+        thaw_json_array_push_number(arguments, 42.0);
+        let text = CString::new("thaw").unwrap();
+        thaw_json_array_push_string(arguments, text.as_ptr());
+        thaw_json_array_push_bool(arguments, 1);
+        assert_eq!(
+            read_c_string(thaw_json_stringify(arguments)),
+            r#"[42.0,"thaw",true]"#
+        );
+
+        let object = thaw_json_object_new();
+        let answer = CString::new("answer").unwrap();
+        thaw_json_object_set_number(object, answer.as_ptr(), 42.0);
+        let nested = CString::new("arguments").unwrap();
+        thaw_json_object_set_json(object, nested.as_ptr(), arguments);
+        let decoded: Value =
+            serde_json::from_str(&read_c_string(thaw_json_stringify(object))).unwrap();
+        assert_eq!(
+            decoded,
+            serde_json::json!({"answer": 42.0, "arguments": [42.0, "thaw", true]})
+        );
+    }
+
+    #[test]
+    fn converts_number_arrays_between_json_and_native_layout() {
+        let value = parse("[1.5, 2, false]");
+        let native = thaw_json_to_number_array(value);
+        assert!(!native.is_null());
+        unsafe {
+            assert_eq!((native as *const i64).read(), 3);
+            assert_eq!((native.add(8) as *const f64).read(), 1.5);
+            assert_eq!((native.add(16) as *const f64).read(), 2.0);
+            assert_eq!((native.add(24) as *const f64).read(), 0.0);
+        }
+
+        let round_trip = thaw_json_from_number_array(native);
+        assert_eq!(
+            read_c_string(thaw_json_stringify(round_trip)),
+            "[1.5,2.0,0.0]"
+        );
     }
 }

@@ -241,6 +241,64 @@ fn sanitize_identifier(s: &str) -> String {
         .collect()
 }
 
+fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
+    match ty {
+        thaw_hir::HirType::F64 => Some("number".into()),
+        thaw_hir::HirType::Str => Some("string".into()),
+        thaw_hir::HirType::Bool => Some("boolean".into()),
+        thaw_hir::HirType::Json => Some("Json".into()),
+        thaw_hir::HirType::Array(element) => {
+            render_dynamic_type(element).map(|element| format!("{element}[]"))
+        }
+        thaw_hir::HirType::Object(fields) => fields
+            .iter()
+            .map(|(name, ty)| render_dynamic_type(ty).map(|ty| format!("{name}: {ty}")))
+            .collect::<Option<Vec<_>>>()
+            .map(|fields| format!("{{ {} }}", fields.join("; "))),
+        _ => None,
+    }
+}
+
+fn typed_dynamic_declaration(
+    package: &str,
+    function: &thaw_bridge::DtsFunction,
+    napi: bool,
+) -> Option<(String, String)> {
+    let params = function
+        .params
+        .iter()
+        .map(|(name, ty)| match ty {
+            thaw_bridge::DtsType::Native(ty) => {
+                render_dynamic_type(ty).map(|ty| format!("{name}: {ty}"))
+            }
+            thaw_bridge::DtsType::Unsupported(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let thaw_bridge::DtsType::Native(ret) = &function.ret else {
+        return None;
+    };
+    let ret = render_dynamic_type(ret)?;
+    let runtime_key = if napi {
+        function.name.clone()
+    } else {
+        format!("{package}::{}", function.name)
+    };
+    let encoded = runtime_key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let symbol = format!(
+        "__thaw_typed_{}_{}",
+        if napi { "napi" } else { "js" },
+        encoded
+    );
+    Some((
+        symbol.clone(),
+        format!("declare function {symbol}({}): {ret};\n", params.join(", ")),
+    ))
+}
+
 /// `(package, name, alias)` -- see `rewrite_qualified_calls`. `package`
 /// here is the *qualifier identifier* (`qualifier_identifier`), not
 /// necessarily the real package name.
@@ -422,6 +480,8 @@ fn generate_registry_shims(
     type PendingBundle = (String, String, Vec<String>, Vec<(String, String)>);
 
     let mut shim = String::new();
+    let mut typed_targets: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<(String, String, Option<String>)> = Vec::new();
@@ -430,6 +490,20 @@ fn generate_registry_shims(
     for pkg in &resolved {
         let native_lib_available = pkg.native_lib.is_some();
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
+        for function in &pkg.functions {
+            let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
+                name == &function.name
+                    && matches!(classification, thaw_bridge::Classification::Fallback { .. })
+            });
+            if is_fallback {
+                if let Some((symbol, declaration)) =
+                    typed_dynamic_declaration(&pkg.name, function, pkg.native_addon.is_some())
+                {
+                    shim.push_str(&declaration);
+                    typed_targets.insert((pkg.name.clone(), function.name.clone()), symbol);
+                }
+            }
+        }
         if pkg.native_addon.is_some() {
             shim.push_str(&thaw_bridge::generate_native_addon_shim(
                 &pkg.functions,
@@ -505,7 +579,10 @@ fn generate_registry_shims(
         let mut package_exports = std::collections::HashMap::new();
         for (name, classification) in &pkg.classifications {
             let target = if matches!(classification, thaw_bridge::Classification::Fallback { .. }) {
-                format!("{}_{name}", sanitize_identifier(&pkg.name))
+                typed_targets
+                    .get(&(pkg.name.clone(), name.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}_{name}", sanitize_identifier(&pkg.name)))
             } else {
                 name.clone()
             };
@@ -1062,18 +1139,18 @@ mod tests {
         std::fs::create_dir_all(registry.join("math-kit")).unwrap();
         std::fs::write(
             registry.join("math-kit/package.d.ts"),
-            "export declare function add(argsArray: any): any;\nexport declare function sub(argsArray: any): any;\n",
+            "export interface Point { x: number; y: number; }\nexport declare function add(a: number, b: number): number;\nexport declare function sub(a: number, b: number): number;\nexport declare function greet(name: string): string;\nexport declare function negate(value: boolean): boolean;\nexport declare function echo(value: Json): Json;\nexport declare function sum(values: number[]): number;\nexport declare function reverse(values: number[]): number[];\nexport declare function shift(point: Point): Point;\nexport declare function fail(): number;\n",
         )
         .unwrap();
         std::fs::write(
             registry.join("math-kit/bundle.js"),
-            "module.exports = { add: function(a,b){ return a+b; }, sub: function(a,b){ return a-b; } };\n",
+            "module.exports = { add: function(a,b){ return a+b; }, sub: function(a,b){ return a-b; }, greet: function(name){ return 'hello ' + name; }, negate: function(value){ return !value; }, echo: function(value){ return value; }, sum: function(values){ return values.reduce(function(a,b){ return a+b; }, 0); }, reverse: function(values){ return values.reverse(); }, shift: function(point){ return { x: point.x + 1, y: point.y + 2 }; }, fail: function(){ throw new Error('typed dynamic failed'); } };\n",
         )
         .unwrap();
         std::fs::create_dir_all(registry.join("twice")).unwrap();
         std::fs::write(
             registry.join("twice/package.d.ts"),
-            "export default function twice(argsArray: any): any;\n",
+            "export default function twice(value: number): number;\n",
         )
         .unwrap();
         std::fs::write(
@@ -1086,14 +1163,27 @@ mod tests {
         std::fs::write(
             &entry,
             r#"
-                import { add } from "math-kit";
+                import { add, greet, negate, echo, sum, reverse, shift, fail } from "math-kit";
                 import * as math from "math-kit";
                 import twice from "twice";
                 function main(): void {
-                    const sum = Number(add(JSON.parse("[10,11]")));
-                    const difference = Number(math.sub(JSON.parse("[13,2]")));
-                    console.log(Number(twice(JSON.parse("[21]"))));
+                    const sum: number = add(10, 11);
+                    const difference: number = math.sub(13, 2);
+                    console.log(twice(21));
                     console.log(sum + difference);
+                    console.log(greet("thaw"));
+                    console.log(negate(false));
+                    console.log(String(echo(JSON.parse("{\"ok\":true}")).ok));
+                    console.log(sum([10, 20, 12]));
+                    const reversed = reverse([1, 2, 3]);
+                    console.log(reversed[0]);
+                    const point = shift({ x: 3, y: 4 });
+                    console.log(point.x * 10 + point.y);
+                    try {
+                        const ignored = fail();
+                    } catch (error) {
+                        console.log(error);
+                    }
                 }
             "#,
         )
@@ -1106,7 +1196,10 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n32\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "42\n32\nhello thaw\ntrue\ntrue\n42\n3\n46\n`math-kit::fail` threw: typed dynamic failed\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1183,7 +1276,7 @@ mod tests {
             std::fs::create_dir_all(registry.join(package)).unwrap();
             std::fs::write(
                 registry.join(package).join("package.d.ts"),
-                "export declare function mark(argsArray: any): any;\n",
+                "export declare function mark(): number;\n",
             )
             .unwrap();
             std::fs::write(
@@ -1199,7 +1292,7 @@ mod tests {
                 import { mark as rightMark } from "right-mark";
                 export async function work(): Promise<void> {
                     await sleep(1);
-                    console.log(Number(leftMark(JSON.parse("[]"))) + Number(rightMark(JSON.parse("[]"))));
+                    console.log(leftMark() + rightMark());
                 }
             "#,
         )
@@ -1367,7 +1460,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare function add(argsArray: any): any;\n",
+            "export declare function add(a: number, b: number): number;\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -1403,19 +1496,10 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "function main(): void { console.log(Number(add(JSON.parse(\"[20,22]\")))); }\n",
+            "import { add } from \"native-add\"; function main(): void { console.log(add(20, 22)); }\n",
         )
         .unwrap();
-        build(
-            &source,
-            &output,
-            &[],
-            &[],
-            &[],
-            &registry,
-            &["native-add".into()],
-        )
-        .unwrap();
+        build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
         let result = Command::new(&output).output().unwrap();
         assert!(
             result.status.success(),

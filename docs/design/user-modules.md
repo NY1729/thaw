@@ -20,11 +20,18 @@ package-qualified shim symbols, including two packages exporting the same
 function name. `--use` remains available for source that calls package exports
 as globals.
 
+When a package function's `.d.ts` parameters and result are representable as
+`number`, `string`, `boolean`, `Json`, `number[]`, or a fixed object composed of
+those types, imports target a typed dynamic-call declaration. LLVM constructs
+the positional JSON array, invokes QuickJS or N-API through the error-aware
+result ABI, and converts the result back to its declared native layout. Thus
+`add(20, 22): number` needs neither `JSON.parse("[20,22]")` nor `Number(...)`.
+Unsupported declarations retain the explicit one-`Json`-array fallback ABI.
+
 `node:path`, `node:util`, `node:process`, and `node:buffer` resolve to the small
-QuickJS polyfills also used by bundled npm dependency graphs. Their callable
-surface follows the current fallback ABI: one `Json` array containing the
-positional arguments. This is intentionally smaller than Node's complete core
-module API.
+QuickJS polyfills also used by bundled npm dependency graphs. Their deliberately
+dynamic declarations currently retain that explicit `Json` ABI. This is
+intentionally smaller than Node's complete core module API.
 
 ## Compilation model
 

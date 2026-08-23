@@ -82,6 +82,20 @@ pub struct FfiSignature {
     pub error_ownership: FfiOwnership,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicBackend {
+    QuickJs,
+    Napi,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DynamicSignature {
+    pub backend: DynamicBackend,
+    pub symbol: Symbol,
+    pub params: Vec<HirType>,
+    pub ret: HirType,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirExpr {
     Lit(HirLit),
@@ -97,7 +111,7 @@ pub enum HirExpr {
     Lambda(Vec<HirParam>, Box<HirExpr>),
     Block(Vec<HirStmt>),
     FfiCall(FfiSignature, Vec<HirExpr>),
-    DynamicCall(Box<HirExpr>, Vec<HirExpr>),
+    DynamicCall(DynamicSignature, Vec<HirExpr>),
     /// `name = value` (and desugared compound assignments / `++`/`--`).
     /// Evaluates to `value`.
     Assign(Symbol, Box<HirExpr>),
@@ -232,8 +246,13 @@ pub fn set_ffi_error_abi(
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
             }
-            HirExpr::Call(callee, args) | HirExpr::DynamicCall(callee, args) => {
+            HirExpr::Call(callee, args) => {
                 visit_expr(callee, symbol, abi, found);
+                for arg in args {
+                    visit_expr(arg, symbol, abi, found);
+                }
+            }
+            HirExpr::DynamicCall(_, args) => {
                 for arg in args {
                     visit_expr(arg, symbol, abi, found);
                 }
@@ -335,8 +354,13 @@ pub fn set_ffi_ownership(
                     update_expr(arg, symbol, returns, errors, found);
                 }
             }
-            HirExpr::Call(callee, args) | HirExpr::DynamicCall(callee, args) => {
+            HirExpr::Call(callee, args) => {
                 update_expr(callee, symbol, returns, errors, found);
+                for arg in args {
+                    update_expr(arg, symbol, returns, errors, found);
+                }
+            }
+            HirExpr::DynamicCall(_, args) => {
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }

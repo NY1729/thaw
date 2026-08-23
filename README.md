@@ -123,6 +123,10 @@ The workspace crates have narrow responsibilities:
 - Bare imports automatically resolve packages already installed in
   `thaw_modules`, generate their existing native/QuickJS/N-API bridge, and
   support named, default and namespace call syntax without a matching `--use`
+- QuickJS and N-API imports with representable `.d.ts` signatures use ordinary
+  typed calls: primitive, `Json`, `number[]`, and fixed object arguments are
+  marshalled automatically and results are converted back to their declared
+  native type; legacy unsupported signatures retain the explicit `Json` ABI
 - Root package `exports` conditions select `types` and `require`/`import` entry
   points during `registry add`, with `types`/`typings` and `main` fallbacks
 - Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
