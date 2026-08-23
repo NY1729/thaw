@@ -1102,7 +1102,7 @@ pub fn generate_native_addon_shim(
 
 pub struct NativeAddon<'a> {
     pub package_name: &'a str,
-    pub path: &'a str,
+    pub bytes: &'a [u8],
     pub root_export: Option<&'a str>,
 }
 
@@ -1113,15 +1113,15 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
     let mut out = String::from("function __thaw_native_module_init(): void {\n");
     for addon in addons {
         out.push_str(&format!("    // {}\n", addon.package_name));
-        let path = escape_ts_string_literal(addon.path);
-        if let Some(root_export) = addon.root_export {
-            out.push_str(&format!(
-                "    loadNativeAddon(\"{path}\", \"{}\");\n",
-                escape_ts_string_literal(root_export)
-            ));
-        } else {
-            out.push_str(&format!("    loadNativeAddon(\"{path}\");\n"));
-        }
+        let hex: String = addon
+            .bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let root_export = escape_ts_string_literal(addon.root_export.unwrap_or(""));
+        out.push_str(&format!(
+            "    loadNativeAddonEmbedded(\"{hex}\", \"{root_export}\");\n"
+        ));
     }
     out.push_str("}\n");
     out
@@ -1350,11 +1350,11 @@ mod tests {
         assert!(shim.contains(r#"return callNativeAddon("add", argsArray);"#));
         let init = generate_native_addon_init(&[NativeAddon {
             package_name: "native-add",
-            path: "/tmp/native.node",
+            bytes: &[0xde, 0xad, 0xbe, 0xef],
             root_export: None,
         }]);
         assert!(init.contains("function __thaw_native_module_init(): void"));
-        assert!(init.contains(r#"loadNativeAddon("/tmp/native.node");"#));
+        assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "");"#));
     }
 
     #[test]

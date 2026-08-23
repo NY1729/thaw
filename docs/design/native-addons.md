@@ -364,3 +364,15 @@ arch、libcとともに保存する。再追加時は以前の`native.node`とme
 network統合テストは`THAW_RUN_NPM_INTEGRATION=1`で有効化し、
 `utf-8-validate@6.0.6`について`registry add`から`build --use`、有効/不正UTF-8
 の実行までを一続きで検証する。
+
+## 12. 単一実行ファイルへの埋め込み
+
+CLIは選択済み`native.node`をビルド時に読み、16進データとして生成HIRへ
+埋め込む。Linuxの実行時は`thaw_napi_load_embedded_hex`が復号し、匿名
+`memfd`へ書き込んで`/proc/self/fd/<fd>`から`dlopen`する。このため配布先に
+registry、`native-addon.json`、元の`.node`をコピーする必要はない。
+
+統合テストはリンク完了後にregistryディレクトリを削除してから生成物を起動し、
+埋め込まれたaddonだけで呼び出せることを確認する。非Linuxでは互換経路として
+一時ファイルへ展開するが、配布成果物そのものは同じく実行ファイル1個である。
+OSの標準dynamic loader、libc、libm、libdlまで静的同梱する保証とは分けて扱う。

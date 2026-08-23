@@ -127,6 +127,9 @@ The workspace crates have narrow responsibilities:
   typed calls: primitive, `Json`, `number[]`, and fixed object arguments are
   marshalled automatically and results are converted back to their declared
   native type; legacy unsupported signatures retain the explicit `Json` ABI
+- Registry-managed JavaScript bundles, Rust runtimes, static native archives,
+  and N-API addon bytes are embedded into the produced executable. The binary
+  can run after `thaw_modules` and its original `.node` files are removed
 - Root package `exports` conditions select `types` and `require`/`import` entry
   points during `registry add`, with `types`/`typings` and `main` fallbacks
 - Exact and single-wildcard package subpath exports such as `pkg/feature` and
