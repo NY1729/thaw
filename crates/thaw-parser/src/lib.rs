@@ -17,6 +17,16 @@ pub use swc_ecma_ast as ast;
 /// returned as a joined string, since callers won't have a `Handler` of
 /// their own at this stage of the pipeline.
 pub fn parse_typescript(source: &str) -> Result<Module, String> {
+    parse_typescript_with_source_map(source).map(|(module, _)| module)
+}
+
+/// Same as [`parse_typescript`], but also returns the `SourceMap` the
+/// module was parsed against -- see
+/// [`parse_javascript_with_source_map`]'s doc comment for why a caller
+/// would need this (thaw-cli's cross-package name-collision call-site
+/// rewrite parses the user's own `.ts` source this way, since it's real
+/// TypeScript, not plain JS).
+pub fn parse_typescript_with_source_map(source: &str) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
 
@@ -35,12 +45,11 @@ pub fn parse_typescript(source: &str) -> Result<Module, String> {
         err.into_diagnostic(&handler).emit();
     }
 
-    parser
-        .parse_module()
-        .map_err(|err| {
-            err.into_diagnostic(&handler).emit();
-            "failed to parse TypeScript source".to_string()
-        })
+    let module = parser.parse_module().map_err(|err| {
+        err.into_diagnostic(&handler).emit();
+        "failed to parse TypeScript source".to_string()
+    })?;
+    Ok((module, cm))
 }
 
 /// Same as [`parse_typescript`], but for plain JS/ES syntax (no TS-specific

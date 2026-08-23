@@ -166,34 +166,71 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
         // function it declares (unlike `--use`, see
         // `generate_registry_shims`, where thaw-registry knows whether a
         // `native.a` actually exists).
-        shim.push_str(&thaw_bridge::generate_shim(&functions, true));
+        shim.push_str(&thaw_bridge::generate_shim(&functions, true, &[]));
     }
     Ok(shim)
 }
 
-/// Resolves each `--use`d package against the local registry (thaw-registry;
-/// `registry_dir` defaults to `thaw_modules/`), generating its callable
-/// surface exactly like `generate_bridge_shims` does for a standalone
-/// `.d.ts` -- but additionally auto-linking the package's `native.a` if it
-/// ships one (replacing a manual `--link`), and collecting its `bundle.js`
-/// (if any) into a single generated `__thaw_module_init` (thaw-bridge's
-/// `generate_module_init`) so it's auto-loaded before user code runs
-/// (replacing a manual `loadScript` call). Returns the generated shim text
-/// and the native lib paths to link.
+/// One `--use`d package, resolved and classified, but with no shim text
+/// generated yet -- collision resolution (see `generate_registry_shims`)
+/// needs to see every package's declared names *before* deciding how any
+/// individual one should be rendered, so this is deliberately kept as an
+/// intermediate step rather than folded into one pass.
+struct ResolvedPackage {
+    name: String,
+    functions: Vec<thaw_bridge::DtsFunction>,
+    classifications: Vec<(String, thaw_bridge::Classification)>,
+    native_lib: Option<PathBuf>,
+    bundle_js: Option<String>,
+}
+
+/// A valid JS/Thaw identifier fragment from an arbitrary package name --
+/// `@hapi/hoek` -> `_hapi_hoek`. Used to build a package-qualified alias
+/// identifier (`generate_registry_shims`'s collision resolution); doesn't
+/// need to be reversible or collision-free against unrelated packages
+/// with a similar sanitized form, since it's always combined with the
+/// original function name too.
+fn sanitize_identifier(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// `(package, name, alias)` -- see `rewrite_qualified_calls`. `package`
+/// here is the *qualifier identifier* (`qualifier_identifier`), not
+/// necessarily the real package name.
+type QualifiedCallRewrite = (String, String, String);
+
+/// The identifier a user writes as the object in `pkg.name(...)`
+/// qualified-call syntax for a `--use`d package. A scoped package's real
+/// name (`@hapi/hoek`) isn't a valid identifier at all (`@`, `/`), so
+/// this uses its last path segment (`hoek`) instead -- an unscoped name
+/// has no `/` to split on and passes through unchanged. Two different
+/// scoped packages sharing a last segment (`@foo/utils`/`@bar/utils`)
+/// would collide *here* instead, ambiguously; not handled specially --
+/// no real package pair triggering this has been found yet, matching
+/// how every other gap in this project got filled (see
+/// docs/design/registry.md).
+fn qualifier_identifier(package: &str) -> &str {
+    package.rsplit('/').next().unwrap_or(package)
+}
+
+/// Resolves each `--use`d package against the local registry
+/// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
+/// generating its callable surface exactly like `generate_bridge_shims`
+/// does for a standalone `.d.ts` -- but additionally auto-linking the
+/// package's `native.a` if it ships one (replacing a manual `--link`),
+/// and collecting its `bundle.js` (if any) into a single generated
+/// `__thaw_module_init` (thaw-bridge's `generate_module_init`) so it's
+/// auto-loaded before user code runs (replacing a manual `loadScript`
+/// call). Returns the generated shim text, the native lib paths to
+/// link, and any cross-package name-collision rewrites the caller must
+/// also apply to the user's own source (`rewrite_qualified_calls`).
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
-) -> Result<(String, Vec<PathBuf>), String> {
-    let mut shim = String::new();
-    let mut native_libs = Vec::new();
-    // (package_name, js_source, fallback_function_names) -- kept as owned
-    // data so the borrowed `ModuleBundle`s built from it below can outlive
-    // this loop.
-    let mut bundles: Vec<(String, String, Vec<String>)> = Vec::new();
-    // Every top-level name generated so far, and which `--use`d package
-    // declared it first -- see the collision check below.
-    let mut declared_by: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
+) -> Result<(String, Vec<PathBuf>, Vec<QualifiedCallRewrite>), String> {
+    let mut resolved = Vec::new();
     for name in use_packages {
         let package = thaw_registry::resolve(registry_dir, name)?;
         let functions = thaw_bridge::parse_dts(&package.dts_source)
@@ -207,67 +244,204 @@ fn generate_registry_shims(
         // `thaw_bridge::effective_classifications`'s doc comment.
         let native_lib_available = package.native_lib.is_some();
         let classifications = thaw_bridge::effective_classifications(&functions, native_lib_available);
+        resolved.push(ResolvedPackage {
+            name: package.name.clone(),
+            functions,
+            classifications,
+            native_lib: package.native_lib,
+            bundle_js: package.bundle_js,
+        });
+    }
 
-        // Every generated top-level name -- FastPath ambient declaration
-        // or Fallback wrapper alike -- lands in the *same* flat global
-        // scope (QuickJS-NG globals for Fallback, the LLVM module's own
-        // symbol table for FastPath). Two different packages exporting
-        // the same name (e.g. `qs` and `@hapi/hoek` both export
-        // `stringify`) would otherwise silently collide: whichever
-        // package's shim/binding runs last wins, with no error --
-        // exactly the kind of order-dependent surprise this project has
-        // treated as a bug to catch loudly every other time it showed up
-        // (see thaw-bridge's `classify_all`, for the same problem one
-        // level down, *within* one `.d.ts`'s own overloads). Found via
-        // this session's own combined multi-package verification:
-        // `stringify` silently resolved to whichever of `qs`/`@hapi/hoek`
-        // was `--use`d last.
-        for (declared_name, _) in &classifications {
-            if let Some(existing_package) = declared_by.get(declared_name) {
-                if existing_package != name {
-                    return Err(format!(
-                        "`{declared_name}` is declared by both `{existing_package}` and `{name}` -- \
-                         using multiple --use packages that export the same top-level name isn't \
-                         supported yet"
-                    ));
-                }
-            } else {
-                declared_by.insert(declared_name.clone(), name.clone());
+    // Every generated top-level name -- FastPath ambient declaration or
+    // Fallback wrapper alike -- would otherwise land in the *same* flat
+    // global scope (QuickJS-NG globals for Fallback, the LLVM module's
+    // own symbol table for FastPath). Two different packages exporting
+    // the same name (e.g. `qs` and `@hapi/hoek` both export `stringify`)
+    // used to silently collide: whichever package's shim/binding ran
+    // last won, with no error -- exactly the kind of order-dependent
+    // surprise this project has treated as a bug to catch loudly every
+    // other time it showed up (see thaw-bridge's `classify_all`, for the
+    // same problem one level down, *within* one `.d.ts`'s own
+    // overloads). A collision where every involved package classifies
+    // the name as Fallback is auto-resolved below by dropping the bare
+    // name for it (`QualifiedFallback::suppress_bare`), forcing
+    // qualified syntax (`qs.stringify(x)`, rewritten to a package-
+    // qualified alias -- see `rewrite_qualified_calls`); a
+    // FastPath-involved collision is a real native-symbol clash this
+    // can't paper over, so it stays a hard error.
+    let mut declared_by: std::collections::HashMap<String, Vec<(String, bool)>> = std::collections::HashMap::new();
+    for pkg in &resolved {
+        for (name, classification) in &pkg.classifications {
+            let is_fast_path = matches!(classification, thaw_bridge::Classification::FastPath(_));
+            declared_by.entry(name.clone()).or_default().push((pkg.name.clone(), is_fast_path));
+        }
+    }
+    for (name, packages) in &declared_by {
+        if packages.len() < 2 {
+            continue;
+        }
+        if let Some((fast_path_pkg, _)) = packages.iter().find(|(_, is_fast_path)| *is_fast_path) {
+            let other_pkg = packages.iter().map(|(p, _)| p.as_str()).find(|p| *p != fast_path_pkg).unwrap_or(fast_path_pkg);
+            return Err(format!(
+                "`{name}` is declared by both `{fast_path_pkg}` and `{other_pkg}` -- automatic \
+                 resolution only covers Fallback functions, not a Fast path native symbol clash"
+            ));
+        }
+    }
+    let colliding: std::collections::HashSet<&String> =
+        declared_by.iter().filter(|(_, pkgs)| pkgs.len() > 1).map(|(name, _)| name).collect();
+
+    // Every Fallback name of every `--use`d package also gets a package-
+    // qualified alias -- not just names that actually collide -- so
+    // `pkg.name(...)` syntax works consistently for any `--use`d
+    // package's function, whether or not `name` happens to collide with
+    // some other package (see `thaw_bridge::QualifiedFallback`'s doc
+    // comment: `suppress_bare` is the only thing collision status
+    // changes). `rewrites` is `(package, name, alias)`, for rewriting
+    // `pkg.name(...)` call syntax in the user's own source (see
+    // `rewrite_qualified_calls`).
+    let mut qualified_by_package: std::collections::HashMap<String, Vec<thaw_bridge::QualifiedFallback>> =
+        std::collections::HashMap::new();
+    let mut rewrites: Vec<QualifiedCallRewrite> = Vec::new();
+    for pkg in &resolved {
+        for (name, classification) in &pkg.classifications {
+            if !matches!(classification, thaw_bridge::Classification::Fallback { .. }) {
+                continue;
             }
+            let alias = format!("{}_{name}", sanitize_identifier(&pkg.name));
+            let qualified_key = format!("{}::{name}", pkg.name);
+            qualified_by_package.entry(pkg.name.clone()).or_default().push(thaw_bridge::QualifiedFallback {
+                name: name.clone(),
+                alias: alias.clone(),
+                qualified_key,
+                suppress_bare: colliding.contains(name),
+            });
+            rewrites.push((qualifier_identifier(&pkg.name).to_string(), name.clone(), alias));
         }
+    }
 
-        shim.push_str(&thaw_bridge::generate_shim(&functions, native_lib_available));
+    /// `(package_name, js_source, fallback_function_names, qualified_aliases)`
+    /// -- kept as owned data so the borrowed `ModuleBundle`s built from it
+    /// below can outlive the loop that collects it.
+    type PendingBundle = (String, String, Vec<String>, Vec<(String, String)>);
 
-        if let Some(native_lib) = package.native_lib {
-            native_libs.push(native_lib);
+    let mut shim = String::new();
+    let mut native_libs = Vec::new();
+    let mut bundles: Vec<PendingBundle> = Vec::new();
+    let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
+
+    for pkg in &resolved {
+        let native_lib_available = pkg.native_lib.is_some();
+        let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
+        shim.push_str(&thaw_bridge::generate_shim(&pkg.functions, native_lib_available, qualified));
+
+        if let Some(native_lib) = &pkg.native_lib {
+            native_libs.push(native_lib.clone());
         }
-        if let Some(bundle_js) = package.bundle_js {
+        if let Some(bundle_js) = &pkg.bundle_js {
             // Only Fallback functions need binding inside the loaded
             // script (see `ModuleBundle::fallback_names`'s doc comment);
             // FastPath functions are real FFI calls and never touch
             // QuickJS-NG at all.
-            let fallback_names = classifications
-                .into_iter()
+            let fallback_names = pkg
+                .classifications
+                .iter()
                 .filter_map(|(name, classification)| match classification {
-                    thaw_bridge::Classification::Fallback { .. } => Some(name),
+                    thaw_bridge::Classification::Fallback { .. } => Some(name.clone()),
                     thaw_bridge::Classification::FastPath(_) => None,
                 })
                 .collect();
-            bundles.push((package.name.clone(), bundle_js, fallback_names));
+            let qualified_aliases = qualified.iter().map(|q| (q.name.clone(), q.qualified_key.clone())).collect();
+            bundles.push((pkg.name.clone(), bundle_js.clone(), fallback_names, qualified_aliases));
         }
     }
 
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
-        .map(|(name, js, fallback_names)| thaw_bridge::ModuleBundle {
+        .map(|(name, js, fallback_names, qualified_aliases)| thaw_bridge::ModuleBundle {
             package_name: name.as_str(),
             js_source: js.as_str(),
             fallback_names,
+            qualified_aliases,
         })
         .collect();
     shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
 
-    Ok((shim, native_libs))
+    Ok((shim, native_libs, rewrites))
+}
+
+/// Rewrites `pkg.name(...)` call expressions in a user's own `.ts` source
+/// to the package-qualified alias identifier `generate_registry_shims`'s
+/// collision resolution actually emits for a colliding name (e.g.
+/// `qs.stringify(x)` -> `qs_stringify(x)`), so a user can keep writing
+/// the familiar namespace-qualified form even though Thaw has no real
+/// object/member-call support backing it -- this is resolved *entirely*
+/// as source-level syntax sugar, at this preprocessing step, not by the
+/// compiler. `rewrites` is empty when there were no collisions at all,
+/// in which case this returns `source` untouched without even parsing it.
+///
+/// Uses `swc_ecma_visit`'s `Visit` to walk the whole AST (a call can be
+/// nested arbitrarily deep in an expression), unlike the top-level-only
+/// walks elsewhere in this project (thaw-registry's ESM rewrite only
+/// ever needs to look at a module's immediate top-level items). Matched
+/// spans are collected first and applied as one pass of text
+/// substitution over the original source afterward, copying everything
+/// else verbatim -- this project carries no general JS/TS code
+/// generator, so re-printing from the AST isn't an option.
+fn rewrite_qualified_calls(source: &str, rewrites: &[QualifiedCallRewrite]) -> Result<String, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
+    use thaw_parser::common::Spanned;
+
+    if rewrites.is_empty() {
+        return Ok(source.to_string());
+    }
+
+    struct Finder<'a> {
+        rewrites: &'a [(String, String, String)],
+        matches: Vec<(u32, u32, String)>,
+    }
+    impl Visit for Finder<'_> {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = &**callee {
+                    if let (Expr::Ident(obj), MemberProp::Ident(prop)) = (&*member.obj, &member.prop) {
+                        if let Some((_, _, alias)) = self
+                            .rewrites
+                            .iter()
+                            .find(|(pkg, name, _)| pkg.as_str() == &*obj.sym && name.as_str() == &*prop.sym)
+                        {
+                            let span = member.span();
+                            self.matches.push((span.lo.0, span.hi.0, alias.clone()));
+                        }
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let mut finder = Finder { rewrites, matches: Vec::new() };
+    module.visit_with(&mut finder);
+
+    if finder.matches.is_empty() {
+        return Ok(source.to_string());
+    }
+    finder.matches.sort_by_key(|(lo, ..)| *lo);
+
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for (lo, hi, alias) in &finder.matches {
+        let lo = cm.lookup_byte_offset(thaw_parser::common::BytePos(*lo)).pos.0 as usize;
+        let hi = cm.lookup_byte_offset(thaw_parser::common::BytePos(*hi)).pos.0 as usize;
+        out.push_str(&source[cursor..lo]);
+        out.push_str(alias);
+        cursor = hi;
+    }
+    out.push_str(&source[cursor..]);
+    Ok(out)
 }
 
 fn build(
@@ -280,8 +454,14 @@ fn build(
 ) -> Result<(), String> {
     let user_source = std::fs::read_to_string(input)
         .map_err(|e| format!("failed to read `{}`: {e}", input.display()))?;
-    let (registry_shim, registry_native_libs) =
+    let (registry_shim, registry_native_libs, qualified_call_rewrites) =
         generate_registry_shims(registry_dir, use_packages)?;
+    // `qs.stringify(x)`-style calls, for a name that collided across two
+    // `--use`d packages, only exist as source-level syntax sugar over the
+    // package-qualified alias `generate_registry_shims` actually
+    // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
+    // (and no parse at all) when there were no collisions.
+    let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
     let source = registry_shim + &generate_bridge_shims(bridge_dts)? + &user_source;
 
     let module = thaw_parser::parse_typescript(&source)?;
@@ -363,4 +543,64 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!("could not find a staticlib for `{pkg}` in `cargo build` output"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualifier_identifier_passes_through_unscoped_names() {
+        assert_eq!(qualifier_identifier("qs"), "qs");
+        assert_eq!(qualifier_identifier("left-pad"), "left-pad");
+    }
+
+    #[test]
+    fn qualifier_identifier_uses_the_last_segment_of_a_scoped_name() {
+        assert_eq!(qualifier_identifier("@hapi/hoek"), "hoek");
+        assert_eq!(qualifier_identifier("@babel/core"), "core");
+    }
+
+    #[test]
+    fn sanitize_identifier_replaces_non_alphanumerics() {
+        assert_eq!(sanitize_identifier("qs"), "qs");
+        assert_eq!(sanitize_identifier("@hapi/hoek"), "_hapi_hoek");
+        assert_eq!(sanitize_identifier("left-pad"), "left_pad");
+    }
+
+    #[test]
+    fn rewrite_qualified_calls_is_a_no_op_with_no_rewrites() {
+        let source = "function main(): void { console.log(qs.stringify(x)); }";
+        assert_eq!(rewrite_qualified_calls(source, &[]).unwrap(), source);
+    }
+
+    #[test]
+    fn rewrite_qualified_calls_replaces_matching_qualified_calls_only() {
+        let source = "function main(): void {\n\
+             console.log(qs.stringify(x));\n\
+             console.log(hoek.stringify(y));\n\
+             console.log(qs.parse(z));\n\
+             console.log(unrelated.stringify(w));\n\
+         }";
+        let rewrites = vec![
+            ("qs".to_string(), "stringify".to_string(), "qs_stringify".to_string()),
+            ("hoek".to_string(), "stringify".to_string(), "hoek_stringify".to_string()),
+        ];
+        let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
+
+        assert!(rewritten.contains("console.log(qs_stringify(x));"));
+        assert!(rewritten.contains("console.log(hoek_stringify(y));"));
+        // Not in `rewrites` (no collision for `parse`, or the object
+        // isn't a known qualifier at all) -- left completely alone.
+        assert!(rewritten.contains("console.log(qs.parse(z));"));
+        assert!(rewritten.contains("console.log(unrelated.stringify(w));"));
+    }
+
+    #[test]
+    fn rewrite_qualified_calls_handles_a_call_nested_in_an_expression() {
+        let source = "function main(): void { const r = String(qs.stringify(x)); }";
+        let rewrites = vec![("qs".to_string(), "stringify".to_string(), "qs_stringify".to_string())];
+        let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
+        assert!(rewritten.contains("const r = String(qs_stringify(x));"));
+    }
 }
