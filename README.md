@@ -276,6 +276,10 @@ The workspace crates have narrow responsibilities:
   `if`/`while`/`try`, and routes the first observed rejection to the nearest
   catch immediately. Remaining children are retained and drained before the
   process exits or the Lambda request arena resets
+- `Promise.race` concurrently observes homogeneous Promise literals or array
+  variables and settles with the first fulfillment or rejection. It supports
+  number, string, boolean, object, and array values, deduplicates repeated
+  handles, and drains every losing child before the request arena resets
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result
@@ -295,8 +299,8 @@ The workspace crates have narrow responsibilities:
   default functions and the complete JavaScript expression/statement set
 - Block-scoped locals inside nested control flow and fully general
   value-returning Promise APIs. `Promise.all` supports homogeneous Promise
-  arrays and heterogeneous literal tuples; `Promise.race`/`any`/`allSettled`
-  remain unsupported
+  arrays and heterogeneous literal tuples, and `Promise.race` supports
+  homogeneous inputs; `Promise.any`/`allSettled` remain unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
