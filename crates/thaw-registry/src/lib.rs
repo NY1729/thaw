@@ -156,6 +156,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "fs" => {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
+        "http" => {
+            "export declare function serveOnce(port: number, body: string): string;\n"
+        }
         _ => return Err(format!("unsupported Node built-in module `{specifier}`")),
     };
     let source = builtin_module_source(name)
@@ -1452,6 +1455,10 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = __thaw_fs;\n\
              module.exports.__esModule = true;\n",
         ),
+        // Native compilation resolves the typed `node:http` surface through
+        // thaw-std. Keep an empty CommonJS module here so dependency discovery
+        // can still complete before the native Fast Path is selected.
+        "http" => Some("module.exports = {};\n"),
         "buffer" => Some(
             "function byteLength(value) { return String(value).length; }\n\
              module.exports = { byteLength: byteLength };\n\

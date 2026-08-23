@@ -903,6 +903,20 @@ target内に`*`が複数現れる場合は同じcaptureをすべてへ適用す�
 現在の呼び出し規約はQuickJS fallbackと同じく、位置引数を格納した1つの
 `Json` 配列である。
 
+## 22. ネイティブNode組み込みモジュール
+
+ユーザーコードからimportする `node:fs` はQuickJS polyfillではなく
+`thaw-std` のネイティブFast Pathへ接続し、同期UTF-8ファイル操作を提供する。
+同じ仕組みで `node:http` の最初の縦断実装として
+`serveOnce(port: number, body: string): string` を追加した。この関数はloopbackで
+1リクエストを受け、固定テキストのHTTP 200レスポンスを返し、request targetを
+呼び出し元へ返す。TypeScript import、HIR/LLVM、静的リンク済みELF、実TCP通信を
+通す統合テストで検証する。
+
+これはNode互換の `createServer` そのものではない。次の段階では関数型、arrow
+function、closure capture、request/response object methodをHIRとLLVMへ通し、
+`createServer((req, res) => ...)` を表現できる呼び出し規約へ拡張する必要がある。
+
 ## 北極星: 「npm と同じ感覚で使える」こと
 
 このドキュメントの各章は、実在する npm パッケージを実際に試して

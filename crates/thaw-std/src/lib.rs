@@ -7,4 +7,5 @@
 
 mod fetch;
 mod fs;
+mod http;
 mod json;

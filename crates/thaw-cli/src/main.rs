@@ -390,6 +390,10 @@ fn qualifier_identifier(package: &str) -> &str {
     package.rsplit('/').next().unwrap_or(package)
 }
 
+fn is_native_builtin(package: &str) -> bool {
+    matches!(package, "node:fs" | "node:http")
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -429,7 +433,7 @@ fn generate_registry_shims(
         // an unresolvable `declare function`, even though a working JS
         // implementation is sitting right there in `bundle.js`. See
         // `thaw_bridge::effective_classifications`'s doc comment.
-        let native_lib_available = package.native_lib.is_some() || package.name == "node:fs";
+        let native_lib_available = package.native_lib.is_some() || is_native_builtin(&package.name);
         let classifications =
             thaw_bridge::effective_classifications(&functions, native_lib_available);
         resolved.push(ResolvedPackage {
@@ -544,7 +548,7 @@ fn generate_registry_shims(
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
-        let native_lib_available = pkg.native_lib.is_some() || pkg.name == "node:fs";
+        let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         for function in &pkg.functions {
             let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
@@ -1144,7 +1148,7 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::process::Stdio;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1646,6 +1650,80 @@ mod tests {
             std::fs::read_to_string(data_file).unwrap(),
             "hello from thaw"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn node_http_serves_a_real_request_from_a_static_binary() {
+        if ensure_static_system_libraries().is_err() {
+            return;
+        }
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-node-http-{}-{}",
+            std::process::id(),
+            port
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+                    import {{ serveOnce }} from "node:http";
+                    function main(): void {{
+                        const target: string = serveOnce({}, "hello from thaw");
+                        console.log(target);
+                    }}
+                "#,
+                port
+            ),
+        )
+        .unwrap();
+        let executable = dir.join("app");
+        build_with_link_mode(
+            &entry,
+            &executable,
+            &[],
+            &[],
+            &[],
+            &dir.join("registry"),
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(!elf_has_program_interpreter(&executable).unwrap());
+
+        let child = Command::new(&executable)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stream = (0..200)
+            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    None
+                }
+            })
+            .expect("compiled HTTP server did not start listening");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("hello from thaw"));
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "/health\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
