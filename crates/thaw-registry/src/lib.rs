@@ -15,24 +15,36 @@
 //!                                  automatically at program startup
 //!                                  (replaces a manual `loadScript` call)
 //!   version.txt    (optional)  -- the exact version `add` resolved and
-//!                                  fetched (see `add`'s doc comment);
-//!                                  purely informational, never read back
-//!                                  by `resolve` for anything but its own
-//!                                  `version` field
+//!                                  fetched for the package itself (see
+//!                                  `add`'s doc comment); purely
+//!                                  informational
+//!   lock.json      (optional)  -- every *other* real npm package folded
+//!                                  into `bundle.js` (transitive same-
+//!                                  registry-install dependencies), each
+//!                                  mapped to the version `npm` actually
+//!                                  resolved it to; written only when
+//!                                  there's at least one (a single-file
+//!                                  package with no dependencies has
+//!                                  nothing to record here beyond
+//!                                  `version.txt`'s own package). Purely
+//!                                  informational, same as `version.txt`.
 //! ```
 //!
-//! Still no build step for the native lib, and no lockfile/dependency-graph
-//! version resolution across multiple packages -- `add` resolves and
-//! records exactly one version per package, independently, the same way a
-//! single `npm install <package>@<spec>` would. This crate only resolves a
-//! package name to the files already sitting on disk (plus, now, the
-//! version `add` recorded there). The native-lib build pipeline is still
-//! exactly what the project's design doc calls "the actual differentiator"
-//! left undone; this is a placeholder for the local half of it, real
-//! enough to remove the remaining manual `--bridge`/`--link`/`loadScript`
-//! steps for a package that's already been fetched/built by some other
-//! means.
+//! Still no build step for the native lib, and no real dependency-graph
+//! *resolution* (no semver range solving of our own -- `npm install`
+//! already did that once, for one `add` call, and `lock.json` just
+//! records what it picked) -- `add` resolves and records versions for
+//! exactly the packages one `npm install <package>@<spec>` call actually
+//! pulled in, independently each time `add` runs. This crate only
+//! resolves a package name to the files already sitting on disk (plus,
+//! now, the versions `add` recorded there). The native-lib build pipeline
+//! is still exactly what the project's design doc calls "the actual
+//! differentiator" left undone; this is a placeholder for the local half
+//! of it, real enough to remove the remaining manual
+//! `--bridge`/`--link`/`loadScript` steps for a package that's already
+//! been fetched/built by some other means.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,6 +62,12 @@ pub struct ResolvedPackage {
     /// through `add` (rather than hand-curation, or an `add` run before
     /// this field existed) -- see `AddedPackage::resolved_version`.
     pub version: Option<String>,
+    /// Every *other* real npm package `add` folded into `bundle.js`,
+    /// mapped to its resolved version, read back from `lock.json` -- see
+    /// `AddedPackage::dependency_versions`. `None` if there's no
+    /// `lock.json` (a single-file package with no dependencies never gets
+    /// one written; nor does a hand-curated or pre-`lock.json` package).
+    pub dependency_versions: Option<BTreeMap<String, String>>,
 }
 
 /// Resolves `name` against `registry_dir/<name>/`. Fails only if
@@ -86,12 +104,17 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         .ok()
         .map(|s| s.trim().to_string());
 
+    let dependency_versions = fs::read_to_string(dir.join("lock.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<BTreeMap<String, String>>(&s).ok());
+
     Ok(ResolvedPackage {
         name: name.to_string(),
         dts_source,
         native_lib,
         bundle_js,
         version,
+        dependency_versions,
     })
 }
 
@@ -113,6 +136,15 @@ pub struct AddedPackage {
     /// specifier at all still reports the real version `npm` picked as
     /// "latest", not just an echo of the empty request).
     pub resolved_version: String,
+    /// Every real npm package folded into `bundle.js` -- `package` itself
+    /// plus every transitive same-install dependency `bundle_commonjs_
+    /// package`'s worklist actually walked into (Node builtin polyfills
+    /// are not real npm packages and are never included here) -- each
+    /// mapped to the version `npm install` resolved *it* to. Always
+    /// contains at least `package`'s own entry. Written to `lock.json`
+    /// only when it has more than that one entry (see this module's
+    /// top-level doc comment).
+    pub dependency_versions: BTreeMap<String, String>,
 }
 
 /// Fetches `package` via `npm install` (into a throwaway scratch
@@ -216,7 +248,7 @@ fn fetch_and_copy(
         .to_string();
 
     let main_field = manifest.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
-    let (js_source, js_relative_path, bundled_file_count) =
+    let (js_source, js_relative_path, bundled_file_count, dependency_versions) =
         bundle_commonjs_package(&node_modules_dir, name, &package_dir, main_field)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
@@ -237,12 +269,24 @@ fn fetch_and_copy(
         .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("bundle.js").display()))?;
     fs::write(dest_dir.join("version.txt"), &resolved_version)
         .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("version.txt").display()))?;
+    // Only worth a `lock.json` at all once there's something beyond
+    // `package`'s own entry (which `version.txt` already covers) --
+    // a single-file package with no dependencies would otherwise get an
+    // uninformative one-entry file next to `version.txt` saying the same
+    // thing twice.
+    if dependency_versions.len() > 1 {
+        let lock_json = serde_json::to_string_pretty(&dependency_versions)
+            .map_err(|e| format!("failed to serialize `lock.json` for `{name}`: {e}"))?;
+        fs::write(dest_dir.join("lock.json"), lock_json)
+            .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("lock.json").display()))?;
+    }
 
     Ok(AddedPackage {
         dts_relative_path,
         js_relative_path,
         bundled_file_count,
         resolved_version,
+        dependency_versions,
     })
 }
 
@@ -417,14 +461,18 @@ struct BundledModule {
 /// bundle.
 ///
 /// Returns the bundle text, the resolved key of `main_relative` (the
-/// bundle's entry point, for `AddedPackage` reporting), and the total
-/// number of files folded in (across every package the bundle reaches).
+/// bundle's entry point, for `AddedPackage` reporting), the total number
+/// of files folded in (across every package the bundle reaches), and
+/// every real npm package the walk touched (`root_package` plus every
+/// bare-specifier dependency actually resolved under `node_modules_dir`,
+/// Node builtin polyfills excluded) mapped to its own resolved version --
+/// see `AddedPackage::dependency_versions`.
 fn bundle_commonjs_package(
     node_modules_dir: &Path,
     root_package: &str,
     root_package_dir: &Path,
     main_relative: &str,
-) -> Result<(String, String, usize), String> {
+) -> Result<(String, String, usize, BTreeMap<String, String>), String> {
     let (main_relative_key, main_abs) = resolve_module_path(root_package_dir, main_relative)?;
     let main_key = format!("{root_package}/{main_relative_key}");
 
@@ -436,6 +484,8 @@ fn bundle_commonjs_package(
         root_package.to_string(),
         root_package_dir.to_path_buf(),
     )];
+    let mut dependency_versions: BTreeMap<String, String> = BTreeMap::new();
+    record_package_version(&mut dependency_versions, root_package, root_package_dir);
 
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
         let source = fs::read_to_string(&abs_path)
@@ -482,6 +532,7 @@ fn bundle_commonjs_package(
                 requires.push((spec, dep_key.clone()));
                 if !visited.contains(&dep_key) {
                     visited.push(dep_key.clone());
+                    record_package_version(&mut dependency_versions, &dep_name, &dep_dir);
                     worklist.push((dep_key, dep_abs, dep_name, dep_dir));
                 }
                 continue;
@@ -508,7 +559,26 @@ fn bundle_commonjs_package(
     }
 
     let file_count = modules.len();
-    Ok((render_bundle(&main_key, &modules), main_key, file_count))
+    Ok((
+        render_bundle(&main_key, &modules),
+        main_key,
+        file_count,
+        dependency_versions,
+    ))
+}
+
+/// Records `name`'s resolved version (from its own real `package.json`)
+/// into `versions`, if it has one -- best-effort: a package that somehow
+/// lacks a readable `package.json`/`version` field (shouldn't happen for
+/// anything `npm install` actually fetched, but this is metadata, not a
+/// correctness dependency) is just silently left out rather than failing
+/// the whole bundle over it.
+fn record_package_version(versions: &mut BTreeMap<String, String>, name: &str, dir: &Path) {
+    if let Ok(manifest) = read_manifest(dir) {
+        if let Some(v) = manifest.get("version").and_then(|v| v.as_str()) {
+            versions.insert(name.to_string(), v.to_string());
+        }
+    }
 }
 
 /// The shared text scan behind `find_relative_require_specs`/
@@ -1071,6 +1141,32 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_packages_lock_json_when_present() {
+        let registry = temp_registry("with_lock");
+        let pkg_dir = registry.join("qs");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(
+            pkg_dir.join("package.d.ts"),
+            "export declare function stringify(x: string): string;",
+        )
+        .unwrap();
+        fs::write(pkg_dir.join("bundle.js"), "function stringify(x){return x;}").unwrap();
+        fs::write(pkg_dir.join("version.txt"), "6.11.0").unwrap();
+        fs::write(
+            pkg_dir.join("lock.json"),
+            r#"{"qs": "6.11.0", "side-channel": "1.0.4"}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve(&registry, "qs").unwrap();
+        let deps = resolved.dependency_versions.expect("lock.json was written");
+        assert_eq!(deps.get("qs").map(String::as_str), Some("6.11.0"));
+        assert_eq!(deps.get("side-channel").map(String::as_str), Some("1.0.4"));
+
+        let _ = fs::remove_dir_all(&registry);
+    }
+
+    #[test]
     fn resolves_a_package_with_only_the_required_dts() {
         let registry = temp_registry("dts_only");
         let pkg_dir = registry.join("is-odd");
@@ -1368,12 +1464,90 @@ mod tests {
         .unwrap();
 
         let empty_node_modules = temp_registry("bundle_multi_file_node_modules");
-        let (bundle, main_key, file_count) =
+        let (bundle, main_key, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "lib/index.js").unwrap();
         assert_eq!(main_key, "pkg/lib/index.js");
         assert_eq!(file_count, 3, "main + parse.js + stringify.js");
         assert!(bundle.contains("pkg/lib/parse.js"));
         assert!(bundle.contains("pkg/lib/stringify.js"));
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    /// `bundle_commonjs_package`'s version-recording half (the other half
+    /// of `add`'s 17章 `version.txt` work, extended to cover every
+    /// package the bundle actually reaches, not just the root one --
+    /// `AddedPackage::dependency_versions`/`lock.json`). Both the root
+    /// package (`pkg`) and its one real dependency (`left-pad-ish`) have
+    /// their own `package.json` with a `version` field here, mirroring
+    /// what `npm install` actually leaves on disk.
+    #[test]
+    fn bundle_commonjs_package_records_every_reached_packages_version() {
+        let dir = temp_registry("bundle_versions_root");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name": "pkg", "version": "2.5.0", "main": "index.js"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("index.js"),
+            "var dep = require('left-pad-ish');\nmodule.exports = dep;",
+        )
+        .unwrap();
+
+        let node_modules = temp_registry("bundle_versions_node_modules");
+        fs::create_dir_all(node_modules.join("left-pad-ish")).unwrap();
+        fs::write(
+            node_modules.join("left-pad-ish/package.json"),
+            r#"{"name": "left-pad-ish", "version": "1.3.0", "main": "index.js"}"#,
+        )
+        .unwrap();
+        fs::write(
+            node_modules.join("left-pad-ish/index.js"),
+            "module.exports = function () { return 'padded'; };",
+        )
+        .unwrap();
+
+        let (_, _, _, dependency_versions) =
+            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+
+        assert_eq!(
+            dependency_versions.get("pkg").map(String::as_str),
+            Some("2.5.0")
+        );
+        assert_eq!(
+            dependency_versions.get("left-pad-ish").map(String::as_str),
+            Some("1.3.0")
+        );
+        assert_eq!(dependency_versions.len(), 2, "no extra/missing entries");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&node_modules);
+    }
+
+    /// A package with no dependencies still gets exactly one entry (its
+    /// own) -- `fetch_and_copy` uses this len-1 case to decide *not* to
+    /// write a redundant `lock.json` next to `version.txt`.
+    #[test]
+    fn bundle_commonjs_package_with_no_dependencies_records_only_itself() {
+        let dir = temp_registry("bundle_versions_solo");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name": "solo-pkg", "version": "0.1.0", "main": "index.js"}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("index.js"), "module.exports = function () { return 1; };").unwrap();
+
+        let empty_node_modules = temp_registry("bundle_versions_solo_node_modules");
+        let (_, _, _, dependency_versions) =
+            bundle_commonjs_package(&empty_node_modules, "solo-pkg", &dir, "index.js").unwrap();
+
+        assert_eq!(dependency_versions.len(), 1);
+        assert_eq!(
+            dependency_versions.get("solo-pkg").map(String::as_str),
+            Some("0.1.0")
+        );
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1385,7 +1559,7 @@ mod tests {
         fs::write(dir.join("index.js"), "module.exports = function f() { return 1; };").unwrap();
 
         let empty_node_modules = temp_registry("bundle_single_file_node_modules");
-        let (_, main_key, file_count) =
+        let (_, main_key, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(main_key, "pkg/index.js");
         assert_eq!(file_count, 1);
@@ -1410,7 +1584,7 @@ mod tests {
         // resolve via resolve_module_path's .js/index.js candidates.
 
         let empty_node_modules = temp_registry("bundle_unresolvable_require_node_modules");
-        let (_, _, file_count) =
+        let (_, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(file_count, 1);
 
@@ -1464,7 +1638,7 @@ mod tests {
         )
         .unwrap();
 
-        let (bundle, _, file_count) =
+        let (bundle, _, file_count, _) =
             bundle_commonjs_package(&node_modules_dir, "pkg", &dir, "lib/index.js").unwrap();
         assert_eq!(file_count, 3, "pkg's index.js + double.js + triple-dep's index.js");
 
@@ -1522,12 +1696,12 @@ mod tests {
             "module.exports = function () { return 'from lazy'; };",
         )
         .unwrap();
-        let (bundle_a, _, _) =
+        let (bundle_a, _, _, _) =
             bundle_commonjs_package(&node_modules_dir, "pkg-a", &dir_a, "index.js").unwrap();
 
         let dir_b = temp_registry("multi_pkg_b");
         fs::write(dir_b.join("index.js"), "module.exports = function () { return 'b'; };").unwrap();
-        let (bundle_b, _, _) =
+        let (bundle_b, _, _, _) =
             bundle_commonjs_package(&node_modules_dir, "pkg-b", &dir_b, "index.js").unwrap();
 
         let wrap = |bundle: &str, bind_as: &str| {
@@ -1580,7 +1754,7 @@ mod tests {
         .unwrap();
         let empty_node_modules = temp_registry("builtin_util_node_modules");
 
-        let (bundle, _, file_count) =
+        let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(file_count, 2, "pkg's index.js + the util polyfill");
         assert!(bundle.contains("node:util"));
@@ -1604,7 +1778,7 @@ mod tests {
         .unwrap();
         let empty_node_modules = temp_registry("builtin_process_node_modules");
 
-        let (bundle, _, _) =
+        let (bundle, _, _, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
 
         let script = format!(
@@ -1644,7 +1818,7 @@ mod tests {
         .unwrap();
         let empty_node_modules = temp_registry("builtin_util_runs_node_modules");
 
-        let (bundle, _, _) =
+        let (bundle, _, _, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
 
         let script = format!(
@@ -1697,7 +1871,7 @@ mod tests {
         .unwrap();
         let empty_node_modules = temp_registry("builtin_addon_chase_node_modules");
 
-        let (bundle, _, file_count) =
+        let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(file_count, 4, "pkg's index.js + fs/path/os polyfills");
 
@@ -1769,7 +1943,7 @@ mod tests {
         .unwrap();
 
         let empty_node_modules = temp_registry("esm_bundle_node_modules");
-        let (bundle, _, file_count) =
+        let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(file_count, 2, "index.js + double.js");
 
