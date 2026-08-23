@@ -14,7 +14,9 @@ use std::os::raw::c_char;
 
 #[no_mangle]
 pub extern "C" fn thaw_fetch_get(url: *const c_char) -> *const c_char {
-    let url = unsafe { CStr::from_ptr(url) }.to_string_lossy().into_owned();
+    let url = unsafe { CStr::from_ptr(url) }
+        .to_string_lossy()
+        .into_owned();
 
     let body = match ureq::get(&url).call() {
         Ok(mut response) => response
@@ -53,7 +55,9 @@ mod tests {
 
         let url = CString::new(format!("http://{addr}/")).unwrap();
         let result_ptr = thaw_fetch_get(url.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
 
         server.join().unwrap();
         assert_eq!(result, "hello from mock server");

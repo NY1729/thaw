@@ -111,7 +111,10 @@ fn main() {
                             for proto in &externs {
                                 if proto.name == "printd" {
                                     if let Some(function) = compiler.module.get_function("printd") {
-                                        engine.add_global_mapping(&function, printd as *const () as usize);
+                                        engine.add_global_mapping(
+                                            &function,
+                                            printd as *const () as usize,
+                                        );
                                     }
                                 }
                             }

@@ -9,3 +9,7 @@ edition.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+thaw-arena = { path = "../thaw-arena" }
+webpki-roots = "1.0"

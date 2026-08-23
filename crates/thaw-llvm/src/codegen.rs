@@ -67,7 +67,8 @@ impl<'ctx> Compiler<'ctx> {
 
         self.variables.clear();
         for (param, name) in function.get_param_iter().zip(func.proto.args.iter()) {
-            self.variables.insert(name.clone(), param.into_float_value());
+            self.variables
+                .insert(name.clone(), param.into_float_value());
         }
         self.current_fn = Some(function);
 
@@ -115,7 +116,12 @@ impl<'ctx> Compiler<'ctx> {
         }
     }
 
-    fn compile_binary(&mut self, op: char, lhs: &Expr, rhs: &Expr) -> Result<FloatValue<'ctx>, String> {
+    fn compile_binary(
+        &mut self,
+        op: char,
+        lhs: &Expr,
+        rhs: &Expr,
+    ) -> Result<FloatValue<'ctx>, String> {
         let lhs_val = self.compile_expr(lhs)?;
         let rhs_val = self.compile_expr(rhs)?;
 
@@ -230,7 +236,9 @@ impl<'ctx> Compiler<'ctx> {
         step: Option<&Expr>,
         body: &Expr,
     ) -> Result<FloatValue<'ctx>, String> {
-        let function = self.current_fn.expect("for-expr outside of a function body");
+        let function = self
+            .current_fn
+            .expect("for-expr outside of a function body");
 
         let start_val = self.compile_expr(start)?;
         let preheader_bb = self.builder.get_insert_block().unwrap();
@@ -248,8 +256,10 @@ impl<'ctx> Compiler<'ctx> {
         phi.add_incoming(&[(&start_val, preheader_bb)]);
 
         let previous_binding = self.variables.remove(var_name);
-        self.variables
-            .insert(var_name.to_string(), phi.as_basic_value().into_float_value());
+        self.variables.insert(
+            var_name.to_string(),
+            phi.as_basic_value().into_float_value(),
+        );
 
         self.compile_expr(body)?;
 
