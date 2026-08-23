@@ -280,6 +280,10 @@ The workspace crates have narrow responsibilities:
   variables and settles with the first fulfillment or rejection. It supports
   number, string, boolean, object, and array values, deduplicates repeated
   handles, and drains every losing child before the request arena resets
+- `Promise.any` ignores early rejections and resolves with the first fulfilled
+  homogeneous input. If every input rejects, it reports `All promises were
+  rejected` through the normal async `try/catch` path; repeated and losing
+  handles are deduplicated and drained
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result
@@ -300,7 +304,8 @@ The workspace crates have narrow responsibilities:
 - Block-scoped locals inside nested control flow and fully general
   value-returning Promise APIs. `Promise.all` supports homogeneous Promise
   arrays and heterogeneous literal tuples, and `Promise.race` supports
-  homogeneous inputs; `Promise.any`/`allSettled` remain unsupported
+  homogeneous inputs; `Promise.any` does as well. `Promise.allSettled` remains
+  unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
