@@ -279,11 +279,16 @@ The dependency order for closing the major compatibility gaps is:
 7. Implement the minimal synchronous N-API host described in
    `native-addons.md`, then expand it from observed addon requirements.
 
-The first synchronous N-API host is now implemented. A registry package may
-place a Linux shared object at `thaw_modules/<package>/native.node`; `thaw
-build --use <package>` loads it at module initialization and routes fallback
-wrappers through its exported N-API functions. Loading native addons executes
-unrestricted native code in the generated process and is not sandboxed.
+The first synchronous N-API host is now implemented. `thaw registry add`
+automatically selects a compatible addon bundled under
+`prebuilds/<platform>-<arch>/`, copies it to
+`thaw_modules/<package>/native.node`, and records its target and SHA-256 in
+`native-addon.json`. `thaw build --use <package>` loads it at module
+initialization and routes fallback wrappers through its exported N-API
+functions. Loading native addons executes unrestricted native code in the
+generated process and is not sandboxed. If bundled prebuilds exist but none
+match the current platform, architecture, or libc, `registry add` reports the
+mismatch and retains the JavaScript fallback.
 The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
 the host API and the complete `thaw build --use utf-8-validate` pipeline.
 Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
