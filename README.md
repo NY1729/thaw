@@ -117,6 +117,9 @@ The workspace crates have narrow responsibilities:
 - QuickJS fallback for signatures which cannot use the C ABI path
 - CommonJS dependency bundling, a limited ESM-to-CommonJS rewrite, selected
   Node built-in polyfills, scoped packages and package version locking
+- Relative user-module graphs (`./file`, `./file.ts`, and `./dir/index.ts`)
+  with named/default imports, aliases, named re-exports, export-all,
+  module-local symbol isolation, dependency deduplication and cycle diagnostics
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint
@@ -216,9 +219,10 @@ The workspace crates have narrow responsibilities:
 
 ### Not yet compatible
 
-- Contextual/generic TypeScript inference, overload resolution, classes, enums, tuples,
-  broad union/intersection support, imports/exports in user programs and the
-  complete JavaScript expression/statement set
+- Contextual/generic TypeScript inference, overload resolution, classes, enums,
+  tuples, broad union/intersection support, namespace imports, non-relative
+  user imports, anonymous default functions and the complete JavaScript
+  expression/statement set
 - Block-scoped locals inside nested control flow, nested/control-flow await,
   value-returning/general user-defined Promise async functions and concurrent
   promise combinators. Other user-defined async calls still use the synchronous
