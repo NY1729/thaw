@@ -259,6 +259,10 @@ The workspace crates have narrow responsibilities:
   heterogeneous typed tuples from conditional branches
 - `Promise<T>` values can be stored in locals and object fields, passed through
   typed function parameters, and awaited later
+- `new Promise<T>((resolve, reject) => ...)` supports contextually typed arrow
+  executors. `.then()` transforms resolved values, `.catch()` recovers rejected
+  values, returned Promises are flattened, and callback/executor throws reject
+  the derived Promise
 - `await` in an `if` condition resumes before selecting the branch; awaits in
   then/else bodies use guarded states, so the inactive branch creates no
   Promise
@@ -309,9 +313,10 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
-- User-created Promise executors, `.then`/`.catch` chains, and arbitrary
-  third-party Promise implementations. Native async functions and their typed
-  Promise values are supported across locals, parameters, fields, and the four
+- Arbitrary third-party Promise implementations, `.finally`, constructor or
+  continuation callbacks other than typed arrow functions, and implicit type
+  inference for `new Promise` without an explicit `T`. Native and user-created
+  Promise values work across locals, parameters, fields, chains, and the four
   implemented static combinators. Full discriminated-union narrowing remains
   unsupported
 - Automatic exception propagation through external C calls that use the legacy

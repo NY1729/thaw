@@ -643,6 +643,26 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_promise_chain",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_adopt",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_promise_all_slots",
             i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i64_type.into()], false),
             Some(Linkage::External),
@@ -3824,6 +3844,10 @@ impl<'ctx> HirCompiler<'ctx> {
             // ordinary expression path.
             HirExpr::Await(inner) => self.compile_await(inner),
             HirExpr::AwaitPromise(inner, _) => self.compile_await(inner),
+            HirExpr::PromiseNew(executor, resolved) => self.compile_promise_new(executor, resolved),
+            HirExpr::PromiseThen(source, callback, input, output, on_rejected, flatten) => {
+                self.compile_promise_then(source, callback, input, output, *on_rejected, *flatten)
+            }
 
             HirExpr::ObjectLit(fields) => self.compile_object_lit(fields),
             HirExpr::PropAccess(obj, object_ty, field) => {
@@ -5141,9 +5165,345 @@ impl<'ctx> HirCompiler<'ctx> {
                 "closure_call",
             )
             .map_err(|error| error.to_string())?;
-        call.try_as_basic_value()
+        if *ret == HirType::Void {
+            Ok(self.context.f64_type().const_zero().into())
+        } else {
+            call.try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("function value `{name}` does not return a value"))
+        }
+    }
+
+    fn allocate_special_closure(
+        &mut self,
+        code: FunctionValue<'ctx>,
+        promise: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let closure = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    i64_type.const_int(16, false).into(),
+                    i64_type.const_int(8, false).into(),
+                ],
+                name,
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
             .basic()
-            .ok_or_else(|| format!("function value `{name}` does not return a value"))
+            .ok_or("closure allocation returned no value")?
+            .into_pointer_value();
+        self.builder
+            .build_store(closure, code.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        let promise_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[i64_type.const_int(8, false)],
+                    "promise_capture",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(promise_slot, promise)
+            .map_err(|error| error.to_string())?;
+        Ok(closure)
+    }
+
+    fn compile_promise_resolver(
+        &mut self,
+        resolved: &HirType,
+        reject: bool,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let name = format!(
+            "__thaw_promise_{}_{}",
+            if reject { "reject" } else { "resolve" },
+            self.next_lambda
+        );
+        self.next_lambda += 1;
+        let param = if reject { &HirType::Str } else { resolved };
+        let function_type = self.function_type(std::slice::from_ref(param), &HirType::Void)?;
+        let function = self
+            .module
+            .add_function(&name, function_type, Some(Linkage::Internal));
+        let return_block = self.builder.get_insert_block().unwrap();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let environment = function.get_nth_param(0).unwrap().into_pointer_value();
+        let offset = self.context.i64_type().const_int(8, false);
+        let promise_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    environment,
+                    &[offset],
+                    "promise_capture",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let promise = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                promise_slot,
+                "promise",
+            )
+            .map_err(|error| error.to_string())?;
+        let value = function.get_nth_param(1).unwrap();
+        let payload = if reject {
+            value.into_pointer_value()
+        } else {
+            let slot = self.allocate_variable_cell(self.basic_type(resolved)?, "promise_result")?;
+            self.builder
+                .build_store(slot, value)
+                .map_err(|error| error.to_string())?;
+            slot
+        };
+        let settle = if reject {
+            "thaw_promise_reject"
+        } else {
+            "thaw_promise_resolve"
+        };
+        self.builder
+            .build_call(
+                self.module.get_function(settle).unwrap(),
+                &[promise.into(), payload.into()],
+                "settle_promise",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(return_block);
+        Ok(function)
+    }
+
+    fn compile_promise_new(
+        &mut self,
+        executor: &HirExpr,
+        resolved: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let promise = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_promise_new").unwrap(),
+                &[],
+                "promise_new",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let executor = self.compile_expr(executor)?.into_pointer_value();
+        let resolve_fn = self.compile_promise_resolver(resolved, false)?;
+        let reject_fn = self.compile_promise_resolver(resolved, true)?;
+        let resolve = self.allocate_special_closure(resolve_fn, promise, "resolve_closure")?;
+        let reject = self.allocate_special_closure(reject_fn, promise, "reject_closure")?;
+        let code = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                executor,
+                "executor_code",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let resolve_ty = HirType::Function(vec![resolved.clone()], Box::new(HirType::Void));
+        let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
+        let executor_type = self.function_type(&[resolve_ty, reject_ty], &HirType::Void)?;
+        self.builder
+            .build_indirect_call(
+                executor_type,
+                code,
+                &[executor.into(), resolve.into(), reject.into()],
+                "invoke_promise_executor",
+            )
+            .map_err(|error| error.to_string())?;
+        let pending_slot = self.pending_exception().as_pointer_value();
+        let pending = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                pending_slot,
+                "executor_error",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let function = self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_parent()
+            .unwrap();
+        let rejected = self
+            .context
+            .append_basic_block(function, "executor_rejected");
+        let complete = self
+            .context
+            .append_basic_block(function, "executor_complete");
+        let has_error = self
+            .builder
+            .build_is_not_null(pending, "executor_has_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_error, rejected, complete)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(rejected);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_reject").unwrap(),
+                &[promise.into(), pending.into()],
+                "reject_executor_throw",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(
+                pending_slot,
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(complete)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(complete);
+        Ok(promise.into())
+    }
+
+    fn compile_promise_then(
+        &mut self,
+        source: &HirExpr,
+        callback: &HirExpr,
+        input: &HirType,
+        output: &HirType,
+        on_rejected: bool,
+        flatten: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let source = self.compile_expr(source)?.into_pointer_value();
+        let closure = self.compile_expr(callback)?.into_pointer_value();
+        let adapter_name = format!("__thaw_promise_chain_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let adapter_type = self
+            .context
+            .void_type()
+            .fn_type(&[ptr.into(), ptr.into(), ptr.into()], false);
+        let adapter =
+            self.module
+                .add_function(&adapter_name, adapter_type, Some(Linkage::Internal));
+        let return_block = self.builder.get_insert_block().unwrap();
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+        let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
+        let promise = adapter.get_nth_param(1).unwrap();
+        let result = adapter.get_nth_param(2).unwrap().into_pointer_value();
+        let callback_input = if on_rejected { &HirType::Str } else { input };
+        let value = if on_rejected {
+            result.into()
+        } else {
+            self.builder
+                .build_load(self.basic_type(callback_input)?, result, "chain_input")
+                .map_err(|error| error.to_string())?
+        };
+        let code = self
+            .builder
+            .build_load(ptr, context, "chain_code")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let callback_return = if flatten {
+            HirType::Promise(Box::new(output.clone()))
+        } else {
+            output.clone()
+        };
+        let callback_type =
+            self.function_type(std::slice::from_ref(callback_input), &callback_return)?;
+        let transformed = self
+            .builder
+            .build_indirect_call(
+                callback_type,
+                code,
+                &[context.into(), value.into()],
+                "invoke_chain_callback",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("Promise callback must return a value")?;
+        let pending_slot = self.pending_exception().as_pointer_value();
+        let pending = self
+            .builder
+            .build_load(ptr, pending_slot, "chain_error")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let failed = self.context.append_basic_block(adapter, "callback_failed");
+        let succeeded = self
+            .context
+            .append_basic_block(adapter, "callback_succeeded");
+        let has_error = self
+            .builder
+            .build_is_not_null(pending, "callback_has_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_error, failed, succeeded)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_reject").unwrap(),
+                &[promise.into(), pending.into()],
+                "reject_chain",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(pending_slot, ptr.const_null())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(succeeded);
+        if flatten {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_adopt").unwrap(),
+                    &[promise.into(), transformed.into()],
+                    "adopt_chain",
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            let output_type = self.basic_type(output)?;
+            let output_slot = self.allocate_variable_cell(output_type, "chain_output")?;
+            self.builder
+                .build_store(output_slot, transformed)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_resolve").unwrap(),
+                    &[promise.into(), output_slot.into()],
+                    "resolve_chain",
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(return_block);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_chain").unwrap(),
+                &[
+                    source.into(),
+                    adapter.as_global_value().as_pointer_value().into(),
+                    closure.into(),
+                    self.context
+                        .i8_type()
+                        .const_int(u64::from(on_rejected), false)
+                        .into(),
+                ],
+                "promise_chain",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_promise_chain returned no value".to_string())
     }
 
     fn compile_sleep(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
@@ -8303,6 +8663,92 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "stored_promise_values"), "41\n42\n");
+    }
+
+    #[test]
+    fn promise_constructor_then_and_catch_chain_native_values() {
+        let source = r#"
+            async function main(): Promise<void> {
+                const fulfilled: Promise<number> = new Promise<number>((resolve, reject) => {
+                    resolve(20);
+                }).then(value => value + 1).then(value => value * 2);
+                const recovered: Promise<number> = new Promise<number>((resolve, reject) => {
+                    reject("expected failure");
+                }).catch(error => {
+                    console.log(error);
+                    return 42;
+                });
+                const callbackThrow: Promise<number> = new Promise<number>((resolve, reject) => {
+                    resolve(1);
+                }).then(value => {
+                    throw "callback failure";
+                    return 0;
+                }).catch(error => {
+                    console.log(error);
+                    return 7;
+                });
+                const executorThrow: Promise<number> = new Promise<number>((resolve, reject) => {
+                    throw "executor failure";
+                }).catch(error => {
+                    console.log(error);
+                    return 8;
+                });
+                console.log(await fulfilled);
+                console.log(await recovered);
+                console.log(await callbackThrow);
+                console.log(await executorThrow);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_constructor_chains"),
+            "expected failure\nexecutor failure\ncallback failure\n42\n42\n7\n8\n"
+        );
+    }
+
+    #[test]
+    fn promise_then_transforms_all_native_value_shapes() {
+        let source = r#"
+            interface Item { value: number; }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                const text: string = await new Promise<number>((resolve, reject) => {
+                    resolve(1);
+                }).then(value => "ready");
+                const flag: boolean = await new Promise<number>((resolve, reject) => {
+                    resolve(1);
+                }).then(value => true);
+                const item: Item = await new Promise<number>((resolve, reject) => {
+                    resolve(9);
+                }).then(value => ({ value: value }));
+                const values: number[] = await new Promise<number>((resolve, reject) => {
+                    resolve(10);
+                }).then(value => [value, value + 1]);
+                const tuple: [number, string] = await new Promise<number>((resolve, reject) => {
+                    resolve(12);
+                }).then(value => [value, "tuple"]);
+                const flattened: number = await new Promise<number>((resolve, reject) => {
+                    resolve(20);
+                }).then(value => delayed(value + 1));
+                const recovered: number = await new Promise<number>((resolve, reject) => {
+                    reject("recover asynchronously");
+                }).catch(error => delayed(22));
+                console.log(text);
+                console.log(flag);
+                console.log(item.value);
+                console.log(values[1]);
+                console.log(tuple[0]);
+                console.log(tuple[1]);
+                console.log(flattened);
+                console.log(recovered);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_chain_shapes"),
+            "ready\ntrue\n9\n11\n12\ntuple\n21\n22\n"
+        );
     }
 
     #[test]

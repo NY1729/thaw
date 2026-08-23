@@ -1528,6 +1528,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
+        | HirExpr::PromiseNew(value, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -1537,6 +1538,10 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value) => collect_referenced_bindings(value, names),
         HirExpr::Lambda(_, _, _, body) => collect_referenced_bindings(body, names),
+        HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+            collect_referenced_bindings(source, names);
+            collect_referenced_bindings(callback, names);
+        }
         HirExpr::Block(stmts) => collect_stmt_bindings(stmts, names),
         HirExpr::FfiCall(_, args)
         | HirExpr::DynamicCall(_, args)
@@ -2265,6 +2270,10 @@ impl<'a> FnLowerer<'a> {
             | HirExpr::PromiseAllSettledArray(_, element) => Ok(HirType::Promise(Box::new(
                 HirType::Array(Box::new(promise_settled_result_type(element.clone()))),
             ))),
+            HirExpr::PromiseNew(_, resolved) => Ok(HirType::Promise(Box::new(resolved.clone()))),
+            HirExpr::PromiseThen(_, _, _, output, _, _) => {
+                Ok(HirType::Promise(Box::new(output.clone())))
+            }
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
                 if values.is_empty() {
@@ -2408,6 +2417,8 @@ impl<'a> FnLowerer<'a> {
                 }
             }
 
+            Expr::New(new_expr) => self.lower_promise_new(new_expr),
+
             other => Err(format!(
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
             )),
@@ -2487,6 +2498,115 @@ impl<'a> FnLowerer<'a> {
         self.bindings = saved_bindings;
         self.ret_type = saved_return;
         result
+    }
+
+    fn lower_contextual_arrow(
+        &mut self,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        parameter_types: &[HirType],
+        expected_return: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        if arrow.is_async || arrow.is_generator || arrow.type_params.is_some() {
+            return Err("async, generator, and generic Promise callbacks are not supported".into());
+        }
+        if arrow.params.len() != parameter_types.len() {
+            return Err(format!(
+                "Promise callback expects {} parameter(s), got {}",
+                parameter_types.len(),
+                arrow.params.len()
+            ));
+        }
+        let saved_scope = self.scope.clone();
+        let saved_bindings = self.bindings.clone();
+        let saved_return = self.ret_type.clone();
+        let result = (|| {
+            let mut params = Vec::with_capacity(parameter_types.len());
+            for (pat, ty) in arrow.params.iter().zip(parameter_types) {
+                let Pat::Ident(binding) = pat else {
+                    return Err("Promise callbacks require identifier parameters".to_string());
+                };
+                let name = self.bind_local(binding.id.sym.as_ref(), ty.clone());
+                params.push(HirParam {
+                    name,
+                    ty: ty.clone(),
+                });
+            }
+            self.ret_type = expected_return.cloned().unwrap_or(HirType::Dynamic);
+            let (body, inferred) = match arrow.body.as_ref() {
+                ArrowFunctionBody::Expr(expr) => {
+                    let body = self.lower_expr(expr)?;
+                    let inferred = self.infer_expr_type(&body)?;
+                    (body, inferred)
+                }
+                ArrowFunctionBody::FunctionBody(block) => {
+                    let stmts = self.lower_stmts(&block.stmts)?;
+                    let inferred = self.infer_return_type(&stmts)?;
+                    (HirExpr::Block(stmts), inferred)
+                }
+            };
+            if let Some(expected) = expected_return {
+                if inferred != *expected && inferred != HirType::Dynamic {
+                    return Err(format!(
+                        "Promise callback returns {inferred:?}, expected {expected:?}"
+                    ));
+                }
+            }
+            let ret = expected_return.cloned().unwrap_or(inferred);
+            if let Some(expected) = expected_return {
+                debug_assert_eq!(&ret, expected);
+            }
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&body, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter_map(|name| {
+                    saved_scope
+                        .get(&name)
+                        .cloned()
+                        .map(|ty| HirParam { name, ty })
+                })
+                .collect();
+            Ok(HirExpr::Lambda(captures, params, ret, Box::new(body)))
+        })();
+        self.scope = saved_scope;
+        self.bindings = saved_bindings;
+        self.ret_type = saved_return;
+        result
+    }
+
+    fn lower_promise_new(&mut self, new_expr: &swc_ecma_ast::NewExpr) -> Result<HirExpr, String> {
+        let Expr::Ident(callee) = new_expr.callee.as_ref() else {
+            return Err("only `new Promise<T>(...)` is supported".into());
+        };
+        if callee.sym != *"Promise" {
+            return Err("only `new Promise<T>(...)` is supported".into());
+        }
+        let type_args = new_expr
+            .type_args
+            .as_ref()
+            .ok_or("`new Promise` requires an explicit type argument")?;
+        let [resolved] = type_args.params.as_slice() else {
+            return Err("`new Promise` requires exactly one type argument".into());
+        };
+        let resolved = lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?;
+        if resolved == HirType::Void {
+            return Err("`new Promise<void>` is not supported yet".into());
+        }
+        let args = new_expr.args.as_deref().unwrap_or_default();
+        let [executor] = args else {
+            return Err("`new Promise<T>` expects exactly one executor".into());
+        };
+        if executor.spread.is_some() {
+            return Err("Promise executor spread is not supported".into());
+        }
+        let Expr::Arrow(arrow) = executor.expr.as_ref() else {
+            return Err("Promise executor must be an arrow function".into());
+        };
+        let resolve = HirType::Function(vec![resolved.clone()], Box::new(HirType::Void));
+        let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
+        let executor =
+            self.lower_contextual_arrow(arrow, &[resolve, reject], Some(&HirType::Void))?;
+        Ok(HirExpr::PromiseNew(Box::new(executor), resolved))
     }
 
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
@@ -2719,6 +2839,58 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
+
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Ident(property) = &member.prop {
+                if property.sym == *"then" || property.sym == *"catch" {
+                    let source = self.lower_expr(&member.obj)?;
+                    let HirType::Promise(input) = self.infer_expr_type(&source)? else {
+                        return Err(format!("`.{}` requires a Promise receiver", property.sym));
+                    };
+                    let [callback] = call.args.as_slice() else {
+                        return Err(format!("`.{}` expects exactly one callback", property.sym));
+                    };
+                    if callback.spread.is_some() {
+                        return Err("Promise callback spread is not supported".into());
+                    }
+                    let Expr::Arrow(arrow) = callback.expr.as_ref() else {
+                        return Err("Promise continuation must be an arrow function".into());
+                    };
+                    let on_rejected = property.sym == *"catch";
+                    let callback_input = if on_rejected {
+                        HirType::Str
+                    } else {
+                        input.as_ref().clone()
+                    };
+                    let callback = self.lower_contextual_arrow(arrow, &[callback_input], None)?;
+                    let HirType::Function(_, callback_output) = self.infer_expr_type(&callback)?
+                    else {
+                        unreachable!()
+                    };
+                    let (output, flatten) = match callback_output.as_ref() {
+                        HirType::Promise(inner) => (inner.as_ref().clone(), true),
+                        output => (output.clone(), false),
+                    };
+                    if output == HirType::Void {
+                        return Err("Promise continuations must return a value".into());
+                    }
+                    if on_rejected && output != *input {
+                        return Err(format!(
+                            "`.catch` callback resolves to {output:?}, expected {:?}",
+                            input
+                        ));
+                    }
+                    return Ok(HirExpr::PromiseThen(
+                        Box::new(source),
+                        Box::new(callback),
+                        input.as_ref().clone(),
+                        output,
+                        on_rejected,
+                        flatten,
+                    ));
+                }
+            }
+        }
 
         // An object field with a function type is a callable value. Preserve
         // it as `Call(PropAccess(...), args)` instead of flattening it into a
@@ -4040,6 +4212,38 @@ mod tests {
             .unwrap(),
             HirType::Void
         );
+    }
+
+    #[test]
+    fn lowers_promise_constructor_then_and_catch_with_contextual_callbacks() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                const value: Promise<string> = new Promise<number>((resolve, reject) => {
+                    resolve(20);
+                }).then(number => "ready");
+                const recovered: Promise<number> = new Promise<number>((resolve, reject) => {
+                    reject("failure");
+                }).catch(error => 42);
+                console.log(await value);
+                console.log(await recovered);
+            }"#,
+        );
+        let HirStmt::Let(_, ty, HirExpr::PromiseThen(_, _, input, output, false, false)) =
+            &program.functions[0].body[0]
+        else {
+            panic!("expected a typed Promise.then expression");
+        };
+        assert_eq!(ty, &HirType::Promise(Box::new(HirType::Str)));
+        assert_eq!(input, &HirType::F64);
+        assert_eq!(output, &HirType::Str);
+        assert!(matches!(
+            &program.functions[0].body[1],
+            HirStmt::Let(
+                _,
+                HirType::Promise(_),
+                HirExpr::PromiseThen(_, _, HirType::F64, HirType::F64, true, false)
+            )
+        ));
     }
 
     #[test]
