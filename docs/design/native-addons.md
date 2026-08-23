@@ -389,3 +389,35 @@ fallbackまたは`native.a` backendの利用を診断する。通常の単一フ
 `PT_INTERP`に基づくlinkage、npm package一覧、QuickJS／N-API有無を表示する。
 `THAW_RUN_CONTAINER_INTEGRATION=1`で有効になるE2Eは、成果物1個だけをread-onlyで
 networkなしのFedora containerへmountし、完全静的binaryの起動を検証する。
+
+## 13. 非同期work V1
+
+`napi_create_async_work`、`napi_queue_async_work`、`napi_delete_async_work`を実装する。
+`execute` callbackは共有worker poolで実行し、完了したworkはthread-safe queueへ
+送る。N-APIを利用する生成実行ファイルはuser `main`の終了後にqueueをdrainし、
+`complete` callbackをmain threadで実行してからprocessを終了する。complete内からの
+`napi_delete_async_work`も許可し、同じworkの二重queueや実行中のdeleteはstatus errorに
+する。unit testでthread境界を、実際のC製`.node`をリンクするE2Eで生成entry pointからの
+drainを検証する。
+
+`napi_cancel_async_work`は、共有queueで待機中のworkだけを取り除き、executeを呼ばずに
+`napi_cancelled` statusでcompleteへ渡す。workerによる取り出しとcancelは同じlockで
+直列化されるため、execute開始後のcancelは`napi_generic_failure`になる。workerはCPU
+並列度を上限4に丸めた共有poolであり、workごとにはthreadを生成しない。libuvそのもの
+とのqueue共有や優先度制御は対象外である。
+
+## 14. bcrypt実package検証
+
+`bcrypt@6.0.0`の公式Linux x64 glibc prebuildを対象に、`nm -D`で要求される
+Node-API surfaceを列挙した。async workに加えてreference、FunctionへのSymbol
+property、汎用property操作、external、Latin-1文字列、callback scope、error API、
+Buffer/typed-array判定を実装した。特にnode-addon-apiはcallback dataをFunctionの
+private Symbol propertyとして管理するため、FunctionもObjectと同様にpropertyを
+保持する必要がある。
+
+`THAW_BCRYPT_NODE`で有効になる実package testは、公式`.node`をロードして
+`gen_salt_sync`と`encrypt_sync`を実行し、さらにcallbackを渡した`gen_salt`を共有
+worker poolで実行する。生成されたsaltがmain-thread complete callbackへ返るところまで
+検証する。次の課題はJsonだけに限定されている`callNativeAddon`引数へコンパイル済み
+Function値を渡せるcallback bridgeを追加し、この非同期呼び出しを生成実行ファイルの
+TypeScriptから直接表現することである。
