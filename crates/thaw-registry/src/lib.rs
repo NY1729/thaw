@@ -261,7 +261,12 @@ fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBu
     let candidates = [
         path.to_string(),
         format!("{trimmed}.js"),
+        // Real ESM packages commonly use an explicit `.mjs` extension
+        // (sometimes alongside a separate `.cjs` build) rather than
+        // relying on `package.json`'s `"type": "module"`.
+        format!("{trimmed}.mjs"),
         format!("{trimmed}/index.js"),
+        format!("{trimmed}/index.mjs"),
     ];
     for candidate in &candidates {
         let resolved = package_dir.join(candidate);
@@ -353,6 +358,10 @@ fn bundle_commonjs_package(
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
         let source = fs::read_to_string(&abs_path)
             .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+        // A no-op for a file that's already CommonJS (or doesn't parse as
+        // JS at all -- left completely untouched either way, so this can
+        // never make an already-working file worse).
+        let source = rewrite_esm_to_commonjs(&source).unwrap_or(source);
 
         let relative_in_pkg = key
             .strip_prefix(&format!("{pkg_name}/"))
@@ -463,6 +472,179 @@ fn find_require_specs(source: &str) -> Vec<String> {
         specs.push(source[content_start..j].to_string());
     }
     specs
+}
+
+/// Rewrites ESM (`import`/`export`) syntax to the CommonJS shape the rest
+/// of this bundler's require-graph resolution already understands:
+/// `find_relative_require_specs`/`find_bare_require_specs`'s text scan
+/// only ever looks for ordinary `require(...)` calls, so as long as this
+/// produces those, nothing else in the pipeline needs to know ESM was
+/// ever involved -- deep imports, builtins, and cross-package resolution
+/// all keep working unmodified on the rewritten text.
+///
+/// Returns `None` (caller keeps the original source untouched) if the
+/// file doesn't parse as JS at all, or parses but uses no `import`/
+/// `export` syntax -- this only ever *adds* a transformation on top of
+/// already-working CommonJS, never risks corrupting it.
+///
+/// A statement this doesn't need to touch is copied out **verbatim** via
+/// its original source span (`SourceMap::span_to_snippet`), not
+/// re-printed from the AST -- this project carries no general JS code
+/// generator, and byte-for-byte preservation of untouched code avoids
+/// ever needing one. Only the `import`/`export` declarations themselves
+/// are replaced with synthesized `require`/`exports.x = ...` statements.
+/// A destructuring `export const { a, b } = obj;` and a re-exported
+/// string-literal name (`export { x as "weird name" }`, a rare ES2022
+/// form) fall outside what's extracted -- silently contribute nothing to
+/// `exports`, rather than aborting the whole rewrite.
+fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
+    use thaw_parser::ast::{
+        Decl, DefaultDecl, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName,
+        ModuleItem, Pat,
+    };
+    use thaw_parser::common::{SourceMapper, Spanned};
+
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let has_esm_syntax = module
+        .body
+        .iter()
+        .any(|item| matches!(item, ModuleItem::ModuleDecl(_)));
+    if !has_esm_syntax {
+        return None;
+    }
+
+    let snippet = |span: thaw_parser::common::Span| cm.span_to_snippet(span).ok();
+    let export_name = |name: &ModuleExportName| match name {
+        ModuleExportName::Ident(id) => id.sym.to_string(),
+        // `Wtf8Atom` (arbitrary-string export names, a rare ES2022 form)
+        // has no `Display`; lossily converting to UTF-8 is fine here --
+        // this text only ever ends up embedded in generated JS source.
+        ModuleExportName::Str(s) => s.value.to_string_lossy().into_owned(),
+    };
+    let names_declared_by = |decl: &Decl| -> Vec<String> {
+        match decl {
+            Decl::Fn(f) => vec![f.ident.sym.to_string()],
+            Decl::Class(c) => vec![c.ident.sym.to_string()],
+            Decl::Var(v) => v
+                .decls
+                .iter()
+                .filter_map(|d| match &d.name {
+                    Pat::Ident(id) => Some(id.id.sym.to_string()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+
+    let mut prologue = String::from("module.exports.__esModule = true;\n");
+    let mut rest = String::new();
+    let mut synthetic_count = 0usize;
+
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(stmt) => {
+                if let Some(text) = snippet(stmt.span()) {
+                    rest.push_str(&text);
+                    rest.push('\n');
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+                let var_name = format!("__thaw_esm_import_{synthetic_count}");
+                synthetic_count += 1;
+                let spec = import.src.value.to_string_lossy();
+                prologue.push_str(&format!("var {var_name} = require({});\n", js_string_literal(&spec)));
+                for specifier in &import.specifiers {
+                    match specifier {
+                        ImportSpecifier::Default(d) => {
+                            let local = d.local.sym.to_string();
+                            prologue.push_str(&format!(
+                                "var {local} = ({var_name} && {var_name}.__esModule) ? {var_name}.default : {var_name};\n"
+                            ));
+                        }
+                        ImportSpecifier::Namespace(n) => {
+                            prologue.push_str(&format!("var {} = {var_name};\n", n.local.sym));
+                        }
+                        ImportSpecifier::Named(n) => {
+                            let local = n.local.sym.to_string();
+                            let imported = n
+                                .imported
+                                .as_ref()
+                                .map(&export_name)
+                                .unwrap_or_else(|| local.clone());
+                            prologue.push_str(&format!("var {local} = {var_name}.{imported};\n"));
+                        }
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                if let Some(text) = snippet(export_decl.decl.span()) {
+                    rest.push_str(&text);
+                    rest.push('\n');
+                }
+                for name in names_declared_by(&export_decl.decl) {
+                    rest.push_str(&format!("exports.{name} = {name};\n"));
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) => {
+                let text = match &default_decl.decl {
+                    DefaultDecl::Fn(f) => snippet(f.span()),
+                    DefaultDecl::Class(c) => snippet(c.span()),
+                    DefaultDecl::TsInterfaceDecl(_) => None,
+                };
+                if let Some(text) = text {
+                    rest.push_str(&format!("module.exports.default = {text};\n"));
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) => {
+                if let Some(text) = snippet(default_expr.expr.span()) {
+                    rest.push_str(&format!("module.exports.default = {text};\n"));
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(named)) => match &named.src {
+                Some(src) => {
+                    let var_name = format!("__thaw_esm_reexport_{synthetic_count}");
+                    synthetic_count += 1;
+                    let spec = src.value.to_string_lossy();
+                    prologue.push_str(&format!("var {var_name} = require({});\n", js_string_literal(&spec)));
+                    for spec in &named.specifiers {
+                        if let ExportSpecifier::Named(n) = spec {
+                            let orig = export_name(&n.orig);
+                            let exported = n.exported.as_ref().map(&export_name).unwrap_or_else(|| orig.clone());
+                            rest.push_str(&format!("exports.{exported} = {var_name}.{orig};\n"));
+                        }
+                        // `export * as ns from './y'`/`export v from './y'`:
+                        // rare re-export forms, best-effort skipped.
+                    }
+                }
+                None => {
+                    for spec in &named.specifiers {
+                        if let ExportSpecifier::Named(n) = spec {
+                            let orig = export_name(&n.orig);
+                            let exported = n.exported.as_ref().map(&export_name).unwrap_or_else(|| orig.clone());
+                            rest.push_str(&format!("exports.{exported} = {orig};\n"));
+                        }
+                    }
+                }
+            },
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export_all)) => {
+                let var_name = format!("__thaw_esm_reexport_all_{synthetic_count}");
+                synthetic_count += 1;
+                let spec = export_all.src.value.to_string_lossy();
+                prologue.push_str(&format!("var {var_name} = require({});\n", js_string_literal(&spec)));
+                rest.push_str(&format!(
+                    "for (var __thaw_esm_key in {var_name}) {{ exports[__thaw_esm_key] = {var_name}[__thaw_esm_key]; }}\n"
+                ));
+            }
+            // `import foo = require(...)`/`export = foo`/`export as
+            // namespace`: TS-only forms that shouldn't appear in real
+            // runtime `.js` files; skip gracefully rather than crashing
+            // if one somehow does.
+            ModuleItem::ModuleDecl(_) => {}
+        }
+    }
+
+    Some(format!("{prologue}{rest}"))
 }
 
 /// Specs starting with `./` or `../` -- same-package relative requires.
@@ -1235,6 +1417,77 @@ mod tests {
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
         assert_eq!(result, "\"symbol\"");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn plain_commonjs_is_left_untouched() {
+        assert!(rewrite_esm_to_commonjs("module.exports = function f() { return 1; };").is_none());
+    }
+
+    #[test]
+    fn rewrites_default_export_to_module_exports_default() {
+        let rewritten = rewrite_esm_to_commonjs("export default function greet() { return 'hi'; }").unwrap();
+        assert!(rewritten.contains("module.exports.default = function greet() { return 'hi'; }"));
+        assert!(rewritten.contains("module.exports.__esModule = true;"));
+    }
+
+    #[test]
+    fn rewrites_named_export_and_binds_it_too() {
+        let rewritten = rewrite_esm_to_commonjs("export function add(a, b) { return a + b; }").unwrap();
+        assert!(rewritten.contains("function add(a, b) { return a + b; }"));
+        assert!(rewritten.contains("exports.add = add;"));
+    }
+
+    #[test]
+    fn rewrites_named_import_to_a_require_call() {
+        let rewritten = rewrite_esm_to_commonjs("import { add } from './math';\nconsole.log(add(1, 2));").unwrap();
+        assert!(rewritten.contains("require(\"./math\")"));
+        assert!(rewritten.contains("console.log(add(1, 2));"));
+    }
+
+    /// The bundle isn't just plausible-looking text: an ESM main file
+    /// importing from an ESM sibling file must actually run correctly
+    /// through the real QuickJS-NG engine, exactly like the equivalent
+    /// CommonJS package already does (`bundle_actually_runs_through_quickjs`).
+    #[test]
+    fn esm_bundle_actually_runs_through_quickjs() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("esm_bundle_runs_through_quickjs");
+        fs::write(
+            dir.join("index.js"),
+            "import { double } from './double.js';\nexport default function run(n) { return double(n); }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("double.js"),
+            "export function double(n) { return n * 2; }",
+        )
+        .unwrap();
+
+        let empty_node_modules = temp_registry("esm_bundle_node_modules");
+        let (bundle, _, file_count) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2, "index.js + double.js");
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.run = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "ESM bundle failed to load");
+
+        let func = CString::new("run").unwrap();
+        let args = CString::new("[21]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "42");
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

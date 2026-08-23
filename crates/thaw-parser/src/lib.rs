@@ -8,6 +8,7 @@ use swc_common::{FileName, SourceMap};
 use swc_ecma_ast::Module;
 use swc_ecma_parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 
+pub use swc_common as common;
 pub use swc_ecma_ast as ast;
 
 /// Parses a TypeScript source string into an SWC `Module`.
@@ -46,6 +47,18 @@ pub fn parse_typescript(source: &str) -> Result<Module, String> {
 /// grammar). Kept around for parity with `Syntax::Es` and future use; the
 /// real pipeline is TS-only.
 pub fn parse_javascript(source: &str) -> Result<Module, String> {
+    parse_javascript_with_source_map(source).map(|(module, _)| module)
+}
+
+/// Same as [`parse_javascript`], but also returns the `SourceMap` the
+/// module was parsed against. A caller that needs to extract a node's
+/// original source text (e.g. thaw-registry's ESM-to-CommonJS rewrite,
+/// which keeps untouched statements verbatim rather than re-printing the
+/// whole AST) needs the `SourceMap` to turn a `Span` back into text via
+/// `SourceMap::span_to_snippet` -- raw `BytePos` arithmetic against the
+/// input string isn't safe to do by hand (SWC's spans aren't simply
+/// 0-based offsets into the source).
+pub fn parse_javascript_with_source_map(source: &str) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
     let fm = cm.new_source_file(Lrc::new(FileName::Custom("input.js".into())), source.to_string());
@@ -58,10 +71,11 @@ pub fn parse_javascript(source: &str) -> Result<Module, String> {
         err.into_diagnostic(&handler).emit();
     }
 
-    parser.parse_module().map_err(|err| {
+    let module = parser.parse_module().map_err(|err| {
         err.into_diagnostic(&handler).emit();
         "failed to parse JavaScript source".to_string()
-    })
+    })?;
+    Ok((module, cm))
 }
 
 #[cfg(test)]

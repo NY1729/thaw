@@ -22,9 +22,9 @@
 use std::collections::HashMap;
 
 use swc_ecma_ast::{
-    Decl, Expr, FnDecl, Module, ModuleDecl, ModuleItem, Pat, TsEntityName, TsInterfaceDecl,
-    TsKeywordTypeKind, TsLit, TsNamespaceBody, TsType, TsTypeElement, TsTypeOperatorOp,
-    TsUnionOrIntersectionType,
+    Decl, DefaultDecl, Expr, Function, Module, ModuleDecl, ModuleItem, Pat, TsEntityName,
+    TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody, TsType, TsTypeElement,
+    TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
 use thaw_hir::{FfiSignature, HirType};
 
@@ -80,36 +80,53 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
         .body
         .iter()
         .flat_map(extract_fn_decls)
-        .map(|fn_decl| lower_dts_function(fn_decl, &interfaces, &generic_interfaces))
+        .map(|(name, func)| lower_dts_function(name, func, &interfaces, &generic_interfaces))
         .collect())
 }
 
 /// A single top-level `declare function`/`export declare function`
-/// extracts one `FnDecl`; a `declare namespace Foo { function bar(...):
-/// ...; }` recurses into its body and extracts every function found
-/// inside (at any nesting depth -- a namespace can itself contain a
-/// nested namespace). Found necessary by a real npm package (`qs`),
-/// whose entire type surface -- including every function -- lives
-/// inside `declare namespace QueryString { ... }` rather than at the
-/// top level; without this, `parse_dts` found zero functions in it. The
-/// extracted `DtsFunction.name` is the bare function name (`parse`, not
-/// `QueryString.parse`) -- that's also what `wrap_as_commonjs_module`'s
+/// extracts one `(name, function)` pair; a `declare namespace Foo {
+/// function bar(...): ...; }` recurses into its body and extracts every
+/// function found inside (at any nesting depth -- a namespace can itself
+/// contain a nested namespace). Found necessary by a real npm package
+/// (`qs`), whose entire type surface -- including every function --
+/// lives inside `declare namespace QueryString { ... }` rather than at
+/// the top level; without this, `parse_dts` found zero functions in it.
+/// The extracted `DtsFunction.name` is the bare function name (`parse`,
+/// not `QueryString.parse`) -- that's also what `wrap_as_commonjs_module`'s
 /// object-export hoisting binds it to at runtime (`qs`'s own
 /// `module.exports = { parse, stringify, ... }`), so the two already
 /// agree without any extra namespace-qualification logic.
-fn extract_fn_decls(item: &ModuleItem) -> Vec<&FnDecl> {
+///
+/// Also handles a *named* `export default function foo(...): T;` (an
+/// `ExportDefaultDecl`, a different AST shape than `ExportDecl` --
+/// found necessary by real ESM packages, whose `.d.ts` commonly uses
+/// this form, e.g. `escape-string-regexp`'s `export default function
+/// escapeStringRegexp(string: string): string;`). An *anonymous*
+/// `export default function(...): T;` has no name to extract a callable
+/// `DtsFunction` under and is silently skipped -- `.d.ts` authors
+/// essentially always name it in practice specifically so it's
+/// referenceable, so this isn't expected to matter.
+fn extract_fn_decls(item: &ModuleItem) -> Vec<(&str, &Function)> {
     match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_fn_decls_from_decl(decl),
         ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
             extract_fn_decls_from_decl(&export.decl)
         }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
+            DefaultDecl::Fn(fn_expr) => match &fn_expr.ident {
+                Some(ident) => vec![(ident.sym.as_str(), &fn_expr.function)],
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
 
-fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<&FnDecl> {
+fn extract_fn_decls_from_decl(decl: &Decl) -> Vec<(&str, &Function)> {
     match decl {
-        Decl::Fn(fn_decl) => vec![fn_decl],
+        Decl::Fn(fn_decl) => vec![(fn_decl.ident.sym.as_str(), &fn_decl.function)],
         Decl::TsModule(module_decl) => {
             let Some(TsNamespaceBody::TsModuleBlock(block)) = &module_decl.body else {
                 return Vec::new();
@@ -300,12 +317,12 @@ fn resolve_type_with_interfaces(
 /// Duration)`) used to silently delete every other function in that file
 /// from `parse_dts`'s result.
 fn lower_dts_function(
-    fn_decl: &FnDecl,
+    name: &str,
+    func: &Function,
     interfaces: &HashMap<String, DtsType>,
     generic_interfaces: &GenericInterfaces,
 ) -> DtsFunction {
-    let name = fn_decl.ident.sym.to_string();
-    let func = &fn_decl.function;
+    let name = name.to_string();
 
     let params = func
         .params
@@ -1004,6 +1021,13 @@ pub struct ModuleBundle<'a> {
 /// (docs/design/bridge.md section 7's "未解決の論点"/"unresolved
 /// questions"). This only unblocks packages with no runtime dependencies
 /// of their own, which covers plenty of real small utility packages.
+///
+/// A `fallback_names` binding also checks `module.exports.default`, not
+/// just `module.exports` itself, being a function: thaw-registry's ESM
+/// rewrite (a real ESM package's `export default function foo(){}`)
+/// always sets `module.exports.default`, matching real `import x from
+/// 'y'` interop semantics, rather than replacing `module.exports`
+/// outright the way a plain CommonJS `module.exports = foo` does.
 fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String {
     // `name` is always a valid JS identifier here: it's a function name
     // SWC already parsed out of a `.d.ts` `declare function` statement,
@@ -1013,7 +1037,8 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
         .iter()
         .map(|name| {
             format!(
-                "if (typeof module.exports === 'function') {{ globalThis.{name} = module.exports; }}\n"
+                "if (typeof module.exports === 'function') {{ globalThis.{name} = module.exports; }}\n\
+                 else if (typeof module.exports === 'object' && module.exports !== null && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n"
             )
         })
         .collect();
@@ -1198,6 +1223,30 @@ mod tests {
         assert_eq!(funcs.len(), 2);
         assert!(funcs.iter().any(|f| f.name == "deep"));
         assert!(funcs.iter().any(|f| f.name == "shallow"));
+    }
+
+    /// The exact shape found in a real ESM npm package's `.d.ts`
+    /// (`escape-string-regexp`): `export default function name(...): T;`
+    /// is a different AST node (`ExportDefaultDecl`) than
+    /// `export declare function name(...): T;` (`ExportDecl`); without
+    /// handling it specifically, `parse_dts` found zero functions.
+    #[test]
+    fn extracts_a_named_export_default_function() {
+        let source = "export default function escapeStringRegexp(string: string): string;";
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "escapeStringRegexp");
+        assert!(matches!(classify(&funcs[0]), Classification::FastPath(_)));
+    }
+
+    /// An anonymous `export default function(...): T;` has no name to
+    /// extract a callable `DtsFunction` under -- must be silently
+    /// skipped, not panic.
+    #[test]
+    fn anonymous_export_default_function_is_skipped_not_panicked_on() {
+        let source = "export default function(string: string): string;";
+        let funcs = parse_dts(source).unwrap();
+        assert_eq!(funcs.len(), 0);
     }
 
     #[test]
@@ -1647,6 +1696,29 @@ mod tests {
         assert!(wrapped.contains("globalThis.require ="));
         assert!(wrapped.contains(js_source));
         assert!(wrapped.contains("globalThis.leftPad = module.exports;"));
+    }
+
+    /// The exact shape thaw-registry's ESM rewrite produces for a real
+    /// ESM package (`escape-string-regexp`'s `export default function
+    /// escapeStringRegexp(){}`): `module.exports.default = <fn>`, not
+    /// `module.exports = <fn>` directly. Runs through real QuickJS-NG to
+    /// confirm the Fallback name actually ends up callable, not just
+    /// that the generated text looks plausible.
+    #[test]
+    fn binds_esm_default_export_under_the_fallback_name() {
+        use std::ffi::{CStr, CString};
+
+        let js_source = "module.exports.__esModule = true;\nmodule.exports.default = function escapeIt(s) { return '[' + s + ']'; };";
+        let wrapped = wrap_as_commonjs_module(js_source, &["escapeIt".to_string()]);
+
+        let source = CString::new(wrapped).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+
+        let func = CString::new("escapeIt").unwrap();
+        let args = CString::new("[\"hi\"]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "\"[hi]\"");
     }
 
     #[test]
