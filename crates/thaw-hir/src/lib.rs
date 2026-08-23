@@ -24,6 +24,7 @@ pub enum HirType {
     Json,
     Promise(Box<HirType>),
     Array(Box<HirType>),
+    Tuple(Vec<HirType>),
     Object(Vec<(Symbol, HirType)>),
     Function(Vec<HirType>, Box<HirType>),
     Union(Vec<HirType>),
@@ -131,6 +132,8 @@ pub enum HirExpr {
     PromiseAll(Vec<HirExpr>, HirType),
     /// A homogeneous `Promise.all` whose promises are supplied as an array.
     PromiseAllArray(Box<HirExpr>, HirType),
+    /// A heterogeneous literal `Promise.all`, preserving each result type.
+    PromiseAllTuple(Vec<HirExpr>, Vec<HirType>),
     /// `await expr`. V1 (see docs/design/async-await.md) compiles this as
     /// an identity transform in codegen -- `async`/`await` is sugar over
     /// synchronous calls, valid because Lambda only ever processes one
@@ -302,7 +305,9 @@ pub fn set_ffi_error_abi(
             | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
-            HirExpr::ArrayLit(values) | HirExpr::PromiseAll(values, _) => {
+            HirExpr::ArrayLit(values)
+            | HirExpr::PromiseAll(values, _)
+            | HirExpr::PromiseAllTuple(values, _) => {
                 for value in values {
                     visit_expr(value, symbol, abi, found);
                 }
@@ -386,7 +391,10 @@ pub fn set_ffi_ownership(
             }
         }
         match expr {
-            HirExpr::FfiCall(_, args) | HirExpr::ArrayLit(args) | HirExpr::PromiseAll(args, _) => {
+            HirExpr::FfiCall(_, args)
+            | HirExpr::ArrayLit(args)
+            | HirExpr::PromiseAll(args, _)
+            | HirExpr::PromiseAllTuple(args, _) => {
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }
@@ -520,7 +528,8 @@ pub fn set_ffi_string_abi(
         match expr {
             HirExpr::FfiCall(_, values)
             | HirExpr::ArrayLit(values)
-            | HirExpr::PromiseAll(values, _) => {
+            | HirExpr::PromiseAll(values, _)
+            | HirExpr::PromiseAllTuple(values, _) => {
                 for value in values {
                     update_expr(value, symbol, params, returns, calling_convention, found);
                 }

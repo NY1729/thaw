@@ -1487,7 +1487,7 @@ struct PromiseAllState {
     first_error: *const u8,
     result: *mut u64,
     result_slot: *mut *const u8,
-    element_size: usize,
+    element_sizes: Vec<usize>,
 }
 
 struct PromiseAllChild {
@@ -1511,7 +1511,7 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
             let destination = unsafe { state.result.add(index + 1).cast::<u8>() };
             unsafe {
                 destination.write_bytes(0, size_of::<u64>());
-                std::ptr::copy_nonoverlapping(result, destination, state.element_size);
+                std::ptr::copy_nonoverlapping(result, destination, state.element_sizes[*index]);
             }
         }
     }
@@ -1541,8 +1541,37 @@ pub unsafe extern "C" fn thaw_promise_all_slots(
     len: usize,
     element_size: usize,
 ) -> *mut ThawPromise {
+    let element_sizes = vec![element_size; len];
+    unsafe { thaw_promise_all_typed(promises, element_sizes.as_ptr(), len) }
+}
+
+/// Joins Promise handles using one result-copy size per input position.
+/// Sizes must be between one byte and one eight-byte array slot.
+///
+/// # Safety
+///
+/// `promises` and `element_sizes` must each reference `len` readable entries.
+/// Promise handles are consumed and must not be used after this call.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_all_typed(
+    promises: *const *mut ThawPromise,
+    element_sizes: *const usize,
+    len: usize,
+) -> *mut ThawPromise {
     let output = thaw_promise_new();
-    if element_size == 0 || element_size > size_of::<u64>() {
+    if len != 0 && element_sizes.is_null() {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let element_sizes = if len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(element_sizes, len) }.to_vec()
+    };
+    if element_sizes
+        .iter()
+        .any(|size| *size == 0 || *size > size_of::<u64>())
+    {
         thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
@@ -1592,7 +1621,7 @@ pub unsafe extern "C" fn thaw_promise_all_slots(
         },
         result,
         result_slot,
-        element_size,
+        element_sizes,
     }));
     if !grouped.is_empty() {
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
@@ -2151,6 +2180,30 @@ mod tests {
         let result = unsafe { *thaw_runtime_run_until_resolved(empty).cast::<*const u64>() };
         assert_eq!(unsafe { result.read() }, 0);
         unsafe { thaw_promise_destroy(empty) };
+    }
+
+    #[test]
+    fn promise_all_typed_copies_position_sizes_and_deduplicates_handles() {
+        let flag = thaw_promise_new();
+        let pointer = thaw_promise_new();
+        let children = [flag, pointer, flag];
+        let sizes = [1usize, 8, 1];
+        let joined =
+            unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), children.len()) };
+        let pointer_value = 0x1234_5678_9abc_def0u64;
+        let flag_value = 1u8;
+        assert_eq!(
+            thaw_promise_resolve(pointer, (&pointer_value as *const u64).cast()),
+            1
+        );
+        assert_eq!(thaw_promise_resolve(flag, &flag_value), 1);
+        thaw_runtime_run_until_idle();
+        let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u64>() };
+        assert_eq!(unsafe { result.read() }, 3);
+        assert_eq!(unsafe { result.add(1).read() }, 1);
+        assert_eq!(unsafe { result.add(2).read() }, pointer_value);
+        assert_eq!(unsafe { result.add(3).read() }, 1);
+        unsafe { thaw_promise_destroy(joined) };
     }
 
     #[test]
