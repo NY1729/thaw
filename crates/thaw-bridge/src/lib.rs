@@ -955,6 +955,14 @@ fn render_ts_type(ty: &HirType) -> String {
         HirType::Str => "string".to_string(),
         HirType::Json => "Json".to_string(),
         HirType::Array(elem) => format!("{}[]", render_ts_type(elem)),
+        HirType::Tuple(elements) => format!(
+            "[{}]",
+            elements
+                .iter()
+                .map(render_ts_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         HirType::Promise(inner) => format!("Promise<{}>", render_ts_type(inner)),
         HirType::Object(fields) => {
             let rendered = fields
