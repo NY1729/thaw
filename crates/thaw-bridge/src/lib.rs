@@ -26,7 +26,7 @@ use swc_ecma_ast::{
     TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody, TsType, TsTypeElement,
     TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
-use thaw_hir::{FfiErrorAbi, FfiSignature, HirType};
+use thaw_hir::{FfiErrorAbi, FfiOwnership, FfiSignature, HirType};
 
 /// One function signature extracted from a `.d.ts` file, before
 /// classification.
@@ -827,6 +827,8 @@ pub fn classify(func: &DtsFunction) -> Classification {
         params,
         ret,
         error_abi: FfiErrorAbi::Direct,
+        return_ownership: FfiOwnership::Borrowed,
+        error_ownership: FfiOwnership::Borrowed,
     })
 }
 
@@ -1256,6 +1258,8 @@ mod tests {
                 params: vec![HirType::F64, HirType::F64],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
     }
@@ -1275,6 +1279,8 @@ mod tests {
                 params: vec![HirType::Array(Box::new(HirType::F64))],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
         assert_eq!(
@@ -1287,6 +1293,8 @@ mod tests {
                 ])],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
     }
@@ -1473,6 +1481,8 @@ mod tests {
                 ])],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
     }
@@ -1533,6 +1543,8 @@ mod tests {
                 ])],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
     }
@@ -1571,6 +1583,8 @@ mod tests {
                 params: vec![HirType::Object(vec![("value".into(), HirType::F64)])],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
     }
@@ -1629,6 +1643,8 @@ mod tests {
                 ])],
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
+                return_ownership: FfiOwnership::Borrowed,
+                error_ownership: FfiOwnership::Borrowed,
             })
         );
     }

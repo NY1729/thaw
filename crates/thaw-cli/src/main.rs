@@ -523,18 +523,61 @@ fn rewrite_qualified_calls(
     Ok(out)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct FfiMetadata {
+    error_abi: thaw_hir::FfiErrorAbi,
+    return_ownership: thaw_hir::FfiOwnership,
+    error_ownership: thaw_hir::FfiOwnership,
+}
+
+fn parse_ffi_ownership(
+    entry: &serde_json::Value,
+    ownership_key: &str,
+    destroy_key: &str,
+    fallback_destroy_key: Option<&str>,
+    symbol: &str,
+    path: &Path,
+) -> Result<thaw_hir::FfiOwnership, String> {
+    let spelling = entry
+        .get(ownership_key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("borrowed");
+    let destroy = entry
+        .get(destroy_key)
+        .or_else(|| fallback_destroy_key.and_then(|key| entry.get(key)))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    match spelling {
+        "borrowed" => Ok(thaw_hir::FfiOwnership::Borrowed),
+        "owned" => destroy
+            .map(|destroy| thaw_hir::FfiOwnership::Owned { destroy })
+            .ok_or_else(|| {
+                format!(
+                    "FFI metadata for `{symbol}` in `{}` needs `{destroy_key}` for `{ownership_key}: owned`",
+                    path.display()
+                )
+            }),
+        "arena-copy" => Ok(thaw_hir::FfiOwnership::ArenaCopy { destroy }),
+        other => Err(format!(
+            "unknown {ownership_key} `{other}` for `{symbol}` in `{}`",
+            path.display()
+        )),
+    }
+}
+
 fn read_ffi_metadata(
     paths: &[PathBuf],
-) -> Result<std::collections::HashMap<String, thaw_hir::FfiErrorAbi>, String> {
+) -> Result<std::collections::HashMap<String, FfiMetadata>, String> {
     let mut configured = std::collections::HashMap::new();
     for path in paths {
         let source = std::fs::read_to_string(path)
             .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
         let document: serde_json::Value = serde_json::from_str(&source)
             .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
-        if document.get("version").and_then(|value| value.as_u64()) != Some(1) {
+        let version = document.get("version").and_then(|value| value.as_u64());
+        if !matches!(version, Some(1 | 2)) {
             return Err(format!(
-                "`{}` must declare FFI metadata version 1",
+                "`{}` must declare FFI metadata version 1 or 2",
                 path.display()
             ));
         }
@@ -562,9 +605,36 @@ fn read_ffi_metadata(
                     ))
                 }
             };
-            if let Some(previous) = configured.insert(symbol.clone(), abi.clone()) {
-                if previous != abi {
-                    return Err(format!("conflicting FFI error ABI metadata for `{symbol}`"));
+            let metadata = FfiMetadata {
+                error_abi: abi,
+                return_ownership: if version == Some(2) {
+                    parse_ffi_ownership(
+                        entry,
+                        "returnOwnership",
+                        "returnDestroy",
+                        Some("destroy"),
+                        symbol,
+                        path,
+                    )?
+                } else {
+                    thaw_hir::FfiOwnership::Borrowed
+                },
+                error_ownership: if version == Some(2) {
+                    parse_ffi_ownership(
+                        entry,
+                        "errorOwnership",
+                        "errorDestroy",
+                        None,
+                        symbol,
+                        path,
+                    )?
+                } else {
+                    thaw_hir::FfiOwnership::Borrowed
+                },
+            };
+            if let Some(previous) = configured.insert(symbol.clone(), metadata.clone()) {
+                if previous != metadata {
+                    return Err(format!("conflicting FFI metadata for `{symbol}`"));
                 }
             }
         }
@@ -597,8 +667,14 @@ fn build(
     let mut program =
         thaw_hir::lower_module_with_source_map(&module, &source_map, input.display().to_string())
             .map_err(|diagnostic| diagnostic.to_string())?;
-    for (symbol, abi) in read_ffi_metadata(ffi_metadata)? {
-        thaw_hir::set_ffi_error_abi(&mut program, &symbol, abi)?;
+    for (symbol, metadata) in read_ffi_metadata(ffi_metadata)? {
+        thaw_hir::set_ffi_error_abi(&mut program, &symbol, metadata.error_abi)?;
+        thaw_hir::set_ffi_ownership(
+            &mut program,
+            &symbol,
+            metadata.return_ownership,
+            metadata.error_ownership,
+        )?;
     }
 
     let context = Context::create();
@@ -720,7 +796,14 @@ mod tests {
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
-        assert_eq!(metadata["externalRead"], thaw_hir::FfiErrorAbi::ThawResult);
+        assert_eq!(
+            metadata["externalRead"],
+            FfiMetadata {
+                error_abi: thaw_hir::FfiErrorAbi::ThawResult,
+                return_ownership: thaw_hir::FfiOwnership::Borrowed,
+                error_ownership: thaw_hir::FfiOwnership::Borrowed,
+            }
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -732,7 +815,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let version = dir.join("version.json");
-        std::fs::write(&version, r#"{"version":2,"functions":{}}"#).unwrap();
+        std::fs::write(&version, r#"{"version":3,"functions":{}}"#).unwrap();
         assert!(read_ffi_metadata(&[version])
             .unwrap_err()
             .contains("version 1"));
@@ -745,6 +828,33 @@ mod tests {
         assert!(read_ffi_metadata(&[abi])
             .unwrap_err()
             .contains("unknown errorAbi"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_version_two_ffi_ownership_metadata() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-ffi-ownership-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ffi.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"functions":{"read":{"errorAbi":"thaw-result","returnOwnership":"owned","destroy":"free_read","errorOwnership":"arena-copy","errorDestroy":"free_error"}}}"#,
+        )
+        .unwrap();
+        let metadata = read_ffi_metadata(&[path]).unwrap();
+        assert_eq!(
+            metadata["read"],
+            FfiMetadata {
+                error_abi: thaw_hir::FfiErrorAbi::ThawResult,
+                return_ownership: thaw_hir::FfiOwnership::Owned {
+                    destroy: "free_read".into()
+                },
+                error_ownership: thaw_hir::FfiOwnership::ArenaCopy {
+                    destroy: Some("free_error".into())
+                },
+            }
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
