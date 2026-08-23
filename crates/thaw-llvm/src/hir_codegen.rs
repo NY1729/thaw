@@ -657,14 +657,19 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
     ) -> Result<FunctionType<'ctx>, String> {
-        let params = params
-            .iter()
-            .map(|ty| self.basic_type(ty).map(BasicMetadataTypeEnum::from))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut lowered = vec![BasicMetadataTypeEnum::from(
+            self.context.ptr_type(AddressSpace::default()),
+        )];
+        lowered.extend(
+            params
+                .iter()
+                .map(|ty| self.basic_type(ty).map(BasicMetadataTypeEnum::from))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         if *ret == HirType::Void {
-            Ok(self.context.void_type().fn_type(&params, false))
+            Ok(self.context.void_type().fn_type(&lowered, false))
         } else {
-            Ok(self.basic_type(ret)?.fn_type(&params, false))
+            Ok(self.basic_type(ret)?.fn_type(&lowered, false))
         }
     }
 
@@ -3510,7 +3515,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
 
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
-            HirExpr::Lambda(params, ret, body) => self.compile_lambda(params, ret, body),
+            HirExpr::Lambda(captures, params, ret, body) => {
+                self.compile_lambda(captures, params, ret, body)
+            }
             HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args),
             HirExpr::DynamicCall(sig, args) => self.compile_typed_dynamic_call(sig, args),
 
@@ -3580,6 +3587,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn compile_lambda(
         &mut self,
+        captures: &[HirParam],
         params: &[HirParam],
         ret: &HirType,
         body: &HirExpr,
@@ -3599,6 +3607,44 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
 
+        // Closure layout: `[code pointer][capture 0][capture 1]...`, with
+        // one machine word per entry. The arena gives the environment a
+        // lifetime long enough for callbacks that outlive their creator.
+        let i64_type = self.context.i64_type();
+        let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+        let closure = self
+            .builder
+            .build_call(
+                alloc,
+                &[
+                    i64_type
+                        .const_int(((captures.len() + 1) * 8) as u64, false)
+                        .into(),
+                    i64_type.const_int(8, false).into(),
+                ],
+                "closure_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a closure")?
+            .into_pointer_value();
+        self.builder
+            .build_store(closure, function.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        for (index, capture) in captures.iter().enumerate() {
+            let value = self.compile_expr(&HirExpr::Var(capture.name.clone()))?;
+            let offset = i64_type.const_int(((index + 1) * 8) as u64, false);
+            let slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(self.context.i8_type(), closure, &[offset], "capture_slot")
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(slot, value)
+                .map_err(|error| error.to_string())?;
+        }
+
         let saved_variables = std::mem::take(&mut self.variables);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);
@@ -3606,7 +3652,39 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = (|| -> Result<(), String> {
             let entry = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(entry);
-            for (value, param) in function.get_param_iter().zip(params) {
+            let environment = function
+                .get_first_param()
+                .ok_or("closure function is missing its environment")?
+                .into_pointer_value();
+            for (index, capture) in captures.iter().enumerate() {
+                let ty = self.basic_type(&capture.ty)?;
+                let offset = i64_type.const_int(((index + 1) * 8) as u64, false);
+                let capture_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            environment,
+                            &[offset],
+                            "captured",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let slot = self
+                    .builder
+                    .build_alloca(ty, &capture.name)
+                    .map_err(|error| error.to_string())?;
+                let value = self
+                    .builder
+                    .build_load(ty, capture_ptr, "capture_value")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
+                self.variables.insert(capture.name.clone(), (slot, ty));
+                self.variable_hir_types
+                    .insert(capture.name.clone(), capture.ty.clone());
+            }
+            for (value, param) in function.get_param_iter().skip(1).zip(params) {
                 let ty = self.basic_type(&param.ty)?;
                 let slot = self
                     .builder
@@ -3657,7 +3735,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.loop_stack = saved_loop_stack;
         self.builder.position_at_end(parent_block);
         result?;
-        Ok(function.as_global_value().as_pointer_value().into())
+        Ok(closure.into())
     }
 
     /// Allocates `[i64 length][f64 elem0]...[f64 elemN-1]` from the arena
@@ -4572,11 +4650,22 @@ impl<'ctx> HirCompiler<'ctx> {
 
         if let Some(HirType::Function(params, ret)) = self.variable_hir_types.get(name).cloned() {
             let function_type = self.function_type(&params, &ret)?;
-            let function_pointer = self.compile_expr(callee)?.into_pointer_value();
-            let compiled_args = args
-                .iter()
-                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
-                .collect::<Result<Vec<_>, _>>()?;
+            let closure = self.compile_expr(callee)?.into_pointer_value();
+            let function_pointer = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    closure,
+                    "closure_code",
+                )
+                .map_err(|error| error.to_string())?
+                .into_pointer_value();
+            let mut compiled_args = vec![BasicMetadataValueEnum::from(closure)];
+            compiled_args.extend(
+                args.iter()
+                    .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
             let call = self
                 .builder
                 .build_indirect_call(
@@ -5592,6 +5681,22 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "typed_arrow"), "42\n");
+    }
+
+    #[test]
+    fn compiles_captured_and_nested_arrow_functions() {
+        let source = r#"
+            function main(): void {
+                const base: number = 40;
+                const add = (value: number): number => base + value;
+                const make = (captured: number): (value: number) => number =>
+                    (value: number): number => captured + value;
+                const nested: (value: number) => number = make(20);
+                console.log(add(2));
+                console.log(nested(22));
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "captured_arrow"), "42\n42\n");
     }
 
     #[test]

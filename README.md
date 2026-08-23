@@ -162,9 +162,10 @@ The workspace crates have narrow responsibilities:
   modules backed by the same QuickJS polyfills used by npm dependencies
 - `node:fs` exposes native synchronous UTF-8 `existsSync`, `readFileSync`,
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
-- `node:http` exposes the first native server slice, `serveOnce(port, body)`,
-  which accepts one HTTP request on loopback, sends a text response, and returns
-  the request target; fully static end-to-end execution is covered
+- `node:http` exposes native `serveOnce(port, body)` and
+  `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
+  to arena-backed closures, including captured values and nested closures, and
+  Rust can invoke them through the callback FFI in fully static executables
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint

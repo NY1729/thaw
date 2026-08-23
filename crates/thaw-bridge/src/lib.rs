@@ -23,8 +23,8 @@ use std::collections::HashMap;
 
 use swc_ecma_ast::{
     Decl, DefaultDecl, Expr, Function, Module, ModuleDecl, ModuleItem, Pat, TsEntityName,
-    TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody, TsType, TsTypeElement,
-    TsTypeOperatorOp, TsUnionOrIntersectionType,
+    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody,
+    TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
 use thaw_hir::{FfiErrorAbi, FfiOwnership, FfiSignature, HirType};
 
@@ -491,6 +491,44 @@ fn classify_ts_type(
                     DtsType::Unsupported(format!("array element type: {reason}"))
                 }
             }
+        }
+
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            if function.type_params.is_some() {
+                return DtsType::Unsupported("generic callback types are not supported".into());
+            }
+            let mut params = Vec::with_capacity(function.params.len());
+            for param in &function.params {
+                let TsFnParam::Ident(param) = param else {
+                    return DtsType::Unsupported(
+                        "callback parameters must be plain identifiers".into(),
+                    );
+                };
+                let Some(annotation) = &param.type_ann else {
+                    return DtsType::Unsupported(format!(
+                        "callback parameter `{}` has no type annotation",
+                        param.id.sym
+                    ));
+                };
+                match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
+                    DtsType::Native(ty) => params.push(ty),
+                    DtsType::Unsupported(reason) => {
+                        return DtsType::Unsupported(format!(
+                            "callback parameter `{}`: {reason}",
+                            param.id.sym
+                        ))
+                    }
+                }
+            }
+            match classify_ts_type(&function.type_ann.type_ann, interfaces, generic_interfaces) {
+                DtsType::Native(ret) => DtsType::Native(HirType::Function(params, Box::new(ret))),
+                DtsType::Unsupported(reason) => {
+                    DtsType::Unsupported(format!("callback return type: {reason}"))
+                }
+            }
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(_)) => {
+            DtsType::Unsupported("constructor callback types are not supported".into())
         }
 
         TsType::TsTypeLit(type_lit) => {
@@ -1430,13 +1468,19 @@ mod tests {
     }
 
     #[test]
-    fn classifies_callback_parameter_as_fallback() {
+    fn classifies_typed_callback_parameter_as_fast_path() {
         let funcs =
             parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
-        assert!(matches!(
-            classify(&funcs[0]),
-            Classification::Fallback { .. }
-        ));
+        let Classification::FastPath(signature) = classify(&funcs[0]) else {
+            panic!("expected callback fast path");
+        };
+        assert_eq!(
+            signature.params,
+            vec![HirType::Function(
+                vec![HirType::Str],
+                Box::new(HirType::Void)
+            )]
+        );
     }
 
     /// A plausible subset of a real package's `.d.ts` (uuid-shaped): mixes
@@ -2294,13 +2338,15 @@ mod tests {
     }
 
     #[test]
-    fn fallback_reason_renders_callback_types_readably() {
-        let funcs =
-            parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
+    fn fallback_reason_renders_unsupported_generic_callbacks_readably() {
+        let funcs = parse_dts("export declare function f(cb: <T>(err: T) => void): void;").unwrap();
         let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
             panic!("expected Fallback");
         };
-        assert_eq!(reason, "parameter `cb`: unsupported type `a function type`");
+        assert_eq!(
+            reason,
+            "parameter `cb`: generic callback types are not supported"
+        );
     }
 
     #[test]
