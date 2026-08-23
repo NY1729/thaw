@@ -1520,6 +1520,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::Await(value)
         | HirExpr::PromiseAllArray(value, _)
+        | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::ArrayLen(value)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
@@ -1530,7 +1531,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::DynamicCall(_, args)
         | HirExpr::ArrayLit(args)
         | HirExpr::PromiseAll(args, _)
-        | HirExpr::PromiseAllTuple(args, _) => {
+        | HirExpr::PromiseAllTuple(args, _)
+        | HirExpr::PromiseRace(args, _) => {
             for arg in args {
                 collect_referenced_bindings(arg, names);
             }
@@ -2225,6 +2227,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::PromiseAllTuple(_, elements) => {
                 Ok(HirType::Promise(Box::new(HirType::Tuple(elements.clone()))))
             }
+            HirExpr::PromiseRace(_, element) | HirExpr::PromiseRaceArray(_, element) => {
+                Ok(HirType::Promise(Box::new(element.clone())))
+            }
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
                 let Some(first) = values.first() else {
@@ -2835,6 +2840,73 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::PromiseAll(promises, first));
             }
             return Ok(HirExpr::PromiseAllTuple(promises, element_types));
+        }
+
+        if callee_name == "Promise.race" {
+            let [arg] = call.args.as_slice() else {
+                return Err("`Promise.race` expects exactly one array argument".into());
+            };
+            if arg.spread.is_some() {
+                return Err("spread arguments are not supported in `Promise.race`".into());
+            }
+            let Expr::Array(array) = arg.expr.as_ref() else {
+                let values = self.lower_expr(&arg.expr)?;
+                let HirType::Array(element) = self.infer_expr_type(&values)? else {
+                    return Err("`Promise.race` expects an array of promises".into());
+                };
+                let HirType::Promise(element) = *element else {
+                    return Err("`Promise.race` expects an array of promises".into());
+                };
+                if *element == HirType::Void {
+                    return Err("`Promise.race` elements must not resolve to void".into());
+                }
+                return Ok(HirExpr::PromiseRaceArray(Box::new(values), *element));
+            };
+            if array.elems.is_empty() {
+                return Err("`Promise.race` requires at least one promise".into());
+            }
+            let mut element_type = None;
+            let promises = array
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(index, element)| {
+                    let Some(element) = element else {
+                        return Err(format!("Promise.race element {index} is missing"));
+                    };
+                    if element.spread.is_some() {
+                        return Err("spread elements are not supported in `Promise.race`".into());
+                    }
+                    let value = self.lower_expr(&element.expr)?;
+                    let resolved = match self.infer_expr_type(&value)? {
+                        HirType::Promise(inner) => *inner,
+                        returned
+                            if matches!(&value, HirExpr::Call(callee, _)
+                                if matches!(callee.as_ref(), HirExpr::Var(name)
+                                    if self.signatures.get(name).is_some_and(|signature| signature.is_async))) => returned,
+                        other => Err(format!(
+                            "Promise.race element {index} must be a Promise, got {other:?}"
+                        ))?,
+                    };
+                    if resolved == HirType::Void {
+                        return Err(format!("Promise.race element {index} resolves to void"));
+                    }
+                    if let Some(expected) = &element_type {
+                        if expected != &resolved {
+                            return Err(format!(
+                                "Promise.race element {index} resolves to {resolved:?}, expected {expected:?}"
+                            ));
+                        }
+                    } else {
+                        element_type = Some(resolved);
+                    }
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(HirExpr::PromiseRace(
+                promises,
+                element_type.expect("non-empty Promise.race"),
+            ));
         }
 
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
@@ -3817,6 +3889,39 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("Promise.all element 1 resolves to void"));
+    }
+
+    #[test]
+    fn promise_race_rejects_empty_mixed_and_non_promise_inputs() {
+        let empty = thaw_parser::parse_typescript(
+            "async function main(): Promise<void> { await Promise.race([]); }",
+        )
+        .unwrap();
+        assert!(lower_module(&empty)
+            .unwrap_err()
+            .contains("requires at least one promise"));
+
+        let mixed = thaw_parser::parse_typescript(
+            r#"
+            async function numberValue(): Promise<number> { return 1; }
+            async function stringValue(): Promise<string> { return "x"; }
+            async function main(): Promise<void> {
+                await Promise.race([numberValue(), stringValue()]);
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(lower_module(&mixed)
+            .unwrap_err()
+            .contains("Promise.race element 1 resolves to Str, expected F64"));
+
+        let plain = thaw_parser::parse_typescript(
+            "async function main(): Promise<void> { await Promise.race([1]); }",
+        )
+        .unwrap();
+        assert!(lower_module(&plain)
+            .unwrap_err()
+            .contains("Promise.race element 0 must be a Promise"));
     }
 
     #[test]

@@ -375,8 +375,8 @@ V1 → V2 で HIR 側のインターフェース（`HirExpr::Await`, `HirFunctio
    Lambda ハンドラでの逐次 `await` はこれで完全にカバーできる。
 2. `fetch`/`std` の実装と合わせて、V1 の「ブロッキング呼び出しに
    脱糖する」対象を増やしていく。
-3. `Promise.all`のhomogeneous fan-inとheterogeneous tupleは7章の形で実装済み。
-   次は同じschedulerを他のPromise結合子へ一般化する。
+3. `Promise.all`と`Promise.race`は7・8章の形で実装済み。次は同じschedulerを
+   `Promise.any`と`Promise.allSettled`へ一般化する。
 
 ## 7. Promise.all fan-in
 
@@ -396,3 +396,16 @@ LLVMは全child callを先に評価し、handle配列を`thaw_promise_all_slots`
 Lambda arena reset直前に実行し、全child callbackとhandleをrequest境界内で回収する。
 runtime testは空配列、順序、最初のerror、親破棄後のdrain、3本の80ms timerが直列化されないことを検査する。
 LLVM E2Eはユーザー定義async関数、`if`、`while`、`try/catch`との合成を単一実行ファイルで検査する。
+
+## 8. Promise.race
+
+`Promise.race([p0, ...])`と`Promise.race(promises)`はhomogeneousなPromise入力を同時に
+subscribeし、最初に観測したfulfilled値またはreject errorをそのまま親Promiseへ転送する。
+空のリテラル、非Promise、void Promise、異なる解決型の混在はloweringで拒否する。配列変数が
+実行時に空だった場合も、runtimeが明示的なrejectとして扱う。
+
+runtimeは同じhandleの重複を一度だけsubscribeし、勝者決定後も敗者handleを保持する。
+最後のchild callbackまでjoin stateを解放せず、`thaw_runtime_drain_detached`が通常main終了前と
+Lambda arena reset前に残りを駆動する。LLVMはliteralでは全child callを先に評価し、配列変数では
+既存の`[i64 len][8-byte slots...]`からhandle領域を取り出して`thaw_promise_race`へ渡す。
+E2E testは完了順、array variable、全native value shape、rejectの`try/catch`伝播を単一実行ファイルで検査する。
