@@ -2075,7 +2075,17 @@ impl<'a> FnLowerer<'a> {
             }
             HirExpr::Call(callee, args) => {
                 let HirExpr::Var(name) = callee.as_ref() else {
-                    return Err("cannot infer the type of a call through a non-name callee".into());
+                    let HirType::Function(params, ret) = self.infer_expr_type(callee)? else {
+                        return Err("call target is not a function value".into());
+                    };
+                    if params.len() != args.len() {
+                        return Err(format!(
+                            "function value expects {} argument(s), got {}",
+                            params.len(),
+                            args.len()
+                        ));
+                    }
+                    return Ok(*ret);
                 };
                 match name.as_str() {
                     "console.log" => return Ok(HirType::F64),
@@ -2553,6 +2563,63 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
+
+        // An object field with a function type is a callable value. Preserve
+        // it as `Call(PropAccess(...), args)` instead of flattening it into a
+        // synthetic `object.method` global symbol (the latter is reserved for
+        // builtins such as `console.log` and `JSON.parse`).
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let (Expr::Ident(object), MemberProp::Ident(property)) =
+                (member.obj.as_ref(), &member.prop)
+            {
+                let object_name = self.resolve_binding(object.sym.as_ref());
+                let callable = self.scope.get(&object_name).and_then(|ty| match ty {
+                    HirType::Object(fields) => fields
+                        .iter()
+                        .find(|(name, _)| name == property.sym.as_str())
+                        .and_then(|(_, ty)| match ty {
+                            HirType::Function(params, ret) => {
+                                Some((params.clone(), ret.as_ref().clone()))
+                            }
+                            _ => None,
+                        }),
+                    _ => None,
+                });
+                if let Some((params, _)) = callable {
+                    if params.len() != call.args.len() {
+                        return Err(format!(
+                            "method `{}.{}` expects {} argument(s), got {}",
+                            object.sym,
+                            property.sym,
+                            params.len(),
+                            call.args.len()
+                        ));
+                    }
+                    let callee = self.lower_member_read(member)?;
+                    let args = call
+                        .args
+                        .iter()
+                        .zip(&params)
+                        .enumerate()
+                        .map(|(index, (arg, expected))| {
+                            if arg.spread.is_some() {
+                                return Err("spread arguments are not supported".to_string());
+                            }
+                            let value = self.lower_expr(&arg.expr)?;
+                            self.coerce_to_declared(expected, value).map_err(|error| {
+                                format!(
+                                    "argument {} of `{}.{}` is invalid: {error}",
+                                    index + 1,
+                                    object.sym,
+                                    property.sym
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(HirExpr::Call(Box::new(callee), args));
+                }
+            }
+        }
 
         let callee_name = match callee_expr.as_ref() {
             Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
@@ -4179,5 +4246,24 @@ mod tests {
                 ty: HirType::F64,
             }]
         );
+    }
+
+    #[test]
+    fn lowers_calls_through_function_typed_object_properties() {
+        let program = lower(
+            r#"interface Operations { apply: (value: number) => number; }
+            function main(): void {
+                const operations: Operations = {
+                    apply: (value: number): number => value + 1
+                };
+                console.log(operations.apply(41));
+            }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[1],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::Call(callee, _)
+                    if matches!(callee.as_ref(), HirExpr::PropAccess(_, _, field) if field == "apply"))
+        ));
     }
 }

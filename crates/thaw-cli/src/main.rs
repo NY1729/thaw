@@ -1672,13 +1672,26 @@ mod tests {
             &entry,
             format!(
                 r#"
-                    import {{ serveOnceWith }} from "node:http";
+                    import {{ createServer }} from "node:http";
                     function main(): void {{
                         const prefix: string = "hello";
-                        const target: string = serveOnceWith(
-                            {},
-                            (requestTarget: string): string => prefix
+                        const server = createServer(
+                            (
+                                request: {{ method: string; url: string }},
+                                response: {{
+                                    statusCode: number;
+                                    setHeader: (name: string, value: string) => boolean;
+                                    write: (chunk: string) => boolean;
+                                    end: (chunk: string) => boolean;
+                                }}
+                            ): boolean => {{
+                                response.statusCode = 201;
+                                response.setHeader("X-Thaw", request.method);
+                                response.write(prefix);
+                                return response.end(request.url);
+                            }}
                         );
+                        const target: string = server.listen({});
                         console.log(target);
                     }}
                 "#,
@@ -1725,8 +1738,9 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(response.ends_with("hello"));
+        assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+        assert!(response.contains("X-Thaw: GET\r\n"));
+        assert!(response.ends_with("hello/health"));
         assert_eq!(String::from_utf8_lossy(&result.stdout), "/health\n");
         let _ = std::fs::remove_dir_all(dir);
     }
