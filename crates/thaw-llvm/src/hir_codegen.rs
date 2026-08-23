@@ -673,6 +673,37 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    fn allocate_variable_cell(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+        let cell = self
+            .builder
+            .build_call(
+                alloc,
+                &[
+                    i64_type.const_int(8, false).into(),
+                    i64_type.const_int(8, false).into(),
+                ],
+                &format!("{name}_cell"),
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a variable cell")?
+            .into_pointer_value();
+        // Validate that this remains a one-word native value. Aggregate
+        // layouts are represented by pointers, so every supported local
+        // currently satisfies this invariant.
+        if ty.size_of().is_none() {
+            return Err(format!("variable `{name}` has an unsized LLVM type"));
+        }
+        Ok(cell)
+    }
+
     fn declare_function(&mut self, func: &HirFunction) -> Result<FunctionValue<'ctx>, String> {
         let param_types = func
             .params
@@ -842,10 +873,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.catch_stack.clear();
         for (param_val, hir_param) in function.get_param_iter().zip(func.params.iter()) {
             let ty = self.basic_type(&hir_param.ty)?;
-            let slot = self
-                .builder
-                .build_alloca(ty, &hir_param.name)
-                .map_err(|e| e.to_string())?;
+            let slot = self.allocate_variable_cell(ty, &hir_param.name)?;
             self.builder
                 .build_store(slot, param_val)
                 .map_err(|e| e.to_string())?;
@@ -3255,10 +3283,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirStmt::Let(name, ty, expr) => {
                 let val = self.compile_expr(expr)?;
                 let llvm_ty = self.basic_type(ty)?;
-                let slot = self
-                    .builder
-                    .build_alloca(llvm_ty, name)
-                    .map_err(|e| e.to_string())?;
+                let slot = self.allocate_variable_cell(llvm_ty, name)?;
                 self.builder
                     .build_store(slot, val)
                     .map_err(|e| e.to_string())?;
@@ -3633,7 +3658,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(closure, function.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
         for (index, capture) in captures.iter().enumerate() {
-            let value = self.compile_expr(&HirExpr::Var(capture.name.clone()))?;
+            let (variable_cell, _) = self
+                .variables
+                .get(&capture.name)
+                .copied()
+                .ok_or_else(|| format!("missing captured variable `{}`", capture.name))?;
             let offset = i64_type.const_int(((index + 1) * 8) as u64, false);
             let slot = unsafe {
                 self.builder
@@ -3641,7 +3670,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
             };
             self.builder
-                .build_store(slot, value)
+                .build_store(slot, variable_cell)
                 .map_err(|error| error.to_string())?;
         }
 
@@ -3659,7 +3688,7 @@ impl<'ctx> HirCompiler<'ctx> {
             for (index, capture) in captures.iter().enumerate() {
                 let ty = self.basic_type(&capture.ty)?;
                 let offset = i64_type.const_int(((index + 1) * 8) as u64, false);
-                let capture_ptr = unsafe {
+                let capture_slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(
                             self.context.i8_type(),
@@ -3669,27 +3698,24 @@ impl<'ctx> HirCompiler<'ctx> {
                         )
                         .map_err(|error| error.to_string())?
                 };
-                let slot = self
+                let variable_cell = self
                     .builder
-                    .build_alloca(ty, &capture.name)
+                    .build_load(
+                        self.context.ptr_type(AddressSpace::default()),
+                        capture_slot,
+                        "capture_cell",
+                    )
                     .map_err(|error| error.to_string())?;
-                let value = self
-                    .builder
-                    .build_load(ty, capture_ptr, "capture_value")
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_store(slot, value)
-                    .map_err(|error| error.to_string())?;
-                self.variables.insert(capture.name.clone(), (slot, ty));
+                self.variables.insert(
+                    capture.name.clone(),
+                    (variable_cell.into_pointer_value(), ty),
+                );
                 self.variable_hir_types
                     .insert(capture.name.clone(), capture.ty.clone());
             }
             for (value, param) in function.get_param_iter().skip(1).zip(params) {
                 let ty = self.basic_type(&param.ty)?;
-                let slot = self
-                    .builder
-                    .build_alloca(ty, &param.name)
-                    .map_err(|error| error.to_string())?;
+                let slot = self.allocate_variable_cell(ty, &param.name)?;
                 self.builder
                     .build_store(slot, value)
                     .map_err(|error| error.to_string())?;
@@ -5697,6 +5723,27 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "captured_arrow"), "42\n42\n");
+    }
+
+    #[test]
+    fn closures_share_mutable_bindings_with_their_outer_scope() {
+        let source = r#"
+            function main(): void {
+                let count: number = 1;
+                const increment = (): number => {
+                    count = count + 1;
+                    return count;
+                };
+                count = 40;
+                console.log(increment());
+                console.log(increment());
+                console.log(count);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "mutable_captured_arrow"),
+            "41\n42\n42\n"
+        );
     }
 
     #[test]
