@@ -719,6 +719,19 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              inspect.custom = Symbol.for('nodejs.util.inspect.custom');\n\
              module.exports = { inspect: inspect };\n",
         ),
+        // Found necessary by a real ESM package (`has-flag`): `import
+        // process from 'process'` -- Node exposes `process` as both a
+        // global and a core module; this is the module half. `.default`
+        // is set too so the ESM-interop convention `rewrite_esm_to_commonjs`
+        // generates for a default import (`.__esModule ? .default : ...`)
+        // finds the same object either way. Only the couple of fields a
+        // real package has actually been found to read.
+        "process" => Some(
+            "var __thaw_process = { argv: [], env: {}, platform: 'linux', version: '', versions: {}, nextTick: function(fn) { fn(); } };\n\
+             module.exports = __thaw_process;\n\
+             module.exports.default = __thaw_process;\n\
+             module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -1377,6 +1390,44 @@ mod tests {
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
         assert_eq!(file_count, 2, "pkg's index.js + the util polyfill");
         assert!(bundle.contains("node:util"));
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    /// The exact pattern found in a real ESM npm package (`has-flag`):
+    /// `import process from 'process'`, then reading `process.argv`.
+    #[test]
+    fn process_builtin_polyfill_actually_runs_through_quickjs() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_process");
+        fs::write(
+            dir.join("index.js"),
+            "import process from 'process';\n\
+             export default function getPlatform() { return process.platform; }",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_process_node_modules");
+
+        let (bundle, _, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.getPlatform = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+
+        let func = CString::new("getPlatform").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        assert_eq!(result, "\"linux\"");
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
