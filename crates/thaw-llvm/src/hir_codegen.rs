@@ -200,31 +200,16 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn discover_frame_async_functions(&mut self, program: &HirProgram) {
-        let mut selected = HashMap::new();
-        loop {
-            let names = selected
-                .keys()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>();
-            let mut changed = false;
-            for func in &program.functions {
-                if !func.is_async || selected.contains_key(&func.name) {
-                    continue;
-                }
-                if func
-                    .body
-                    .iter()
-                    .any(|stmt| Self::stmt_awaits_frame_source(stmt, &names))
-                {
-                    selected.insert(func.name.clone(), func.ret.clone());
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        self.frame_async_functions = selected;
+        // Every async function must expose the same Promise-handle ABI, even
+        // when its body happens not to suspend. Otherwise storing or passing
+        // its result as `Promise<T>` would depend on an implementation detail
+        // of that function's current body.
+        self.frame_async_functions = program
+            .functions
+            .iter()
+            .filter(|func| func.is_async)
+            .map(|func| (func.name.clone(), func.ret.clone()))
+            .collect();
     }
 
     fn stmt_awaits_frame_source(
@@ -265,6 +250,7 @@ impl<'ctx> HirCompiler<'ctx> {
         frame_functions: &std::collections::HashSet<String>,
     ) -> bool {
         match expr {
+            HirExpr::AwaitPromise(_, _) => true,
             HirExpr::Await(inner) => {
                 matches!(
                     inner.as_ref(),
@@ -1731,11 +1717,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 segments.last_mut().unwrap().stmts.push(stmt.clone());
             }
         }
-        if !found {
-            return Ok(None);
-        }
         if !func.is_async {
-            return Err("frame-split await requires an async function".to_string());
+            return if found {
+                Err("frame-split await requires an async function".to_string())
+            } else {
+                Ok(None)
+            };
         }
         if func.ret != HirType::Void {
             self.basic_type(&func.ret)
@@ -1903,6 +1890,7 @@ impl<'ctx> HirCompiler<'ctx> {
         frame_names: &std::collections::HashSet<String>,
     ) -> bool {
         match expr {
+            HirExpr::AwaitPromise(_, _) => true,
             HirExpr::Await(inner) => {
                 matches!(
                     inner.as_ref(),
@@ -1974,6 +1962,13 @@ impl<'ctx> HirCompiler<'ctx> {
         expr: &mut HirExpr,
         temporary: &str,
     ) -> Result<Option<(HirExpr, HirType)>, String> {
+        if let HirExpr::AwaitPromise(inner, resolved) = expr {
+            let awaited = inner.as_ref().clone();
+            let ty = resolved.clone();
+            *expr = HirExpr::Var(temporary.to_string());
+            return Ok(Some((awaited, ty)));
+        }
+
         if let HirExpr::Await(inner) = expr {
             if self.is_frame_await_source(inner) {
                 let awaited = inner.as_ref().clone();
@@ -2089,7 +2084,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.extract_first_frame_await(value, temporary)
                 }
             }
-            HirExpr::Await(inner) => self.extract_first_frame_await(inner, temporary),
+            HirExpr::Await(inner) | HirExpr::AwaitPromise(inner, _) => {
+                self.extract_first_frame_await(inner, temporary)
+            }
             _ => Ok(None),
         }
     }
@@ -3822,11 +3819,11 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonAsString(inner) => self.compile_json_as(inner, "thaw_json_as_string"),
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),
 
-            // V1 async/await (docs/design/async-await.md): `await` is an
-            // identity transform -- `Promise` was already erased at
-            // lowering time (async functions' `ret` is the unwrapped `T`),
-            // so there's nothing left to suspend on here.
+            // Real suspension points are extracted by the async frame plan.
+            // These arms compile only legacy/direct awaits that remain in an
+            // ordinary expression path.
             HirExpr::Await(inner) => self.compile_await(inner),
+            HirExpr::AwaitPromise(inner, _) => self.compile_await(inner),
 
             HirExpr::ObjectLit(fields) => self.compile_object_lit(fields),
             HirExpr::PropAccess(obj, object_ty, field) => {
@@ -7553,13 +7550,10 @@ mod tests {
         );
     }
 
-    /// V1 async/await (docs/design/async-await.md): `async`/`await` are
-    /// pure sugar over synchronous calls, including `main` itself being
-    /// `async` -- the entry-point detection in `compile_program` doesn't
-    /// care about `is_async` at all, since by the time codegen sees it the
-    /// function's `ret` is already the unwrapped, non-Promise type.
+    /// Async functions without an explicit suspension still use the uniform
+    /// Promise-handle ABI and resolve their completion in the initial state.
     #[test]
-    fn compiles_async_functions_as_synchronous_calls() {
+    fn compiles_async_functions_without_explicit_suspension() {
         let source = r#"
             async function computeStage(): Promise<string> {
                 const s: string = process.env.STAGE;
@@ -7726,7 +7720,7 @@ mod tests {
         compiler.compile_program(&program).unwrap();
         let ir = compiler.print_to_string();
         assert!(ir.contains("call ptr @compute()"));
-        assert!(ir.contains("awaited_value"));
+        assert!(ir.contains("__thaw_await_0"));
         assert_eq!(compile_and_run(source, "await_async_result"), "42\n");
     }
 
@@ -8188,6 +8182,127 @@ mod tests {
             compile_and_run(source, "promise_all_settled_shapes"),
             "text\ntrue\n8\n10\n"
         );
+    }
+
+    #[test]
+    fn frame_split_async_functions_return_objects_arrays_and_tuples_from_branches() {
+        let source = r#"
+            interface Item { value: number; }
+            async function objectValue(first: boolean): Promise<Item> {
+                await sleep(1);
+                if (first) { return { value: 11 }; }
+                return { value: 12 };
+            }
+            async function arrayValue(first: boolean): Promise<number[]> {
+                await sleep(1);
+                if (first) { return [21, 22]; }
+                return [23, 24];
+            }
+            async function tupleValue(first: boolean): Promise<[number, string]> {
+                await sleep(1);
+                if (first) { return [31, "first"]; }
+                return [32, "second"];
+            }
+            async function main(): Promise<void> {
+                const object: Item = await objectValue(false);
+                const array: number[] = await arrayValue(true);
+                const tuple: [number, string] = await tupleValue(false);
+                console.log(object.value);
+                console.log(array[1]);
+                console.log(tuple[0]);
+                console.log(tuple[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "async_aggregate_branch_returns"),
+            "12\n22\n32\nsecond\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_extracts_awaits_from_arguments_and_literals_left_to_right() {
+        let source = r#"
+            interface Pair { left: number; right: number; }
+            async function delayed(value: number, ms: number): Promise<number> {
+                await sleep(ms); return value;
+            }
+            function combine(left: number, right: number): number {
+                return left * 10 + right;
+            }
+            async function main(): Promise<void> {
+                const combined: number = combine(
+                    await delayed(1, 3), await delayed(2, 1)
+                );
+                const values: number[] = [
+                    await delayed(3, 2), await delayed(4, 1)
+                ];
+                const pair: Pair = {
+                    left: await delayed(5, 2),
+                    right: await delayed(6, 1)
+                };
+                console.log(combined);
+                console.log(values[0] * 10 + values[1]);
+                console.log(pair.left * 10 + pair.right);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "awaits_in_arguments_and_literals"),
+            "12\n34\n56\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_returns_from_deep_async_loop_try_and_block_scopes() {
+        let source = r#"
+            async function delayed(value: number): Promise<number> {
+                await sleep(1); return value;
+            }
+            async function find(): Promise<number> {
+                let index: number = 0;
+                while (index < 4) {
+                    try {
+                        const current: number = await delayed(index);
+                        if (current === 2) {
+                            const answer: number = await delayed(current + 40);
+                            return answer;
+                        }
+                    } catch (error) {
+                        return 0;
+                    }
+                    index = index + 1;
+                }
+                return 1;
+            }
+            async function main(): Promise<void> {
+                const value: number = await find();
+                console.log(value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "deep_async_return_control_flow"),
+            "42\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_awaits_promises_stored_in_variables_arguments_and_objects() {
+        let source = r#"
+            interface Holder { pending: Promise<number>; }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                return value;
+            }
+            async function consume(pending: Promise<number>): Promise<number> {
+                return await pending;
+            }
+            async function main(): Promise<void> {
+                const pending: Promise<number> = delayed(41);
+                const holder: Holder = { pending: delayed(42) };
+                console.log(await consume(pending));
+                console.log(await holder.pending);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "stored_promise_values"), "41\n42\n");
     }
 
     #[test]

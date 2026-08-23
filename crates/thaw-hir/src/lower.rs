@@ -1527,6 +1527,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             }
         }
         HirExpr::Await(value)
+        | HirExpr::AwaitPromise(value, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -2023,6 +2024,19 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
+            if expected.len() != values.len() {
+                return Err(format!(
+                    "tuple literal has {} element(s), expected {}",
+                    values.len(),
+                    expected.len()
+                ));
+            }
+            for (index, (expected, value)) in expected.iter().zip(values).enumerate() {
+                self.expect_type(expected, value, &format!("tuple element {index}"))?;
+            }
+            return Ok(value);
+        }
         let (HirType::Object(declared_fields), HirExpr::ObjectLit(lit_fields)) = (declared, &value)
         else {
             self.expect_type(declared, &value, "value")?;
@@ -2223,6 +2237,8 @@ impl<'a> FnLowerer<'a> {
                                 self.generic_interfaces,
                                 &mut Vec::new(),
                             )
+                        } else if sig.is_async {
+                            Ok(HirType::Promise(Box::new(sig.ret.clone())))
                         } else {
                             Ok(sig.ret.clone())
                         }
@@ -2251,34 +2267,20 @@ impl<'a> FnLowerer<'a> {
             ))),
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
-                let Some(first) = values.first() else {
+                if values.is_empty() {
                     return Ok(HirType::Array(Box::new(HirType::F64)));
-                };
-                let array_element_type = |value: &HirExpr| -> Result<HirType, String> {
-                    let inferred = self.infer_expr_type(value)?;
-                    if let HirExpr::Call(callee, _) = value {
-                        if let HirExpr::Var(name) = callee.as_ref() {
-                            if self
-                                .signatures
-                                .get(name)
-                                .is_some_and(|signature| signature.is_async)
-                            {
-                                return Ok(HirType::Promise(Box::new(inferred)));
-                            }
-                        }
-                    }
-                    Ok(inferred)
-                };
-                let element = array_element_type(first)?;
-                for value in &values[1..] {
-                    let actual = array_element_type(value)?;
-                    if actual != element {
-                        return Err(format!(
-                            "array element has type {actual:?}, expected {element:?}"
-                        ));
-                    }
                 }
-                Ok(HirType::Array(Box::new(element)))
+                let array_element_type =
+                    |value: &HirExpr| -> Result<HirType, String> { self.infer_expr_type(value) };
+                let elements = values
+                    .iter()
+                    .map(array_element_type)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if elements.iter().all(|element| element == &elements[0]) {
+                    Ok(HirType::Array(Box::new(elements[0].clone())))
+                } else {
+                    Ok(HirType::Tuple(elements))
+                }
             }
             HirExpr::Index(arr, index) => {
                 self.expect_type(&HirType::F64, index, "array index")?;
@@ -2321,12 +2323,14 @@ impl<'a> FnLowerer<'a> {
             HirExpr::JsonAsString(_) => Ok(HirType::Str),
             HirExpr::JsonAsBool(_) => Ok(HirType::Bool),
             HirExpr::FfiCall(sig, _) => Ok(sig.ret.clone()),
-            HirExpr::Await(inner) => match self.infer_expr_type(inner)? {
-                HirType::Promise(value) => Ok(*value),
-                // V1 user-defined async calls still have an already-unwrapped
-                // signature until their coroutine frames are generalized.
-                other => Ok(other),
-            },
+            HirExpr::Await(inner) | HirExpr::AwaitPromise(inner, _) => {
+                match self.infer_expr_type(inner)? {
+                    HirType::Promise(value) => Ok(*value),
+                    // Legacy/direct await sources can already expose their
+                    // resolved type to the surrounding expression.
+                    other => Ok(other),
+                }
+            }
             // The Lambda node now preserves typed parameters and its body,
             // but function values do not have a native ABI until the next
             // callback-lowering phase. Keep the enclosing local dynamic
@@ -2392,7 +2396,16 @@ impl<'a> FnLowerer<'a> {
             Expr::Update(update) => self.lower_update(update),
 
             Expr::Await(await_expr) => {
-                Ok(HirExpr::Await(Box::new(self.lower_expr(&await_expr.arg)?)))
+                let value = self.lower_expr(&await_expr.arg)?;
+                if let HirType::Promise(resolved) = self.infer_expr_type(&value)? {
+                    if *resolved == HirType::Void {
+                        Ok(HirExpr::Await(Box::new(value)))
+                    } else {
+                        Ok(HirExpr::AwaitPromise(Box::new(value), *resolved))
+                    }
+                } else {
+                    Ok(HirExpr::Await(Box::new(value)))
+                }
             }
 
             other => Err(format!(
@@ -3982,8 +3995,8 @@ mod tests {
 
         let fetch_stage = &program.functions[0];
         assert!(fetch_stage.is_async);
-        // `Promise<string>` is unwrapped to `string` -- Promise never
-        // appears in the compiled HIR (V1 design).
+        // The function result stays unwrapped for native code generation;
+        // the await node records the value carried by its runtime promise.
         assert_eq!(fetch_stage.ret, HirType::Str);
 
         let main = &program.functions[1];
@@ -3994,10 +4007,13 @@ mod tests {
             HirStmt::Let(
                 "stage".into(),
                 HirType::Str,
-                HirExpr::Await(Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("fetchStage".into())),
-                    vec![],
-                ))),
+                HirExpr::AwaitPromise(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("fetchStage".into())),
+                        vec![],
+                    )),
+                    HirType::Str,
+                ),
             )
         );
     }

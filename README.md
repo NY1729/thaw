@@ -254,10 +254,14 @@ The workspace crates have narrow responsibilities:
   typed result into the caller's frame when its continuation resumes
 - Await expressions nested inside a top-level expression are extracted
   left-to-right into typed temporary frame slots, including multiple awaits
-  in one expression
+  in one expression, function arguments, array literals, and object literals
+- Async functions can return numbers, strings, booleans, objects, arrays, and
+  heterogeneous typed tuples from conditional branches
+- `Promise<T>` values can be stored in locals and object fields, passed through
+  typed function parameters, and awaited later
 - `await` in an `if` condition resumes before selecting the branch; awaits in
   then/else bodies use guarded states, so the inactive branch creates no
-  Promise. More deeply nested async control flow remains an explicit error
+  Promise
 - `while` bodies can suspend repeatedly: generated states re-check the loop
   condition and use a back edge after each iteration. The loop condition can
   itself await and is re-run on every iteration; direct `break` and `continue`
@@ -305,11 +309,10 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
-- Block-scoped locals inside nested control flow and fully general
-  value-returning Promise APIs. `Promise.all` supports homogeneous Promise
-  arrays and heterogeneous literal tuples, and `Promise.race` supports
-  homogeneous inputs; `Promise.any` and the normalized-result form of
-  `Promise.allSettled` do as well. Full discriminated-union narrowing remains
+- User-created Promise executors, `.then`/`.catch` chains, and arbitrary
+  third-party Promise implementations. Native async functions and their typed
+  Promise values are supported across locals, parameters, fields, and the four
+  implemented static combinators. Full discriminated-union narrowing remains
   unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
