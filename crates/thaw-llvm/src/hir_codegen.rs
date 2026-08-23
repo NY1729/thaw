@@ -20,8 +20,9 @@
 //! doesn't depend on it, so the extra loads/stores are left for a later
 //! optimization pass.
 //!
-//! Phase 2 additionally adds `handler(event: string): string` as an
-//! alternate process entry point (see `emit_lambda_entry`), `process.env`,
+//! Phase 2 additionally adds `handler(event: string): string` and
+//! `handler(event: Json): Json` as alternate process entry points (see
+//! `emit_lambda_entry`), `process.env`,
 //! and object types: `{ x: number; y: number }`-style records, `f64`
 //! fields only, arena-allocated as a flat `[f64 field0]...[f64 fieldN-1]`
 //! buffer with no length header (field order is static, part of the type
@@ -169,7 +170,7 @@ impl<'ctx> HirCompiler<'ctx> {
             (false, Some(handler)) => self.emit_lambda_entry(handler)?,
             (false, None) => {
                 return Err(
-                    "no `function main(): void { ... }` or `function handler(event: string): string { ... }` found"
+                    "no `function main(): void { ... }`, `function handler(event: string): string { ... }`, or `function handler(event: Json): Json { ... }` found"
                         .to_string(),
                 )
             }
@@ -4494,18 +4495,150 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    fn emit_json_handler_adapter(
+        &mut self,
+        handler_fn: FunctionValue<'ctx>,
+        is_frame_async: bool,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let adapter = self.module.add_function(
+            "__thaw_json_handler_adapter",
+            ptr_ty.fn_type(&[ptr_ty.into()], false),
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+        let event_text = adapter.get_first_param().unwrap().into_pointer_value();
+        let parse = self.module.get_function("thaw_json_parse").unwrap();
+        let event = self
+            .builder
+            .build_call(parse, &[event_text.into()], "lambda_event_json")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_parse did not return a value")?;
+        let call = self
+            .builder
+            .build_call(handler_fn, &[event.into()], "call_json_handler")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("JSON handler did not return a value")?;
+
+        let result = if is_frame_async {
+            let promise = call.into_pointer_value();
+            let result_slot = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_runtime_run_until_resolved")
+                        .unwrap(),
+                    &[promise.into()],
+                    "await_json_handler",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("async JSON handler did not settle")?
+                .into_pointer_value();
+            let promise_state = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_promise_state").unwrap(),
+                    &[promise.into()],
+                    "json_handler_state",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_int_value();
+            let rejected = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    promise_state,
+                    self.context.i8_type().const_int(2, false),
+                    "json_handler_rejected",
+                )
+                .map_err(|error| error.to_string())?;
+            let failed = self.context.append_basic_block(adapter, "handler_rejected");
+            let succeeded = self
+                .context
+                .append_basic_block(adapter, "handler_fulfilled");
+            self.builder
+                .build_conditional_branch(rejected, failed, succeeded)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(failed);
+            self.builder
+                .build_store(self.pending_exception().as_pointer_value(), result_slot)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_destroy").unwrap(),
+                    &[promise.into()],
+                    "destroy_rejected_json_handler",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_return(Some(&ptr_ty.const_null()))
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(succeeded);
+            let result = self
+                .builder
+                .build_load(ptr_ty, result_slot, "json_handler_result")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_destroy").unwrap(),
+                    &[promise.into()],
+                    "destroy_json_handler",
+                )
+                .map_err(|error| error.to_string())?;
+            result
+        } else {
+            call
+        };
+
+        self.branch_on_pending_exception()?;
+        let stringify = self.module.get_function("thaw_json_stringify").unwrap();
+        let text = self
+            .builder
+            .build_call(stringify, &[result.into()], "lambda_response_json")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_stringify did not return a value")?;
+        self.builder
+            .build_return(Some(&text))
+            .map_err(|error| error.to_string())?;
+        Ok(adapter)
+    }
+
     /// Emits `int main(void) { thaw_runtime_run(&handler); return 0; }` for
     /// programs that define `handler` instead of `main` -- `thaw_runtime_run`
     /// (see thaw-runtime) never actually returns; it polls the Lambda
     /// Runtime API forever.
     fn emit_lambda_entry(&mut self, handler_hir: &HirFunction) -> Result<(), String> {
-        let valid_signature = handler_hir.params.len() == 1
+        let string_signature = handler_hir.params.len() == 1
             && handler_hir.params[0].ty == HirType::Str
             && handler_hir.ret == HirType::Str;
-        if !valid_signature {
-            return Err("`handler` must have the signature `(event: string): string`".to_string());
+        let json_signature = handler_hir.params.len() == 1
+            && handler_hir.params[0].ty == HirType::Json
+            && handler_hir.ret == HirType::Json;
+        if !string_signature && !json_signature {
+            return Err("`handler` must have the signature `(event: string): string` or `(event: Json): Json`".to_string());
         }
         let handler_fn = self.module.get_function("handler").unwrap();
+        let handler_fn = if json_signature {
+            self.emit_json_handler_adapter(
+                handler_fn,
+                self.frame_async_functions.contains_key("handler"),
+            )?
+        } else {
+            handler_fn
+        };
 
         let i8_ptr = self.context.ptr_type(AddressSpace::default());
         let run_type = self
@@ -4698,6 +4831,82 @@ mod tests {
             }
         }
         panic!("could not find a staticlib for `{pkg}` in `cargo build` output:\n{stdout}");
+    }
+
+    fn compile_and_invoke_lambda(
+        source: &str,
+        test_name: &str,
+        event_body: &str,
+    ) -> (String, String) {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, test_name);
+        compiler.compile_program(&program).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-{test_name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        compiler.write_object_file(&obj_path).unwrap();
+
+        let link_status = Command::new("cc")
+            .arg(&obj_path)
+            .arg(build_staticlib("thaw-arena"))
+            .arg(build_staticlib("thaw-runtime"))
+            .arg(build_staticlib("thaw-std"))
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .expect("failed to invoke system `cc` linker");
+        assert!(link_status.success(), "linking failed");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let event_body = event_body.to_string();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: test-req-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                event_body.len(),
+                event_body
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+            drop(conn);
+
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            conn.read_to_end(&mut buf).unwrap();
+            tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
+            conn.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        });
+
+        let mut child = Command::new(&exe_path)
+            .env("AWS_LAMBDA_RUNTIME_API", &addr)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn compiled Lambda handler binary");
+        let post_request = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("handler never posted to the mock runtime API");
+        server.join().unwrap();
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        (
+            post_request,
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
     }
 
     /// Full pipeline smoke test: TS source -> thaw-parser -> thaw-hir ->
@@ -6919,102 +7128,81 @@ mod tests {
     }
 
     /// Full pipeline test for the Lambda entry point: a `handler(event:
-    /// string): string` program is compiled, linked against both
+    /// Json): Json` program is compiled, linked against both
     /// thaw-arena and thaw-runtime, run as a real subprocess against a
     /// mock Lambda Runtime API server (the same protocol thaw-runtime
     /// itself is tested against), and its actual HTTP interaction is
     /// verified end to end.
     #[test]
-    fn compiles_and_runs_a_lambda_handler_against_a_mock_runtime_api() {
+    fn compiles_and_runs_a_json_lambda_handler_against_a_mock_runtime_api() {
         let source = r#"
-            function handler(event: string): string {
-                console.log(event);
-                return "{\"ok\":true}";
+            function handler(event: Json): Json {
+                console.log(String(event.message));
+                return event;
             }
         "#;
-
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
-
-        let context = Context::create();
-        let mut compiler = HirCompiler::new(&context, "lambda_handler");
-        compiler.compile_program(&program).unwrap();
-
-        let dir = std::env::temp_dir().join(format!(
-            "thaw-hir-codegen-test-lambda-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let obj_path = dir.join("out.o");
-        let exe_path = dir.join("out");
-        compiler.write_object_file(&obj_path).unwrap();
-
-        let arena_lib = build_staticlib("thaw-arena");
-        let runtime_lib = build_staticlib("thaw-runtime");
-
-        let link_status = Command::new("cc")
-            .arg(&obj_path)
-            .arg(&arena_lib)
-            .arg(&runtime_lib)
-            .arg("-o")
-            .arg(&exe_path)
-            .status()
-            .expect("failed to invoke system `cc` linker");
-        assert!(link_status.success(), "linking failed");
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-
-        let (tx, rx) = mpsc::channel();
-        let server = std::thread::spawn(move || {
-            let (mut conn, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = conn.read(&mut buf).unwrap();
-            let body = "\"ping\"";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nLambda-Runtime-Aws-Request-Id: test-req-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            conn.write_all(response.as_bytes()).unwrap();
-            drop(conn);
-
-            let (mut conn, _) = listener.accept().unwrap();
-            let mut buf = Vec::new();
-            conn.read_to_end(&mut buf).unwrap();
-            tx.send(String::from_utf8_lossy(&buf).into_owned()).unwrap();
-
-            let response =
-                "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            conn.write_all(response.as_bytes()).unwrap();
-        });
-
-        let mut child = Command::new(&exe_path)
-            .env("AWS_LAMBDA_RUNTIME_API", &addr)
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn compiled Lambda handler binary");
-
-        let post_request = rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("handler never posted a response to the mock runtime API");
-        server.join().unwrap();
-
-        // `thaw_runtime_run` loops forever by design (it's the actual
-        // Lambda execution model) -- kill the process after we've observed
-        // one full round trip rather than waiting for an exit that never
-        // comes on its own.
-        let _ = child.kill();
-        let output = child.wait_with_output().unwrap();
+        let (post_request, stdout) = compile_and_invoke_lambda(
+            source,
+            "json_lambda_handler",
+            "{\"message\":\"ping\",\"ok\":true}",
+        );
 
         assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/response"));
-        assert!(post_request.ends_with("{\"ok\":true}"));
+        assert!(post_request.ends_with("{\"message\":\"ping\",\"ok\":true}"));
         // Also confirms the fflush-after-console.log fix: stdout is a pipe
         // here (fully buffered by default in libc), and the process is
         // killed rather than exited normally, so without an explicit flush
         // this assertion would flake/fail.
-        assert!(String::from_utf8_lossy(&output.stdout).contains("\"ping\""));
+        assert!(stdout.contains("ping"));
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn awaits_an_async_json_lambda_handler() {
+        let source = r#"
+            async function handler(event: Json): Promise<Json> {
+                await sleep(1);
+                return event;
+            }
+        "#;
+        let (post_request, _) = compile_and_invoke_lambda(
+            source,
+            "async_json_lambda_handler",
+            "{\"message\":\"after await\"}",
+        );
+
+        assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/response"));
+        assert!(post_request.ends_with("{\"message\":\"after await\"}"));
+    }
+
+    #[test]
+    fn posts_json_lambda_handler_failures_to_the_error_endpoint() {
+        let source = r#"
+            function handler(event: Json): Json {
+                throw "json handler failed";
+            }
+        "#;
+        let (post_request, _) =
+            compile_and_invoke_lambda(source, "failing_json_lambda_handler", "{\"ok\":false}");
+
+        assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/error"));
+        assert!(post_request.contains("json handler failed"));
+    }
+
+    #[test]
+    fn posts_async_json_lambda_rejections_to_the_error_endpoint() {
+        let source = r#"
+            async function handler(event: Json): Promise<Json> {
+                await sleep(1);
+                throw "async json handler failed";
+            }
+        "#;
+        let (post_request, _) = compile_and_invoke_lambda(
+            source,
+            "rejecting_async_json_lambda_handler",
+            "{\"ok\":false}",
+        );
+
+        assert!(post_request.starts_with("POST /2018-06-01/runtime/invocation/test-req-1/error"));
+        assert!(post_request.contains("async json handler failed"));
     }
 }
