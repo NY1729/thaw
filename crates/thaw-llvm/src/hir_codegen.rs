@@ -42,13 +42,13 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiErrorAbi, FfiOwnership, FfiSignature, HirExpr,
-    HirFunction, HirLit, HirProgram, HirStmt, HirType,
+    HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
 };
 
 /// The user's `main`, if any, is compiled under this symbol instead of
@@ -120,6 +120,7 @@ pub struct HirCompiler<'ctx> {
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+    variable_hir_types: HashMap<String, HirType>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
     /// call target the innermost entry; an empty stack propagates by returning
     /// from the current function with the pending exception left intact.
@@ -129,6 +130,7 @@ pub struct HirCompiler<'ctx> {
     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
     /// so callers and callees agree on the LLVM signature.
     frame_async_functions: HashMap<String, HirType>,
+    next_lambda: usize,
 }
 
 impl<'ctx> HirCompiler<'ctx> {
@@ -138,9 +140,11 @@ impl<'ctx> HirCompiler<'ctx> {
             module: context.create_module(module_name),
             builder: context.create_builder(),
             variables: HashMap::new(),
+            variable_hir_types: HashMap::new(),
             catch_stack: Vec::new(),
             loop_stack: Vec::new(),
             frame_async_functions: HashMap::new(),
+            next_lambda: 0,
         }
     }
 
@@ -641,9 +645,26 @@ impl<'ctx> HirCompiler<'ctx> {
             // family as everything else -- only `thaw_json_*` (thaw-std)
             // ever dereferences it.
             HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             other => Err(format!(
                 "Phase 1/2 codegen does not support type {other:?} yet"
             )),
+        }
+    }
+
+    fn function_type(
+        &self,
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<FunctionType<'ctx>, String> {
+        let params = params
+            .iter()
+            .map(|ty| self.basic_type(ty).map(BasicMetadataTypeEnum::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        if *ret == HirType::Void {
+            Ok(self.context.void_type().fn_type(&params, false))
+        } else {
+            Ok(self.basic_type(ret)?.fn_type(&params, false))
         }
     }
 
@@ -812,6 +833,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
 
         self.variables.clear();
+        self.variable_hir_types.clear();
         self.catch_stack.clear();
         for (param_val, hir_param) in function.get_param_iter().zip(func.params.iter()) {
             let ty = self.basic_type(&hir_param.ty)?;
@@ -823,6 +845,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(slot, param_val)
                 .map_err(|e| e.to_string())?;
             self.variables.insert(hir_param.name.clone(), (slot, ty));
+            self.variable_hir_types
+                .insert(hir_param.name.clone(), hir_param.ty.clone());
         }
 
         let terminated = self.compile_block(&func.body)?;
@@ -2459,6 +2483,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let entry = self.context.append_basic_block(ramp, "entry");
         self.builder.position_at_end(entry);
         self.variables.clear();
+        self.variable_hir_types.clear();
         self.catch_stack.clear();
 
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
@@ -2515,6 +2540,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let resume_entry = self.context.append_basic_block(resume, "entry");
         self.builder.position_at_end(resume_entry);
         self.variables.clear();
+        self.variable_hir_types.clear();
         self.catch_stack.clear();
         let resume_frame = resume.get_nth_param(0).unwrap().into_pointer_value();
         let resume_result = resume.get_nth_param(1).unwrap().into_pointer_value();
@@ -2725,6 +2751,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, block) in case_blocks.into_iter().enumerate() {
             self.builder.position_at_end(block);
             self.variables.clear();
+            self.variable_hir_types.clear();
             self.catch_stack.clear();
             self.bind_async_frame_locals(resume_frame, plan)?;
             self.emit_async_segment(
@@ -3231,6 +3258,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(slot, val)
                     .map_err(|e| e.to_string())?;
                 self.variables.insert(name.clone(), (slot, llvm_ty));
+                self.variable_hir_types.insert(name.clone(), ty.clone());
                 Ok(false)
             }
 
@@ -3482,6 +3510,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
 
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
+            HirExpr::Lambda(params, ret, body) => self.compile_lambda(params, ret, body),
             HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args),
             HirExpr::DynamicCall(sig, args) => self.compile_typed_dynamic_call(sig, args),
 
@@ -3547,6 +3576,88 @@ impl<'ctx> HirCompiler<'ctx> {
 
             other => Err(format!("Phase 1/2 codegen does not support {other:?} yet")),
         }
+    }
+
+    fn compile_lambda(
+        &mut self,
+        params: &[HirParam],
+        ret: &HirType,
+        body: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let parent_block = self
+            .builder
+            .get_insert_block()
+            .ok_or("lambda must be emitted inside a function")?;
+        let param_types = params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect::<Vec<_>>();
+        let function_type = self.function_type(&param_types, ret)?;
+        let name = format!("__thaw_lambda_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let function = self
+            .module
+            .add_function(&name, function_type, Some(Linkage::Internal));
+
+        let saved_variables = std::mem::take(&mut self.variables);
+        let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+        let result = (|| -> Result<(), String> {
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            for (value, param) in function.get_param_iter().zip(params) {
+                let ty = self.basic_type(&param.ty)?;
+                let slot = self
+                    .builder
+                    .build_alloca(ty, &param.name)
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(|error| error.to_string())?;
+                self.variables.insert(param.name.clone(), (slot, ty));
+                self.variable_hir_types
+                    .insert(param.name.clone(), param.ty.clone());
+            }
+
+            match body {
+                HirExpr::Block(stmts) => {
+                    let terminated = self.compile_block(stmts)?;
+                    if !terminated {
+                        if *ret == HirType::Void {
+                            self.builder
+                                .build_return(None)
+                                .map_err(|error| error.to_string())?;
+                        } else {
+                            return Err(format!(
+                                "lambda `{name}` does not return a value on all paths"
+                            ));
+                        }
+                    }
+                }
+                expr => {
+                    if *ret == HirType::Void {
+                        self.compile_expr(expr)?;
+                        self.builder
+                            .build_return(None)
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        let value = self.compile_expr(expr)?;
+                        self.builder
+                            .build_return(Some(&value))
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        self.variables = saved_variables;
+        self.variable_hir_types = saved_variable_hir_types;
+        self.catch_stack = saved_catch_stack;
+        self.loop_stack = saved_loop_stack;
+        self.builder.position_at_end(parent_block);
+        result?;
+        Ok(function.as_global_value().as_pointer_value().into())
     }
 
     /// Allocates `[i64 length][f64 elem0]...[f64 elemN-1]` from the arena
@@ -4457,6 +4568,28 @@ impl<'ctx> HirCompiler<'ctx> {
             "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
             "callNativeAddon" => return self.compile_call_native_addon(args),
             _ => {}
+        }
+
+        if let Some(HirType::Function(params, ret)) = self.variable_hir_types.get(name).cloned() {
+            let function_type = self.function_type(&params, &ret)?;
+            let function_pointer = self.compile_expr(callee)?.into_pointer_value();
+            let compiled_args = args
+                .iter()
+                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
+                .collect::<Result<Vec<_>, _>>()?;
+            let call = self
+                .builder
+                .build_indirect_call(
+                    function_type,
+                    function_pointer,
+                    &compiled_args,
+                    "lambda_call",
+                )
+                .map_err(|error| error.to_string())?;
+            return call
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("function value `{name}` does not return a value"));
         }
 
         let symbol = Self::llvm_symbol_for(name);
@@ -5447,6 +5580,18 @@ mod tests {
             compile_and_run(source, "multi_argument_generics"),
             "42\nchosen\n43\nanswer\n44\n45\n"
         );
+    }
+
+    #[test]
+    fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
+        let source = r#"
+            function main(): void {
+                const increment: (value: number) => number =
+                    (value: number): number => value + 1;
+                console.log(increment(41));
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "typed_arrow"), "42\n");
     }
 
     #[test]
