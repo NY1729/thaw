@@ -1528,7 +1528,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
-        | HirExpr::PromiseNew(value, _)
+        | HirExpr::PromiseNew(value, _, _)
         | HirExpr::PromiseAllArray(value, _)
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
@@ -1539,6 +1539,10 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::JsonAsBool(value) => collect_referenced_bindings(value, names),
         HirExpr::Lambda(_, _, _, body) => collect_referenced_bindings(body, names),
         HirExpr::PromiseThen(source, callback, _, _, _, _) => {
+            collect_referenced_bindings(source, names);
+            collect_referenced_bindings(callback, names);
+        }
+        HirExpr::PromiseFinally(source, callback, _, _) => {
             collect_referenced_bindings(source, names);
             collect_referenced_bindings(callback, names);
         }
@@ -1572,7 +1576,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(object, names);
             collect_referenced_bindings(value, names);
         }
-        HirExpr::Lit(_) | HirExpr::EnvVar(_) => {}
+        HirExpr::Lit(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
     }
 }
 
@@ -2105,6 +2109,9 @@ impl<'a> FnLowerer<'a> {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{name}`")),
+            HirExpr::FunctionRef(_, params, ret) => {
+                Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
+            }
             HirExpr::Assign(name, value) => {
                 let expected = self
                     .scope
@@ -2270,9 +2277,12 @@ impl<'a> FnLowerer<'a> {
             | HirExpr::PromiseAllSettledArray(_, element) => Ok(HirType::Promise(Box::new(
                 HirType::Array(Box::new(promise_settled_result_type(element.clone()))),
             ))),
-            HirExpr::PromiseNew(_, resolved) => Ok(HirType::Promise(Box::new(resolved.clone()))),
+            HirExpr::PromiseNew(_, resolved, _) => Ok(HirType::Promise(Box::new(resolved.clone()))),
             HirExpr::PromiseThen(_, _, _, output, _, _) => {
                 Ok(HirType::Promise(Box::new(output.clone())))
+            }
+            HirExpr::PromiseFinally(_, _, input, _) => {
+                Ok(HirType::Promise(Box::new(input.clone())))
             }
             HirExpr::DynamicCall(signature, _) => Ok(signature.ret.clone()),
             HirExpr::ArrayLit(values) => {
@@ -2574,23 +2584,63 @@ impl<'a> FnLowerer<'a> {
         result
     }
 
+    fn lower_promise_callback(
+        &mut self,
+        expr: &Expr,
+        parameter_types: &[HirType],
+        expected_return: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let callback = match expr {
+            Expr::Arrow(arrow) => {
+                return self.lower_contextual_arrow(arrow, parameter_types, expected_return)
+            }
+            Expr::Ident(ident) => {
+                let name = self.resolve_binding(ident.sym.as_ref());
+                if self.scope.contains_key(&name) {
+                    self.lower_expr(expr)?
+                } else {
+                    let signature = self
+                        .signatures
+                        .get(&name)
+                        .ok_or_else(|| format!("unknown Promise callback `{name}`"))?;
+                    if !signature.generic_type_params.is_empty() {
+                        return Err("generic Promise callbacks are not supported".into());
+                    }
+                    let ret = if signature.is_async {
+                        HirType::Promise(Box::new(signature.ret.clone()))
+                    } else {
+                        signature.ret.clone()
+                    };
+                    HirExpr::FunctionRef(name, signature.params.clone(), ret)
+                }
+            }
+            _ => return Err("Promise callback must be an arrow or function value".into()),
+        };
+        let HirType::Function(params, ret) = self.infer_expr_type(&callback)? else {
+            return Err("Promise callback is not a function value".into());
+        };
+        if params != parameter_types {
+            return Err(format!(
+                "Promise callback has parameters {params:?}, expected {parameter_types:?}"
+            ));
+        }
+        if let Some(expected) = expected_return {
+            if *ret != *expected {
+                return Err(format!(
+                    "Promise callback returns {:?}, expected {expected:?}",
+                    ret
+                ));
+            }
+        }
+        Ok(callback)
+    }
+
     fn lower_promise_new(&mut self, new_expr: &swc_ecma_ast::NewExpr) -> Result<HirExpr, String> {
         let Expr::Ident(callee) = new_expr.callee.as_ref() else {
             return Err("only `new Promise<T>(...)` is supported".into());
         };
         if callee.sym != *"Promise" {
             return Err("only `new Promise<T>(...)` is supported".into());
-        }
-        let type_args = new_expr
-            .type_args
-            .as_ref()
-            .ok_or("`new Promise` requires an explicit type argument")?;
-        let [resolved] = type_args.params.as_slice() else {
-            return Err("`new Promise` requires exactly one type argument".into());
-        };
-        let resolved = lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?;
-        if resolved == HirType::Void {
-            return Err("`new Promise<void>` is not supported yet".into());
         }
         let args = new_expr.args.as_deref().unwrap_or_default();
         let [executor] = args else {
@@ -2599,14 +2649,120 @@ impl<'a> FnLowerer<'a> {
         if executor.spread.is_some() {
             return Err("Promise executor spread is not supported".into());
         }
-        let Expr::Arrow(arrow) = executor.expr.as_ref() else {
-            return Err("Promise executor must be an arrow function".into());
+        let inferred_resolve = self.infer_promise_constructor_type(&executor.expr);
+        let (resolved, assimilates) = if let Some(type_args) = &new_expr.type_args {
+            let [resolved] = type_args.params.as_slice() else {
+                return Err("`new Promise` requires exactly one type argument".into());
+            };
+            let resolved = lower_ts_type(resolved, self.interfaces, self.generic_interfaces)?;
+            let assimilates = matches!(
+                inferred_resolve.as_ref().ok(),
+                Some(HirType::Promise(inner)) if inner.as_ref() == &resolved
+            );
+            (resolved, assimilates)
+        } else {
+            match inferred_resolve? {
+                HirType::Promise(inner) => (*inner, true),
+                resolved => (resolved, false),
+            }
         };
-        let resolve = HirType::Function(vec![resolved.clone()], Box::new(HirType::Void));
+        if resolved == HirType::Void {
+            return Err("`new Promise<void>` is not supported yet".into());
+        }
+        let resolve_value = if assimilates {
+            HirType::Promise(Box::new(resolved.clone()))
+        } else {
+            resolved.clone()
+        };
+        let resolve = HirType::Function(vec![resolve_value], Box::new(HirType::Void));
         let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let executor =
-            self.lower_contextual_arrow(arrow, &[resolve, reject], Some(&HirType::Void))?;
-        Ok(HirExpr::PromiseNew(Box::new(executor), resolved))
+            self.lower_promise_callback(&executor.expr, &[resolve, reject], Some(&HirType::Void))?;
+        Ok(HirExpr::PromiseNew(
+            Box::new(executor),
+            resolved,
+            assimilates,
+        ))
+    }
+
+    fn infer_promise_constructor_type(&mut self, executor: &Expr) -> Result<HirType, String> {
+        use swc_ecma_visit::{Visit, VisitWith};
+
+        if let Expr::Ident(ident) = executor {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            let callback_type = self.scope.get(&name).cloned().or_else(|| {
+                self.signatures.get(&name).map(|signature| {
+                    HirType::Function(
+                        signature.params.clone(),
+                        Box::new(if signature.is_async {
+                            HirType::Promise(Box::new(signature.ret.clone()))
+                        } else {
+                            signature.ret.clone()
+                        }),
+                    )
+                })
+            });
+            let Some(HirType::Function(params, _)) = callback_type else {
+                return Err("cannot infer Promise type from executor function".into());
+            };
+            let Some(HirType::Function(resolve_params, _)) = params.first() else {
+                return Err("cannot infer Promise type from executor resolve parameter".into());
+            };
+            let [resolved] = resolve_params.as_slice() else {
+                return Err("Promise resolve callback must take exactly one value".into());
+            };
+            return Ok(resolved.clone());
+        }
+
+        let Expr::Arrow(arrow) = executor else {
+            return Err("cannot infer Promise type from this executor".into());
+        };
+        let Some(Pat::Ident(resolve_binding)) = arrow.params.first() else {
+            return Err("cannot infer Promise type without a resolve parameter".into());
+        };
+        struct ResolveCalls {
+            name: Symbol,
+            values: Vec<Expr>,
+        }
+        impl Visit for ResolveCalls {
+            fn visit_call_expr(&mut self, call: &CallExpr) {
+                if let Callee::Expr(callee) = &call.callee {
+                    if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == self.name) {
+                        if let [arg] = call.args.as_slice() {
+                            if arg.spread.is_none() {
+                                self.values.push(arg.expr.as_ref().clone());
+                            }
+                        }
+                    }
+                }
+                call.visit_children_with(self);
+            }
+        }
+        let mut calls = ResolveCalls {
+            name: resolve_binding.id.sym.to_string(),
+            values: Vec::new(),
+        };
+        arrow.body.visit_with(&mut calls);
+        let mut inferred = None;
+        for value in calls.values {
+            let value = self.lower_expr(&value).map_err(|error| {
+                format!("cannot infer Promise type from resolve argument: {error}")
+            })?;
+            let actual = self.infer_expr_type(&value)?;
+            if let Some(expected) = &inferred {
+                if expected != &actual {
+                    return Err(format!(
+                        "conflicting Promise resolve types: {expected:?} and {actual:?}"
+                    ));
+                }
+            } else {
+                inferred = Some(actual);
+            }
+        }
+        inferred.ok_or_else(|| {
+            "cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
+                .into()
+        })
     }
 
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
@@ -2842,6 +2998,29 @@ impl<'a> FnLowerer<'a> {
 
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
+                if property.sym == *"finally" {
+                    let source = self.lower_expr(&member.obj)?;
+                    let HirType::Promise(input) = self.infer_expr_type(&source)? else {
+                        return Err("`.finally` requires a Promise receiver".into());
+                    };
+                    let [callback] = call.args.as_slice() else {
+                        return Err("`.finally` expects exactly one callback".into());
+                    };
+                    if callback.spread.is_some() {
+                        return Err("Promise callback spread is not supported".into());
+                    }
+                    let callback = self.lower_promise_callback(&callback.expr, &[], None)?;
+                    let HirType::Function(_, callback_return) = self.infer_expr_type(&callback)?
+                    else {
+                        unreachable!()
+                    };
+                    return Ok(HirExpr::PromiseFinally(
+                        Box::new(source),
+                        Box::new(callback),
+                        *input,
+                        *callback_return,
+                    ));
+                }
                 if property.sym == *"then" || property.sym == *"catch" {
                     let source = self.lower_expr(&member.obj)?;
                     let HirType::Promise(input) = self.infer_expr_type(&source)? else {
@@ -2853,16 +3032,14 @@ impl<'a> FnLowerer<'a> {
                     if callback.spread.is_some() {
                         return Err("Promise callback spread is not supported".into());
                     }
-                    let Expr::Arrow(arrow) = callback.expr.as_ref() else {
-                        return Err("Promise continuation must be an arrow function".into());
-                    };
                     let on_rejected = property.sym == *"catch";
                     let callback_input = if on_rejected {
                         HirType::Str
                     } else {
                         input.as_ref().clone()
                     };
-                    let callback = self.lower_contextual_arrow(arrow, &[callback_input], None)?;
+                    let callback =
+                        self.lower_promise_callback(&callback.expr, &[callback_input], None)?;
                     let HirType::Function(_, callback_output) = self.infer_expr_type(&callback)?
                     else {
                         unreachable!()
@@ -4244,6 +4421,37 @@ mod tests {
                 HirExpr::PromiseThen(_, _, HirType::F64, HirType::F64, true, false)
             )
         ));
+    }
+
+    #[test]
+    fn infers_promise_constructor_type_and_reports_conflicting_resolves() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                const value: number = await new Promise((resolve, reject) => {
+                    resolve(42);
+                });
+                console.log(value);
+            }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Let(_, HirType::F64, HirExpr::AwaitPromise(_, HirType::F64))
+        ));
+
+        let module = thaw_parser::parse_typescript(
+            r#"function main(): void {
+                const value = new Promise((resolve, reject) => {
+                    resolve(1);
+                    resolve("wrong");
+                });
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("conflicting Promise resolve types"),
+            "{error}"
+        );
     }
 
     #[test]

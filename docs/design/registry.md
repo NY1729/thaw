@@ -958,6 +958,19 @@ pathとhashは従来どおり`native-addon.json`へ記録する。
 公式prebuildを埋め込んだ単一実行ファイルを生成する。registry directoryを削除した後に
 Promiseベースの`writeSnapshot`を呼び、実snapshotファイルが作られるところまで検証する。
 
+## 24. 実npm Promise workload
+
+opt-in npm integration testは`p-limit@2.3.0`を無改造で取得し、依存する
+`p-try@2.2.0`をregistry bundlerが自動解決したことをlock graphで確認する。生成された
+CommonJS bundleをQuickJS fallbackへロードし、concurrency limiterを通したasync taskを
+実行する。返却Promiseのmicrotask queueを完了まで駆動し、結果objectをJson bridge経由で
+native側へ戻して、単一実行ファイルが`42`を出力するところまで検証する。
+
+この経路はnative HIRのPromise constructor/chainテストとは独立しており、実パッケージ内の
+class/function closure、CommonJS dependency、QuickJS Promise、Json marshalが同時に成立する
+ことを確認する。packageが返すcallable object自体をnative typed valueとして保持する汎用ABIは
+まだないため、現段階ではpackage内部のworkloadをJSON化可能なexported resultへ閉じ込める。
+
 ## 北極星: 「npm と同じ感覚で使える」こと
 
 このドキュメントの各章は、実在する npm パッケージを実際に試して
