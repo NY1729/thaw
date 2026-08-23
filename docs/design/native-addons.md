@@ -331,3 +331,19 @@ registry は `native.a` と区別して `native.node` を検出する。bridge �
 V1 は Linux のローカル `native.node` を対象とする。プリビルドの自動取得、
 `node-gyp`、非同期work、class/wrap/finalizer、および実パッケージ固有APIは
 引き続きスコープ外である。
+
+## 10. 実パッケージ互換性
+
+`utf-8-validate@6.0.6` の公式 Linux x64 prebuild を実行確認した。このaddonが
+参照するのは `napi_module_register`、`napi_create_function`、
+`napi_get_cb_info`、`napi_get_buffer_info`、`napi_get_boolean` の5つで、V1
+ホストの範囲内だった。一方、初期化関数はexports objectではなくcallback
+functionそのものを返すため、単一関数の`.d.ts`名をroot export名として
+`thaw_napi_load_named`へ渡す処理を追加した。
+
+また、QuickJS/ThawとのJSON境界ではNodeのBuffer JSON表現
+`{"type":"Buffer","data":[...]}`を検出し、`Value::Buffer`へ変換する。
+公式prebuildに対して有効な4-byte UTF-8と不正な`0xff`を渡し、それぞれ
+`true`/`false`になることをhost単体と`thaw build --use`の両方で検証する。
+回帰テストは再配布バイナリをrepositoryへ含めず、
+`THAW_UTF8_VALIDATE_NODE`にprebuildのpathが指定された環境で実行する。

@@ -284,6 +284,11 @@ place a Linux shared object at `thaw_modules/<package>/native.node`; `thaw
 build --use <package>` loads it at module initialization and routes fallback
 wrappers through its exported N-API functions. Loading native addons executes
 unrestricted native code in the generated process and is not sandboxed.
+The Linux x64 prebuild from `utf-8-validate@6.0.6` is verified through both
+the host API and the complete `thaw build --use utf-8-validate` pipeline.
+Node's JSON Buffer shape (`{"type":"Buffer","data":[...]}`) is converted
+to a real `napi_value` Buffer, and addons that return a function as their
+module root are bound to the single declaration name from `package.d.ts`.
 
 Each step must include an end-to-end native execution test in addition to unit
 tests for its individual lowering/runtime layers.

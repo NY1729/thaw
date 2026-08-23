@@ -1083,6 +1083,7 @@ pub fn generate_native_addon_shim(
 pub struct NativeAddon<'a> {
     pub package_name: &'a str,
     pub path: &'a str,
+    pub root_export: Option<&'a str>,
 }
 
 pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
@@ -1092,10 +1093,15 @@ pub fn generate_native_addon_init(addons: &[NativeAddon<'_>]) -> String {
     let mut out = String::from("function __thaw_native_module_init(): void {\n");
     for addon in addons {
         out.push_str(&format!("    // {}\n", addon.package_name));
-        out.push_str(&format!(
-            "    loadNativeAddon(\"{}\");\n",
-            escape_ts_string_literal(addon.path)
-        ));
+        let path = escape_ts_string_literal(addon.path);
+        if let Some(root_export) = addon.root_export {
+            out.push_str(&format!(
+                "    loadNativeAddon(\"{path}\", \"{}\");\n",
+                escape_ts_string_literal(root_export)
+            ));
+        } else {
+            out.push_str(&format!("    loadNativeAddon(\"{path}\");\n"));
+        }
     }
     out.push_str("}\n");
     out
@@ -1325,6 +1331,7 @@ mod tests {
         let init = generate_native_addon_init(&[NativeAddon {
             package_name: "native-add",
             path: "/tmp/native.node",
+            root_export: None,
         }]);
         assert!(init.contains("function __thaw_native_module_init(): void"));
         assert!(init.contains(r#"loadNativeAddon("/tmp/native.node");"#));

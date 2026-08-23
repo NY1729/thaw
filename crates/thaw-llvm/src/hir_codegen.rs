@@ -472,6 +472,13 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .add_function("thaw_napi_load", js_load_type, Some(Linkage::External));
         self.module.add_function(
+            "thaw_napi_load_named",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_call_result",
             js_call_result_type,
             Some(Linkage::External),
@@ -3802,14 +3809,21 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let [path] = args else {
-            return Err("loadNativeAddon expects exactly one argument".to_string());
+        if !(1..=2).contains(&args.len()) {
+            return Err("loadNativeAddon expects a path and optional root export name".to_string());
+        }
+        let path = self.compile_expr(&args[0])?;
+        let mut call_args = vec![path.into()];
+        let symbol = if args.len() == 2 {
+            call_args.push(self.compile_expr(&args[1])?.into());
+            "thaw_napi_load_named"
+        } else {
+            "thaw_napi_load"
         };
-        let path = self.compile_expr(path)?;
-        let function = self.module.get_function("thaw_napi_load").unwrap();
+        let function = self.module.get_function(symbol).unwrap();
         let loaded = self
             .builder
-            .build_call(function, &[path.into()], "load_napi_u8")
+            .build_call(function, &call_args, "load_napi_u8")
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
