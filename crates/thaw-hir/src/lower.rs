@@ -27,10 +27,10 @@ use std::fmt;
 
 use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
-    AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl, Expr, FnDecl,
-    KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem, ObjectLit as SwcObjectLit, Pat,
-    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsInterfaceDecl, TsKeywordTypeKind,
-    TsType, TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
+    ArrowFunctionBody, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl,
+    Expr, FnDecl, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
+    ObjectLit as SwcObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
+    TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 
 use crate::{
@@ -2045,6 +2045,11 @@ impl<'a> FnLowerer<'a> {
                 // signature until their coroutine frames are generalized.
                 other => Ok(other),
             },
+            // The Lambda node now preserves typed parameters and its body,
+            // but function values do not have a native ABI until the next
+            // callback-lowering phase. Keep the enclosing local dynamic
+            // instead of discarding or pretending to know that ABI.
+            HirExpr::Lambda(_, _) => Ok(HirType::Dynamic),
             other => Err(format!(
                 "cannot infer the type of {other:?} (needs an explicit type annotation)"
             )),
@@ -2073,6 +2078,8 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Call(call) => self.lower_call(call),
+
+            Expr::Arrow(arrow) => self.lower_arrow(arrow),
 
             Expr::Array(array_lit) => {
                 let elems = array_lit
@@ -2107,6 +2114,65 @@ impl<'a> FnLowerer<'a> {
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
             )),
         }
+    }
+
+    fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
+        if arrow.is_async || arrow.is_generator || arrow.type_params.is_some() {
+            return Err(
+                "async, generator, and generic arrow functions are not supported yet".into(),
+            );
+        }
+        let source_params = arrow
+            .params
+            .iter()
+            .map(|param| {
+                lower_param(
+                    param,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    false,
+                    &HashMap::new(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let declared_return = arrow
+            .return_type
+            .as_ref()
+            .map(|ann| lower_ts_type(&ann.type_ann, self.interfaces, self.generic_interfaces))
+            .transpose()?;
+
+        let saved_scope = self.scope.clone();
+        let saved_bindings = self.bindings.clone();
+        let saved_return = self.ret_type.clone();
+        let result = (|| {
+            let mut params = Vec::with_capacity(source_params.len());
+            for param in source_params {
+                let name = self.bind_local(&param.name, param.ty.clone());
+                params.push(HirParam { name, ty: param.ty });
+            }
+            self.ret_type = declared_return.clone().unwrap_or(HirType::Dynamic);
+            let body = match arrow.body.as_ref() {
+                ArrowFunctionBody::Expr(expr) => {
+                    let body = self.lower_expr(expr)?;
+                    if let Some(expected) = &declared_return {
+                        self.expect_type(expected, &body, "arrow function return value")?;
+                    }
+                    body
+                }
+                ArrowFunctionBody::FunctionBody(block) => {
+                    let stmts = self.lower_stmts(&block.stmts)?;
+                    if declared_return.is_none() {
+                        self.infer_return_type(&stmts)?;
+                    }
+                    HirExpr::Block(stmts)
+                }
+            };
+            Ok(HirExpr::Lambda(params, Box::new(body)))
+        })();
+        self.scope = saved_scope;
+        self.bindings = saved_bindings;
+        self.ret_type = saved_return;
+        result
     }
 
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
@@ -3809,5 +3875,53 @@ mod tests {
         assert_eq!(catch_name, "error__thaw_0");
         assert!(format!("{:?}", catch_body).contains("error__thaw_0"));
         assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
+    }
+
+    #[test]
+    fn lowers_typed_arrow_functions_and_restores_the_outer_scope() {
+        let program = lower(
+            r#"function main(): void {
+                const value: number = 10;
+                const callback = (value: number): number => value + 1;
+                console.log(value);
+            }"#,
+        );
+        let body = &program.functions[0].body;
+        let HirStmt::Let(_, HirType::Dynamic, HirExpr::Lambda(params, lambda_body)) = &body[1]
+        else {
+            panic!("expected a lowered arrow function");
+        };
+        assert_eq!(
+            params,
+            &[HirParam {
+                name: "value__thaw_0".into(),
+                ty: HirType::F64
+            }]
+        );
+        assert!(matches!(
+            lambda_body.as_ref(),
+            HirExpr::BinOp(_, left, _) if matches!(left.as_ref(), HirExpr::Var(name) if name == "value__thaw_0")
+        ));
+        assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
+    }
+
+    #[test]
+    fn lowers_a_typed_arrow_block_body() {
+        let program = lower(
+            r#"function main(): void {
+                const callback = (path: string): string => { return path; };
+            }"#,
+        );
+        let HirStmt::Let(_, _, HirExpr::Lambda(params, lambda_body)) =
+            &program.functions[0].body[0]
+        else {
+            panic!("expected a lowered arrow function");
+        };
+        assert_eq!(params[0].ty, HirType::Str);
+        assert!(matches!(
+            lambda_body.as_ref(),
+            HirExpr::Block(stmts)
+                if matches!(&stmts[0], HirStmt::Return(Some(HirExpr::Var(name))) if name == "path")
+        ));
     }
 }
