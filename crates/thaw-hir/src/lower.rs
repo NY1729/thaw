@@ -293,7 +293,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         for constraint in call_constraints.into_inner() {
             match constraint {
                 CallConstraint::Generic(callee, types) => {
-                    if types.iter().any(|ty| *ty == HirType::Dynamic) {
+                    if types.contains(&HirType::Dynamic) {
                         continue;
                     }
                     let instances = generic_instantiations.entry(callee).or_default();
@@ -408,7 +408,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         specialized.push(instance);
         for constraint in nested_constraints.into_inner() {
             if let CallConstraint::Generic(nested_name, nested_types) = constraint {
-                if !nested_types.iter().any(|ty| *ty == HirType::Dynamic) {
+                if !nested_types.contains(&HirType::Dynamic) {
                     pending.push((nested_name, nested_types));
                 }
             }
@@ -2577,6 +2577,14 @@ impl<'a> FnLowerer<'a> {
                 let resolved_property = match (requested_property, call.args.len()) {
                     ("listen", 2) => "__listenWithCallback",
                     ("close", 1) => "__closeWithCallback",
+                    ("on", 2)
+                        if matches!(
+                            call.args.first().map(|arg| arg.expr.as_ref()),
+                            Some(Expr::Lit(Lit::Str(event))) if event.value == *"error"
+                        ) =>
+                    {
+                        "__onError"
+                    }
                     _ => requested_property,
                 };
                 let object_ty = self.scope.get(&object_name).cloned();
@@ -2735,7 +2743,7 @@ impl<'a> FnLowerer<'a> {
                 .collect::<Result<Vec<_>, _>>()?;
             let types = infer_generic_type_tuple(signature, &actual)
                 .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
-            if !types.iter().any(|ty| *ty == HirType::Dynamic) {
+            if !types.contains(&HirType::Dynamic) {
                 for ty in &types {
                     if !supports_generic_native_layout(ty) {
                         return Err(format!(
@@ -2794,7 +2802,7 @@ impl<'a> FnLowerer<'a> {
 
         let lowered_name = if generic_types
             .as_ref()
-            .is_some_and(|types| !types.iter().any(|ty| *ty == HirType::Dynamic))
+            .is_some_and(|types| !types.contains(&HirType::Dynamic))
         {
             let param_types = args
                 .iter()

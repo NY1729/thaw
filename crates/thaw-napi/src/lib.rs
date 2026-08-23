@@ -1,5 +1,9 @@
 //! Minimal synchronous Node-API host for loading `.node` addons.
 
+// Every exported unsafe function in this crate implements the Node-API C ABI
+// and shares its pointer-validity contract with the native addon caller.
+#![allow(clippy::missing_safety_doc)]
+
 use libc::{c_char, c_void};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
@@ -80,6 +84,9 @@ pub struct CallbackInfo {
 struct Host {
     functions: HashMap<String, Function>,
     libraries: Vec<*mut c_void>,
+    // Addons retain `napi_env` pointers, so moving an Env during Vec growth
+    // would invalidate foreign pointers. The Box provides stable addresses.
+    #[allow(clippy::vec_box)]
     module_envs: Vec<Box<Env>>,
     last_error: String,
 }
@@ -163,10 +170,10 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
             CStr::from_ptr(error).to_string_lossy().into_owned()
         });
     }
-    let direct = libc::dlsym(handle, b"napi_register_module_v1\0".as_ptr().cast());
+    let direct = libc::dlsym(handle, c"napi_register_module_v1".as_ptr());
     let registered = PENDING_MODULE.with(|slot| slot.borrow_mut().take());
     let init: RegisterV1 = if !direct.is_null() {
-        std::mem::transmute(direct)
+        std::mem::transmute::<*mut c_void, RegisterV1>(direct)
     } else if let Some(module) = registered {
         module
             .nm_register_func
@@ -244,7 +251,7 @@ pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *c
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         return Err("embedded addon hex has an odd length".into());
     }
     input

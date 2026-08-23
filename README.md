@@ -177,7 +177,9 @@ The workspace crates have narrow responsibilities:
   connections; callbacks remain single-threaded, and idempotent `close()`
   interrupts the listener while allowing accepted connections to finish;
   `listen(port, callback)` fires after registration and `close(callback)` after
-  those accepted connections drain
+  those accepted connections drain; `server.on("listening" | "close" |
+  "error", callback)` supports persistent, ordered event listeners, with
+  `ERR_SOCKET_BAD_PORT` and `EADDRINUSE` details for listen failures
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint

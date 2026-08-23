@@ -939,7 +939,11 @@ listenerはthaw-runtimeの永続fd watcherとして登録され、timer、Promis
 request処理を停止しない。`close()` は新規acceptを停止し、処理中の接続が完了してから
 process lifecycle loopが終了する。`listen(port, callback)` のcallbackはlistener登録後の
 event loop開始時に、`close(callback)` のcallbackはaccept済み接続がすべて完了した後に
-単一thread上で呼ばれる。一般的なEventEmitter APIとerror eventは次段階である。
+単一thread上で呼ばれる。`server.on(event, callback)` は `listening`、`close`、`error` の
+listenerを複数、登録順に保持し、再listen後も残す。listen/closeへ直接渡したcallbackは
+一回だけ発火する。`on("error", (error: string) => ...)` は引数付きの内部ABIへloweringされ、
+不正portを `ERR_SOCKET_BAD_PORT`、bind競合を `EADDRINUSE`、その他のlisten失敗を説明文として
+登録順に通知する。Node互換の構造化Error objectと未処理errorのprocess failureは次段階である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 
