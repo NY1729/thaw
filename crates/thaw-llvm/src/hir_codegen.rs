@@ -449,6 +449,15 @@ impl<'ctx> HirCompiler<'ctx> {
         let js_call_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         self.module
             .add_function("thaw_js_call", js_call_type, Some(Linkage::External));
+        let result_type = self
+            .context
+            .struct_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        let js_call_result_type = result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_js_call_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
 
         let sleep_type = i8_ptr.fn_type(&[i64_type.into()], false);
         self.module
@@ -3749,18 +3758,33 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_stringify did not return a value")?;
 
-        let call_fn = self.module.get_function("thaw_js_call").unwrap();
-        let result_json_str = self
+        let call_fn = self.module.get_function("thaw_js_call_result").unwrap();
+        let result = self
             .builder
             .build_call(
                 call_fn,
                 &[name_val.into(), args_json_str.into()],
-                "call_dynamic_result_json",
+                "call_dynamic_result_abi",
             )
             .map_err(|e| e.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_js_call did not return a value")?;
+            .ok_or("thaw_js_call_result did not return a value")?
+            .into_struct_value();
+        let result_json_str = self
+            .builder
+            .build_extract_value(result, 0, "call_dynamic_value")
+            .map_err(|e| e.to_string())?
+            .into_pointer_value();
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "call_dynamic_error")
+            .map_err(|e| e.to_string())?
+            .into_pointer_value();
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|e| e.to_string())?;
+        self.branch_on_pending_exception()?;
 
         let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
         self.builder
@@ -4212,7 +4236,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let handler_fn = self.module.get_function("handler").unwrap();
 
         let i8_ptr = self.context.ptr_type(AddressSpace::default());
-        let run_type = self.context.void_type().fn_type(&[i8_ptr.into()], false);
+        let run_type = self
+            .context
+            .void_type()
+            .fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         let run_fn =
             self.module
                 .add_function("thaw_runtime_run", run_type, Some(Linkage::External));
@@ -4222,7 +4249,14 @@ impl<'ctx> HirCompiler<'ctx> {
         self.call_module_init_if_present();
         let handler_ptr = handler_fn.as_global_value().as_pointer_value();
         self.builder
-            .build_call(run_fn, &[handler_ptr.into()], "call_thaw_runtime_run")
+            .build_call(
+                run_fn,
+                &[
+                    handler_ptr.into(),
+                    self.pending_exception().as_pointer_value().into(),
+                ],
+                "call_thaw_runtime_run",
+            )
             .map_err(|e| e.to_string())?;
         self.finish_c_main();
         Ok(())
@@ -4924,6 +4958,34 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "quickjs_fallback"),
             "true\n5\nhello, thaw\n42\n"
+        );
+    }
+
+    #[test]
+    fn quickjs_errors_use_thaw_try_catch_and_finally() {
+        let source = r#"
+            function main(): void {
+                loadScript(
+                    "function boom() { throw new Error('kaboom'); } function later() { return Promise.reject(new Error('nope')); }"
+                );
+                try {
+                    const ignored = callDynamic("boom", JSON.parse("[]"));
+                    console.log("unreachable");
+                } catch (error) {
+                    console.log(error);
+                } finally {
+                    console.log("cleanup");
+                }
+                try {
+                    const ignored = callDynamic("later", JSON.parse("[]"));
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "quickjs_result_abi"),
+            "`boom` threw: kaboom\ncleanup\n`later`'s promise rejected: nope\n"
         );
     }
 
