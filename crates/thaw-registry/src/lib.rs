@@ -305,6 +305,60 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
     }))
 }
 
+fn select_optional_dependency_addon(
+    node_modules_dir: &Path,
+    manifest: &serde_json::Value,
+) -> Result<Option<SelectedPrebuild>, String> {
+    let Some(optional) = manifest
+        .get("optionalDependencies")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    let (platform, arch, libc) = target_prebuild_components();
+    let suffix = if platform == "linux" {
+        format!("-{platform}-{arch}-{libc}")
+    } else {
+        format!("-{platform}-{arch}")
+    };
+    let mut names = optional
+        .keys()
+        .filter(|name| name.ends_with(&suffix))
+        .collect::<Vec<_>>();
+    names.sort();
+    for name in names {
+        let dependency_dir = node_modules_dir.join(name);
+        if !dependency_dir.is_dir() {
+            continue;
+        }
+        let dependency_manifest = read_manifest(&dependency_dir)?;
+        let main = dependency_manifest
+            .get("main")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("index.js");
+        let path = dependency_dir.join(main);
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "node")
+            && path.is_file()
+        {
+            let relative_path = path
+                .strip_prefix(node_modules_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            return Ok(Some(SelectedPrebuild {
+                path,
+                relative_path,
+                platform: platform.into(),
+                arch: arch.into(),
+                libc: libc.into(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// Fetches `package` via `npm install` (into a throwaway scratch
 /// directory -- `--ignore-scripts`, since this runs an arbitrary
 /// third-party package's install unattended and its `postinstall` is not
@@ -469,7 +523,11 @@ fn add_installed_inner(
             })?;
         }
     }
-    let (native_addon, native_diagnostic) = match select_prebuilt_addon(&package_dir) {
+    let selected_addon = select_prebuilt_addon(&package_dir).and_then(|selected| match selected {
+        Some(selected) => Ok(Some(selected)),
+        None => select_optional_dependency_addon(node_modules_dir, &manifest),
+    });
+    let (native_addon, native_diagnostic) = match selected_addon {
         Ok(Some(selected)) => {
             let bytes = fs::read(&selected.path).map_err(|error| {
                 format!(
@@ -1837,6 +1895,37 @@ mod tests {
         assert!(diagnostic.contains("no bundled native addon matches"));
         assert!(diagnostic.contains("imaginary-other"));
         let _ = fs::remove_dir_all(package);
+    }
+
+    #[test]
+    fn selects_a_platform_optional_dependency_node_addon() {
+        let node_modules = temp_registry("optional_native_prebuild");
+        let (platform, arch, libc) = target_prebuild_components();
+        let dependency = if platform == "linux" {
+            format!("@example/addon-{platform}-{arch}-{libc}")
+        } else {
+            format!("@example/addon-{platform}-{arch}")
+        };
+        let dependency_dir = node_modules.join(&dependency);
+        fs::create_dir_all(&dependency_dir).unwrap();
+        fs::write(
+            dependency_dir.join("package.json"),
+            format!(r#"{{"name":"{dependency}","main":"binding.node"}}"#),
+        )
+        .unwrap();
+        fs::write(dependency_dir.join("binding.node"), b"native bytes").unwrap();
+        let manifest = serde_json::json!({
+            "optionalDependencies": { dependency.clone(): "1.0.0" }
+        });
+        let selected = select_optional_dependency_addon(&node_modules, &manifest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.path, dependency_dir.join("binding.node"));
+        assert_eq!(selected.relative_path, format!("{dependency}/binding.node"));
+        assert_eq!(selected.platform, platform);
+        assert_eq!(selected.arch, arch);
+        assert_eq!(selected.libc, libc);
+        let _ = fs::remove_dir_all(node_modules);
     }
 
     #[test]

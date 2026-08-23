@@ -483,3 +483,22 @@ host testはworker threadからのblocking投入、callbackのmain-thread実行�
 deadlock防止、abort cleanup、acquire/release、ref/unref、finalizerを固定して検証する。
 加えて実C addonを`-pthread`でbuildし、native pthreadからTSFNへ投入した値が生成callback
 bridgeを通ってmain thread上で`42`として返るところまでE2E検証する。
+
+## 19. Parcel Watcher実package検証
+
+`@parcel/watcher@2.5.1`はasync-work、deferred Promise、TSFNを同時に使う。hostは
+`napi_create_promise`／`napi_resolve_deferred`／`napi_reject_deferred`を値モデルへ追加し、
+`thaw_napi_poll_async_work`で待機せずready callbackだけをmain thread上で進める。
+同期bridgeからPromiseを返した場合はnative async-workがsettleするまでpollし、resolved値を
+JSONへ変換する。`napi_strict_equals`と`napi_fatal_exception`も実prebuild要求から追加した。
+
+`THAW_PARCEL_WATCHER_NODE`付きhost E2Eは一時directoryをsubscribeし、実ファイル作成を
+inotify backendが検出してTSFN callbackへ返すこと、同じcallback identityによるunsubscribe、
+両操作のPromise解決まで検証する。snapshot APIもPromise bridge経由で実ファイルを生成する。
+
+Parcelのbinaryは本体package内の`prebuilds/`ではなく、
+`@parcel/watcher-linux-x64-glibc`のようなplatform optional dependencyへ分離される。
+registryは現在のOS／architecture／libc suffixに一致するoptional dependencyの`main`が
+`.node`なら自動選択し、従来と同じ`native.node`／`native-addon.json`へ格納する。
+`THAW_RUN_NPM_INTEGRATION=1`のCLI E2Eは実npm packageを取得し、snapshot実行ファイルをbuild、
+registry削除後の単独実行まで確認する。

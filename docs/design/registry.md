@@ -945,6 +945,18 @@ listenerを複数、登録順に保持し、再listen後も残す。listen/close
 不正portを `ERR_SOCKET_BAD_PORT`、bind競合を `EADDRINUSE`、その他のlisten失敗を説明文として
 登録順に通知する。Node互換の構造化Error objectと未処理errorのprocess failureは次段階である。
 
+## 23. platform optional dependencyのN-API prebuild
+
+`@parcel/watcher`のように、本体packageの`prebuilds/`ではなく
+`@parcel/watcher-linux-x64-glibc`等へbinaryを分離するpackageに対応した。
+`optionalDependencies`から現在のplatform／architecture／libc suffixに一致するpackageを
+選び、そのpackageの`main`が`.node`ならregistryの`native.node`へコピーする。source package
+pathとhashは従来どおり`native-addon.json`へ記録する。
+
+実npm integration testは`@parcel/watcher@2.5.1`を無改造で取得し、optional dependencyの
+公式prebuildを埋め込んだ単一実行ファイルを生成する。registry directoryを削除した後に
+Promiseベースの`writeSnapshot`を呼び、実snapshotファイルが作られるところまで検証する。
+
 ## 北極星: 「npm と同じ感覚で使える」こと
 
 このドキュメントの各章は、実在する npm パッケージを実際に試して
@@ -956,13 +968,13 @@ listenerを複数、登録順に保持し、再listen後も残す。listen/close
 -- つまり npm を使う感覚と地続きの体験にすること。ESM 専用パッケージも
 書いてある順に近い状態で動くようになり、複数パッケージ間の名前衝突も
 namespace 修飾構文（15章）で自動的に解決できるようになった。ネイティブ
-アドオンは実行そのものにはまだ手を出していないが、失敗した時に原因が
-一目で分かるところまでは来た（16章）。`<package>@<version>` で
+アドオンはN-API hostで実行でき、package本体内のprebuildとplatform optional
+dependencyの双方を自動選択できる（23章）。`<package>@<version>` で
 特定バージョンを指定し、実際に解決されたバージョンを記録することも
 できるようになった（17章）。Fast path の Marshal アダプタも、
 パラメータ側の `(ptr, len)`/フィールド展開までは実装した（18章）。
 依存グラフ全体で実際に npm が選んだバージョンを `lock.json` として
 記録することもできるようになった（19章、ただし独自の semver
-ソルバは書いていない）。ネイティブアドオンの実行そのものなど、
-まだ埋まっていない穴はある（20章）。優先順位は「実際に試して見つかった
+ソルバは書いていない）。より広いN-API／Node互換性など、まだ埋まっていない
+穴はある（20章）。優先順位は「実際に試して見つかった
 順」で決めていく。
