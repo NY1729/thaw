@@ -109,7 +109,10 @@ pub enum HirExpr {
     /// invocation at a time (nothing to interleave with). A real suspend
     /// point is V2, not implemented.
     Await(Box<HirExpr>),
-    Lambda(Vec<HirParam>, HirType, Box<HirExpr>),
+    /// A typed closure. `captures` contains the outer bindings referenced by
+    /// the body in deterministic name order, followed by ordinary parameters,
+    /// the return type, and the body itself.
+    Lambda(Vec<HirParam>, Vec<HirParam>, HirType, Box<HirExpr>),
     Block(Vec<HirStmt>),
     FfiCall(FfiSignature, Vec<HirExpr>),
     DynamicCall(DynamicSignature, Vec<HirExpr>),
@@ -264,7 +267,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
-            HirExpr::Lambda(_, _, body) => visit_expr(body, symbol, abi, found),
+            HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
             HirExpr::ArrayLit(values) => {
                 for value in values {
@@ -376,7 +379,7 @@ pub fn set_ffi_ownership(
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner) => update_expr(inner, symbol, returns, errors, found),
-            HirExpr::Lambda(_, _, body) => update_expr(body, symbol, returns, errors, found),
+            HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
             HirExpr::Block(stmts) => update_stmts(stmts, symbol, returns, errors, found),
             HirExpr::IndexAssign(a, b, c) => {
                 update_expr(a, symbol, returns, errors, found);

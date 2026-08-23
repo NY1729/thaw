@@ -913,6 +913,14 @@ target内に`*`が複数現れる場合は同じcaptureをすべてへ適用す�
 呼び出し元へ返す。TypeScript import、HIR/LLVM、静的リンク済みELF、実TCP通信を
 通す統合テストで検証する。
 
+関数型はHIRの `Function(params, return)` として保持し、arrow functionはLLVMの
+内部関数へ変換する。関数値はarena上の `[code pointer, captures...]` という
+closure環境を指し、間接呼び出しではその環境を隠し第1引数として渡す。これにより
+外側の値を読むclosure、nested closure、Rustからのcallback呼び戻しが可能になった。
+`serveOnceWith(port, (target) => body)` はこのABIを使い、callbackの戻り値を実際の
+HTTP response bodyとして送信する。現段階のcaptureは生成時の値を保存する方式で、
+JavaScriptと同じ共有mutable bindingへの拡張は今後の課題である。
+
 これはNode互換の `createServer` そのものではない。次の段階では関数型、arrow
 function、closure capture、request/response object methodをHIRとLLVMへ通し、
 `createServer((req, res) => ...)` を表現できる呼び出し規約へ拡張する必要がある。
