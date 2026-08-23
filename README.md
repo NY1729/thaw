@@ -284,6 +284,10 @@ The workspace crates have narrow responsibilities:
   homogeneous input. If every input rejects, it reports `All promises were
   rejected` through the normal async `try/catch` path; repeated and losing
   handles are deduplicated and drained
+- `Promise.allSettled` waits for every homogeneous input and returns ordered
+  `{ status, value, reason }` objects. Rejections are values rather than parent
+  failures; literals, Promise array variables, empty inputs, repeated handles,
+  and every native value shape are supported
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result
@@ -304,7 +308,8 @@ The workspace crates have narrow responsibilities:
 - Block-scoped locals inside nested control flow and fully general
   value-returning Promise APIs. `Promise.all` supports homogeneous Promise
   arrays and heterogeneous literal tuples, and `Promise.race` supports
-  homogeneous inputs; `Promise.any` does as well. `Promise.allSettled` remains
+  homogeneous inputs; `Promise.any` and the normalized-result form of
+  `Promise.allSettled` do as well. Full discriminated-union narrowing remains
   unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata

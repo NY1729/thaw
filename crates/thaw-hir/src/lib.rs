@@ -142,6 +142,10 @@ pub enum HirExpr {
     PromiseAny(Vec<HirExpr>, HirType),
     /// A homogeneous `Promise.any` supplied through an array value.
     PromiseAnyArray(Box<HirExpr>, HirType),
+    /// A homogeneous `Promise.allSettled` over a literal list.
+    PromiseAllSettled(Vec<HirExpr>, HirType),
+    /// A homogeneous `Promise.allSettled` supplied through an array value.
+    PromiseAllSettledArray(Box<HirExpr>, HirType),
     /// `await expr`. V1 (see docs/design/async-await.md) compiles this as
     /// an identity transform in codegen -- `async`/`await` is sugar over
     /// synchronous calls, valid because Lambda only ever processes one
@@ -308,6 +312,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::PromiseRaceArray(inner, _)
             | HirExpr::PromiseAnyArray(inner, _)
+            | HirExpr::PromiseAllSettledArray(inner, _)
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
@@ -319,7 +324,8 @@ pub fn set_ffi_error_abi(
             | HirExpr::PromiseAll(values, _)
             | HirExpr::PromiseAllTuple(values, _)
             | HirExpr::PromiseRace(values, _)
-            | HirExpr::PromiseAny(values, _) => {
+            | HirExpr::PromiseAny(values, _)
+            | HirExpr::PromiseAllSettled(values, _) => {
                 for value in values {
                     visit_expr(value, symbol, abi, found);
                 }
@@ -408,7 +414,8 @@ pub fn set_ffi_ownership(
             | HirExpr::PromiseAll(args, _)
             | HirExpr::PromiseAllTuple(args, _)
             | HirExpr::PromiseRace(args, _)
-            | HirExpr::PromiseAny(args, _) => {
+            | HirExpr::PromiseAny(args, _)
+            | HirExpr::PromiseAllSettled(args, _) => {
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }
@@ -434,6 +441,7 @@ pub fn set_ffi_ownership(
             | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::PromiseRaceArray(inner, _)
             | HirExpr::PromiseAnyArray(inner, _)
+            | HirExpr::PromiseAllSettledArray(inner, _)
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
@@ -547,7 +555,8 @@ pub fn set_ffi_string_abi(
             | HirExpr::PromiseAll(values, _)
             | HirExpr::PromiseAllTuple(values, _)
             | HirExpr::PromiseRace(values, _)
-            | HirExpr::PromiseAny(values, _) => {
+            | HirExpr::PromiseAny(values, _)
+            | HirExpr::PromiseAllSettled(values, _) => {
                 for value in values {
                     update_expr(value, symbol, params, returns, calling_convention, found);
                 }
@@ -573,6 +582,7 @@ pub fn set_ffi_string_abi(
             | HirExpr::PromiseAllArray(inner, _)
             | HirExpr::PromiseRaceArray(inner, _)
             | HirExpr::PromiseAnyArray(inner, _)
+            | HirExpr::PromiseAllSettledArray(inner, _)
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
