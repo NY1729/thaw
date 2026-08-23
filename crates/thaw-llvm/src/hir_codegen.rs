@@ -291,15 +291,20 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     /// Declares an ambient (`declare function`) signature as an `extern
-    /// "C"` symbol -- see docs/design/bridge.md section 6. The final link
-    /// step must resolve it from somewhere else (a real native library
-    /// today; thaw-registry eventually).
+    /// "C"` symbol -- see docs/design/bridge.md sections 5/6. The final
+    /// link step must resolve it from somewhere else (a real native
+    /// library today; thaw-registry eventually).
+    ///
+    /// The declared LLVM parameter list is *not* simply one slot per HIR
+    /// parameter: `Array`/`Object` params are expanded into the real C ABI
+    /// shape a native library actually expects (see `ffi_param_types`),
+    /// matching the argument list `compile_ffi_call` builds at each call
+    /// site. Only parameters are adapted this way -- a return value still
+    /// uses Thaw's own internal representation (`basic_type`) unchanged;
+    /// marshaling an `Array`/`Object` *return* into a real C convention is
+    /// still out of scope (docs/design/registry.md section 18).
     fn declare_extern_function(&mut self, sig: &FfiSignature) -> Result<FunctionValue<'ctx>, String> {
-        let param_types = sig
-            .params
-            .iter()
-            .map(|ty| self.basic_type(ty).map(BasicMetadataTypeEnum::from))
-            .collect::<Result<Vec<_>, _>>()?;
+        let param_types = self.ffi_param_types(&sig.params)?;
 
         let fn_type = match &sig.ret {
             HirType::Void => self.context.void_type().fn_type(&param_types, false),
@@ -309,6 +314,55 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self
             .module
             .add_function(&sig.symbol, fn_type, Some(Linkage::External)))
+    }
+
+    /// The real C ABI parameter list a Fast path native symbol is declared
+    /// with, for the given `.d.ts`-derived HIR parameter types --
+    /// docs/design/bridge.md section 5's "Marshal コード生成", the part
+    /// left explicitly unimplemented when Fast path FFI calls were first
+    /// added (see docs/design/registry.md section 18, "実際の C ABI...
+    /// に合わせた Marshal アダプタ生成"). Thaw's own internal
+    /// representation for `Array`/`Object` (a single opaque pointer to an
+    /// arena buffer with Thaw-specific layout) is almost never what a real
+    /// native library's C signature expects, so those two are expanded
+    /// here into the shape a real C API actually tends to use -- this
+    /// list, and `compile_ffi_call`'s argument-building loop, must stay in
+    /// lockstep (each match arm here has a matching arm there).
+    ///
+    /// - `number[]` -> two C parameters, `(const double*, int64_t len)` --
+    ///   the near-universal C convention for passing an array, as opposed
+    ///   to Thaw's own single-pointer `[i64 len][f64 elements...]` buffer.
+    /// - `{ x: number; ... }` -> one C parameter *per field*, in
+    ///   declaration order (`distance(x1, y1, x2, y2)` rather than a
+    ///   single struct pointer) -- Fast path classification only accepts
+    ///   `number` object fields (docs/design/bridge.md section 4.1), so
+    ///   this is always one `double` per field. A real by-value C struct
+    ///   parameter would need to replicate the target's own struct-passing
+    ///   ABI (register-class rules, padding, ...), which isn't attempted
+    ///   here; a native library that genuinely wants a struct by value
+    ///   needs its own flat-field C wrapper, the same way many real C APIs
+    ///   already choose to expose one.
+    /// - everything else -- unchanged, one C parameter each.
+    fn ffi_param_types(&self, params: &[HirType]) -> Result<Vec<BasicMetadataTypeEnum<'ctx>>, String> {
+        let mut out = Vec::with_capacity(params.len());
+        for ty in params {
+            match ty {
+                HirType::Array(elem) if **elem == HirType::F64 => {
+                    out.push(self.context.ptr_type(AddressSpace::default()).into());
+                    out.push(self.context.i64_type().into());
+                }
+                HirType::Object(fields) => {
+                    for (field_name, field_ty) in fields {
+                        let field_llvm_ty = self
+                            .basic_type(field_ty)
+                            .map_err(|e| format!("FFI object field `{field_name}`: {e}"))?;
+                        out.push(field_llvm_ty.into());
+                    }
+                }
+                other => out.push(self.basic_type(other).map(BasicMetadataTypeEnum::from)?),
+            }
+        }
+        Ok(out)
     }
 
     fn compile_function_body(&mut self, func: &HirFunction) -> Result<(), String> {
@@ -1114,8 +1168,11 @@ impl<'ctx> HirCompiler<'ctx> {
     /// `HirExpr::FfiCall` -- an ambient `declare function` call (see
     /// docs/design/bridge.md). By the time codegen sees this, the symbol
     /// is already declared (`declare_extern_function` ran in the
-    /// `compile_program` pre-pass), so this is otherwise identical to a
-    /// normal call.
+    /// `compile_program` pre-pass) with the *adapted* C ABI parameter list
+    /// `ffi_param_types` computed, so unlike a normal Thaw-to-Thaw call
+    /// (`build_call_with`), an `Array`/`Object` argument here must be
+    /// unpacked into that same adapted shape before the call -- each match
+    /// arm below has a matching arm in `ffi_param_types`'s doc comment.
     fn compile_ffi_call(
         &mut self,
         sig: &FfiSignature,
@@ -1125,7 +1182,79 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .get_function(&sig.symbol)
             .expect("extern function was declared in compile_program's pre-pass");
-        self.build_call_with(function, args, &sig.symbol)
+
+        let mut compiled_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::with_capacity(args.len());
+        for (param_ty, arg) in sig.params.iter().zip(args) {
+            let value = self.compile_expr(arg)?;
+            match param_ty {
+                // Thaw's own array value is a pointer to `[i64
+                // len][f64 elements...]` (`compile_array_lit`) --
+                // read the length back out of that header and pass
+                // `(elements pointer, len)` instead of the header
+                // pointer itself.
+                HirType::Array(elem) if **elem == HirType::F64 => {
+                    let base_ptr = value.into_pointer_value();
+                    let i64_type = self.context.i64_type();
+                    let len_val = self
+                        .builder
+                        .build_load(i64_type, base_ptr, "ffi_arr_len")
+                        .map_err(|e| e.to_string())?;
+                    let header_offset = i64_type.const_int(ARRAY_HEADER_BYTES, false);
+                    let elems_ptr = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                self.context.i8_type(),
+                                base_ptr,
+                                &[header_offset],
+                                "ffi_arr_elems",
+                            )
+                            .map_err(|e| e.to_string())?
+                    };
+                    compiled_args.push(elems_ptr.into());
+                    compiled_args.push(len_val.into());
+                }
+                // Thaw's own object value is a pointer to a flat
+                // `[f64 field0]...[f64 fieldN-1]` buffer
+                // (`compile_object_lit`) in declared order -- read
+                // each field back out and pass it as its own scalar
+                // argument, in that same order.
+                HirType::Object(fields) => {
+                    let base_ptr = value.into_pointer_value();
+                    let i64_type = self.context.i64_type();
+                    for (i, (field_name, field_ty)) in fields.iter().enumerate() {
+                        let field_llvm_ty = self
+                            .basic_type(field_ty)
+                            .map_err(|e| format!("FFI object field `{field_name}`: {e}"))?;
+                        let offset = i64_type.const_int(OBJECT_FIELD_BYTES * i as u64, false);
+                        let field_ptr = unsafe {
+                            self.builder
+                                .build_in_bounds_gep(
+                                    self.context.i8_type(),
+                                    base_ptr,
+                                    &[offset],
+                                    "ffi_field_ptr",
+                                )
+                                .map_err(|e| e.to_string())?
+                        };
+                        let field_val = self
+                            .builder
+                            .build_load(field_llvm_ty, field_ptr, "ffi_field")
+                            .map_err(|e| e.to_string())?;
+                        compiled_args.push(field_val.into());
+                    }
+                }
+                _ => compiled_args.push(value.into()),
+            }
+        }
+
+        let call_site = self
+            .builder
+            .build_call(function, &compiled_args, "ffi_calltmp")
+            .map_err(|e| e.to_string())?;
+        call_site
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("`{}` does not return a value", sig.symbol))
     }
 
     /// Compiles `args`, calls `function` with them, and extracts the
@@ -1924,6 +2053,162 @@ mod tests {
             .expect("failed to execute compiled binary");
         assert!(output.status.success(), "binary exited non-zero");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "5\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// docs/design/bridge.md section 5's marshal-adapter gap, closed:
+    /// unlike the plain-`number` case above, a real C function taking an
+    /// array almost never expects Thaw's own internal `[i64 len][f64
+    /// elements...]` buffer -- it expects the near-universal `(const
+    /// double*, int64_t len)` two-argument convention instead, exactly
+    /// what this real (not Thaw-authored) C function below declares. If
+    /// `ffi_param_types`/`compile_ffi_call` still passed Thaw's raw buffer
+    /// pointer as a single argument, this would either fail to link
+    /// (arity mismatch caught by `cc`) or silently misread memory as a
+    /// `(double*, int64_t)` pair -- it does neither: the sum comes back
+    /// correct.
+    #[test]
+    fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
+        let source = r#"
+            declare function native_sum(xs: number[]): number;
+
+            function main(): void {
+                const xs: number[] = [1, 2, 3, 4];
+                console.log(native_sum(xs));
+            }
+        "#;
+
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        assert_eq!(program.extern_functions.len(), 1, "sanity: this is really an FFI call");
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_array_marshal");
+        compiler.compile_program(&program).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi_array_marshal-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+
+        compiler.write_object_file(&obj_path).unwrap();
+
+        // A real, independently-written C function -- not one shaped
+        // around Thaw's own array layout. `len` is genuinely used (not
+        // just accepted and ignored), so a wrong length would also
+        // produce a wrong sum, not just "happen to work".
+        std::fs::write(
+            &native_c_path,
+            "#include <stdint.h>\n\
+             double native_sum(const double* xs, int64_t len) {\n\
+             \x20\x20double total = 0;\n\
+             \x20\x20for (int64_t i = 0; i < len; i++) { total += xs[i]; }\n\
+             \x20\x20return total;\n\
+             }\n",
+        )
+        .unwrap();
+        let cc_status = Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .expect("failed to invoke `cc` to build the native stand-in library");
+        assert!(cc_status.success(), "compiling native.c failed");
+
+        let arena_lib = build_staticlib("thaw-arena");
+        let link_status = Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .expect("failed to invoke system `cc` linker");
+        assert!(link_status.success(), "linking failed");
+
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("failed to execute compiled binary");
+        assert!(output.status.success(), "binary exited non-zero");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "10\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same gap, for `Object` params: a real C function is far more
+    /// likely to be a flat multi-argument function than to agree with
+    /// Thaw's own arena struct layout, so an object-typed FFI parameter
+    /// is flattened into one scalar C argument per field, in declared
+    /// order. `x*10 + y` (rather than something field-order-symmetric
+    /// like `x + y`) specifically catches a field-order bug: if `x`/`y`
+    /// were swapped, `{x: 3, y: 4}` would produce `43` instead of `34`.
+    #[test]
+    fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
+        let source = r#"
+            declare function native_combine(p: { x: number; y: number }): number;
+
+            function main(): void {
+                console.log(native_combine({ x: 3, y: 4 }));
+            }
+        "#;
+
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        assert_eq!(program.extern_functions.len(), 1, "sanity: this is really an FFI call");
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_object_marshal");
+        compiler.compile_program(&program).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi_object_marshal-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+
+        compiler.write_object_file(&obj_path).unwrap();
+
+        std::fs::write(
+            &native_c_path,
+            "double native_combine(double x, double y) { return x * 10 + y; }\n",
+        )
+        .unwrap();
+        let cc_status = Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .expect("failed to invoke `cc` to build the native stand-in library");
+        assert!(cc_status.success(), "compiling native.c failed");
+
+        let arena_lib = build_staticlib("thaw-arena");
+        let link_status = Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .expect("failed to invoke system `cc` linker");
+        assert!(link_status.success(), "linking failed");
+
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("failed to execute compiled binary");
+        assert!(output.status.success(), "binary exited non-zero");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "34\n");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

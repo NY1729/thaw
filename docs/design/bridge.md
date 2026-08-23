@@ -325,12 +325,30 @@ extern "C" fn thaw_dynamic_call(
 
 ## 8. 今回やらなかったこと（意図的なスコープ外）
 
-- `interface` 宣言のサポート（`TsInterfaceDecl`）-- `.d.ts` の実用上の
-  カバレッジを大きく左右するため優先度が高いが、thaw-hir の型
-  lowering 自体を拡張する必要があり別タスクとする。
-- 実際の npm パッケージの `.d.ts` を読み込んでの動作確認（今回は
-  手書きの `.d.ts` 相当のシグネチャでのみ検証）。
+以下のうち3項目は、この節を書いた時点では未着手だったが、その後の
+セッションで実装済みになっている（このドキュメント自体は当時のまま
+残してあるが、リンク先が最新の状態）:
+
+- ~~`interface` 宣言のサポート~~ -- 実装済み（`03b2e96`〜`11966fb`、
+  named object types・nested fields・extends・ジェネリックの
+  オンザスポット単相化まで）。
+- ~~QuickJS-NG の実装統合~~ -- 実装済み（`328b4d6`）。7章の
+  インターフェース設計がそのまま実装に落ちた。
+- ~~thaw-registry~~ -- 実装済み、[registry.md](registry.md) 参照。
+  「`.so` の解決・キャッシュ・配布」というより「`.d.ts`/JS 実装の
+  自動取り込み」が実際の中心的な価値になった。
+
+以下はまだ残っているもの:
+
+- 実際の npm パッケージの `.d.ts` を読み込んでの動作確認は
+  Fast path 自体には未実施のまま（Fast path 用の `native.a` を
+  自動生成する npm パッケージが実質存在しないため -- registry.md
+  18章参照）。Fallback 経路は実物パッケージで広く検証済み。
 - 5章で述べた、外部ライブラリの実際の C ABI 規約（`(ptr, len)` 分割
-  など）に合わせた Marshal アダプタ生成。
-- QuickJS-NG の実装統合（7章はインターフェース設計のみ）。
-- thaw-registry（`.so` の解決・キャッシュ・配布）。
+  など）に合わせた Marshal アダプタ生成 -- **`number[]` パラメータの
+  `(const double*, int64_t len)` 展開と、object パラメータのフィールド
+  単位への展開は実装済み**（`thaw-llvm::hir_codegen::ffi_param_types`/
+  `compile_ffi_call`、手書きの実 C 関数とリンクして検証）。戻り値側の
+  マーシャリング（`Array`/`Object` を返す C 関数への対応）と、文字列の
+  `(ptr, len)` 分割規約（`string` はそのまま `const char*` として渡す
+  規約のみ対応）は引き続き未対応。
