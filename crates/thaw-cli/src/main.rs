@@ -1675,6 +1675,7 @@ mod tests {
                     import {{ createServer }} from "node:http";
                     function main(): void {{
                         const prefix: string = "hello";
+                        let requests: number = 0;
                         const server = createServer(
                             (
                                 request: {{ method: string; url: string }},
@@ -1685,14 +1686,16 @@ mod tests {
                                     end: (chunk: string) => boolean;
                                 }}
                             ): boolean => {{
+                                requests = requests + 1;
                                 response.statusCode = 201;
                                 response.setHeader("X-Thaw", request.method);
                                 response.write(prefix);
                                 return response.end(request.url);
                             }}
                         );
-                        const target: string = server.listen({});
+                        const target: string = server.listenMany({}, 2);
                         console.log(target);
+                        console.log(requests);
                     }}
                 "#,
                 port
@@ -1718,20 +1721,25 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut stream = (0..200)
-            .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
-                Ok(stream) => Some(stream),
-                Err(_) => {
-                    std::thread::sleep(Duration::from_millis(5));
-                    None
-                }
-            })
-            .expect("compiled HTTP server did not start listening");
-        stream
-            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let request = |target: &str| {
+            let mut stream = (0..200)
+                .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => Some(stream),
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        None
+                    }
+                })
+                .expect("compiled HTTP server did not start listening");
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+        let response = request("/health");
+        let second_response = request("/ready");
         let result = child.wait_with_output().unwrap();
         assert!(
             result.status.success(),
@@ -1741,7 +1749,8 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
         assert!(response.contains("X-Thaw: GET\r\n"));
         assert!(response.ends_with("hello/health"));
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "/health\n");
+        assert!(second_response.ends_with("hello/ready"));
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "/ready\n2\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
