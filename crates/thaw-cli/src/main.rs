@@ -1696,6 +1696,8 @@ mod tests {
                         const target: string = server.listenMany({}, 2);
                         console.log(target);
                         console.log(requests);
+                        console.log(server.close());
+                        console.log(server.close());
                     }}
                 "#,
                 port
@@ -1750,7 +1752,10 @@ mod tests {
         assert!(response.contains("X-Thaw: GET\r\n"));
         assert!(response.ends_with("hello/health"));
         assert!(second_response.ends_with("hello/ready"));
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "/ready\n2\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "/ready\n2\ntrue\nfalse\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

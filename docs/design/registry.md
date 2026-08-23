@@ -929,7 +929,9 @@ objectのfunction型propertyは一般のclosureとして呼び出せる。これ
 endの本文は実際のHTTP responseへ反映される。`listen` は同じsocketで逐次リクエストを
 継続処理し、テストやbatch用途では `listenMany(port, count)` が指定数の処理後に返る。
 複数リクエスト間でもcallbackのclosure stateは保持される。現在はblocking acceptであり、
-`close` とevent loop上のnon-blocking server lifecycleは次段階である。
+`close()` は共有Atomic状態を通じて冪等に停止要求を設定する。listenerはnon-blocking
+acceptを短い間隔で確認するため、次のrequest待ちも停止できる。TypeScriptのmainを
+ブロックしないevent loop統合とlisten/close event callbackは次段階である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

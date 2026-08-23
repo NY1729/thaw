@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::raw::{c_char, c_void};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn string_from_ptr(value: *const c_char) -> String {
     if value.is_null() {
@@ -233,20 +234,32 @@ fn invoke_server_callback(callback: *const c_void, method: &str, target: &str) -
     }
 }
 
-fn run_server_many(port: f64, callback: *const c_void, count: usize) -> String {
+fn run_server_many(port: f64, state: &ServerState, count: usize) -> String {
     if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
         return String::new();
     }
     let Ok(listener) = TcpListener::bind(("127.0.0.1", port as u16)) else {
         return String::new();
     };
+    if listener.set_nonblocking(true).is_err() {
+        return String::new();
+    }
     let mut last_target = String::new();
     for _ in 0..count {
-        let Ok((stream, _)) = listener.accept() else {
-            return String::new();
+        let stream = loop {
+            if state.closed.load(Ordering::Acquire) {
+                return last_target;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(_) => return String::new(),
+            }
         };
         match handle_stream(stream, |method, target| {
-            invoke_server_callback(callback, method, target)
+            invoke_server_callback(state.callback as *const c_void, method, target)
         }) {
             Ok(target) => last_target = target,
             Err(_) => return String::new(),
@@ -256,19 +269,22 @@ fn run_server_many(port: f64, callback: *const c_void, count: usize) -> String {
 }
 
 struct ServerState {
-    callback: *const c_void,
+    callback: usize,
+    closed: AtomicBool,
 }
 
 #[repr(C)]
 struct Server {
     listen: *const NativeClosure,
     listen_many: *const NativeClosure,
+    close: *const NativeClosure,
 }
 
 unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    CString::new(run_server_many(port, state.callback, usize::MAX))
+    state.closed.store(false, Ordering::Release);
+    CString::new(run_server_many(port, state, usize::MAX))
         .unwrap_or_default()
         .into_raw()
 }
@@ -285,9 +301,16 @@ unsafe extern "C" fn server_listen_many(
     } else {
         0
     };
-    CString::new(run_server_many(port, state.callback, count))
+    state.closed.store(false, Ordering::Release);
+    CString::new(run_server_many(port, state, count))
         .unwrap_or_default()
         .into_raw()
+}
+
+unsafe extern "C" fn server_close(environment: *const c_void) -> bool {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    !state.closed.swap(true, Ordering::AcqRel)
 }
 
 /// Node-shaped constructor slice: returns an object with `listen(port)`.
@@ -296,7 +319,10 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
     if callback.is_null() {
         return std::ptr::null();
     }
-    let state = Box::into_raw(Box::new(ServerState { callback }));
+    let state = Box::into_raw(Box::new(ServerState {
+        callback: callback as usize,
+        closed: AtomicBool::new(false),
+    }));
     let listen = Box::into_raw(Box::new(NativeClosure {
         code: server_listen as *const c_void,
         context: state.cast(),
@@ -305,9 +331,14 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_listen_many as *const c_void,
         context: state.cast(),
     }));
+    let close = Box::into_raw(Box::new(NativeClosure {
+        code: server_close as *const c_void,
+        context: state.cast(),
+    }));
     Box::into_raw(Box::new(Server {
         listen,
         listen_many,
+        close,
     }))
     .cast()
 }
@@ -316,6 +347,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 mod tests {
     use super::*;
     use std::net::TcpStream;
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -344,5 +376,44 @@ mod tests {
         stream.read_to_string(&mut response).unwrap();
         assert!(response.ends_with("hello thaw"));
         assert_eq!(server.join().unwrap(), "/health");
+    }
+
+    #[test]
+    fn close_interrupts_a_continuous_listener_between_requests() {
+        unsafe extern "C" fn callback(
+            _environment: *const c_void,
+            _request: *const IncomingMessage,
+            _response: *mut ServerResponse,
+        ) -> bool {
+            true
+        }
+
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let callback = Box::into_raw(Box::new(NativeClosure {
+            code: callback as *const c_void,
+            context: std::ptr::null_mut(),
+        }));
+        let state = Arc::new(ServerState {
+            callback: callback as usize,
+            closed: AtomicBool::new(false),
+        });
+        let server_state = Arc::clone(&state);
+        let server = thread::spawn(move || run_server_many(port as f64, &server_state, usize::MAX));
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        stream
+            .write_all(b"GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        state.closed.store(true, Ordering::Release);
+        assert_eq!(server.join().unwrap(), "/first");
     }
 }
