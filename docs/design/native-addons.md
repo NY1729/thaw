@@ -464,6 +464,22 @@ GCのweak-reference clearingは今後の拡張対象である。
 `napi_set_instance_data`／`napi_get_instance_data`、coercion、int64、named-property
 query、`napi_make_callback`の不足が判明し、hostへ追加した。serialportはNode本体が
 公開する`uv_poll_*`等も直接参照するため、Linuxではaddonの解決前にsystem
-`libuv.so.1`をglobal visibilityでロードする。thread-safe functionのABI symbolも
-公開するが、cross-thread JS queueは未実装であり、作成要求には
-`napi_generic_failure`を返す。
+`libuv.so.1`をglobal visibilityでロードする。
+
+## 18. thread-safe function
+
+`napi_create_threadsafe_function`はaddon workerから渡されたopaque dataをmutex保護queueへ
+積み、`thaw_napi_run_async_work`が生成実行ファイルのmain thread上で`call_js` callbackを
+実行する。bounded queueはnonblocking時に`napi_queue_full`を返し、blocking時は空きを待つ。
+main thread自身が満杯queueをblocking投入しようとした場合は`napi_would_deadlock`を返す。
+
+producer数は`napi_acquire_threadsafe_function`／`napi_release_threadsafe_function`で管理する。
+最後のrelease後にqueueをdrainしてfinalizerを一度だけ実行し、abort releaseでは残ったdataを
+null env／null JS functionの`call_js`へ渡してnative cleanupを可能にする。ref/unrefは生成実行
+ファイル終了時のdrain待機対象を切り替える。thread-safe functionを作ったcallback Envは
+finalize完了まで`pending_call_envs`に保持する。
+
+host testはworker threadからのblocking投入、callbackのmain-thread実行、queue full、
+deadlock防止、abort cleanup、acquire/release、ref/unref、finalizerを固定して検証する。
+加えて実C addonを`-pthread`でbuildし、native pthreadからTSFNへ投入した値が生成callback
+bridgeを通ってmain thread上で`42`として返るところまでE2E検証する。
