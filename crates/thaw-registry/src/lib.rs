@@ -14,15 +14,24 @@
 //!                                  `generate_module_init` so it's loaded
 //!                                  automatically at program startup
 //!                                  (replaces a manual `loadScript` call)
+//!   version.txt    (optional)  -- the exact version `add` resolved and
+//!                                  fetched (see `add`'s doc comment);
+//!                                  purely informational, never read back
+//!                                  by `resolve` for anything but its own
+//!                                  `version` field
 //! ```
 //!
-//! No network fetch, no version resolution, and no build step for the
-//! native lib -- this crate only resolves a package name to the files
-//! already sitting on disk. Those deferred pieces are exactly what the
-//! project's design doc calls "the actual differentiator"; this is a
-//! placeholder for the local half of it, real enough to remove the
-//! remaining manual `--bridge`/`--link`/`loadScript` steps for a package
-//! that's already been fetched/built by some other means.
+//! Still no build step for the native lib, and no lockfile/dependency-graph
+//! version resolution across multiple packages -- `add` resolves and
+//! records exactly one version per package, independently, the same way a
+//! single `npm install <package>@<spec>` would. This crate only resolves a
+//! package name to the files already sitting on disk (plus, now, the
+//! version `add` recorded there). The native-lib build pipeline is still
+//! exactly what the project's design doc calls "the actual differentiator"
+//! left undone; this is a placeholder for the local half of it, real
+//! enough to remove the remaining manual `--bridge`/`--link`/`loadScript`
+//! steps for a package that's already been fetched/built by some other
+//! means.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,6 +46,10 @@ pub struct ResolvedPackage {
     pub dts_source: String,
     pub native_lib: Option<PathBuf>,
     pub bundle_js: Option<String>,
+    /// The version `add` recorded in `version.txt`, if this package went
+    /// through `add` (rather than hand-curation, or an `add` run before
+    /// this field existed) -- see `AddedPackage::resolved_version`.
+    pub version: Option<String>,
 }
 
 /// Resolves `name` against `registry_dir/<name>/`. Fails only if
@@ -69,11 +82,16 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         None
     };
 
+    let version = fs::read_to_string(dir.join("version.txt"))
+        .ok()
+        .map(|s| s.trim().to_string());
+
     Ok(ResolvedPackage {
         name: name.to_string(),
         dts_source,
         native_lib,
         bundle_js,
+        version,
     })
 }
 
@@ -89,6 +107,12 @@ pub struct AddedPackage {
     pub dts_relative_path: String,
     pub js_relative_path: String,
     pub bundled_file_count: usize,
+    /// The exact version `npm install` actually resolved `package`'s
+    /// version-or-range specifier to (read back from the fetched
+    /// package's own `package.json`, so a bare package name with no
+    /// specifier at all still reports the real version `npm` picked as
+    /// "latest", not just an echo of the empty request).
+    pub resolved_version: String,
 }
 
 /// Fetches `package` via `npm install` (into a throwaway scratch
@@ -110,10 +134,26 @@ pub struct AddedPackage {
 /// carry no runtime code. An ESM-only package and a native addon (this
 /// never produces a `native.a`) are still out of scope; see the design
 /// doc's closing section.
+///
+/// `package` may carry a version/tag/range specifier the same way `npm
+/// install` accepts one (`left-pad@1.3.0`, `left-pad@^1.2.0`,
+/// `left-pad@next`, or a bare `left-pad` for "whatever `npm` calls
+/// latest") -- passed through to `npm install` completely unexamined
+/// (`split_package_spec` only peels it off to know the bare package name
+/// for the registry's own on-disk directory and for the `@types/*`
+/// fallback name, which is versioned independently of whatever version
+/// of `package` itself was requested). The version `npm` actually
+/// resolved the specifier to is read back from the fetched package's own
+/// `package.json` and recorded in `version.txt` next to `package.d.ts`/
+/// `bundle.js` -- there's still no lockfile or cross-package version
+/// *graph* (each `add` call is independent, exactly like one `npm
+/// install <spec>` would be), but a specific version can now actually be
+/// requested and later confirmed, rather than every `add` silently
+/// meaning "whatever's newest today".
 pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
     let scratch = std::env::temp_dir().join(format!(
         "thaw-registry-add-{}-{}",
-        package.replace('/', "_"),
+        package.replace(['/', '@'], "_"),
         std::process::id()
     ));
     fs::create_dir_all(&scratch).map_err(|e| {
@@ -125,20 +165,59 @@ pub fn add(registry_dir: &Path, package: &str) -> Result<AddedPackage, String> {
     result
 }
 
+/// Splits an `add`/`npm install`-style package specifier into the bare
+/// package name and an optional version/tag/range suffix. A scoped
+/// package's leading `@scope/` is never mistaken for a version separator
+/// -- only an `@` *after* that (or, for an unscoped name, anywhere at
+/// all) starts a version: `"left-pad"` -> `("left-pad", None)`,
+/// `"left-pad@1.3.0"` -> `("left-pad", Some("1.3.0"))`, `"@hapi/hoek"` ->
+/// `("@hapi/hoek", None)`, `"@hapi/hoek@9.0.0"` -> `("@hapi/hoek",
+/// Some("9.0.0"))`.
+/// The bare-name half of [`split_package_spec`], exposed for callers
+/// (thaw-cli's `registry add` reporting) that need to know which
+/// registry directory a possibly-versioned `add` argument actually
+/// landed in without duplicating the parsing themselves.
+pub fn package_name(spec: &str) -> &str {
+    split_package_spec(spec).0
+}
+
+fn split_package_spec(spec: &str) -> (&str, Option<&str>) {
+    let search_from = if spec.starts_with('@') {
+        spec.find('/').map(|i| i + 1).unwrap_or(spec.len())
+    } else {
+        0
+    };
+    match spec[search_from..].find('@') {
+        Some(rel_i) => {
+            let at = search_from + rel_i;
+            (&spec[..at], Some(&spec[at + 1..]))
+        }
+        None => (spec, None),
+    }
+}
+
 fn fetch_and_copy(
     scratch: &Path,
     registry_dir: &Path,
     package: &str,
 ) -> Result<AddedPackage, String> {
+    let (name, _version_spec) = split_package_spec(package);
+
     npm_install(scratch, package)?;
 
     let node_modules_dir = scratch.join("node_modules");
-    let package_dir = node_modules_dir.join(package);
+    let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
+
+    let resolved_version = manifest
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0")
+        .to_string();
 
     let main_field = manifest.get("main").and_then(|v| v.as_str()).unwrap_or("index.js");
     let (js_source, js_relative_path, bundled_file_count) =
-        bundle_commonjs_package(&node_modules_dir, package, &package_dir, main_field)?;
+        bundle_commonjs_package(&node_modules_dir, name, &package_dir, main_field)?;
 
     let (dts_relative_path, dts_source) = match find_own_dts(&manifest, &package_dir) {
         Some((rel, abs)) => {
@@ -146,21 +225,24 @@ fn fetch_and_copy(
                 .map_err(|e| format!("failed to read `{rel}`: {e}"))?;
             (rel, source)
         }
-        None => fetch_types_package_dts(scratch, package)?,
+        None => fetch_types_package_dts(scratch, name)?,
     };
 
-    let dest_dir = registry_dir.join(package);
+    let dest_dir = registry_dir.join(name);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("failed to create `{}`: {e}", dest_dir.display()))?;
     fs::write(dest_dir.join("package.d.ts"), dts_source)
         .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("package.d.ts").display()))?;
     fs::write(dest_dir.join("bundle.js"), js_source)
         .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("bundle.js").display()))?;
+    fs::write(dest_dir.join("version.txt"), &resolved_version)
+        .map_err(|e| format!("failed to write `{}`: {e}", dest_dir.join("version.txt").display()))?;
 
     Ok(AddedPackage {
         dts_relative_path,
         js_relative_path,
         bundled_file_count,
+        resolved_version,
     })
 }
 
@@ -973,6 +1055,7 @@ mod tests {
         .unwrap();
         fs::write(pkg_dir.join("native.a"), b"fake archive").unwrap();
         fs::write(pkg_dir.join("bundle.js"), "function pad(s){return s;}").unwrap();
+        fs::write(pkg_dir.join("version.txt"), "1.3.0").unwrap();
 
         let resolved = resolve(&registry, "left-pad").unwrap();
         assert_eq!(resolved.name, "left-pad");
@@ -982,6 +1065,7 @@ mod tests {
             resolved.bundle_js.as_deref(),
             Some("function pad(s){return s;}")
         );
+        assert_eq!(resolved.version.as_deref(), Some("1.3.0"));
 
         let _ = fs::remove_dir_all(&registry);
     }
@@ -1000,6 +1084,9 @@ mod tests {
         let resolved = resolve(&registry, "is-odd").unwrap();
         assert!(resolved.native_lib.is_none());
         assert!(resolved.bundle_js.is_none());
+        // A hand-curated package (or one `add`ed before `version.txt`
+        // existed) has no version on record -- not an error, just unknown.
+        assert!(resolved.version.is_none());
 
         let _ = fs::remove_dir_all(&registry);
     }
@@ -1166,6 +1253,31 @@ mod tests {
         assert_eq!(
             split_bare_spec("@babel/core/lib/index"),
             ("@babel/core", Some("lib/index"))
+        );
+    }
+
+    #[test]
+    fn splits_version_specs_from_add_arguments() {
+        assert_eq!(split_package_spec("left-pad"), ("left-pad", None));
+        assert_eq!(
+            split_package_spec("left-pad@1.3.0"),
+            ("left-pad", Some("1.3.0"))
+        );
+        assert_eq!(
+            split_package_spec("left-pad@^1.2.0"),
+            ("left-pad", Some("^1.2.0"))
+        );
+        assert_eq!(
+            split_package_spec("left-pad@next"),
+            ("left-pad", Some("next"))
+        );
+        // A scoped package's leading `@scope/` is never mistaken for a
+        // version separator -- only an `@` after the scope's own `/`
+        // starts one.
+        assert_eq!(split_package_spec("@hapi/hoek"), ("@hapi/hoek", None));
+        assert_eq!(
+            split_package_spec("@hapi/hoek@9.0.0"),
+            ("@hapi/hoek", Some("9.0.0"))
         );
     }
 
