@@ -890,6 +890,9 @@ fn build(
     )
 }
 
+// Keep the build inputs explicit: the slices come from separate CLI/registry
+// sources and are independently varied by integration tests.
+#[allow(clippy::too_many_arguments)]
 fn build_with_link_mode(
     input: &Path,
     output: &Path,
@@ -1661,6 +1664,8 @@ mod tests {
         let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
+        let occupied_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let occupied_port = occupied_listener.local_addr().unwrap().port();
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-node-http-{}-{}",
             std::process::id(),
@@ -1698,15 +1703,26 @@ mod tests {
                         console.log(requests);
                         console.log(server.close());
                         console.log(server.close());
+                        server.on("listening", (): void => {{
+                            console.log("event:listening");
+                        }});
+                        server.on("close", (): void => {{
+                            console.log("event:close");
+                        }});
+                        server.on("error", (error: string): void => {{
+                            console.log(error);
+                        }});
                         server.listen({}, (): void => {{
                             console.log("listening");
                         }});
                         console.log(server.close((): void => {{
                             console.log("closed");
                         }}));
+                        server.listen(70000);
+                        server.listen({});
                     }}
                 "#,
-                port, port
+                port, port, occupied_port
             ),
         )
         .unwrap();
@@ -1760,8 +1776,9 @@ mod tests {
         assert!(second_response.ends_with("hello/ready"));
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "/ready\n2\ntrue\nfalse\ntrue\nlistening\nclosed\n"
+            "/ready\n2\ntrue\nfalse\ntrue\nevent:listening\nlistening\nERR_SOCKET_BAD_PORT\nEADDRINUSE\nevent:close\nclosed\n"
         );
+        drop(occupied_listener);
         let _ = std::fs::remove_dir_all(dir);
     }
 

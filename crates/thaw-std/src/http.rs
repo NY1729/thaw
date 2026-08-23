@@ -298,8 +298,18 @@ struct ServerState {
     listener: Mutex<Option<TcpListener>>,
     watcher: AtomicU64,
     connections: AtomicUsize,
-    listen_callback: AtomicUsize,
-    close_callback: AtomicUsize,
+    listening_listeners: Mutex<Vec<EventListener>>,
+    close_listeners: Mutex<Vec<EventListener>>,
+    error_listeners: Mutex<Vec<EventListener>>,
+    pending_listening: AtomicBool,
+    pending_errors: Mutex<Vec<String>>,
+    close_requested: AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+struct EventListener {
+    callback: usize,
+    once: bool,
 }
 
 fn active_servers() -> &'static Mutex<Vec<usize>> {
@@ -335,7 +345,13 @@ pub extern "C" fn thaw_http_run_servers() {
             let mut servers = active_servers().lock().unwrap();
             servers.retain(|address| {
                 let state = unsafe { &*(*address as *const ServerState) };
-                invoke_pending_callback(&state.listen_callback);
+                if state.pending_listening.swap(false, Ordering::AcqRel) {
+                    emit_event(&state.listening_listeners);
+                }
+                let errors = std::mem::take(&mut *state.pending_errors.lock().unwrap());
+                for error in errors {
+                    emit_error(&state.error_listeners, &error);
+                }
                 if state.closed.load(Ordering::Acquire) {
                     let watcher = state.watcher.swap(0, Ordering::AcqRel);
                     if watcher != 0 {
@@ -343,7 +359,9 @@ pub extern "C" fn thaw_http_run_servers() {
                     }
                     *state.listener.lock().unwrap() = None;
                     if state.connections.load(Ordering::Acquire) == 0 {
-                        invoke_pending_callback(&state.close_callback);
+                        if state.close_requested.swap(false, Ordering::AcqRel) {
+                            emit_event(&state.close_listeners);
+                        }
                         false
                     } else {
                         true
@@ -362,16 +380,44 @@ pub extern "C" fn thaw_http_run_servers() {
     }
 }
 
-fn invoke_pending_callback(slot: &AtomicUsize) {
-    let callback = slot.swap(0, Ordering::AcqRel) as *const c_void;
-    if callback.is_null() {
-        return;
+fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
+    let callbacks = {
+        let mut listeners = listeners.lock().unwrap();
+        let callbacks = listeners.clone();
+        listeners.retain(|listener| !listener.once);
+        callbacks
+    };
+    for listener in callbacks {
+        let callback = listener.callback as *const c_void;
+        unsafe {
+            type Callback = unsafe extern "C" fn(*const c_void);
+            let code = *(callback as *const *const c_void);
+            let callback_fn: Callback = std::mem::transmute(code);
+            callback_fn(callback);
+        }
     }
-    unsafe {
-        type Callback = unsafe extern "C" fn(*const c_void);
-        let code = *(callback as *const *const c_void);
-        let callback_fn: Callback = std::mem::transmute(code);
-        callback_fn(callback);
+}
+
+fn add_event_listener(listeners: &Mutex<Vec<EventListener>>, callback: *const c_void, once: bool) {
+    if !callback.is_null() {
+        listeners.lock().unwrap().push(EventListener {
+            callback: callback as usize,
+            once,
+        });
+    }
+}
+
+fn emit_error(listeners: &Mutex<Vec<EventListener>>, message: &str) {
+    let callbacks = listeners.lock().unwrap().clone();
+    let message = CString::new(message).unwrap_or_default();
+    for listener in callbacks {
+        let callback = listener.callback as *const c_void;
+        unsafe {
+            type Callback = unsafe extern "C" fn(*const c_void, *const c_char);
+            let code = *(callback as *const *const c_void);
+            let callback_fn: Callback = std::mem::transmute(code);
+            callback_fn(callback, message.as_ptr());
+        }
     }
 }
 
@@ -527,18 +573,31 @@ struct Server {
     listen_many: *const NativeClosure,
     close: *const NativeClosure,
     close_with_callback: *const NativeClosure,
+    on: *const NativeClosure,
+    on_error: *const NativeClosure,
 }
 
 unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
     if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
+        fail_server_listen(state, "ERR_SOCKET_BAD_PORT".into());
         return CString::new("").unwrap().into_raw();
     }
-    let Ok(listener) = TcpListener::bind(("127.0.0.1", port as u16)) else {
-        return CString::new("").unwrap().into_raw();
+    let listener = match TcpListener::bind(("127.0.0.1", port as u16)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let message = if error.kind() == std::io::ErrorKind::AddrInUse {
+                "EADDRINUSE".into()
+            } else {
+                format!("listen failed: {error}")
+            };
+            fail_server_listen(state, message);
+            return CString::new("").unwrap().into_raw();
+        }
     };
     if listener.set_nonblocking(true).is_err() {
+        fail_server_listen(state, "failed to configure non-blocking listener".into());
         return CString::new("").unwrap().into_raw();
     }
     state.closed.store(false, Ordering::Release);
@@ -555,11 +614,11 @@ unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *co
         (state as *const ServerState).cast_mut().cast(),
     );
     if watcher == 0 {
-        state.closed.store(true, Ordering::Release);
-        *state.listener.lock().unwrap() = None;
+        fail_server_listen(state, "failed to register listener with event loop".into());
         return CString::new("").unwrap().into_raw();
     }
     state.watcher.store(watcher, Ordering::Release);
+    state.pending_listening.store(true, Ordering::Release);
     register_server(state);
     CString::new("").unwrap().into_raw()
 }
@@ -571,10 +630,15 @@ unsafe extern "C" fn server_listen_with_callback(
 ) -> *const c_char {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    state
-        .listen_callback
-        .store(callback as usize, Ordering::Release);
+    add_event_listener(&state.listening_listeners, callback, true);
     server_listen(environment, port)
+}
+
+fn fail_server_listen(state: &ServerState, message: String) {
+    state.closed.store(true, Ordering::Release);
+    state.pending_errors.lock().unwrap().push(message);
+    *state.listener.lock().unwrap() = None;
+    register_server(state);
 }
 
 unsafe extern "C" fn server_listen_many(
@@ -607,14 +671,44 @@ unsafe extern "C" fn server_close_with_callback(
 ) -> bool {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    state
-        .close_callback
-        .store(callback as usize, Ordering::Release);
+    add_event_listener(&state.close_listeners, callback, true);
     close_server_state(state)
+}
+
+unsafe extern "C" fn server_on(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    match string_from_ptr(event).as_str() {
+        "listening" => add_event_listener(&state.listening_listeners, callback, false),
+        "close" => add_event_listener(&state.close_listeners, callback, false),
+        _ => return false,
+    }
+    !callback.is_null()
+}
+
+unsafe extern "C" fn server_on_error(
+    environment: *const c_void,
+    event: *const c_char,
+    callback: *const c_void,
+) -> bool {
+    if string_from_ptr(event) != "error" {
+        return false;
+    }
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    add_event_listener(&state.error_listeners, callback, false);
+    !callback.is_null()
 }
 
 fn close_server_state(state: &ServerState) -> bool {
     let was_open = !state.closed.swap(true, Ordering::AcqRel);
+    if was_open {
+        state.close_requested.store(true, Ordering::Release);
+    }
     let watcher = state.watcher.swap(0, Ordering::AcqRel);
     if watcher != 0 {
         unsafe { thaw_runtime_unwatch_fd(watcher) };
@@ -634,8 +728,12 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         listener: Mutex::new(None),
         watcher: AtomicU64::new(0),
         connections: AtomicUsize::new(0),
-        listen_callback: AtomicUsize::new(0),
-        close_callback: AtomicUsize::new(0),
+        listening_listeners: Mutex::new(Vec::new()),
+        close_listeners: Mutex::new(Vec::new()),
+        error_listeners: Mutex::new(Vec::new()),
+        pending_listening: AtomicBool::new(false),
+        pending_errors: Mutex::new(Vec::new()),
+        close_requested: AtomicBool::new(false),
     }));
     let listen = Box::into_raw(Box::new(NativeClosure {
         code: server_listen as *const c_void,
@@ -657,12 +755,22 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_close_with_callback as *const c_void,
         context: state.cast(),
     }));
+    let on = Box::into_raw(Box::new(NativeClosure {
+        code: server_on as *const c_void,
+        context: state.cast(),
+    }));
+    let on_error = Box::into_raw(Box::new(NativeClosure {
+        code: server_on_error as *const c_void,
+        context: state.cast(),
+    }));
     Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
         listen_many,
         close,
         close_with_callback,
+        on,
+        on_error,
     }))
     .cast()
 }
@@ -725,8 +833,12 @@ mod tests {
             listener: Mutex::new(None),
             watcher: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
-            listen_callback: AtomicUsize::new(0),
-            close_callback: AtomicUsize::new(0),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(false),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
         });
         let server_state = Arc::clone(&state);
         let server = thread::spawn(move || run_server_many(port as f64, &server_state, usize::MAX));
@@ -778,8 +890,12 @@ mod tests {
             listener: Mutex::new(None),
             watcher: AtomicU64::new(0),
             connections: AtomicUsize::new(0),
-            listen_callback: AtomicUsize::new(0),
-            close_callback: AtomicUsize::new(0),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(false),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
         }));
         unsafe { (*callback).context = state.cast() };
         let listen = NativeClosure {

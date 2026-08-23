@@ -2049,6 +2049,9 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    // The loop splitter threads the surrounding control-flow destinations and
+    // frame layout explicitly; grouping them would only hide this pass state.
+    #[allow(clippy::too_many_arguments)]
     fn append_nested_async_while(
         &self,
         segments: &mut Vec<AsyncSegment>,
@@ -2808,6 +2811,9 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    // Segment emission needs the coroutine frame plus all exceptional and
+    // normal successors as distinct LLVM values.
+    #[allow(clippy::too_many_arguments)]
     fn emit_async_segment(
         &mut self,
         segment: &AsyncSegment,
