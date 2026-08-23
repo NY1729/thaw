@@ -1058,6 +1058,7 @@ name = "thaw-cli"
 version = "0.1.0"
 dependencies = [
  "inkwell",
+ "serde_json",
  "swc_ecma_visit",
  "thaw-bridge",
  "thaw-hir",

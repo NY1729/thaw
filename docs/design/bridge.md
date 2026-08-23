@@ -352,3 +352,17 @@ extern "C" fn thaw_dynamic_call(
   マーシャリング（`Array`/`Object` を返す C 関数への対応）と、文字列の
   `(ptr, len)` 分割規約（`string` はそのまま `const char*` として渡す
   規約のみ対応）は引き続き未対応。
+# Result ABI metadata
+
+The manual bridge path accepts a separate, versioned JSON document through
+`--ffi-metadata`. Version 1 maps ambient function symbols to an `errorAbi` of
+either `direct` (the default) or `thaw-result`. For a non-void declared return
+type `T`, `thaw-result` declares the native symbol as returning the target C ABI
+equivalent of `struct { T value; const char *error; }`. LLVM extracts the error
+pointer into Thaw's pending-exception channel before exposing the value, so the
+existing `try/catch/finally` implementation handles native failures unchanged.
+
+Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
+describe C ownership or error conventions. Unknown versions, ABI spellings, or
+ambient symbols are rejected instead of silently assuming a calling convention.
+Void results and ownership/destructor metadata remain future extensions.

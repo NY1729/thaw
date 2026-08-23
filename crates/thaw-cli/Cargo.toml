@@ -15,3 +15,4 @@ thaw-llvm = { version = "0.1.0", path = "../thaw-llvm" }
 thaw-parser = { version = "0.1.0", path = "../thaw-parser" }
 thaw-registry = { version = "0.1.0", path = "../thaw-registry" }
 swc_ecma_visit = "29.0.0"
+serde_json = "1"

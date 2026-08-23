@@ -26,7 +26,7 @@ use swc_ecma_ast::{
     TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody, TsType, TsTypeElement,
     TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
-use thaw_hir::{FfiSignature, HirType};
+use thaw_hir::{FfiErrorAbi, FfiSignature, HirType};
 
 /// One function signature extracted from a `.d.ts` file, before
 /// classification.
@@ -826,6 +826,7 @@ pub fn classify(func: &DtsFunction) -> Classification {
         symbol: func.name.clone(),
         params,
         ret,
+        error_abi: FfiErrorAbi::Direct,
     })
 }
 
@@ -1254,6 +1255,7 @@ mod tests {
                 symbol: "add".into(),
                 params: vec![HirType::F64, HirType::F64],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
     }
@@ -1272,6 +1274,7 @@ mod tests {
                 symbol: "sum".into(),
                 params: vec![HirType::Array(Box::new(HirType::F64))],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
         assert_eq!(
@@ -1283,6 +1286,7 @@ mod tests {
                     ("y".into(), HirType::F64),
                 ])],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
     }
@@ -1468,6 +1472,7 @@ mod tests {
                     ("y".into(), HirType::F64),
                 ])],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
     }
@@ -1527,6 +1532,7 @@ mod tests {
                     ("length".into(), HirType::F64),
                 ])],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
     }
@@ -1564,6 +1570,7 @@ mod tests {
                 symbol: "unwrap".into(),
                 params: vec![HirType::Object(vec![("value".into(), HirType::F64)])],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
     }
@@ -1621,6 +1628,7 @@ mod tests {
                     ("radius".into(), HirType::F64),
                 ])],
                 ret: HirType::F64,
+                error_abi: FfiErrorAbi::Direct,
             })
         );
     }
