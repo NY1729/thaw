@@ -170,7 +170,8 @@ The workspace crates have narrow responsibilities:
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` accepts sequential requests, while
-  `listenMany(port, count)` provides deterministic bounded server execution
+  `listenMany(port, count)` provides deterministic bounded server execution;
+  idempotent `close()` interrupts the listener between requests
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint
