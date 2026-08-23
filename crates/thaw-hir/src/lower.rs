@@ -2573,10 +2573,17 @@ impl<'a> FnLowerer<'a> {
                 (member.obj.as_ref(), &member.prop)
             {
                 let object_name = self.resolve_binding(object.sym.as_ref());
-                let callable = self.scope.get(&object_name).and_then(|ty| match ty {
+                let requested_property = property.sym.as_str();
+                let resolved_property = match (requested_property, call.args.len()) {
+                    ("listen", 2) => "__listenWithCallback",
+                    ("close", 1) => "__closeWithCallback",
+                    _ => requested_property,
+                };
+                let object_ty = self.scope.get(&object_name).cloned();
+                let callable = object_ty.as_ref().and_then(|ty| match ty {
                     HirType::Object(fields) => fields
                         .iter()
-                        .find(|(name, _)| name == property.sym.as_str())
+                        .find(|(name, _)| name == resolved_property)
                         .and_then(|(_, ty)| match ty {
                             HirType::Function(params, ret) => {
                                 Some((params.clone(), ret.as_ref().clone()))
@@ -2595,7 +2602,12 @@ impl<'a> FnLowerer<'a> {
                             call.args.len()
                         ));
                     }
-                    let callee = self.lower_member_read(member)?;
+                    let object_expr = self.lower_expr(&member.obj)?;
+                    let callee = HirExpr::PropAccess(
+                        Box::new(object_expr),
+                        object_ty.unwrap(),
+                        resolved_property.to_string(),
+                    );
                     let args = call
                         .args
                         .iter()

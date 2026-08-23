@@ -407,6 +407,13 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .add_function("fflush", fflush_type, Some(Linkage::External));
 
+        let run_http_servers_type = self.context.void_type().fn_type(&[], false);
+        self.module.add_function(
+            "thaw_http_run_servers",
+            run_http_servers_type,
+            Some(Linkage::External),
+        );
+
         // thaw-std: fetch + JSON (see docs/design/async-await.md for why
         // `fetch` is a plain blocking call under the hood).
         let f64_type = self.context.f64_type();
@@ -5156,6 +5163,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
+        if self.module.get_function("createServer").is_some() {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_http_run_servers").unwrap(),
+                    &[],
+                    "run_http_servers",
+                )
+                .unwrap();
+        }
         self.finish_c_main();
     }
 
@@ -5453,8 +5469,8 @@ mod tests {
         let link_status = Command::new("cc")
             .arg(&obj_path)
             .arg(&arena_lib)
-            .arg(&runtime_lib)
             .arg(&std_lib)
+            .arg(&runtime_lib)
             .arg(&quickjs_lib)
             // QuickJS-NG's C code calls libm math functions directly;
             // `rustc` normally adds `-lm` automatically when it does the
@@ -5534,8 +5550,8 @@ mod tests {
         let link_status = Command::new("cc")
             .arg(&obj_path)
             .arg(build_staticlib("thaw-arena"))
-            .arg(build_staticlib("thaw-runtime"))
             .arg(build_staticlib("thaw-std"))
+            .arg(build_staticlib("thaw-runtime"))
             .arg("-o")
             .arg(&exe_path)
             .status()
@@ -6251,11 +6267,13 @@ mod tests {
         compiler.write_object_file(&obj).unwrap();
         let arena = build_staticlib("thaw-arena");
         let std = build_staticlib("thaw-std");
+        let runtime = build_staticlib("thaw-runtime");
         let napi = build_staticlib("thaw-napi");
         assert!(Command::new("cc")
             .arg(&obj)
             .arg(&arena)
             .arg(&std)
+            .arg(&runtime)
             .arg(&napi)
             .args(["-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
             .arg(&exe)
@@ -6364,8 +6382,8 @@ mod tests {
         let link_status = Command::new("cc")
             .arg(&obj_path)
             .arg(&arena_lib)
-            .arg(&runtime_lib)
             .arg(&std_lib)
+            .arg(&runtime_lib)
             .arg(&quickjs_lib)
             .arg("-lm")
             .arg("-o")

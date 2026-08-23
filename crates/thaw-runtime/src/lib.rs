@@ -36,6 +36,7 @@ pub const THAW_FD_WRITABLE: u8 = 2;
 pub type HandlerFn = extern "C" fn(*const c_char) -> *const c_char;
 pub type HandlerErrorSlot = *mut *const c_char;
 pub type PromiseResumeFn = extern "C" fn(*mut u8, *const u8);
+pub type FdWatcherFn = extern "C" fn(*mut u8, i16);
 
 #[derive(Clone, Copy)]
 struct PromiseSubscription {
@@ -48,6 +49,7 @@ thread_local! {
         RefCell::new(VecDeque::new());
     static TIMERS: RefCell<Vec<PromiseTimer>> = RefCell::new(Vec::new());
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = RefCell::new(Vec::new());
+    static FD_WATCHERS: RefCell<Vec<FdWatcher>> = RefCell::new(Vec::new());
 }
 
 struct PromiseTimer {
@@ -62,10 +64,22 @@ struct PromiseFdWait {
     deadline: Option<Instant>,
 }
 
+#[derive(Clone, Copy)]
+struct FdWatcher {
+    id: u64,
+    fd: libc::c_int,
+    interests: u8,
+    callback: FdWatcherFn,
+    context: *mut u8,
+}
+
+static NEXT_FD_WATCHER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 static INVALID_FD_ERROR: &[u8] = b"invalid file descriptor\0";
 static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
+    let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
     let mut pollfds = FD_WAITS.with(|waits| {
         waits
             .borrow()
@@ -84,6 +98,13 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
                 revents: 0,
             })
             .collect::<Vec<_>>()
+    });
+    FD_WATCHERS.with(|watchers| {
+        pollfds.extend(watchers.borrow().iter().map(|watcher| libc::pollfd {
+            fd: watcher.fd,
+            events: poll_events(watcher.interests),
+            revents: 0,
+        }));
     });
     if pollfds.is_empty() {
         return 0;
@@ -121,7 +142,7 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
         let mut waits = waits.borrow_mut();
         let mut completed = Vec::new();
         let now = Instant::now();
-        for index in (0..pollfds.len()).rev() {
+        for index in (0..wait_count).rev() {
             let timed_out = waits[index]
                 .deadline
                 .is_some_and(|deadline| deadline <= now);
@@ -145,11 +166,97 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
             thaw_promise_resolve(promise, std::ptr::dangling::<u8>());
         }
     }
-    count
+    let ready_watchers = FD_WATCHERS.with(|watchers| {
+        watchers
+            .borrow()
+            .iter()
+            .zip(&pollfds[wait_count..])
+            .filter(|(_, pollfd)| pollfd.revents != 0)
+            .map(|(watcher, pollfd)| (*watcher, pollfd.revents))
+            .collect::<Vec<_>>()
+    });
+    let watcher_count = ready_watchers.len();
+    for (watcher, events) in ready_watchers {
+        (watcher.callback)(watcher.context, events);
+    }
+    count + watcher_count
 }
 
 fn has_fd_waits() -> bool {
     FD_WAITS.with(|waits| !waits.borrow().is_empty())
+        || FD_WATCHERS.with(|watchers| !watchers.borrow().is_empty())
+}
+
+fn poll_events(interests: u8) -> i16 {
+    (if interests & THAW_FD_READABLE != 0 {
+        libc::POLLIN
+    } else {
+        0
+    }) | (if interests & THAW_FD_WRITABLE != 0 {
+        libc::POLLOUT
+    } else {
+        0
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_runtime_watch_fd(
+    fd: libc::c_int,
+    interests: u8,
+    callback: FdWatcherFn,
+    context: *mut u8,
+) -> u64 {
+    if fd < 0 || interests == 0 || interests & !(THAW_FD_READABLE | THAW_FD_WRITABLE) != 0 {
+        return 0;
+    }
+    let id = NEXT_FD_WATCHER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    FD_WATCHERS.with(|watchers| {
+        watchers.borrow_mut().push(FdWatcher {
+            id,
+            fd,
+            interests,
+            callback,
+            context,
+        });
+    });
+    id
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_runtime_unwatch_fd(id: u64) -> bool {
+    FD_WATCHERS.with(|watchers| {
+        let mut watchers = watchers.borrow_mut();
+        let Some(index) = watchers.iter().position(|watcher| watcher.id == id) else {
+            return false;
+        };
+        watchers.swap_remove(index);
+        true
+    })
+}
+
+/// Blocks until the next timer or fd event, dispatches it, and drains one
+/// queued continuation. Returns false when no event source remains.
+#[no_mangle]
+pub extern "C" fn thaw_runtime_run_one_event() -> bool {
+    promote_due_timers();
+    if thaw_runtime_poll_one() != 0 {
+        return true;
+    }
+    let delay = next_timer_delay();
+    if has_fd_waits() {
+        poll_fd_waits(delay);
+        let _ = thaw_runtime_poll_one();
+        true
+    } else if let Some(delay) = delay {
+        if !delay.is_zero() {
+            thread::sleep(delay);
+        }
+        promote_due_timers();
+        let _ = thaw_runtime_poll_one();
+        true
+    } else {
+        false
+    }
 }
 
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
@@ -190,16 +297,16 @@ fn next_timer_delay() -> Option<Duration> {
     })
 }
 
-/// Runs one ready continuation and returns 1, or returns 0 when the queue is
-/// empty. I/O and QuickJS integrations can alternate their own polling with
-/// this function without introducing a multi-threaded executor.
+/// Runs one ready continuation or dispatches ready I/O and returns 1. Returns
+/// 0 when neither source is ready. I/O and QuickJS integrations can alternate
+/// their own polling with this function without a multi-threaded executor.
 #[no_mangle]
 pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     promote_due_timers();
-    poll_fd_waits(Some(Duration::ZERO));
+    let io_events = poll_fd_waits(Some(Duration::ZERO));
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
     let Some((subscription, result)) = next else {
-        return 0;
+        return u8::from(io_events != 0);
     };
     (subscription.resume)(subscription.frame, result);
     1
@@ -1818,6 +1925,62 @@ mod tests {
         assert_eq!(thaw_runtime_run_until_idle(), 0);
         unsafe { thaw_promise_destroy(promise) };
         unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn persistent_fd_watcher_dispatches_through_the_shared_event_loop() {
+        extern "C" fn record_watcher(context: *mut u8, events: i16) {
+            let record = unsafe { &mut *(context as *mut (usize, i16)) };
+            record.0 += 1;
+            record.1 = events;
+        }
+
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut record = (0usize, 0i16);
+        let watcher = thaw_runtime_watch_fd(
+            fds[0],
+            THAW_FD_READABLE,
+            record_watcher,
+            (&mut record as *mut (usize, i16)).cast(),
+        );
+        assert_ne!(watcher, 0);
+        assert_eq!(
+            unsafe { libc::write(fds[1], b"ready".as_ptr().cast(), 5) },
+            5
+        );
+        assert!(thaw_runtime_run_one_event());
+        assert_eq!(record.0, 1);
+        assert_ne!(record.1 & libc::POLLIN, 0);
+        assert!(thaw_runtime_unwatch_fd(watcher));
+        assert!(!thaw_runtime_unwatch_fd(watcher));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn timer_completes_while_a_persistent_watcher_is_idle() {
+        extern "C" fn ignore_watcher(_context: *mut u8, _events: i16) {}
+
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let watcher = thaw_runtime_watch_fd(
+            fds[0],
+            THAW_FD_READABLE,
+            ignore_watcher,
+            std::ptr::null_mut(),
+        );
+        let timer = thaw_sleep_ms(1);
+        assert!(!thaw_runtime_run_until_resolved(timer).is_null());
+        assert_eq!(thaw_promise_state(timer), 1);
+        assert!(thaw_runtime_unwatch_fd(watcher));
+        unsafe {
+            thaw_promise_destroy(timer);
             libc::close(fds[0]);
             libc::close(fds[1]);
         }

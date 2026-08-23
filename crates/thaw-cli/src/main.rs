@@ -1015,8 +1015,8 @@ fn build_with_link_mode(
     linker
         .arg(&obj_path)
         .arg(&arena_lib)
-        .arg(&runtime_lib)
         .arg(&std_lib)
+        .arg(&runtime_lib)
         .arg(&quickjs_lib)
         .arg(&napi_lib)
         // QuickJS-NG's C code calls libm math functions directly; `rustc`
@@ -1698,9 +1698,15 @@ mod tests {
                         console.log(requests);
                         console.log(server.close());
                         console.log(server.close());
+                        server.listen({}, (): void => {{
+                            console.log("listening");
+                        }});
+                        console.log(server.close((): void => {{
+                            console.log("closed");
+                        }}));
                     }}
                 "#,
-                port
+                port, port
             ),
         )
         .unwrap();
@@ -1754,7 +1760,7 @@ mod tests {
         assert!(second_response.ends_with("hello/ready"));
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "/ready\n2\ntrue\nfalse\n"
+            "/ready\n2\ntrue\nfalse\ntrue\nlistening\nclosed\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
