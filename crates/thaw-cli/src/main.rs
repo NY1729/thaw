@@ -135,7 +135,9 @@ fn run_build(args: &[String]) -> Result<(), String> {
             }
             "--use" => {
                 i += 1;
-                let value = args.get(i).ok_or("--use requires a package name argument")?;
+                let value = args
+                    .get(i)
+                    .ok_or("--use requires a package name argument")?;
                 use_packages.push(value.clone());
             }
             other => {
@@ -264,7 +266,8 @@ fn generate_registry_shims(
         // implementation is sitting right there in `bundle.js`. See
         // `thaw_bridge::effective_classifications`'s doc comment.
         let native_lib_available = package.native_lib.is_some();
-        let classifications = thaw_bridge::effective_classifications(&functions, native_lib_available);
+        let classifications =
+            thaw_bridge::effective_classifications(&functions, native_lib_available);
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             functions,
@@ -291,11 +294,15 @@ fn generate_registry_shims(
     // qualified alias -- see `rewrite_qualified_calls`); a
     // FastPath-involved collision is a real native-symbol clash this
     // can't paper over, so it stays a hard error.
-    let mut declared_by: std::collections::HashMap<String, Vec<(String, bool)>> = std::collections::HashMap::new();
+    let mut declared_by: std::collections::HashMap<String, Vec<(String, bool)>> =
+        std::collections::HashMap::new();
     for pkg in &resolved {
         for (name, classification) in &pkg.classifications {
             let is_fast_path = matches!(classification, thaw_bridge::Classification::FastPath(_));
-            declared_by.entry(name.clone()).or_default().push((pkg.name.clone(), is_fast_path));
+            declared_by
+                .entry(name.clone())
+                .or_default()
+                .push((pkg.name.clone(), is_fast_path));
         }
     }
     for (name, packages) in &declared_by {
@@ -303,15 +310,22 @@ fn generate_registry_shims(
             continue;
         }
         if let Some((fast_path_pkg, _)) = packages.iter().find(|(_, is_fast_path)| *is_fast_path) {
-            let other_pkg = packages.iter().map(|(p, _)| p.as_str()).find(|p| *p != fast_path_pkg).unwrap_or(fast_path_pkg);
+            let other_pkg = packages
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .find(|p| *p != fast_path_pkg)
+                .unwrap_or(fast_path_pkg);
             return Err(format!(
                 "`{name}` is declared by both `{fast_path_pkg}` and `{other_pkg}` -- automatic \
                  resolution only covers Fallback functions, not a Fast path native symbol clash"
             ));
         }
     }
-    let colliding: std::collections::HashSet<&String> =
-        declared_by.iter().filter(|(_, pkgs)| pkgs.len() > 1).map(|(name, _)| name).collect();
+    let colliding: std::collections::HashSet<&String> = declared_by
+        .iter()
+        .filter(|(_, pkgs)| pkgs.len() > 1)
+        .map(|(name, _)| name)
+        .collect();
 
     // Every Fallback name of every `--use`d package also gets a package-
     // qualified alias -- not just names that actually collide -- so
@@ -322,8 +336,10 @@ fn generate_registry_shims(
     // changes). `rewrites` is `(package, name, alias)`, for rewriting
     // `pkg.name(...)` call syntax in the user's own source (see
     // `rewrite_qualified_calls`).
-    let mut qualified_by_package: std::collections::HashMap<String, Vec<thaw_bridge::QualifiedFallback>> =
-        std::collections::HashMap::new();
+    let mut qualified_by_package: std::collections::HashMap<
+        String,
+        Vec<thaw_bridge::QualifiedFallback>,
+    > = std::collections::HashMap::new();
     let mut rewrites: Vec<QualifiedCallRewrite> = Vec::new();
     for pkg in &resolved {
         for (name, classification) in &pkg.classifications {
@@ -332,13 +348,20 @@ fn generate_registry_shims(
             }
             let alias = format!("{}_{name}", sanitize_identifier(&pkg.name));
             let qualified_key = format!("{}::{name}", pkg.name);
-            qualified_by_package.entry(pkg.name.clone()).or_default().push(thaw_bridge::QualifiedFallback {
-                name: name.clone(),
-                alias: alias.clone(),
-                qualified_key,
-                suppress_bare: colliding.contains(name),
-            });
-            rewrites.push((qualifier_identifier(&pkg.name).to_string(), name.clone(), alias));
+            qualified_by_package
+                .entry(pkg.name.clone())
+                .or_default()
+                .push(thaw_bridge::QualifiedFallback {
+                    name: name.clone(),
+                    alias: alias.clone(),
+                    qualified_key,
+                    suppress_bare: colliding.contains(name),
+                });
+            rewrites.push((
+                qualifier_identifier(&pkg.name).to_string(),
+                name.clone(),
+                alias,
+            ));
         }
     }
 
@@ -355,7 +378,11 @@ fn generate_registry_shims(
     for pkg in &resolved {
         let native_lib_available = pkg.native_lib.is_some();
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
-        shim.push_str(&thaw_bridge::generate_shim(&pkg.functions, native_lib_available, qualified));
+        shim.push_str(&thaw_bridge::generate_shim(
+            &pkg.functions,
+            native_lib_available,
+            qualified,
+        ));
 
         if let Some(native_lib) = &pkg.native_lib {
             native_libs.push(native_lib.clone());
@@ -373,19 +400,29 @@ fn generate_registry_shims(
                     thaw_bridge::Classification::FastPath(_) => None,
                 })
                 .collect();
-            let qualified_aliases = qualified.iter().map(|q| (q.name.clone(), q.qualified_key.clone())).collect();
-            bundles.push((pkg.name.clone(), bundle_js.clone(), fallback_names, qualified_aliases));
+            let qualified_aliases = qualified
+                .iter()
+                .map(|q| (q.name.clone(), q.qualified_key.clone()))
+                .collect();
+            bundles.push((
+                pkg.name.clone(),
+                bundle_js.clone(),
+                fallback_names,
+                qualified_aliases,
+            ));
         }
     }
 
     let module_bundles: Vec<thaw_bridge::ModuleBundle> = bundles
         .iter()
-        .map(|(name, js, fallback_names, qualified_aliases)| thaw_bridge::ModuleBundle {
-            package_name: name.as_str(),
-            js_source: js.as_str(),
-            fallback_names,
-            qualified_aliases,
-        })
+        .map(
+            |(name, js, fallback_names, qualified_aliases)| thaw_bridge::ModuleBundle {
+                package_name: name.as_str(),
+                js_source: js.as_str(),
+                fallback_names,
+                qualified_aliases,
+            },
+        )
         .collect();
     shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
 
@@ -410,7 +447,10 @@ fn generate_registry_shims(
 /// substitution over the original source afterward, copying everything
 /// else verbatim -- this project carries no general JS/TS code
 /// generator, so re-printing from the AST isn't an option.
-fn rewrite_qualified_calls(source: &str, rewrites: &[QualifiedCallRewrite]) -> Result<String, String> {
+fn rewrite_qualified_calls(
+    source: &str,
+    rewrites: &[QualifiedCallRewrite],
+) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
     use thaw_parser::common::Spanned;
@@ -427,12 +467,12 @@ fn rewrite_qualified_calls(source: &str, rewrites: &[QualifiedCallRewrite]) -> R
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(member) = &**callee {
-                    if let (Expr::Ident(obj), MemberProp::Ident(prop)) = (&*member.obj, &member.prop) {
-                        if let Some((_, _, alias)) = self
-                            .rewrites
-                            .iter()
-                            .find(|(pkg, name, _)| pkg.as_str() == &*obj.sym && name.as_str() == &*prop.sym)
-                        {
+                    if let (Expr::Ident(obj), MemberProp::Ident(prop)) =
+                        (&*member.obj, &member.prop)
+                    {
+                        if let Some((_, _, alias)) = self.rewrites.iter().find(|(pkg, name, _)| {
+                            pkg.as_str() == &*obj.sym && name.as_str() == &*prop.sym
+                        }) {
                             let span = member.span();
                             self.matches.push((span.lo.0, span.hi.0, alias.clone()));
                         }
@@ -444,7 +484,10 @@ fn rewrite_qualified_calls(source: &str, rewrites: &[QualifiedCallRewrite]) -> R
     }
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
-    let mut finder = Finder { rewrites, matches: Vec::new() };
+    let mut finder = Finder {
+        rewrites,
+        matches: Vec::new(),
+    };
     module.visit_with(&mut finder);
 
     if finder.matches.is_empty() {
@@ -455,8 +498,14 @@ fn rewrite_qualified_calls(source: &str, rewrites: &[QualifiedCallRewrite]) -> R
     let mut out = String::with_capacity(source.len());
     let mut cursor = 0usize;
     for (lo, hi, alias) in &finder.matches {
-        let lo = cm.lookup_byte_offset(thaw_parser::common::BytePos(*lo)).pos.0 as usize;
-        let hi = cm.lookup_byte_offset(thaw_parser::common::BytePos(*hi)).pos.0 as usize;
+        let lo = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(*lo))
+            .pos
+            .0 as usize;
+        let hi = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(*hi))
+            .pos
+            .0 as usize;
         out.push_str(&source[cursor..lo]);
         out.push_str(alias);
         cursor = hi;
@@ -485,8 +534,10 @@ fn build(
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
     let source = registry_shim + &generate_bridge_shims(bridge_dts)? + &user_source;
 
-    let module = thaw_parser::parse_typescript(&source)?;
-    let program = thaw_hir::lower_module(&module)?;
+    let (module, source_map) = thaw_parser::parse_typescript_with_source_map(&source)?;
+    let program =
+        thaw_hir::lower_module_with_source_map(&module, &source_map, input.display().to_string())
+            .map_err(|diagnostic| diagnostic.to_string())?;
 
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, input.to_string_lossy().as_ref());
@@ -555,7 +606,11 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let target_name = pkg.replace('-', "_");
     for line in stdout.lines() {
+        if !line.contains(&format!("\"name\":\"{target_name}\"")) {
+            continue;
+        }
         if let Some(idx) = line.find("\"filenames\":[\"") {
             let rest = &line[idx + "\"filenames\":[\"".len()..];
             if let Some(end) = rest.find(".a\"") {
@@ -563,7 +618,9 @@ fn build_staticlib(pkg: &str) -> Result<PathBuf, String> {
             }
         }
     }
-    Err(format!("could not find a staticlib for `{pkg}` in `cargo build` output"))
+    Err(format!(
+        "could not find a staticlib for `{pkg}` in `cargo build` output"
+    ))
 }
 
 #[cfg(test)]
@@ -604,8 +661,16 @@ mod tests {
              console.log(unrelated.stringify(w));\n\
          }";
         let rewrites = vec![
-            ("qs".to_string(), "stringify".to_string(), "qs_stringify".to_string()),
-            ("hoek".to_string(), "stringify".to_string(), "hoek_stringify".to_string()),
+            (
+                "qs".to_string(),
+                "stringify".to_string(),
+                "qs_stringify".to_string(),
+            ),
+            (
+                "hoek".to_string(),
+                "stringify".to_string(),
+                "hoek_stringify".to_string(),
+            ),
         ];
         let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
 
@@ -620,7 +685,11 @@ mod tests {
     #[test]
     fn rewrite_qualified_calls_handles_a_call_nested_in_an_expression() {
         let source = "function main(): void { const r = String(qs.stringify(x)); }";
-        let rewrites = vec![("qs".to_string(), "stringify".to_string(), "qs_stringify".to_string())];
+        let rewrites = vec![(
+            "qs".to_string(),
+            "stringify".to_string(),
+            "qs_stringify".to_string(),
+        )];
         let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
         assert!(rewritten.contains("const r = String(qs_stringify(x));"));
     }

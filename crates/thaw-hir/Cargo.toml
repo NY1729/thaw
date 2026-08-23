@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
 
 [dev-dependencies]

@@ -1,7 +1,10 @@
 //! SWC AST -> Thaw HIR lowering.
 //!
-//! Phase 0 scope (still true here): no type inference for function
-//! params/returns -- those need explicit primitive annotations. Phase 1
+//! Function parameters are inferred from their module-local call sites when
+//! every call agrees; otherwise they need annotations. Local initializers and
+//! function returns are inferred too, including forward call chains, and the
+//! resulting concrete types are checked at assignments, returns, operators,
+//! indexes, and call boundaries before LLVM lowering. Phase 1
 //! adds `if`/`while`/classic `for`/`throw`/`try`/`catch`, local
 //! `let`/`const`, assignment/`++`/`--`, and number arrays. Phase 2 adds
 //! `process.env` and object types (`{ x: number; y: number }`-style
@@ -10,17 +13,19 @@
 //! Object support is why this module carries a type *scope* now instead of
 //! being purely syntax-directed: resolving `obj.field` needs to know
 //! whether `obj` is an array (`.length`) or an object (which field, at
-//! which offset) without a real type checker. The scope is one flat map per
-//! function (params + every `let` seen so far, regardless of block
-//! nesting) -- it doesn't model block scoping, matching hir_codegen's own
-//! flat variable table, so lowering and codegen agree on what "scope" means.
+//! which offset) without a real type checker. Source-level bindings are
+//! tracked lexically and renamed to unique HIR symbols when shadowed; the
+//! type table remains flat because those HIR symbols never collide.
 //!
 //! A single SWC `Stmt` can lower to *several* HIR statements (`for` becomes
 //! a `Let` followed by a `While`), so the statement lowering entry point is
 //! `lower_stmt_seq`, not a single-statement `lower_stmt`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 
+use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl, Expr, FnDecl,
     KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem, ObjectLit as SwcObjectLit, Pat,
@@ -46,6 +51,98 @@ struct FnSignature {
     /// docs/design/bridge.md section 6: calls to these lower to
     /// `HirExpr::FfiCall`, not `HirExpr::Call`.
     is_extern: bool,
+    source_range: (u32, u32),
+    generic_type_params: Vec<Symbol>,
+    generic_param_patterns: Vec<GenericTypePattern>,
+    generic_return_type: Option<Box<TsType>>,
+}
+
+#[derive(Clone, Debug)]
+enum GenericTypePattern {
+    Variable(Symbol),
+    Concrete(HirType),
+    Array(Box<GenericTypePattern>),
+    Promise(Box<GenericTypePattern>),
+    Object(Vec<(Symbol, GenericTypePattern)>),
+}
+
+#[derive(Clone)]
+enum CallConstraint {
+    Parameter(Symbol, usize, HirType, (u32, u32)),
+    Generic(Symbol, Vec<HirType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRange {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowerDiagnostic {
+    pub message: String,
+    pub range: Option<SourceRange>,
+}
+
+impl fmt::Display for LowerDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.range {
+            Some(range) => write!(
+                formatter,
+                "{}:{}:{}: {}",
+                range.file, range.line, range.column, self.message
+            ),
+            None => formatter.write_str(&self.message),
+        }
+    }
+}
+
+impl std::error::Error for LowerDiagnostic {}
+
+/// Structured companion to [`lower_module`]. Existing callers can keep the
+/// string API, while CLI/tooling callers get a stable message plus a source
+/// range resolved through the parser's `SourceMap`.
+pub fn lower_module_with_source_map(
+    module: &Module,
+    source_map: &SourceMap,
+    file_name: impl Into<String>,
+) -> Result<HirProgram, LowerDiagnostic> {
+    lower_module(module).map_err(|raw| {
+        let file = file_name.into();
+        let Some((message, bytes)) = raw.rsplit_once(" at bytes ") else {
+            return LowerDiagnostic {
+                message: raw,
+                range: None,
+            };
+        };
+        let Some((lo, hi)) = bytes.split_once("..") else {
+            return LowerDiagnostic {
+                message: raw,
+                range: None,
+            };
+        };
+        let (Ok(lo), Ok(hi)) = (lo.parse::<u32>(), hi.parse::<u32>()) else {
+            return LowerDiagnostic {
+                message: raw,
+                range: None,
+            };
+        };
+        let start = source_map.lookup_char_pos(BytePos(lo));
+        let end = source_map.lookup_char_pos(BytePos(hi));
+        LowerDiagnostic {
+            message: message.to_string(),
+            range: Some(SourceRange {
+                file,
+                line: start.line,
+                column: start.col_display + 1,
+                end_line: end.line,
+                end_column: end.col_display + 1,
+            }),
+        }
+    })
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
@@ -53,6 +150,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
+    let mut generic_instantiations: HashMap<Symbol, Vec<Vec<HirType>>> = HashMap::new();
 
     for item in &module.body {
         match item {
@@ -63,24 +161,74 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 if is_extern && func.is_async {
                     return Err(format!("ambient function `{name}` cannot be async"));
                 }
+                if is_extern && func.type_params.is_some() {
+                    return Err(format!(
+                        "ambient generic function `{name}` needs an explicitly monomorphic native ABI"
+                    ));
+                }
+                let type_substitution = function_type_substitution(func);
+                let generic_type_params = validate_generic_function(fn_decl)?;
+                let generic_param_patterns = if generic_type_params.is_empty() {
+                    Vec::new()
+                } else {
+                    let substitutions = generic_type_params
+                        .iter()
+                        .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
+                        .collect::<HashMap<_, _>>();
+                    func.params
+                        .iter()
+                        .map(|param| match &param.pat {
+                            Pat::Ident(binding) => binding
+                                .type_ann
+                                .as_ref()
+                                .ok_or_else(|| format!("generic function `{name}` needs parameter type annotations"))
+                                .and_then(|ann| generic_type_pattern(
+                                    &ann.type_ann,
+                                    &substitutions,
+                                    &interfaces,
+                                    &generic_interfaces,
+                                    &mut Vec::new(),
+                                )),
+                            _ => Err(format!("generic function `{name}` requires identifier parameters")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 let params = func
                     .params
                     .iter()
-                    .map(|p| lower_param(&p.pat, &interfaces, &generic_interfaces).map(|p| p.ty))
+                    .map(|p| {
+                        lower_param(
+                            &p.pat,
+                            &interfaces,
+                            &generic_interfaces,
+                            !is_extern,
+                            &type_substitution,
+                        )
+                        .map(|p| p.ty)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
-                let ret = lower_fn_return_type(
-                    func.is_async,
-                    &func.return_type,
-                    &name,
-                    &interfaces,
-                    &generic_interfaces,
-                )?;
+                let ret = if func.return_type.is_none() && !is_extern {
+                    HirType::Dynamic
+                } else {
+                    lower_fn_return_type(
+                        func.is_async,
+                        &func.return_type,
+                        &name,
+                        &interfaces,
+                        &generic_interfaces,
+                        &type_substitution,
+                    )?
+                };
                 signatures.insert(
                     name,
                     FnSignature {
                         params,
                         ret,
                         is_extern,
+                        source_range: (func.span.lo.0, func.span.hi.0),
+                        generic_type_params,
+                        generic_param_patterns,
+                        generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                     },
                 );
                 if !is_extern {
@@ -101,6 +249,88 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
 
+    // Missing parameter/return annotations are type variables. Re-lower against the
+    // signatures discovered in the previous round until forward calls and
+    // mutually recursive functions reach a fixed point.
+    for _ in 0..=(fn_decls.len() * 2 + 1) {
+        let mut changed = false;
+        let call_constraints = RefCell::new(Vec::new());
+        for fn_decl in &fn_decls {
+            let name = fn_decl.ident.sym.to_string();
+            let function = lower_fn_decl(
+                fn_decl,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                Some(&call_constraints),
+            )?;
+            if signatures[&name].ret == HirType::Dynamic && function.ret != HirType::Dynamic {
+                signatures.get_mut(&name).unwrap().ret = function.ret;
+                changed = true;
+            }
+        }
+        for constraint in call_constraints.into_inner() {
+            match constraint {
+                CallConstraint::Generic(callee, types) => {
+                    if types.iter().any(|ty| *ty == HirType::Dynamic) {
+                        continue;
+                    }
+                    let instances = generic_instantiations.entry(callee).or_default();
+                    if !instances.contains(&types) {
+                        instances.push(types);
+                    }
+                }
+                CallConstraint::Parameter(callee, index, actual, call_range) => {
+                    if actual == HirType::Dynamic {
+                        continue;
+                    }
+                    let param = &mut signatures.get_mut(&callee).unwrap().params[index];
+                    if *param == HirType::Dynamic {
+                        *param = actual;
+                        changed = true;
+                    } else if *param != actual {
+                        return Err(format!(
+                            "conflicting inferred types for parameter {} of `{callee}`: {param:?} and {actual:?} at bytes {}..{}",
+                            index + 1, call_range.0, call_range.1,
+                        ));
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if let Some((name, signature)) = signatures.iter().find(|(_, signature)| {
+        !signature.is_extern
+            && signature.generic_type_params.is_empty()
+            && signature.params.contains(&HirType::Dynamic)
+    }) {
+        let index = signature
+            .params
+            .iter()
+            .position(|ty| *ty == HirType::Dynamic)
+            .unwrap();
+        return Err(format!(
+            "cannot infer parameter {} of function `{name}` from its call sites; add an explicit type annotation at bytes {}..{}",
+            index + 1,
+            signature.source_range.0,
+            signature.source_range.1,
+        ));
+    }
+    let unresolved = signatures.iter().find(|(_, signature)| {
+        !signature.is_extern
+            && signature.generic_type_params.is_empty()
+            && signature.ret == HirType::Dynamic
+    });
+    if let Some((name, signature)) = unresolved {
+        return Err(format!(
+            "cannot infer the return type of function `{name}`; add an explicit return annotation at bytes {}..{}",
+            signature.source_range.0,
+            signature.source_range.1,
+        ));
+    }
+
     let extern_functions = signatures
         .iter()
         .filter(|(_, sig)| sig.is_extern)
@@ -113,12 +343,416 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let functions = fn_decls
         .into_iter()
-        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures, &interfaces, &generic_interfaces))
+        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures, &interfaces, &generic_interfaces, None))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut specialized = functions
+        .into_iter()
+        .filter(|function| signatures[&function.name].generic_type_params.is_empty())
+        .collect::<Vec<_>>();
+    let mut pending = generic_instantiations
+        .iter()
+        .flat_map(|(name, instances)| instances.iter().cloned().map(|types| (name.clone(), types)))
+        .collect::<Vec<_>>();
+    let mut completed: Vec<(Symbol, Vec<HirType>)> = Vec::new();
+    while let Some((name, types)) = pending.pop() {
+        if completed
+            .iter()
+            .any(|done| done == &(name.clone(), types.clone()))
+        {
+            continue;
+        }
+        let decl = module
+            .body
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::Stmt(Stmt::Decl(Decl::Fn(decl))) if decl.ident.sym.as_ref() == name => {
+                    Some(decl)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| format!("missing declaration for `{name}`"))?;
+        let nested_constraints = RefCell::new(Vec::new());
+        let instance = lower_generic_instance(
+            decl,
+            &types,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            Some(&nested_constraints),
+        )?;
+        completed.push((name, types));
+        specialized.push(instance);
+        for constraint in nested_constraints.into_inner() {
+            if let CallConstraint::Generic(nested_name, nested_types) = constraint {
+                if !nested_types.iter().any(|ty| *ty == HirType::Dynamic) {
+                    pending.push((nested_name, nested_types));
+                }
+            }
+        }
+    }
 
     Ok(HirProgram {
-        functions,
+        functions: specialized,
         extern_functions,
+    })
+}
+
+fn validate_generic_function(fn_decl: &FnDecl) -> Result<Vec<Symbol>, String> {
+    let Some(type_params) = &fn_decl.function.type_params else {
+        return Ok(Vec::new());
+    };
+    let name = fn_decl.ident.sym.as_str();
+    if type_params.params.is_empty() || fn_decl.function.return_type.is_none() {
+        return Err(format!(
+            "generic function `{name}` needs type parameters and a return annotation"
+        ));
+    }
+    Ok(type_params
+        .params
+        .iter()
+        .map(|param| param.name.sym.to_string())
+        .collect())
+}
+
+fn supports_generic_native_layout(ty: &HirType) -> bool {
+    match ty {
+        HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => true,
+        HirType::Array(inner) => **inner == HirType::F64,
+        HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, ty)| supports_generic_native_layout(ty)),
+        _ => false,
+    }
+}
+
+fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
+    fn fingerprint(ty: &HirType) -> String {
+        match ty {
+            HirType::F64 => "f64".into(),
+            HirType::I64 => "i64".into(),
+            HirType::Bool => "bool".into(),
+            HirType::Str => "str".into(),
+            HirType::Json => "json".into(),
+            HirType::Array(inner) => format!("array_{}", fingerprint(inner)),
+            HirType::Object(fields) => format!(
+                "object_{}",
+                fields
+                    .iter()
+                    .map(|(name, ty)| format!("{name}_{}", fingerprint(ty)))
+                    .collect::<Vec<_>>()
+                    .join("_")
+            ),
+            other => panic!("unsupported generic specialization type: {other:?}"),
+        }
+    }
+    format!(
+        "{name}__thaw_{}",
+        types.iter().map(fingerprint).collect::<Vec<_>>().join("__")
+    )
+}
+
+fn generic_type_pattern(
+    ty: &TsType,
+    substitutions: &HashMap<Symbol, GenericTypePattern>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<GenericTypePattern, String> {
+    if let TsType::TsTypeRef(reference) = ty {
+        if let swc_ecma_ast::TsEntityName::Ident(id) = &reference.type_name {
+            let name = id.sym.as_str();
+            if let Some(pattern) = substitutions.get(name) {
+                return Ok(pattern.clone());
+            }
+            if let Some(interface) = generic_interfaces.get(name) {
+                if in_progress.iter().any(|active| active == name) {
+                    return Err(format!("generic interface `{name}` is self-referential"));
+                }
+                if !interface.extends.is_empty() {
+                    return Err(format!(
+                        "generic interface `{name}` cannot use `extends` yet"
+                    ));
+                }
+                let parameter_names = interface
+                    .type_params
+                    .as_ref()
+                    .expect("generic interface type parameters")
+                    .params
+                    .iter()
+                    .map(|param| param.name.sym.to_string())
+                    .collect::<Vec<_>>();
+                let arguments = reference
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default();
+                if arguments.len() != parameter_names.len() {
+                    return Err(format!(
+                        "generic interface `{name}` expects {} type argument(s), got {}",
+                        parameter_names.len(),
+                        arguments.len()
+                    ));
+                }
+                let argument_patterns = arguments
+                    .iter()
+                    .map(|argument| {
+                        generic_type_pattern(
+                            argument,
+                            substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let nested_substitutions = parameter_names
+                    .into_iter()
+                    .zip(argument_patterns)
+                    .collect::<HashMap<_, _>>();
+                in_progress.push(name.to_string());
+                let fields = interface
+                    .body
+                    .body
+                    .iter()
+                    .map(|member| {
+                        let TsTypeElement::TsPropertySignature(property) = member else {
+                            return Err(format!(
+                                "generic interface `{name}` only supports plain properties"
+                            ));
+                        };
+                        let Expr::Ident(field) = property.key.as_ref() else {
+                            return Err(format!(
+                                "generic interface `{name}` has an unsupported property key"
+                            ));
+                        };
+                        let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                            format!("field `{}` needs a type annotation", field.sym)
+                        })?;
+                        Ok((
+                            field.sym.to_string(),
+                            generic_type_pattern(
+                                &annotation.type_ann,
+                                &nested_substitutions,
+                                interfaces,
+                                generic_interfaces,
+                                in_progress,
+                            )?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>();
+                in_progress.pop();
+                return Ok(GenericTypePattern::Object(fields?));
+            }
+            if let Some(inner) = reference
+                .type_params
+                .as_ref()
+                .and_then(|params| params.params.as_slice().first())
+            {
+                let inner = Box::new(generic_type_pattern(
+                    inner,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?);
+                match name {
+                    "Array" => return Ok(GenericTypePattern::Array(inner)),
+                    "Promise" => return Ok(GenericTypePattern::Promise(inner)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    match ty {
+        TsType::TsArrayType(array) => {
+            Ok(GenericTypePattern::Array(Box::new(generic_type_pattern(
+                &array.elem_type,
+                substitutions,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?)))
+        }
+        TsType::TsTypeLit(literal) => Ok(GenericTypePattern::Object(
+            literal
+                .members
+                .iter()
+                .map(|member| {
+                    let TsTypeElement::TsPropertySignature(property) = member else {
+                        return Err("generic object patterns only support plain properties".into());
+                    };
+                    let Expr::Ident(field) = property.key.as_ref() else {
+                        return Err("generic object pattern has an unsupported key".into());
+                    };
+                    let annotation = property
+                        .type_ann
+                        .as_ref()
+                        .ok_or_else(|| format!("field `{}` needs a type annotation", field.sym))?;
+                    Ok((
+                        field.sym.to_string(),
+                        generic_type_pattern(
+                            &annotation.type_ann,
+                            substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        other => Ok(GenericTypePattern::Concrete(lower_ts_type(
+            other,
+            interfaces,
+            generic_interfaces,
+        )?)),
+    }
+}
+
+fn match_generic_pattern(
+    pattern: &GenericTypePattern,
+    actual: &HirType,
+    inferred: &mut HashMap<Symbol, HirType>,
+) -> Result<(), String> {
+    match (pattern, actual) {
+        (GenericTypePattern::Variable(name), actual) => {
+            if let Some(previous) = inferred.get(name) {
+                if previous != actual {
+                    return Err(format!(
+                    "generic type parameter has conflicting call-site types {previous:?} and {actual:?}"
+                ));
+                }
+            } else {
+                inferred.insert(name.clone(), actual.clone());
+            }
+            Ok(())
+        }
+        (GenericTypePattern::Array(expected), HirType::Array(value))
+        | (GenericTypePattern::Promise(expected), HirType::Promise(value)) => {
+            match_generic_pattern(expected, value, inferred)
+        }
+        (GenericTypePattern::Object(expected), HirType::Object(value))
+            if expected.len() == value.len() =>
+        {
+            for ((expected_name, expected_ty), (actual_name, actual_ty)) in
+                expected.iter().zip(value)
+            {
+                if expected_name != actual_name {
+                    return Err(format!(
+                        "generic argument object field `{actual_name}` does not match `{expected_name}`"
+                    ));
+                }
+                match_generic_pattern(expected_ty, actual_ty, inferred)?;
+            }
+            Ok(())
+        }
+        (GenericTypePattern::Concrete(expected), actual)
+            if *expected == HirType::Dynamic || expected == actual =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "generic argument has type {actual:?}, incompatible with parameter pattern {pattern:?}"
+        )),
+    }
+}
+
+fn infer_generic_type_tuple(
+    signature: &FnSignature,
+    actual_params: &[HirType],
+) -> Result<Vec<HirType>, String> {
+    let mut inferred = HashMap::new();
+    for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
+        match_generic_pattern(pattern, actual, &mut inferred)?;
+    }
+    signature
+        .generic_type_params
+        .iter()
+        .map(|name| {
+            inferred.get(name).cloned().ok_or_else(|| {
+                format!("cannot infer generic type parameter `{name}` from this call")
+            })
+        })
+        .collect()
+}
+
+fn lower_generic_instance(
+    fn_decl: &FnDecl,
+    types: &[HirType],
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
+) -> Result<HirFunction, String> {
+    let base_name = fn_decl.ident.sym.to_string();
+    let signature = &signatures[&base_name];
+    let substitution = signature
+        .generic_type_params
+        .iter()
+        .cloned()
+        .zip(types.iter().cloned())
+        .collect::<HashMap<_, _>>();
+    let params = fn_decl
+        .function
+        .params
+        .iter()
+        .map(|param| {
+            lower_param(
+                &param.pat,
+                interfaces,
+                generic_interfaces,
+                false,
+                &substitution,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ret = lower_fn_return_type(
+        fn_decl.function.is_async,
+        &fn_decl.function.return_type,
+        &base_name,
+        interfaces,
+        generic_interfaces,
+        &substitution,
+    )?;
+    let mut concrete_signatures = signatures.clone();
+    let concrete = concrete_signatures.get_mut(&base_name).unwrap();
+    concrete.params = params.iter().map(|param| param.ty.clone()).collect();
+    concrete.ret = ret.clone();
+    let mut lowerer = FnLowerer::new(
+        &concrete_signatures,
+        interfaces,
+        generic_interfaces,
+        ret.clone(),
+        call_constraints,
+    );
+    for param in &params {
+        lowerer.scope.insert(param.name.clone(), param.ty.clone());
+        lowerer
+            .bindings
+            .entry(param.name.clone())
+            .or_default()
+            .push(param.name.clone());
+    }
+    let body = lowerer.lower_stmts(
+        &fn_decl
+            .function
+            .body
+            .as_ref()
+            .ok_or_else(|| format!("function `{base_name}` has no body"))?
+            .stmts,
+    )?;
+    Ok(HirFunction {
+        name: specialized_generic_name(
+            &base_name,
+            &params
+                .iter()
+                .map(|param| param.ty.clone())
+                .collect::<Vec<_>>(),
+        ),
+        params,
+        ret,
+        is_async: fn_decl.function.is_async,
+        body,
     })
 }
 
@@ -190,7 +824,9 @@ fn resolve_interface(
         .ok_or_else(|| format!("unknown interface `{name}`"))?;
 
     if iface.type_params.is_some() {
-        return Err(format!("generic interfaces are not supported yet (`{name}`)"));
+        return Err(format!(
+            "generic interfaces are not supported yet (`{name}`)"
+        ));
     }
 
     in_progress.push(name.to_string());
@@ -236,7 +872,11 @@ fn resolve_interface(
         };
         let field_name = match prop.key.as_ref() {
             Expr::Ident(ident) => ident.sym.to_string(),
-            _ => return Err(format!("interface `{name}` has an unsupported property key")),
+            _ => {
+                return Err(format!(
+                    "interface `{name}` has an unsupported property key"
+                ))
+            }
         };
         if fields.iter().any(|(n, _)| *n == field_name) {
             return Err(format!(
@@ -289,34 +929,57 @@ fn lower_fn_decl(
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let name = fn_decl.ident.sym.to_string();
     let func = &fn_decl.function;
+    let type_substitution = function_type_substitution(func);
 
-    let params = func
+    let mut params = func
         .params
         .iter()
-        .map(|param| lower_param(&param.pat, interfaces, generic_interfaces))
+        .map(|param| {
+            lower_param(
+                &param.pat,
+                interfaces,
+                generic_interfaces,
+                true,
+                &type_substitution,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    for (param, inferred) in params.iter_mut().zip(&signatures[&name].params) {
+        param.ty = inferred.clone();
+    }
 
-    let ret = lower_fn_return_type(
-        func.is_async,
-        &func.return_type,
-        &name,
-        interfaces,
-        generic_interfaces,
-    )?;
+    let declared_ret = signatures[&name].ret.clone();
 
     let body_block = func
         .body
         .as_ref()
         .ok_or_else(|| format!("function `{name}` has no body (ambient/overload decl?)"))?;
 
-    let mut lowerer = FnLowerer::new(signatures, interfaces, generic_interfaces, ret.clone());
+    let mut lowerer = FnLowerer::new(
+        signatures,
+        interfaces,
+        generic_interfaces,
+        declared_ret.clone(),
+        call_constraints,
+    );
     for param in &params {
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
+        lowerer
+            .bindings
+            .entry(param.name.clone())
+            .or_default()
+            .push(param.name.clone());
     }
     let body = lowerer.lower_stmts(&body_block.stmts)?;
+    let ret = if declared_ret == HirType::Dynamic {
+        lowerer.infer_return_type(&body)?
+    } else {
+        declared_ret
+    };
 
     Ok(HirFunction {
         name,
@@ -337,9 +1000,16 @@ fn lower_fn_return_type(
     fn_name: &str,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    type_substitution: &HashMap<Symbol, HirType>,
 ) -> Result<HirType, String> {
     let declared = match return_type {
-        Some(ann) => lower_ts_type(&ann.type_ann, interfaces, generic_interfaces)?,
+        Some(ann) => resolve_ts_type_with_substitution(
+            &ann.type_ann,
+            type_substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?,
         None => HirType::Void,
     };
     if !is_async {
@@ -357,20 +1027,43 @@ fn lower_param(
     pat: &Pat,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    allow_inference: bool,
+    type_substitution: &HashMap<Symbol, HirType>,
 ) -> Result<HirParam, String> {
     let Pat::Ident(binding) = pat else {
         return Err("only simple identifier parameters are supported".into());
     };
     let name = binding.id.sym.to_string();
     let ty = match &binding.type_ann {
-        Some(ann) => lower_ts_type(&ann.type_ann, interfaces, generic_interfaces)?,
+        Some(ann) => resolve_ts_type_with_substitution(
+            &ann.type_ann,
+            type_substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?,
+        None if allow_inference => HirType::Dynamic,
         None => {
             return Err(format!(
-                "parameter `{name}` needs an explicit type annotation (no type inference for params)"
-            ))
+            "parameter `{name}` needs an explicit type annotation (no type inference for params)"
+        ))
         }
     };
     Ok(HirParam { name, ty })
+}
+
+fn function_type_substitution(function: &swc_ecma_ast::Function) -> HashMap<Symbol, HirType> {
+    function
+        .type_params
+        .as_ref()
+        .map(|params| {
+            params
+                .params
+                .iter()
+                .map(|param| (param.name.sym.to_string(), HirType::Dynamic))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn lower_ts_type(
@@ -417,6 +1110,7 @@ fn lower_ts_type(
                         ty_ref,
                         interfaces,
                         generic_interfaces,
+                        None,
                         &mut Vec::new(),
                     );
                 }
@@ -493,19 +1187,17 @@ fn lower_ts_type(
 /// generic interface) -- freshly created at each top-level `lower_ts_type`
 /// call, so it only needs to catch a cycle within one such call tree.
 ///
-/// Scope limits (see `GenericInterfaces`'s doc comment for the broader
-/// one): the generic interface itself cannot use `extends`; a field type
-/// that references *another* generic interface using one of *this*
-/// interface's own type parameters as an argument (e.g. `interface
-/// Wrapper<T> { boxed: Box<T>; }` where `Box` is also generic) is not
-/// substituted into -- only `T` used directly, in `T[]`/`Array<T>`/
-/// `Promise<T>`, or as an object type literal field is.
+/// The generic interface itself cannot use `extends` yet. Type arguments are
+/// resolved through an optional outer substitution, so function type variables
+/// in `Box<T>` and nested forms such as `Wrapper<Box<T>>` are concrete before
+/// the interface's own fields are expanded.
 fn resolve_generic_interface(
     name: &str,
     decl: &TsInterfaceDecl,
     ty_ref: &swc_ecma_ast::TsTypeRef,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    outer_substitution: Option<&HashMap<Symbol, HirType>>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<HirType, String> {
     if in_progress.iter().any(|n| n == name) {
@@ -514,7 +1206,9 @@ fn resolve_generic_interface(
         ));
     }
     if !decl.extends.is_empty() {
-        return Err(format!("generic interface `{name}` cannot use `extends` yet"));
+        return Err(format!(
+            "generic interface `{name}` cannot use `extends` yet"
+        ));
     }
 
     let type_param_decl = decl
@@ -541,7 +1235,16 @@ fn resolve_generic_interface(
     }
     let resolved_args = type_args
         .iter()
-        .map(|arg| lower_ts_type(arg, interfaces, generic_interfaces))
+        .map(|arg| match outer_substitution {
+            Some(outer) => resolve_ts_type_with_substitution(
+                arg,
+                outer,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ),
+            None => lower_ts_type(arg, interfaces, generic_interfaces),
+        })
         .collect::<Result<Vec<_>, String>>()?;
     let substitution: HashMap<Symbol, HirType> =
         type_param_names.into_iter().zip(resolved_args).collect();
@@ -557,7 +1260,11 @@ fn resolve_generic_interface(
         };
         let field_name = match prop.key.as_ref() {
             Expr::Ident(ident) => ident.sym.to_string(),
-            _ => return Err(format!("interface `{name}` has an unsupported property key")),
+            _ => {
+                return Err(format!(
+                    "interface `{name}` has an unsupported property key"
+                ))
+            }
         };
         let ann = prop.type_ann.as_ref().ok_or_else(|| {
             format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
@@ -603,6 +1310,7 @@ fn resolve_ts_type_with_substitution(
                     ty_ref,
                     interfaces,
                     generic_interfaces,
+                    Some(substitution),
                     in_progress,
                 );
             }
@@ -627,13 +1335,15 @@ fn resolve_ts_type_with_substitution(
     }
 
     match ty {
-        TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(resolve_ts_type_with_substitution(
-            &arr.elem_type,
-            substitution,
-            interfaces,
-            generic_interfaces,
-            in_progress,
-        )?))),
+        TsType::TsArrayType(arr) => {
+            Ok(HirType::Array(Box::new(resolve_ts_type_with_substitution(
+                &arr.elem_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?)))
+        }
         TsType::TsTypeLit(type_lit) => {
             let fields = type_lit
                 .members
@@ -698,6 +1408,47 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
     }
 }
 
+/// Expands an enclosing `finally` before every control-flow exit in `stmts`.
+/// A throw in a try body is handled by that try's catch first, so recursive
+/// descent into `HirStmt::Try` only instruments its catch body for throws.
+/// Returns are always instrumented because they leave every enclosing try.
+fn inject_finally_before_exits(
+    stmts: Vec<HirStmt>,
+    finalizer: &[HirStmt],
+    inject_throws: bool,
+) -> Vec<HirStmt> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Return(_) => {
+                out.extend(finalizer.iter().cloned());
+                out.push(stmt);
+            }
+            HirStmt::Throw(_) if inject_throws => {
+                out.extend(finalizer.iter().cloned());
+                out.push(stmt);
+            }
+            HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
+                cond,
+                inject_finally_before_exits(then_body, finalizer, inject_throws),
+                inject_finally_before_exits(else_body, finalizer, inject_throws),
+            )),
+            HirStmt::While(cond, body) => out.push(HirStmt::While(
+                cond,
+                inject_finally_before_exits(body, finalizer, inject_throws),
+            )),
+            HirStmt::Break | HirStmt::Continue => out.push(stmt),
+            HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
+                inject_finally_before_exits(body, finalizer, false),
+                catch_name,
+                inject_finally_before_exits(catch_body, finalizer, inject_throws),
+            )),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn compound_op(op: AssignOp) -> Option<BinOp> {
     match op {
         AssignOp::AddAssign => Some(BinOp::Add),
@@ -727,10 +1478,13 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
 /// object literals against their declared shape.
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
+    bindings: HashMap<Symbol, Vec<Symbol>>,
+    next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'a>,
     ret_type: HirType,
+    call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
 }
 
 impl<'a> FnLowerer<'a> {
@@ -739,14 +1493,49 @@ impl<'a> FnLowerer<'a> {
         interfaces: &'a HashMap<Symbol, HirType>,
         generic_interfaces: &'a GenericInterfaces<'a>,
         ret_type: HirType,
+        call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     ) -> Self {
         Self {
             scope: HashMap::new(),
+            bindings: HashMap::new(),
+            next_binding: 0,
             signatures,
             interfaces,
             generic_interfaces,
             ret_type,
+            call_constraints,
         }
+    }
+
+    fn resolve_binding(&self, source_name: &str) -> Symbol {
+        self.bindings
+            .get(source_name)
+            .and_then(|names| names.last())
+            .cloned()
+            .unwrap_or_else(|| source_name.to_string())
+    }
+
+    fn bind_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
+        let hir_name = if self.scope.contains_key(source_name) {
+            let name = format!("{source_name}__thaw_{}", self.next_binding);
+            self.next_binding += 1;
+            name
+        } else {
+            source_name.to_string()
+        };
+        self.scope.insert(hir_name.clone(), ty);
+        self.bindings
+            .entry(source_name.to_string())
+            .or_default()
+            .push(hir_name.clone());
+        hir_name
+    }
+
+    fn lower_scoped_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
+        let saved = self.bindings.clone();
+        let lowered = self.lower_stmts(stmts);
+        self.bindings = saved;
+        lowered
     }
 
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
@@ -757,13 +1546,65 @@ impl<'a> FnLowerer<'a> {
         Ok(out)
     }
 
+    fn infer_return_type(&self, body: &[HirStmt]) -> Result<HirType, String> {
+        fn collect<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
+            for stmt in stmts {
+                match stmt {
+                    HirStmt::Return(Some(value)) => out.push(value),
+                    HirStmt::Return(None) => *bare = true,
+                    HirStmt::If(_, then_body, else_body) => {
+                        collect(then_body, out, bare);
+                        collect(else_body, out, bare);
+                    }
+                    HirStmt::While(_, body) => collect(body, out, bare),
+                    HirStmt::Try(body, _, catch_body) => {
+                        collect(body, out, bare);
+                        collect(catch_body, out, bare);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut values = Vec::new();
+        let mut bare = false;
+        collect(body, &mut values, &mut bare);
+        if values.is_empty() {
+            return Ok(HirType::Void);
+        }
+        if bare {
+            return Err("function mixes value-returning and bare `return` statements".into());
+        }
+        let first = self.infer_expr_type(values[0])?;
+        if first == HirType::Dynamic {
+            return Ok(HirType::Dynamic);
+        }
+        for value in &values[1..] {
+            let ty = self.infer_expr_type(value)?;
+            if ty == HirType::Dynamic {
+                return Ok(HirType::Dynamic);
+            }
+            if ty != first {
+                return Err(format!(
+                    "function returns incompatible types {first:?} and {ty:?}"
+                ));
+            }
+        }
+        Ok(first)
+    }
+
     /// Normalizes a `for`/`while`/`if` body, which SWC represents as a
     /// single `Stmt` (either a `{ ... }` block or one bare statement), into
     /// a flat HIR statement list.
     fn lower_body(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
-            Stmt::Block(block) => self.lower_stmts(&block.stmts),
-            other => self.lower_stmt_seq(other),
+            Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
+            other => {
+                let saved = self.bindings.clone();
+                let lowered = self.lower_stmt_seq(other);
+                self.bindings = saved;
+                lowered
+            }
         }
     }
 
@@ -773,18 +1614,30 @@ impl<'a> FnLowerer<'a> {
                 let value = match &ret.arg {
                     Some(arg) => {
                         let value = self.lower_expr(arg)?;
+                        if self.ret_type == HirType::Void {
+                            return Err("a void function cannot return a value".into());
+                        }
                         Some(self.coerce_to_declared(&self.ret_type.clone(), value)?)
                     }
-                    None => None,
+                    None => {
+                        if !matches!(self.ret_type, HirType::Void | HirType::Dynamic) {
+                            return Err(format!(
+                                "bare `return` is not valid for return type {:?}",
+                                self.ret_type
+                            ));
+                        }
+                        None
+                    }
                 };
                 Ok(vec![HirStmt::Return(value)])
             }
             Stmt::Expr(expr_stmt) => Ok(vec![HirStmt::Expr(self.lower_expr(&expr_stmt.expr)?)]),
-            Stmt::Block(block) => self.lower_stmts(&block.stmts),
+            Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
             Stmt::Decl(Decl::Var(var_decl)) => self.lower_var_decl(var_decl),
 
             Stmt::If(if_stmt) => {
                 let cond = self.lower_expr(&if_stmt.test)?;
+                self.expect_type(&HirType::Bool, &cond, "if condition")?;
                 let then_branch = self.lower_body(&if_stmt.cons)?;
                 let else_branch = match &if_stmt.alt {
                     Some(alt) => self.lower_body(alt)?,
@@ -795,54 +1648,108 @@ impl<'a> FnLowerer<'a> {
 
             Stmt::While(while_stmt) => {
                 let cond = self.lower_expr(&while_stmt.test)?;
+                self.expect_type(&HirType::Bool, &cond, "while condition")?;
                 let body = self.lower_body(&while_stmt.body)?;
                 Ok(vec![HirStmt::While(cond, body)])
             }
 
+            Stmt::Break(break_stmt) => {
+                if break_stmt.label.is_some() {
+                    return Err("labeled `break` is not supported".into());
+                }
+                Ok(vec![HirStmt::Break])
+            }
+
+            Stmt::Continue(continue_stmt) => {
+                if continue_stmt.label.is_some() {
+                    return Err("labeled `continue` is not supported".into());
+                }
+                Ok(vec![HirStmt::Continue])
+            }
+
             Stmt::For(for_stmt) => {
-                let mut out = Vec::new();
-                if let Some(init) = &for_stmt.init {
-                    match init {
-                        VarDeclOrExpr::VarDecl(var_decl) => out.extend(self.lower_var_decl(var_decl)?),
-                        VarDeclOrExpr::Expr(expr) => out.push(HirStmt::Expr(self.lower_expr(expr)?)),
+                let saved = self.bindings.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let mut out = Vec::new();
+                    if let Some(init) = &for_stmt.init {
+                        match init {
+                            VarDeclOrExpr::VarDecl(var_decl) => {
+                                out.extend(self.lower_var_decl(var_decl)?)
+                            }
+                            VarDeclOrExpr::Expr(expr) => {
+                                out.push(HirStmt::Expr(self.lower_expr(expr)?))
+                            }
+                        }
                     }
-                }
 
-                let cond = match &for_stmt.test {
-                    Some(test) => self.lower_expr(test)?,
-                    None => HirExpr::Lit(HirLit::Bool(true)),
-                };
+                    let cond = match &for_stmt.test {
+                        Some(test) => {
+                            let cond = self.lower_expr(test)?;
+                            self.expect_type(&HirType::Bool, &cond, "for condition")?;
+                            cond
+                        }
+                        None => HirExpr::Lit(HirLit::Bool(true)),
+                    };
 
-                let mut body = self.lower_body(&for_stmt.body)?;
-                if let Some(update) = &for_stmt.update {
-                    body.push(HirStmt::Expr(self.lower_expr(update)?));
-                }
+                    let mut body = self.lower_body(&for_stmt.body)?;
+                    if let Some(update) = &for_stmt.update {
+                        body.push(HirStmt::Expr(self.lower_expr(update)?));
+                    }
 
-                out.push(HirStmt::While(cond, body));
-                Ok(out)
+                    out.push(HirStmt::While(cond, body));
+                    Ok(out)
+                })();
+                self.bindings = saved;
+                lowered
             }
 
             Stmt::Throw(throw_stmt) => Ok(vec![HirStmt::Throw(self.lower_expr(&throw_stmt.arg)?)]),
 
             Stmt::Try(try_stmt) => {
-                if try_stmt.finalizer.is_some() {
-                    return Err("`finally` is not supported yet".into());
+                if try_stmt.handler.is_none() && try_stmt.finalizer.is_none() {
+                    return Err("`try` needs a `catch` or `finally` block".into());
                 }
-                let handler = try_stmt
-                    .handler
-                    .as_ref()
-                    .ok_or("`try` without `catch` is not supported yet")?;
-                let catch_name = match &handler.param {
-                    Some(Pat::Ident(binding)) => binding.id.sym.to_string(),
-                    Some(_) => {
-                        return Err("only a simple identifier catch binding is supported".into())
+
+                let mut body = self.lower_scoped_stmts(&try_stmt.block.stmts)?;
+                let (catch_name, mut catch_body) = match &try_stmt.handler {
+                    Some(handler) => {
+                        let source_name = match &handler.param {
+                            Some(Pat::Ident(binding)) => binding.id.sym.to_string(),
+                            Some(_) => {
+                                return Err(
+                                    "only a simple identifier catch binding is supported".into(),
+                                )
+                            }
+                            None => "_".to_string(),
+                        };
+                        let saved = self.bindings.clone();
+                        let catch_name = self.bind_local(&source_name, HirType::Str);
+                        let catch_body = self.lower_stmts(&handler.body.stmts)?;
+                        self.bindings = saved;
+                        (catch_name, catch_body)
                     }
-                    None => "_".to_string(),
+                    None => {
+                        let mut name = "__thaw_finally_exception".to_string();
+                        while self.scope.contains_key(&name) {
+                            name.push('_');
+                        }
+                        let name = self.bind_local(&name, HirType::Str);
+                        let rethrow = HirStmt::Throw(HirExpr::Var(name.clone()));
+                        (name, vec![rethrow])
+                    }
                 };
-                let body = self.lower_stmts(&try_stmt.block.stmts)?;
-                self.scope.insert(catch_name.clone(), HirType::Str);
-                let catch_body = self.lower_stmts(&handler.body.stmts)?;
-                Ok(vec![HirStmt::Try(body, catch_name, catch_body)])
+
+                let mut after_try = Vec::new();
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    let finalizer = self.lower_scoped_stmts(&finalizer.stmts)?;
+                    body = inject_finally_before_exits(body, &finalizer, false);
+                    catch_body =
+                        inject_finally_before_exits(catch_body, &finalizer, true);
+                    after_try = finalizer;
+                }
+                let mut lowered = vec![HirStmt::Try(body, catch_name, catch_body)];
+                lowered.extend(after_try);
+                Ok(lowered)
             }
 
             other => Err(format!(
@@ -869,7 +1776,9 @@ impl<'a> FnLowerer<'a> {
                 let value = self.lower_expr(init)?;
 
                 let ty = match &binding.type_ann {
-                    Some(ann) => lower_ts_type(&ann.type_ann, self.interfaces, self.generic_interfaces)?,
+                    Some(ann) => {
+                        lower_ts_type(&ann.type_ann, self.interfaces, self.generic_interfaces)?
+                    }
                     None => self.infer_expr_type(&value).map_err(|e| {
                         format!(
                             "cannot infer the type of `{name}`: {e} \
@@ -879,8 +1788,8 @@ impl<'a> FnLowerer<'a> {
                 };
                 let value = self.coerce_to_declared(&ty, value)?;
 
-                self.scope.insert(name.clone(), ty.clone());
-                Ok(HirStmt::Let(name, ty, value))
+                let hir_name = self.bind_local(&name, ty.clone());
+                Ok(HirStmt::Let(hir_name, ty, value))
             })
             .collect()
     }
@@ -891,8 +1800,12 @@ impl<'a> FnLowerer<'a> {
     /// one canonical field order (the declared one), never the literal's
     /// source order. A no-op for every other combination.
     fn coerce_to_declared(&self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        if *declared == HirType::Dynamic {
+            return Ok(value);
+        }
         let (HirType::Object(declared_fields), HirExpr::ObjectLit(lit_fields)) = (declared, &value)
         else {
+            self.expect_type(declared, &value, "value")?;
             return Ok(value);
         };
 
@@ -912,7 +1825,7 @@ impl<'a> FnLowerer<'a> {
                     .find(|(n, _)| n == name)
                     .ok_or_else(|| format!("object literal is missing field `{name}`"))?;
                 let actual_ty = self.infer_expr_type(field_value)?;
-                if actual_ty != *expected_ty {
+                if *expected_ty != HirType::Dynamic && actual_ty != *expected_ty {
                     return Err(format!(
                         "field `{name}` has type {actual_ty:?}, expected {expected_ty:?}"
                     ));
@@ -924,31 +1837,89 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::ObjectLit(reordered))
     }
 
-    /// Minimal type inference, used only to resolve member access
-    /// (`obj.field`) and to check/reorder object literals -- not a general
-    /// type checker. Every expression shape lowering can currently produce
-    /// is covered; anything else is a lowering bug, not user error.
+    fn expect_type(
+        &self,
+        expected: &HirType,
+        value: &HirExpr,
+        context: &str,
+    ) -> Result<(), String> {
+        let actual = self.infer_expr_type(value)?;
+        if actual == HirType::Dynamic || *expected == HirType::Dynamic || actual == *expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "{context} has type {actual:?}, expected {expected:?}"
+            ))
+        }
+    }
+
+    /// Infers the concrete native type of an expression. This is also the
+    /// shared checker for assignments, returns, operators, indexes and call
+    /// arguments, keeping unresolved/dynamic layouts out of LLVM lowering.
     fn infer_expr_type(&self, expr: &HirExpr) -> Result<HirType, String> {
         match expr {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
             HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
-            HirExpr::Var(name) | HirExpr::Assign(name, _) => self
+            HirExpr::Var(name) => self
                 .scope
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{name}`")),
-            HirExpr::BinOp(op, ..) => match op {
-                BinOp::Lt | BinOp::Gt | BinOp::EqEqEq => Ok(HirType::Bool),
-                _ => Ok(HirType::F64),
-            },
-            HirExpr::Call(callee, _) => {
+            HirExpr::Assign(name, value) => {
+                let expected = self
+                    .scope
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown variable `{name}`"))?;
+                self.expect_type(&expected, value, &format!("assignment to `{name}`"))?;
+                Ok(expected)
+            }
+            HirExpr::BinOp(op, left, right) => {
+                let left_ty = self.infer_expr_type(left)?;
+                let right_ty = self.infer_expr_type(right)?;
+                match op {
+                    BinOp::EqEqEq => {
+                        if left_ty != HirType::Dynamic
+                            && right_ty != HirType::Dynamic
+                            && left_ty != right_ty
+                        {
+                            return Err(format!(
+                                "strict equality compares incompatible types {left_ty:?} and {right_ty:?}"
+                            ));
+                        }
+                        Ok(HirType::Bool)
+                    }
+                    BinOp::Lt | BinOp::Gt => {
+                        if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
+                            || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
+                        {
+                            return Err(format!(
+                                "numeric comparison requires F64 operands, got {left_ty:?} and {right_ty:?}"
+                            ));
+                        }
+                        Ok(HirType::Bool)
+                    }
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                        if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
+                            || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
+                        {
+                            return Err(format!(
+                                "arithmetic requires F64 operands, got {left_ty:?} and {right_ty:?}"
+                            ));
+                        }
+                        Ok(HirType::F64)
+                    }
+                }
+            }
+            HirExpr::Call(callee, args) => {
                 let HirExpr::Var(name) = callee.as_ref() else {
                     return Err("cannot infer the type of a call through a non-name callee".into());
                 };
                 match name.as_str() {
                     "console.log" => return Ok(HirType::F64),
                     "fetch" => return Ok(HirType::Str),
+                    "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "JSON.parse" => return Ok(HirType::Json),
                     "JSON.stringify" => return Ok(HirType::Str),
                     // QuickJS-NG fallback path (docs/design/bridge.md
@@ -960,17 +1931,62 @@ impl<'a> FnLowerer<'a> {
                     "callDynamic" => return Ok(HirType::Json),
                     _ => {}
                 }
-                self.signatures
-                    .get(name)
-                    .map(|sig| sig.ret.clone())
-                    .ok_or_else(|| format!("call to unknown function `{name}`"))
+                let signature = self.signatures.get(name).or_else(|| {
+                    name.split_once("__thaw_")
+                        .and_then(|(base, _)| self.signatures.get(base))
+                        .filter(|signature| !signature.generic_type_params.is_empty())
+                });
+                match signature {
+                    Some(sig) => {
+                        if !sig.generic_type_params.is_empty() {
+                            let actual = args
+                                .iter()
+                                .map(|arg| self.infer_expr_type(arg))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let types = infer_generic_type_tuple(sig, &actual)?;
+                            let substitution = sig
+                                .generic_type_params
+                                .iter()
+                                .cloned()
+                                .zip(types)
+                                .collect::<HashMap<_, _>>();
+                            resolve_ts_type_with_substitution(
+                                sig.generic_return_type
+                                    .as_ref()
+                                    .expect("generic return type"),
+                                &substitution,
+                                self.interfaces,
+                                self.generic_interfaces,
+                                &mut Vec::new(),
+                            )
+                        } else {
+                            Ok(sig.ret.clone())
+                        }
+                    }
+                    None => Err(format!("call to unknown function `{name}`")),
+                }
             }
-            HirExpr::ArrayLit(_) => Ok(HirType::Array(Box::new(HirType::F64))),
-            HirExpr::Index(arr, _) => match self.infer_expr_type(arr)? {
-                HirType::Array(elem) => Ok(*elem),
-                other => Err(format!("cannot index into a value of type {other:?}")),
-            },
-            HirExpr::IndexAssign(_, _, value) => self.infer_expr_type(value),
+            HirExpr::ArrayLit(values) => {
+                for value in values {
+                    self.expect_type(&HirType::F64, value, "array element")?;
+                }
+                Ok(HirType::Array(Box::new(HirType::F64)))
+            }
+            HirExpr::Index(arr, index) => {
+                self.expect_type(&HirType::F64, index, "array index")?;
+                match self.infer_expr_type(arr)? {
+                    HirType::Array(elem) => Ok(*elem),
+                    other => Err(format!("cannot index into a value of type {other:?}")),
+                }
+            }
+            HirExpr::IndexAssign(arr, index, value) => {
+                self.expect_type(&HirType::F64, index, "array index")?;
+                let HirType::Array(element) = self.infer_expr_type(arr)? else {
+                    return Err("index assignment target is not an array".into());
+                };
+                self.expect_type(&element, value, "array assignment")?;
+                Ok(*element)
+            }
             HirExpr::ArrayLen(_) => Ok(HirType::F64),
             HirExpr::EnvVar(_) => Ok(HirType::Str),
             HirExpr::ObjectLit(fields) => {
@@ -986,7 +2002,9 @@ impl<'a> FnLowerer<'a> {
                     .find(|(name, _)| name == field)
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| format!("object has no field `{field}`")),
-                other => Err(format!("cannot access `.{field}` on a value of type {other:?}")),
+                other => Err(format!(
+                    "cannot access `.{field}` on a value of type {other:?}"
+                )),
             },
             HirExpr::PropAssign(_, _, _, value) => self.infer_expr_type(value),
             HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) => Ok(HirType::Json),
@@ -994,10 +2012,12 @@ impl<'a> FnLowerer<'a> {
             HirExpr::JsonAsString(_) => Ok(HirType::Str),
             HirExpr::JsonAsBool(_) => Ok(HirType::Bool),
             HirExpr::FfiCall(sig, _) => Ok(sig.ret.clone()),
-            // V1 erases Promise entirely: a call's return type in
-            // `self.signatures` is already unwrapped for async functions,
-            // so `await` is transparent here too.
-            HirExpr::Await(inner) => self.infer_expr_type(inner),
+            HirExpr::Await(inner) => match self.infer_expr_type(inner)? {
+                HirType::Promise(value) => Ok(*value),
+                // V1 user-defined async calls still have an already-unwrapped
+                // signature until their coroutine frames are generalized.
+                other => Ok(other),
+            },
             other => Err(format!(
                 "cannot infer the type of {other:?} (needs an explicit type annotation)"
             )),
@@ -1011,14 +2031,18 @@ impl<'a> FnLowerer<'a> {
                 s.value.to_string_lossy().into_owned(),
             ))),
             Expr::Lit(Lit::Bool(b)) => Ok(HirExpr::Lit(HirLit::Bool(b.value))),
-            Expr::Ident(ident) => Ok(HirExpr::Var(ident.sym.to_string())),
+            Expr::Ident(ident) => Ok(HirExpr::Var(
+                self.resolve_binding(ident.sym.as_ref()),
+            )),
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
 
             Expr::Bin(bin) => {
                 let op = lower_bin_op(bin.op)?;
                 let lhs = self.lower_expr(&bin.left)?;
                 let rhs = self.lower_expr(&bin.right)?;
-                Ok(HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs)))
+                let value = HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs));
+                self.infer_expr_type(&value)?;
+                Ok(value)
             }
 
             Expr::Call(call) => self.lower_call(call),
@@ -1035,7 +2059,9 @@ impl<'a> FnLowerer<'a> {
                         None => Err("elisions are not supported in array literals".to_string()),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(HirExpr::ArrayLit(elems))
+                let value = HirExpr::ArrayLit(elems);
+                self.infer_expr_type(&value)?;
+                Ok(value)
             }
 
             Expr::Object(obj_lit) => self.lower_object_lit(obj_lit),
@@ -1062,11 +2088,13 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|prop| {
                 let PropOrSpread::Prop(prop) = prop else {
-                    return Err("spread properties are not supported in object literals".to_string());
+                    return Err(
+                        "spread properties are not supported in object literals".to_string()
+                    );
                 };
                 let Prop::KeyValue(KeyValueProp { key, value }) = prop.as_ref() else {
                     return Err(
-                        "only `key: value` object literal properties are supported".to_string(),
+                        "only `key: value` object literal properties are supported".to_string()
                     );
                 };
                 let name = match key {
@@ -1100,6 +2128,7 @@ impl<'a> FnLowerer<'a> {
                 let obj = self.lower_expr(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let index = self.lower_expr(&computed.expr)?;
+                self.expect_type(&HirType::F64, &index, "index expression")?;
                 match obj_ty {
                     HirType::Array(_) => Ok(HirExpr::Index(Box::new(obj), Box::new(index))),
                     HirType::Json => Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index))),
@@ -1115,7 +2144,11 @@ impl<'a> FnLowerer<'a> {
                     }
                     HirType::Object(fields) => {
                         if fields.iter().any(|(name, _)| name == prop.sym.as_str()) {
-                            Ok(HirExpr::PropAccess(Box::new(obj), obj_ty.clone(), prop.sym.to_string()))
+                            Ok(HirExpr::PropAccess(
+                                Box::new(obj),
+                                obj_ty.clone(),
+                                prop.sym.to_string(),
+                            ))
                         } else {
                             Err(format!("object has no field `{}`", prop.sym))
                         }
@@ -1158,14 +2191,18 @@ impl<'a> FnLowerer<'a> {
             return Err("destructuring assignment targets are not supported".into());
         };
         match simple {
-            SimpleAssignTarget::Ident(binding) => Ok(Target::Var(binding.id.sym.to_string())),
+            SimpleAssignTarget::Ident(binding) => {
+                Ok(Target::Var(self.resolve_binding(binding.id.sym.as_ref())))
+            }
             SimpleAssignTarget::Member(member) => match &member.prop {
                 MemberProp::Computed(computed) => self.lower_index_target(member, computed),
                 MemberProp::Ident(prop) => {
                     let obj = self.lower_expr(&member.obj)?;
                     let obj_ty = self.infer_expr_type(&obj)?;
                     match &obj_ty {
-                        HirType::Object(fields) if fields.iter().any(|(n, _)| n == prop.sym.as_str()) => {
+                        HirType::Object(fields)
+                            if fields.iter().any(|(n, _)| n == prop.sym.as_str()) =>
+                        {
                             Ok(Target::Prop(obj, obj_ty.clone(), prop.sym.to_string()))
                         }
                         other => Err(format!(
@@ -1174,7 +2211,9 @@ impl<'a> FnLowerer<'a> {
                         )),
                     }
                 }
-                _ => Err("only `arr[i] = ...` / `obj.field = ...` member assignment is supported".into()),
+                _ => Err(
+                    "only `arr[i] = ...` / `obj.field = ...` member assignment is supported".into(),
+                ),
             },
             _ => Err("unsupported assignment target".into()),
         }
@@ -1210,7 +2249,18 @@ impl<'a> FnLowerer<'a> {
                     None => value,
                 }
             }
-            _ => value,
+            Target::Index(array, index) => {
+                self.expect_type(&HirType::F64, index, "array index")?;
+                let HirType::Array(element) = self.infer_expr_type(array)? else {
+                    return Err("index assignment target is not an array".into());
+                };
+                self.coerce_to_declared(&element, value)?
+            }
+            Target::Prop(_, other, field) => {
+                return Err(format!(
+                    "cannot assign to field `{field}` on value of type {other:?}"
+                ));
+            }
         };
 
         Ok(build_assign(target, value))
@@ -1222,7 +2272,7 @@ impl<'a> FnLowerer<'a> {
         // value is used, which doesn't happen in the
         // `for (...; ...; i++)` / bare `i++;` forms this is meant to support.
         let target = match update.arg.as_ref() {
-            Expr::Ident(ident) => Target::Var(ident.sym.to_string()),
+            Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
             Expr::Member(member) => match &member.prop {
                 MemberProp::Computed(computed) => self.lower_index_target(member, computed)?,
                 _ => return Err("unsupported ++/-- target".into()),
@@ -1258,12 +2308,10 @@ impl<'a> FnLowerer<'a> {
                 };
                 format!("{}.{}", obj.sym, prop.sym)
             }
-            _ => {
-                return Err(
-                    "unsupported call target (only plain identifiers and console.log are supported)"
-                        .into(),
-                )
-            }
+            _ => return Err(
+                "unsupported call target (only plain identifiers and console.log are supported)"
+                    .into(),
+            ),
         };
 
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
@@ -1296,6 +2344,16 @@ impl<'a> FnLowerer<'a> {
         let signature = self.signatures.get(&callee_name).cloned();
         let param_types = signature.as_ref().map(|sig| sig.params.clone());
 
+        if let Some(params) = &param_types {
+            if call.args.len() != params.len() {
+                return Err(format!(
+                    "function `{callee_name}` expects {} argument(s), got {}",
+                    params.len(),
+                    call.args.len()
+                ));
+            }
+        }
+
         let args = call
             .args
             .iter()
@@ -1306,13 +2364,66 @@ impl<'a> FnLowerer<'a> {
                 }
                 let value = self.lower_expr(&arg.expr)?;
                 match param_types.as_ref().and_then(|p| p.get(i)) {
-                    Some(declared) => self.coerce_to_declared(declared, value),
+                    Some(_)
+                        if signature
+                            .as_ref()
+                            .is_some_and(|sig| !sig.generic_type_params.is_empty()) =>
+                    {
+                        Ok(value)
+                    }
+                    Some(declared) => self.coerce_to_declared(declared, value).map_err(|error| {
+                        format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
+                    }),
                     None => Ok(value),
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if let Some(sig) = signature.filter(|sig| sig.is_extern) {
+        let generic_types = if let Some(signature) = signature
+            .as_ref()
+            .filter(|signature| !signature.generic_type_params.is_empty())
+        {
+            let actual = args
+                .iter()
+                .map(|arg| self.infer_expr_type(arg))
+                .collect::<Result<Vec<_>, _>>()?;
+            let types = infer_generic_type_tuple(signature, &actual)
+                .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
+            if !types.iter().any(|ty| *ty == HirType::Dynamic) {
+                for ty in &types {
+                    if !supports_generic_native_layout(ty) {
+                        return Err(format!(
+                            "generic function `{callee_name}` cannot specialize for native layout {ty:?}"
+                        ));
+                    }
+                }
+            }
+            Some(types)
+        } else {
+            None
+        };
+
+        if let (Some(signature), Some(constraints)) = (&signature, self.call_constraints) {
+            if let Some(types) = &generic_types {
+                constraints
+                    .borrow_mut()
+                    .push(CallConstraint::Generic(callee_name.clone(), types.clone()));
+            } else {
+                for (index, (declared, value)) in signature.params.iter().zip(&args).enumerate() {
+                    if *declared == HirType::Dynamic {
+                        let actual = self.infer_expr_type(value)?;
+                        constraints.borrow_mut().push(CallConstraint::Parameter(
+                            callee_name.clone(),
+                            index,
+                            actual,
+                            (call.span.lo.0, call.span.hi.0),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(sig) = signature.clone().filter(|sig| sig.is_extern) {
             let ffi_signature = FfiSignature {
                 symbol: callee_name,
                 params: sig.params,
@@ -1321,7 +2432,19 @@ impl<'a> FnLowerer<'a> {
             return Ok(HirExpr::FfiCall(ffi_signature, args));
         }
 
-        Ok(HirExpr::Call(Box::new(HirExpr::Var(callee_name)), args))
+        let lowered_name = if generic_types
+            .as_ref()
+            .is_some_and(|types| !types.iter().any(|ty| *ty == HirType::Dynamic))
+        {
+            let param_types = args
+                .iter()
+                .map(|arg| self.infer_expr_type(arg))
+                .collect::<Result<Vec<_>, _>>()?;
+            specialized_generic_name(&callee_name, &param_types)
+        } else {
+            callee_name
+        };
+        Ok(HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args))
     }
 }
 
@@ -1381,7 +2504,420 @@ mod tests {
     #[test]
     fn rejects_missing_parameter_type_annotation() {
         let module = thaw_parser::parse_typescript("function f(a) { return a; }").unwrap();
-        assert!(lower_module(&module).is_err());
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("cannot infer parameter"));
+        assert!(error.contains("at bytes"));
+    }
+
+    #[test]
+    fn infers_unannotated_parameters_from_call_sites() {
+        let program = lower(
+            "function identity(value) { return value; } function main(): number { return identity(42); }",
+        );
+        let identity = &program.functions[0];
+        assert_eq!(identity.params[0].ty, HirType::F64);
+        assert_eq!(identity.ret, HirType::F64);
+    }
+
+    #[test]
+    fn propagates_parameter_constraints_through_forward_call_chains() {
+        let program = lower(
+            "function first(value) { return second(value); } function second(value) { return value; } function main(): string { return first(\"ok\"); }",
+        );
+        assert_eq!(program.functions[0].params[0].ty, HirType::Str);
+        assert_eq!(program.functions[0].ret, HirType::Str);
+        assert_eq!(program.functions[1].params[0].ty, HirType::Str);
+        assert_eq!(program.functions[1].ret, HirType::Str);
+    }
+
+    #[test]
+    fn rejects_conflicting_call_site_parameter_constraints() {
+        let module = thaw_parser::parse_typescript(
+            "function identity(value) { return value; } function main(): void { identity(1); identity(\"x\"); }",
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("conflicting inferred types"),
+            "unexpected error: {error}"
+        );
+        assert!(error.contains("at bytes"));
+    }
+
+    #[test]
+    fn structured_diagnostic_resolves_file_line_and_column() {
+        let source = "function identity(value) { return value; }\nfunction main(): void { identity(1); identity(\"x\"); }";
+        let (module, source_map) = thaw_parser::parse_typescript_with_source_map(source).unwrap();
+        let diagnostic =
+            lower_module_with_source_map(&module, &source_map, "example.ts").unwrap_err();
+        assert!(diagnostic.message.contains("conflicting inferred types"));
+        let range = diagnostic
+            .range
+            .as_ref()
+            .expect("diagnostic should carry a range");
+        assert_eq!(range.file, "example.ts");
+        assert_eq!(range.line, 2);
+        assert!(range.column > 1);
+        assert!(diagnostic.to_string().starts_with("example.ts:2:"));
+    }
+
+    #[test]
+    fn monomorphizes_a_generic_function_from_its_call_site() {
+        let program = lower(
+            "function identity<T>(value: T): T { return value; } function main(): string { return identity(\"ok\"); }",
+        );
+        let identity = program
+            .functions
+            .iter()
+            .find(|function| function.name == "identity__thaw_str")
+            .unwrap();
+        assert_eq!(identity.params[0].ty, HirType::Str);
+        assert_eq!(identity.ret, HirType::Str);
+    }
+
+    #[test]
+    fn creates_distinct_native_instantiations_for_polymorphic_uses() {
+        let program = lower(
+            "function identity<T>(value: T): T { return value; } function main(): void { identity(1); identity(2); identity(\"x\"); }",
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| function.name == "identity__thaw_f64")
+                .count(),
+            1
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| function.name == "identity__thaw_str")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn specializes_multiple_generic_arguments_as_one_call_tuple() {
+        let program = lower(
+            r#"
+            interface Pair<T, U> { first: T; second: U; }
+            function chooseFirst<T, U>(first: T, second: U): T { return first; }
+            function makePair<T, U>(first: T, second: U): Pair<T, U> {
+                return { first: first, second: second };
+            }
+            function main(): void {
+                console.log(chooseFirst(1, "ignored"));
+                const pair = makePair("left", 2);
+                console.log(pair.first);
+                console.log(pair.second);
+            }
+            "#,
+        );
+        let choose = program
+            .functions
+            .iter()
+            .find(|function| function.name == "chooseFirst__thaw_f64__str")
+            .expect("chooseFirst<number, string> specialization");
+        assert_eq!(choose.params[0].ty, HirType::F64);
+        assert_eq!(choose.params[1].ty, HirType::Str);
+        assert_eq!(choose.ret, HirType::F64);
+
+        let pair = program
+            .functions
+            .iter()
+            .find(|function| function.name == "makePair__thaw_str__f64")
+            .expect("makePair<string, number> specialization");
+        assert_eq!(
+            pair.ret,
+            HirType::Object(vec![
+                ("first".into(), HirType::Str),
+                ("second".into(), HirType::F64),
+            ])
+        );
+        assert!(
+            matches!(&pair.body[0], HirStmt::Return(Some(HirExpr::ObjectLit(fields))) if
+            fields[0].0 == "first" && fields[1].0 == "second")
+        );
+    }
+
+    #[test]
+    fn deduplicates_multi_argument_instantiations_and_supports_forward_references() {
+        let program = lower(
+            r#"
+            function main(): void {
+                chooseFirst(1, "a");
+                chooseFirst(2, "b");
+                chooseFirst("x", 3);
+            }
+            function chooseFirst<T, U>(first: T, second: U): T { return first; }
+            "#,
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| { function.name == "chooseFirst__thaw_f64__str" })
+                .count(),
+            1
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| { function.name == "chooseFirst__thaw_str__f64" })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn enforces_repeated_generic_type_constraints_across_arguments() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            function same<T>(left: T, right: T): T { return left; }
+            function main(): void { same(1, "wrong"); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("conflicting call-site types"), "{error}");
+        assert!(error.contains("F64") && error.contains("Str"), "{error}");
+    }
+
+    #[test]
+    fn enforces_repeated_generic_constraints_inside_arrays_and_interfaces() {
+        let array = thaw_parser::parse_typescript(
+            r#"
+            function sameArrays<T>(left: T[], right: T[]): T[] { return left; }
+            function main(): void { sameArrays([1], [2]); }
+            "#,
+        )
+        .unwrap();
+        assert!(lower_module(&array).is_ok());
+
+        let pair = thaw_parser::parse_typescript(
+            r#"
+            interface Pair<T, U> { first: T; second: U; }
+            function diagonal<T>(value: Pair<T, T>): T { return value.first; }
+            function main(): void { diagonal({ first: 1, second: "wrong" }); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&pair).unwrap_err();
+        assert!(error.contains("conflicting call-site types"), "{error}");
+    }
+
+    #[test]
+    fn diagnoses_uninferable_and_unsupported_generic_layouts() {
+        let uninferable = thaw_parser::parse_typescript(
+            r#"
+            function phantom<T, U>(value: T): T { return value; }
+            function main(): void { phantom(1); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&uninferable).unwrap_err();
+        assert!(
+            error.contains("cannot infer generic type parameter `U`"),
+            "{error}"
+        );
+
+        let unsupported = thaw_parser::parse_typescript(
+            r#"
+            function identity<T>(value: T): T { return value; }
+            function main(): void { identity(JSON.parse("null")); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&unsupported).unwrap_err();
+        assert!(
+            error.contains("cannot specialize for native layout Json"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn propagates_specializations_through_generic_function_calls() {
+        let program = lower(
+            r#"
+            function forward<T, U>(first: T, second: U): T {
+                return chooseFirst(first, second);
+            }
+            function chooseFirst<T, U>(first: T, second: U): T {
+                return first;
+            }
+            function main(): void { console.log(forward(42, "unused")); }
+            "#,
+        );
+        let forward = program
+            .functions
+            .iter()
+            .find(|function| function.name == "forward__thaw_f64__str")
+            .expect("outer specialization");
+        assert!(format!("{:?}", forward.body).contains("chooseFirst__thaw_f64__str"));
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| function.name == "chooseFirst__thaw_f64__str")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn specializes_type_variables_nested_in_arrays_and_objects() {
+        let program = lower(
+            r#"
+            interface Box<T> { value: T; }
+            interface Wrapper<T> { boxed: Box<T>; }
+            function sameArray<T>(value: T[]): T[] { return value; }
+            function sameBox<T>(value: { value: T }): { value: T } { return value; }
+            function namedBox<T>(value: Box<T>): Box<T> { return value; }
+            function wrapped<T>(value: Wrapper<T>): Wrapper<T> { return value; }
+            function main(): void {
+                sameArray([1, 2]);
+                sameBox({ value: 3 });
+                namedBox({ value: 4 });
+                wrapped({ boxed: { value: 5 } });
+            }
+            "#,
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "sameArray__thaw_array_f64"));
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "sameBox__thaw_object_value_f64"));
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "namedBox__thaw_object_value_f64"));
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| { function.name == "wrapped__thaw_object_boxed_object_value_f64" }));
+    }
+
+    #[test]
+    fn specializes_named_structures_with_multiple_type_parameters() {
+        let program = lower(
+            r#"
+            interface Pair<T, U> { first: T; second: U; }
+            function samePair<T, U>(value: Pair<T, U>): Pair<T, U> { return value; }
+            function main(): void { samePair({ first: 1, second: "two" }); }
+            "#,
+        );
+        let pair = program
+            .functions
+            .iter()
+            .find(|function| function.name == "samePair__thaw_object_first_f64_second_str")
+            .expect("Pair<number, string> specialization");
+        assert_eq!(
+            pair.params[0].ty,
+            HirType::Object(vec![
+                ("first".into(), HirType::F64),
+                ("second".into(), HirType::Str),
+            ])
+        );
+        assert_eq!(pair.ret, pair.params[0].ty);
+    }
+
+    #[test]
+    fn specializes_generic_property_projections() {
+        let program = lower(
+            r#"
+            interface Pair<T, U> { first: T; second: U; }
+            interface Box<T> { value: T; }
+            interface Wrapper<T> { boxed: Box<T>; }
+            function first<T, U>(value: Pair<T, U>): T { return value.first; }
+            function unbox<T>(value: Wrapper<T>): T { return value.boxed.value; }
+            function main(): void {
+                const n = first({ first: 1, second: "two" });
+                const deep = unbox({ boxed: { value: 3 } });
+            }
+            "#,
+        );
+        let first = program
+            .functions
+            .iter()
+            .find(|function| function.name == "first__thaw_object_first_f64_second_str")
+            .unwrap();
+        assert_eq!(first.ret, HirType::F64);
+        let unbox = program
+            .functions
+            .iter()
+            .find(|function| function.name == "unbox__thaw_object_boxed_object_value_f64")
+            .unwrap();
+        assert_eq!(unbox.ret, HirType::F64);
+    }
+
+    #[test]
+    fn infers_unannotated_function_return_types_through_forward_calls() {
+        let program =
+            lower("function first() { return second(); } function second() { return 42; }");
+        assert_eq!(program.functions[0].ret, HirType::F64);
+        assert_eq!(program.functions[1].ret, HirType::F64);
+    }
+
+    #[test]
+    fn infers_void_for_an_unannotated_function_without_value_returns() {
+        let program = lower("function log() { console.log(1); }");
+        assert_eq!(program.functions[0].ret, HirType::Void);
+    }
+
+    #[test]
+    fn rejects_incompatible_return_types() {
+        let module = thaw_parser::parse_typescript(
+            "function choose(flag: boolean) { if (flag) return 1; return \"no\"; }",
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("incompatible types"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_wrong_call_argument_type_and_arity() {
+        let wrong_type = thaw_parser::parse_typescript(
+            "function square(value: number): number { return value * value; } function main(): number { return square(\"x\"); }",
+        )
+        .unwrap();
+        let error = lower_module(&wrong_type).unwrap_err();
+        assert!(error.contains("argument 1"), "unexpected error: {error}");
+
+        let wrong_arity = thaw_parser::parse_typescript(
+            "function square(value: number): number { return value * value; } function main(): number { return square(); }",
+        )
+        .unwrap();
+        let error = lower_module(&wrong_arity).unwrap_err();
+        assert!(
+            error.contains("expects 1 argument"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_assignment_and_declared_return_types() {
+        let assignment = thaw_parser::parse_typescript(
+            "function main(): void { let value = 1; value = \"x\"; }",
+        )
+        .unwrap();
+        assert!(lower_module(&assignment)
+            .unwrap_err()
+            .contains("expected F64"));
+
+        let returned =
+            thaw_parser::parse_typescript("function main(): number { return \"x\"; }").unwrap();
+        assert!(lower_module(&returned)
+            .unwrap_err()
+            .contains("expected F64"));
     }
 
     #[test]
@@ -1481,6 +3017,30 @@ mod tests {
                 ))],
             )]
         );
+    }
+
+    #[test]
+    fn lowers_finally_onto_normal_return_and_rethrow_paths() {
+        let program = lower(
+            r#"function f(): string {
+                try {
+                    return "ok";
+                } catch (e) {
+                    throw e;
+                } finally {
+                    console.log("cleanup");
+                }
+            }
+            function main(): void { console.log(f()); }"#,
+        );
+        let HirStmt::Try(body, _, catch_body) = &program.functions[0].body[0] else {
+            panic!("expected lowered try");
+        };
+        assert!(matches!(body[0], HirStmt::Expr(_)));
+        assert!(matches!(body[1], HirStmt::Return(_)));
+        assert!(matches!(catch_body[0], HirStmt::Expr(_)));
+        assert!(matches!(catch_body[1], HirStmt::Throw(_)));
+        assert!(matches!(program.functions[0].body[1], HirStmt::Expr(_)));
     }
 
     #[test]
@@ -1636,11 +3196,33 @@ mod tests {
     }
 
     #[test]
+    fn infers_await_sleep_as_void() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                await sleep(1);
+            }"#,
+        );
+        let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
+            panic!("expected await expression");
+        };
+        assert_eq!(
+            FnLowerer::new(
+                &HashMap::new(),
+                &HashMap::new(),
+                &GenericInterfaces::new(),
+                HirType::Void,
+                None,
+            )
+            .infer_expr_type(&HirExpr::Await(inner.clone()))
+            .unwrap(),
+            HirType::Void
+        );
+    }
+
+    #[test]
     fn rejects_async_function_not_declared_as_returning_promise() {
-        let module = thaw_parser::parse_typescript(
-            "async function f(): number { return 1; }",
-        )
-        .unwrap();
+        let module =
+            thaw_parser::parse_typescript("async function f(): number { return 1; }").unwrap();
         let err = lower_module(&module).unwrap_err();
         assert!(err.contains("Promise"), "unexpected error: {err}");
     }
@@ -1757,16 +3339,21 @@ mod tests {
             function main(): void {}"#,
         );
         let f = &program.functions[0];
-        assert_eq!(f.params, vec![HirParam { name: "args".into(), ty: HirType::Json }]);
+        assert_eq!(
+            f.params,
+            vec![HirParam {
+                name: "args".into(),
+                ty: HirType::Json
+            }]
+        );
         assert_eq!(f.ret, HirType::Json);
     }
 
     #[test]
     fn rejects_number_conversion_on_a_non_json_value() {
-        let module = thaw_parser::parse_typescript(
-            "function main(): void { const x: number = Number(1); }",
-        )
-        .unwrap();
+        let module =
+            thaw_parser::parse_typescript("function main(): void { const x: number = Number(1); }")
+                .unwrap();
         let err = lower_module(&module).unwrap_err();
         assert!(err.contains("JSON"), "unexpected error: {err}");
     }
@@ -1793,7 +3380,11 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(program.functions.len(), 1, "the ambient decl has no body to lower");
+        assert_eq!(
+            program.functions.len(),
+            1,
+            "the ambient decl has no body to lower"
+        );
         assert_eq!(
             program.extern_functions,
             vec![crate::FfiSignature {
@@ -1841,10 +3432,17 @@ mod tests {
             }"#,
         );
 
-        let point_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
+        let point_ty =
+            HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
 
         let dist = &program.functions[0];
-        assert_eq!(dist.params, vec![HirParam { name: "p".into(), ty: point_ty.clone() }]);
+        assert_eq!(
+            dist.params,
+            vec![HirParam {
+                name: "p".into(),
+                ty: point_ty.clone()
+            }]
+        );
 
         let main = &program.functions[1];
         // Declared via the interface name, but the literal is still
@@ -1884,7 +3482,8 @@ mod tests {
             }"#,
         );
 
-        let point_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
+        let point_ty =
+            HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
         let line_ty = HirType::Object(vec![
             ("start".into(), point_ty),
             ("length".into(), HirType::F64),
@@ -1984,7 +3583,10 @@ mod tests {
                 console.log(b.items.length);
             }"#,
         );
-        let box_ty = HirType::Object(vec![("items".into(), HirType::Array(Box::new(HirType::F64)))]);
+        let box_ty = HirType::Object(vec![(
+            "items".into(),
+            HirType::Array(Box::new(HirType::F64)),
+        )]);
         assert!(matches!(&program.functions[0].body[0], HirStmt::Let(_, ty, _) if *ty == box_ty));
     }
 
@@ -2112,5 +3714,53 @@ mod tests {
             ("c".into(), HirType::F64),
         ]);
         assert!(matches!(&program.functions[0].body[0], HirStmt::Let(_, ty, _) if *ty == c_ty));
+    }
+
+    #[test]
+    fn renames_shadowed_block_locals_and_restores_outer_binding() {
+        let program = lower(
+            r#"function main(): void {
+                let value = 1;
+                if (value < 2) {
+                    let value = 2;
+                    value = value + 1;
+                    console.log(value);
+                }
+                console.log(value);
+            }"#,
+        );
+        let body = &program.functions[0].body;
+        assert!(matches!(&body[0], HirStmt::Let(name, _, _) if name == "value"));
+        let HirStmt::If(_, then_body, _) = &body[1] else {
+            panic!("expected lowered if");
+        };
+        assert!(matches!(&then_body[0], HirStmt::Let(name, _, _) if name == "value__thaw_0"));
+        assert!(
+            matches!(&then_body[1], HirStmt::Expr(HirExpr::Assign(name, _)) if name == "value__thaw_0")
+        );
+        assert!(format!("{:?}", then_body[2]).contains("value__thaw_0"));
+        assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
+    }
+
+    #[test]
+    fn renames_catch_binding_that_shadows_an_outer_local() {
+        let program = lower(
+            r#"function main(): void {
+                const error = "outer";
+                try {
+                    throw "inner";
+                } catch (error) {
+                    console.log(error);
+                }
+                console.log(error);
+            }"#,
+        );
+        let body = &program.functions[0].body;
+        let HirStmt::Try(_, catch_name, catch_body) = &body[1] else {
+            panic!("expected lowered try");
+        };
+        assert_eq!(catch_name, "error__thaw_0");
+        assert!(format!("{:?}", catch_body).contains("error__thaw_0"));
+        assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
     }
 }

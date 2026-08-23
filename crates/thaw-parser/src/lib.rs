@@ -30,7 +30,10 @@ pub fn parse_typescript_with_source_map(source: &str) -> Result<(Module, Lrc<Sou
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
 
-    let fm = cm.new_source_file(Lrc::new(FileName::Custom("input.ts".into())), source.to_string());
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("input.ts".into())),
+        source.to_string(),
+    );
 
     let syntax = Syntax::Typescript(TsSyntax {
         tsx: false,
@@ -70,7 +73,10 @@ pub fn parse_javascript(source: &str) -> Result<Module, String> {
 pub fn parse_javascript_with_source_map(source: &str) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
-    let fm = cm.new_source_file(Lrc::new(FileName::Custom("input.js".into())), source.to_string());
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("input.js".into())),
+        source.to_string(),
+    );
 
     let syntax = Syntax::Es(EsSyntax::default());
     let lexer = Lexer::new(syntax, Default::default(), StringInput::from(&*fm), None);
@@ -94,10 +100,9 @@ mod tests {
 
     #[test]
     fn parses_a_typed_function_declaration() {
-        let module = parse_typescript(
-            "function add(a: number, b: number): number { return a + b; }",
-        )
-        .unwrap();
+        let module =
+            parse_typescript("function add(a: number, b: number): number { return a + b; }")
+                .unwrap();
 
         assert_eq!(module.body.len(), 1);
         match &module.body[0] {

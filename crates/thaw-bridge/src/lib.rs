@@ -189,7 +189,9 @@ fn resolve_interface(
         return ty.clone();
     }
     if in_progress.iter().any(|n| n == name) {
-        let ty = DtsType::Unsupported(format!("interface `{name}` is (indirectly) self-referential"));
+        let ty = DtsType::Unsupported(format!(
+            "interface `{name}` is (indirectly) self-referential"
+        ));
         resolved.insert(name.to_string(), ty.clone());
         return ty;
     }
@@ -207,13 +209,14 @@ fn resolve_interface(
     let mut failure = None;
     'extends: for base in &iface.extends {
         if base.type_args.is_some() {
-            failure = Some(
-                "extends a base with type arguments, which is not classified yet".to_string(),
-            );
+            failure =
+                Some("extends a base with type arguments, which is not classified yet".to_string());
             break;
         }
         let Expr::Ident(base_ident) = base.expr.as_ref() else {
-            failure = Some("has an unsupported `extends` target (only a plain interface name)".to_string());
+            failure = Some(
+                "has an unsupported `extends` target (only a plain interface name)".to_string(),
+            );
             break;
         };
         let base_name = base_ident.sym.to_string();
@@ -229,7 +232,9 @@ fn resolve_interface(
                     fields.push((field_name, field_ty));
                 }
             }
-            DtsType::Native(_) => unreachable!("resolve_interface always returns an Object or Unsupported"),
+            DtsType::Native(_) => {
+                unreachable!("resolve_interface always returns an Object or Unsupported")
+            }
             DtsType::Unsupported(reason) => {
                 failure = Some(format!("extends unresolvable base `{base_name}`: {reason}"));
                 break;
@@ -257,8 +262,12 @@ fn resolve_interface(
                 break;
             }
             let field_ty = match &prop.type_ann {
-                Some(ann) => resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress),
-                None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+                Some(ann) => {
+                    resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress)
+                }
+                None => {
+                    DtsType::Unsupported(format!("field `{field_name}` has no type annotation"))
+                }
             };
             match field_ty {
                 // Any type hir_codegen's `basic_type` can represent is fine
@@ -330,7 +339,9 @@ fn lower_dts_function(
         .enumerate()
         .map(|(i, param)| {
             let Pat::Ident(binding) = &param.pat else {
-                let reason = "unsupported parameter pattern (only simple identifiers are classified yet)".to_string();
+                let reason =
+                    "unsupported parameter pattern (only simple identifiers are classified yet)"
+                        .to_string();
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
             let param_name = binding.id.sym.to_string();
@@ -468,17 +479,19 @@ fn classify_ts_type(
             other => DtsType::Unsupported(format!("`{}` is not supported", keyword_name(other))),
         },
 
-        TsType::TsArrayType(arr) => match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
-            DtsType::Native(HirType::F64) => {
-                DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+        TsType::TsArrayType(arr) => {
+            match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
+                DtsType::Native(HirType::F64) => {
+                    DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                }
+                DtsType::Native(other) => DtsType::Unsupported(format!(
+                    "array element type {other:?} is not supported yet (only number[])"
+                )),
+                DtsType::Unsupported(reason) => {
+                    DtsType::Unsupported(format!("array element type: {reason}"))
+                }
             }
-            DtsType::Native(other) => DtsType::Unsupported(format!(
-                "array element type {other:?} is not supported yet (only number[])"
-            )),
-            DtsType::Unsupported(reason) => {
-                DtsType::Unsupported(format!("array element type: {reason}"))
-            }
-        },
+        }
 
         TsType::TsTypeLit(type_lit) => {
             let mut fields = Vec::with_capacity(type_lit.members.len());
@@ -491,18 +504,26 @@ fn classify_ts_type(
                 };
                 let field_name = match prop.key.as_ref() {
                     Expr::Ident(ident) => ident.sym.to_string(),
-                    _ => return DtsType::Unsupported("unsupported object type literal key".to_string()),
+                    _ => {
+                        return DtsType::Unsupported(
+                            "unsupported object type literal key".to_string(),
+                        )
+                    }
                 };
                 let field_ty = match &prop.type_ann {
                     Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
-                    None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+                    None => {
+                        DtsType::Unsupported(format!("field `{field_name}` has no type annotation"))
+                    }
                 };
                 match field_ty {
                     // See the parallel comment in `resolve_interface`:
                     // any representable type works as a field now.
                     DtsType::Native(ty) => fields.push((field_name, ty)),
                     DtsType::Unsupported(reason) => {
-                        return DtsType::Unsupported(format!("object field `{field_name}`: {reason}"))
+                        return DtsType::Unsupported(format!(
+                            "object field `{field_name}`: {reason}"
+                        ))
                     }
                 }
             }
@@ -513,7 +534,9 @@ fn classify_ts_type(
             let ref_name = match &ty_ref.type_name {
                 TsEntityName::Ident(id) => id.sym.to_string(),
                 TsEntityName::TsQualifiedName(_) => {
-                    return DtsType::Unsupported("qualified type names are not supported yet".to_string())
+                    return DtsType::Unsupported(
+                        "qualified type names are not supported yet".to_string(),
+                    )
                 }
             };
 
@@ -568,7 +591,9 @@ fn resolve_generic_interface(
         ));
     }
     if !decl.extends.is_empty() {
-        return DtsType::Unsupported(format!("generic interface `{name}` cannot use `extends` yet"));
+        return DtsType::Unsupported(format!(
+            "generic interface `{name}` cannot use `extends` yet"
+        ));
     }
 
     let type_param_decl = decl
@@ -714,7 +739,9 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             ) {
-                DtsType::Native(HirType::F64) => DtsType::Native(HirType::Array(Box::new(HirType::F64))),
+                DtsType::Native(HirType::F64) => {
+                    DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
                     "array element type {other:?} is not supported yet (only number[])"
                 )),
@@ -734,7 +761,11 @@ fn resolve_ts_type_with_substitution(
                 };
                 let field_name = match prop.key.as_ref() {
                     Expr::Ident(ident) => ident.sym.to_string(),
-                    _ => return DtsType::Unsupported("unsupported object type literal key".to_string()),
+                    _ => {
+                        return DtsType::Unsupported(
+                            "unsupported object type literal key".to_string(),
+                        )
+                    }
                 };
                 let field_ty = match &prop.type_ann {
                     Some(ann) => resolve_ts_type_with_substitution(
@@ -744,12 +775,16 @@ fn resolve_ts_type_with_substitution(
                         generic_interfaces,
                         in_progress,
                     ),
-                    None => DtsType::Unsupported(format!("field `{field_name}` has no type annotation")),
+                    None => {
+                        DtsType::Unsupported(format!("field `{field_name}` has no type annotation"))
+                    }
                 };
                 match field_ty {
                     DtsType::Native(ty) => fields.push((field_name, ty)),
                     DtsType::Unsupported(reason) => {
-                        return DtsType::Unsupported(format!("object field `{field_name}`: {reason}"))
+                        return DtsType::Unsupported(format!(
+                            "object field `{field_name}`: {reason}"
+                        ))
                     }
                 }
             }
@@ -1000,7 +1035,9 @@ pub fn generate_shim(
                 // `identity(JSON.parse("[42]"))`, not `identity(JSON.parse("42"))` --
                 // named to make that convention hard to miss at the call site.
                 out.push_str(&format!("function {function}(argsArray: Json): Json {{\n"));
-                out.push_str(&format!("    return callDynamic(\"{function}\", argsArray);\n"));
+                out.push_str(&format!(
+                    "    return callDynamic(\"{function}\", argsArray);\n"
+                ));
                 out.push_str("}\n");
             }
         }
@@ -1208,7 +1245,8 @@ mod tests {
 
     #[test]
     fn classifies_simple_primitive_signature_as_fast_path() {
-        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let funcs =
+            parse_dts("export declare function add(a: number, b: number): number;").unwrap();
         assert_eq!(funcs.len(), 1);
         assert_eq!(
             classify(&funcs[0]),
@@ -1252,26 +1290,39 @@ mod tests {
     #[test]
     fn classifies_generic_function_as_fallback() {
         let funcs = parse_dts("export declare function identity<T>(x: T): T;").unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
     fn classifies_union_parameter_as_fallback() {
         let funcs = parse_dts("export declare function f(x: string | number): void;").unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
     fn classifies_string_array_as_fallback() {
         // Only number[] is supported today (Phase 1's own restriction).
         let funcs = parse_dts("export declare function f(xs: string[]): void;").unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
     fn classifies_callback_parameter_as_fallback() {
-        let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        let funcs =
+            parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     /// A plausible subset of a real package's `.d.ts` (uuid-shaped): mixes
@@ -1287,7 +1338,10 @@ mod tests {
         assert_eq!(funcs.len(), 3);
         assert!(matches!(classify(&funcs[0]), Classification::FastPath(_)));
         assert!(matches!(classify(&funcs[1]), Classification::FastPath(_)));
-        assert!(matches!(classify(&funcs[2]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[2]),
+            Classification::Fallback { .. }
+        ));
     }
 
     /// The exact shape found in a real npm package (`qs`): every function
@@ -1363,7 +1417,10 @@ mod tests {
         let add = funcs.iter().find(|f| f.name == "add").unwrap();
         let identity = funcs.iter().find(|f| f.name == "identity").unwrap();
         assert!(matches!(classify(add), Classification::FastPath(_)));
-        assert!(matches!(classify(identity), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(identity),
+            Classification::Fallback { .. }
+        ));
     }
 
     /// The real `qs` round-trip: a namespaced Fallback function's
@@ -1485,7 +1542,10 @@ mod tests {
             export declare function add(a: number, b: number): number;
         "#;
         let funcs = parse_dts(source).unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
         assert!(matches!(classify(&funcs[1]), Classification::FastPath(_)));
     }
 
@@ -1518,7 +1578,10 @@ mod tests {
             export declare function f(p: Pair<number>): number;
         "#;
         let funcs = parse_dts(source).unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
@@ -1531,7 +1594,10 @@ mod tests {
             export declare function head(n: Node<number>): number;
         "#;
         let funcs = parse_dts(source).unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
@@ -1567,12 +1633,16 @@ mod tests {
             export declare function f(b: B): number;
         "#;
         let funcs = parse_dts(source).unwrap();
-        assert!(matches!(classify(&funcs[0]), Classification::Fallback { .. }));
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
     fn generates_ambient_declaration_for_fast_path_function() {
-        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let funcs =
+            parse_dts("export declare function add(a: number, b: number): number;").unwrap();
         assert_eq!(
             generate_shim(&funcs, true, &[]),
             "declare function add(a: number, b: number): number;\n"
@@ -1601,7 +1671,8 @@ mod tests {
     /// wrapper instead, since a working JS implementation is right there.
     #[test]
     fn downgrades_fast_path_to_fallback_when_no_native_lib_is_available() {
-        let funcs = parse_dts("export declare function daysToWeeks(days: number): number;").unwrap();
+        let funcs =
+            parse_dts("export declare function daysToWeeks(days: number): number;").unwrap();
         let shim = generate_shim(&funcs, false, &[]);
         assert!(
             !shim.contains("declare function"),
@@ -1613,7 +1684,8 @@ mod tests {
 
     #[test]
     fn native_lib_available_true_keeps_fast_path_as_before() {
-        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let funcs =
+            parse_dts("export declare function add(a: number, b: number): number;").unwrap();
         assert_eq!(
             generate_shim(&funcs, true, &[]),
             "declare function add(a: number, b: number): number;\n"
@@ -1622,7 +1694,8 @@ mod tests {
 
     #[test]
     fn effective_classifications_downgrades_fast_path_when_native_lib_unavailable() {
-        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let funcs =
+            parse_dts("export declare function add(a: number, b: number): number;").unwrap();
         let result = effective_classifications(&funcs, false);
         assert_eq!(result.len(), 1);
         assert!(matches!(result[0].1, Classification::Fallback { .. }));
@@ -1634,7 +1707,10 @@ mod tests {
         let with_native = effective_classifications(&funcs, true);
         let without_native = effective_classifications(&funcs, false);
         assert!(matches!(with_native[0].1, Classification::Fallback { .. }));
-        assert!(matches!(without_native[0].1, Classification::Fallback { .. }));
+        assert!(matches!(
+            without_native[0].1,
+            Classification::Fallback { .. }
+        ));
     }
 
     #[test]
@@ -1648,7 +1724,8 @@ mod tests {
 
     #[test]
     fn classify_all_collapses_a_single_signature_exactly_like_classify() {
-        let funcs = parse_dts("export declare function add(a: number, b: number): number;").unwrap();
+        let funcs =
+            parse_dts("export declare function add(a: number, b: number): number;").unwrap();
         let grouped = classify_all(&funcs);
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0], ("add".to_string(), classify(&funcs[0])));
@@ -1859,12 +1936,18 @@ mod tests {
         let wrapped = wrap_as_commonjs_module(js_source, &["escapeIt".to_string()]);
 
         let source = CString::new(wrapped).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "failed to load"
+        );
 
         let func = CString::new("escapeIt").unwrap();
         let args = CString::new("[\"hi\"]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, "\"[hi]\"");
     }
 
@@ -1900,13 +1983,22 @@ mod tests {
         );
 
         let source = CString::new(wrapped).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "failed to load"
+        );
 
         let func = CString::new("checkBuffer").unwrap();
         let args = CString::new("[1]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
-        assert_eq!(result, "false", "the guard should take its no-Buffer branch, not throw");
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            result, "false",
+            "the guard should take its no-Buffer branch, not throw"
+        );
     }
 
     /// The exact pattern found in the same real npm package (`@hapi/hoek`):
@@ -1924,7 +2016,11 @@ mod tests {
         );
 
         let source = CString::new(wrapped).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "failed to load"
+        );
     }
 
     /// The exact pattern chasing a real native addon's load path
@@ -1950,12 +2046,18 @@ mod tests {
         );
 
         let source = CString::new(wrapped).unwrap();
-        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1, "failed to load");
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(source.as_ptr()),
+            1,
+            "failed to load"
+        );
 
         let func = CString::new("readIt").unwrap();
         let args = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
-        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned();
+        let result = unsafe { CStr::from_ptr(result_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(result, "\"object,string,string,string\"");
     }
 
@@ -1975,13 +2077,18 @@ mod tests {
             "{init}\nfunction main(): void {{\n    console.log(String(callDynamic(\"greet\", JSON.parse(\"[]\"))));\n}}\n"
         );
 
-        let module = thaw_parser::parse_typescript(&program_source)
-            .unwrap_or_else(|e| panic!("generated module_init did not parse: {e}\n---\n{program_source}"));
-        let program = thaw_hir::lower_module(&module)
-            .unwrap_or_else(|e| panic!("generated module_init did not lower: {e}\n---\n{program_source}"));
+        let module = thaw_parser::parse_typescript(&program_source).unwrap_or_else(|e| {
+            panic!("generated module_init did not parse: {e}\n---\n{program_source}")
+        });
+        let program = thaw_hir::lower_module(&module).unwrap_or_else(|e| {
+            panic!("generated module_init did not lower: {e}\n---\n{program_source}")
+        });
 
         assert_eq!(program.functions.len(), 2);
-        assert!(program.functions.iter().any(|f| f.name == "__thaw_module_init"));
+        assert!(program
+            .functions
+            .iter()
+            .any(|f| f.name == "__thaw_module_init"));
         assert!(program.functions.iter().any(|f| f.name == "main"));
     }
 
@@ -2021,8 +2128,14 @@ mod tests {
         let qs_capture = init.find(r#"globalThis[\"qs::stringify\"]"#).unwrap();
         let hoek_load = init.find("// @hapi/hoek").unwrap();
         let hoek_capture = init.find(r#"globalThis[\"hoek::stringify\"]"#).unwrap();
-        assert!(qs_load < qs_capture, "qs's capture must come after qs's own load");
-        assert!(qs_capture < hoek_load, "qs's capture must come before hoek's load");
+        assert!(
+            qs_load < qs_capture,
+            "qs's capture must come after qs's own load"
+        );
+        assert!(
+            qs_capture < hoek_load,
+            "qs's capture must come before hoek's load"
+        );
         assert!(hoek_load < hoek_capture);
     }
 
@@ -2044,12 +2157,14 @@ mod tests {
     /// `addDays`'s `date: DateArg<DateType> & {}` parameter).
     #[test]
     fn fallback_reason_renders_intersection_and_generic_types_readably() {
-        let funcs =
-            parse_dts("export declare function f(x: DateArg<Date> & {}): void;").unwrap();
+        let funcs = parse_dts("export declare function f(x: DateArg<Date> & {}): void;").unwrap();
         let Classification::Fallback { reason, .. } = classify(&funcs[0]) else {
             panic!("expected Fallback");
         };
-        assert_eq!(reason, "parameter `x`: unsupported type `DateArg<Date> & {}`");
+        assert_eq!(
+            reason,
+            "parameter `x`: unsupported type `DateArg<Date> & {}`"
+        );
     }
 
     #[test]
@@ -2086,7 +2201,11 @@ mod tests {
             export declare function subtract(a: number, b: number): number;
         "#;
         let funcs = parse_dts(source).unwrap();
-        assert_eq!(funcs.len(), 3, "one bad parameter pattern must not delete sibling functions");
+        assert_eq!(
+            funcs.len(),
+            3,
+            "one bad parameter pattern must not delete sibling functions"
+        );
 
         assert!(matches!(
             classify(funcs.iter().find(|f| f.name == "add").unwrap()),

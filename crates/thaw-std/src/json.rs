@@ -20,7 +20,9 @@ use std::os::raw::c_char;
 use serde_json::Value;
 
 fn to_str(ptr: *const c_char) -> String {
-    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn leak(value: Value) -> *mut Value {
@@ -105,7 +107,9 @@ mod tests {
     }
 
     fn read_c_string(ptr: *const c_char) -> String {
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]
