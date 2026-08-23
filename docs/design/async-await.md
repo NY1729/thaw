@@ -390,7 +390,8 @@ LLVMは全child callを先に評価し、handle配列を`thaw_promise_all_f64`�
 変わらない。結果は`[i64 len][f64...]`へのpointerを格納したtyped result slotとして親Promiseへ
 渡し、通常のframe resume ABIから読み取る。
 
-最初に観測したreject pointerを保持し、それ以後の成功値は無視する。未完了childをLambda request
-境界の外へ残さないため、全child callbackを回収してhandleを破棄した時点で親をrejectする。
-runtime testは空配列、順序、最初のerror、3本の80ms timerが直列化されないことを検査する。
+最初に観測したreject pointerで親を即座にrejectし、それ以後の成功値は無視する。未完了childは
+親handle破棄後も独立したjoin stateで保持する。`thaw_runtime_drain_detached`を通常mainの終了前と
+Lambda arena reset直前に実行し、全child callbackとhandleをrequest境界内で回収する。
+runtime testは空配列、順序、最初のerror、親破棄後のdrain、3本の80ms timerが直列化されないことを検査する。
 LLVM E2Eはユーザー定義async関数、`if`、`while`、`try/catch`との合成を単一実行ファイルで検査する。
