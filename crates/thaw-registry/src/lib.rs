@@ -131,6 +131,34 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
     })
 }
 
+/// Resolves the deliberately small built-in surface exposed to user imports.
+/// The implementation is the same CommonJS polyfill already used while
+/// bundling npm dependencies, paired with a Thaw-friendly declaration whose
+/// fallback functions accept the existing JSON positional-argument array.
+pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
+    let name = specifier.strip_prefix("node:").unwrap_or(specifier);
+    let dts_source = match name {
+        "util" => "export declare function inspect(argsArray: any): any;\n",
+        "path" => {
+            "export declare function resolve(argsArray: any): any;\nexport declare function join(argsArray: any): any;\nexport declare function dirname(argsArray: any): any;\nexport declare function basename(argsArray: any): any;\nexport declare function normalize(argsArray: any): any;\n"
+        }
+        "process" => "export declare function cwd(argsArray: any): any;\n",
+        "buffer" => "export declare function byteLength(argsArray: any): any;\n",
+        _ => return Err(format!("unsupported Node built-in module `{specifier}`")),
+    };
+    let source = builtin_module_source(name)
+        .ok_or_else(|| format!("unsupported Node built-in module `{specifier}`"))?;
+    Ok(ResolvedPackage {
+        name: format!("node:{name}"),
+        dts_source: dts_source.to_string(),
+        native_lib: None,
+        native_addon: None,
+        bundle_js: Some(source.to_string()),
+        version: None,
+        dependency_versions: None,
+    })
+}
+
 /// Where a freshly `add`ed package's declarations/JS entry came from,
 /// inside the fetched package itself -- informational only, since the
 /// scratch directory these were read from is deleted before `add`
@@ -365,9 +393,8 @@ fn fetch_and_copy(
         .unwrap_or("0.0.0")
         .to_string();
 
-    let main_field = manifest
-        .get("main")
-        .and_then(|v| v.as_str())
+    let main_field = package_export_target(&manifest, &["require", "import", "default"])
+        .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
         .unwrap_or("index.js");
     let (js_source, js_relative_path, bundled_file_count, dependency_versions) =
         bundle_commonjs_package(&node_modules_dir, name, &package_dir, main_field)?;
@@ -505,6 +532,37 @@ fn read_manifest(package_dir: &Path) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("`{}` is not valid JSON: {e}", manifest_path.display()))
 }
 
+fn package_export_target<'a>(
+    manifest: &'a serde_json::Value,
+    conditions: &[&str],
+) -> Option<&'a str> {
+    fn select<'a>(value: &'a serde_json::Value, conditions: &[&str]) -> Option<&'a str> {
+        if let Some(path) = value.as_str() {
+            return Some(path);
+        }
+        let object = value.as_object()?;
+        for condition in conditions {
+            if let Some(path) = object
+                .get(*condition)
+                .and_then(|value| select(value, conditions))
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    let exports = manifest.get("exports")?;
+    if exports.is_string() {
+        return exports.as_str();
+    }
+    let root = exports
+        .as_object()
+        .and_then(|object| object.get("."))
+        .unwrap_or(exports);
+    select(root, conditions)
+}
+
 /// `package` has no bundled type declarations of its own -- fetch the
 /// corresponding DefinitelyTyped package instead. `@types/*` packages
 /// carry no runtime JS of their own (`main` is typically empty), just
@@ -548,6 +606,12 @@ fn types_package_name(package: &str) -> String {
 /// convention, e.g. left-pad/slugify). Returns both the path as recorded
 /// (relative to `package_dir`) and the resolved absolute path to read.
 fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(String, PathBuf)> {
+    if let Some(path) = package_export_target(manifest, &["types"]) {
+        let absolute = package_dir.join(path);
+        if absolute.is_file() {
+            return Some((path.to_string(), absolute));
+        }
+    }
     for field in ["types", "typings"] {
         if let Some(path) = manifest.get(field).and_then(|v| v.as_str()) {
             return Some((path.to_string(), package_dir.join(path)));
@@ -1096,7 +1160,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         // finds the same object either way. Only the couple of fields a
         // real package has actually been found to read.
         "process" => Some(
-            "var __thaw_process = { argv: [], env: {}, platform: 'linux', version: '', versions: {}, nextTick: function(fn) { fn(); } };\n\
+            "var __thaw_process = { argv: [], env: {}, platform: 'linux', version: '', versions: {}, cwd: function() { return '/'; }, nextTick: function(fn) { fn(); } };\n\
              module.exports = __thaw_process;\n\
              module.exports.default = __thaw_process;\n\
              module.exports.__esModule = true;\n",
@@ -1183,6 +1247,12 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = __thaw_fs;\n\
              module.exports.__esModule = true;\n",
         ),
+        "buffer" => Some(
+            "function byteLength(value) { return String(value).length; }\n\
+             module.exports = { byteLength: byteLength };\n\
+             module.exports.default = module.exports;\n\
+             module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -1197,9 +1267,8 @@ fn resolve_bare_require(
         Some(sub) => resolve_module_path(&dep_dir, sub).ok()?,
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            let main = manifest
-                .get("main")
-                .and_then(|v| v.as_str())
+            let main = package_export_target(&manifest, &["require", "import", "default"])
+                .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
                 .unwrap_or("index.js");
             resolve_module_path(&dep_dir, main).ok()?
         }
@@ -1322,6 +1391,31 @@ fn js_string_literal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_package_exports_conditions_for_runtime_and_types() {
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{
+                "main": "legacy.js",
+                "types": "legacy.d.ts",
+                "exports": { ".": {
+                    "types": "./dist/index.d.ts",
+                    "import": "./dist/index.mjs",
+                    "require": "./dist/index.cjs",
+                    "default": "./dist/index.js"
+                }}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            package_export_target(&manifest, &["require", "import", "default"]),
+            Some("./dist/index.cjs")
+        );
+        assert_eq!(
+            package_export_target(&manifest, &["types"]),
+            Some("./dist/index.d.ts")
+        );
+    }
 
     fn temp_registry(test_name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

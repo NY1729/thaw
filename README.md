@@ -120,6 +120,13 @@ The workspace crates have narrow responsibilities:
 - Relative user-module graphs (`./file`, `./file.ts`, and `./dir/index.ts`)
   with named/default imports, aliases, named re-exports, export-all,
   module-local symbol isolation, dependency deduplication and cycle diagnostics
+- Bare imports automatically resolve packages already installed in
+  `thaw_modules`, generate their existing native/QuickJS/N-API bridge, and
+  support named, default and namespace call syntax without a matching `--use`
+- Root package `exports` conditions select `types` and `require`/`import` entry
+  points during `registry add`, with `types`/`typings` and `main` fallbacks
+- Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
+  modules backed by the same QuickJS polyfills used by npm dependencies
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint
@@ -220,9 +227,8 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
-  tuples, broad union/intersection support, namespace imports, non-relative
-  user imports, anonymous default functions and the complete JavaScript
-  expression/statement set
+  tuples, broad union/intersection support, package subpath exports, anonymous
+  default functions and the complete JavaScript expression/statement set
 - Block-scoped locals inside nested control flow, nested/control-flow await,
   value-returning/general user-defined Promise async functions and concurrent
   promise combinators. Other user-defined async calls still use the synchronous

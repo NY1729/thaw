@@ -873,6 +873,27 @@ bridge.md 5章がスコープ外として保留していた項目: Fast path の
   フィールド展開は実装したが、戻り値側のマーシャリングと文字列の
   `(ptr, len)` 分割規約は未対応のまま。
 
+## 21. ユーザーコードの bare import と package exports
+
+`thaw build` は相対 TypeScript モジュールグラフを先に走査し、bare
+specifier を見つけると同名のローカルregistry packageを自動解決する。
+従来必要だった `--use` を明示しなくても、同じ `.d.ts` 分類、shim生成、
+`bundle.js` 初期化、native archive／N-API選択が行われる。named、default、
+namespace import はpackage固有のshim symbolへ変換されるため、同名exportを
+持つ複数packageも同じプログラムから利用できる。
+
+`registry add` のroot entry選択では、`package.json` の `exports["."]` を
+読み、型は `types` condition、実行時は `require`、`import`、`default` の
+順で選ぶ。該当conditionがなければ従来通りトップレベルの
+`types`/`typings` と `main` にフォールバックする。package subpath exports
+はまだ誤ってrootへ結び付けず、import元のファイル・行・列を含む診断として
+拒否する。
+
+`node:path`、`node:util`、`node:process`、`node:buffer` は11章でnpm内部の
+`require`向けに使ってきたpolyfillを、ユーザーのimportにも公開する。
+現在の呼び出し規約はQuickJS fallbackと同じく、位置引数を格納した1つの
+`Json` 配列である。
+
 ## 北極星: 「npm と同じ感覚で使える」こと
 
 このドキュメントの各章は、実在する npm パッケージを実際に試して
