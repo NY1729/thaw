@@ -2242,6 +2242,94 @@ mod tests {
     }
 
     #[test]
+    fn registry_runs_bcrypt_async_callbacks_when_supplied() {
+        let Ok(prebuild) = std::env::var("THAW_BCRYPT_NODE") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("thaw-cli-bcrypt-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let package = registry.join("bcrypt");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "declare function gen_salt(argsArray: Json): Json;\n\
+             declare function encrypt(argsArray: Json): Json;\n\
+             declare function compare(argsArray: Json): Json;\n",
+        )
+        .unwrap();
+        std::fs::copy(prebuild, package.join("native.node")).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            r#"function main(): void {
+                const saltQueued = callNativeAddonWithCallback(
+                    "gen_salt",
+                    JSON.parse("[\"b\",4,{\"type\":\"Buffer\",\"data\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(String(result));
+                        return result;
+                    }
+                );
+                const encryptQueued = callNativeAddonWithCallback(
+                    "encrypt",
+                    JSON.parse("[\"password\",\"$2b$04$abcdefghijklmnopqrstuu\"]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(String(result));
+                        return result;
+                    }
+                );
+                const compareQueued = callNativeAddonWithCallback(
+                    "compare",
+                    JSON.parse("[\"password\",\"$2b$04$abcdefghijklmnopqrstuu\"]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(Boolean(result));
+                        return result;
+                    }
+                );
+                const invalidQueued = callNativeAddonWithCallback(
+                    "encrypt",
+                    JSON.parse("[\"password\",\"invalid\"]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(String(error));
+                        return error;
+                    }
+                );
+            }"#,
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["bcrypt".into()],
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            stdout.lines().any(|line| line.starts_with("$2b$04$")),
+            "{stdout}"
+        );
+        assert!(stdout.lines().any(|line| line == "false"), "{stdout}");
+        assert!(
+            stdout.lines().any(|line| line.contains("Invalid salt")),
+            "{stdout}"
+        );
+        assert_eq!(stdout.lines().count(), 4, "{stdout}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn registry_add_fetches_and_runs_utf8_validate_when_enabled() {
         if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
             return;

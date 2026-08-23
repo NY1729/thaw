@@ -551,6 +551,14 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_call_with_callback_result",
+            result_type.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_run_async_work",
             self.context.i64_type().fn_type(&[], false),
             Some(Linkage::External),
@@ -4290,6 +4298,142 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_backend_call(args, "thaw_napi_call_result", "callNativeAddon")
     }
 
+    fn compile_call_native_addon_with_callback(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [name, call_args, callback] = args else {
+            return Err(
+                "callNativeAddonWithCallback expects a name, Json args, and callback".into(),
+            );
+        };
+        let callback_type = match callback {
+            HirExpr::Lambda(_, params, ret, _) => HirType::Function(
+                params.iter().map(|param| param.ty.clone()).collect(),
+                Box::new(ret.clone()),
+            ),
+            HirExpr::Var(name) => self
+                .variable_hir_types
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("unknown callback `{name}`"))?,
+            _ => {
+                return Err("callNativeAddonWithCallback callback must be a function value".into())
+            }
+        };
+        let HirType::Function(params, ret) = callback_type else {
+            return Err("callNativeAddonWithCallback third argument must be a function".into());
+        };
+        if params != vec![HirType::Json, HirType::Json] || *ret != HirType::Json {
+            return Err("native addon callback must have type (Json, Json) => Json".into());
+        }
+
+        self.uses_napi = true;
+        let name = self.compile_expr(name)?;
+        let args_json = self.compile_expr(call_args)?;
+        let closure = self.compile_expr(callback)?.into_pointer_value();
+        let stringify = self.module.get_function("thaw_json_stringify").unwrap();
+        let args_string = self
+            .builder
+            .build_call(stringify, &[args_json.into()], "napi_callback_args")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+
+        let callback_name = format!("__thaw_napi_callback_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let adapter_type = self
+            .context
+            .void_type()
+            .fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let adapter =
+            self.module
+                .add_function(&callback_name, adapter_type, Some(Linkage::Internal));
+        let return_block = self.builder.get_insert_block().unwrap();
+        let adapter_entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(adapter_entry);
+        let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
+        let error_string = adapter.get_nth_param(1).unwrap();
+        let result_string = adapter.get_nth_param(2).unwrap();
+        let parse = self.module.get_function("thaw_json_parse").unwrap();
+        let error_json = self
+            .builder
+            .build_call(parse, &[error_string.into()], "callback_error")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result_json = self
+            .builder
+            .build_call(parse, &[result_string.into()], "callback_result")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let code = self
+            .builder
+            .build_load(ptr_type, context, "callback_code")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let closure_type = self.function_type(&params, &ret)?;
+        self.builder
+            .build_indirect_call(
+                closure_type,
+                code,
+                &[context.into(), error_json.into(), result_json.into()],
+                "invoke_thaw_callback",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(return_block);
+
+        let call = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_call_with_callback_result")
+                    .unwrap(),
+                &[
+                    name.into(),
+                    args_string.into(),
+                    adapter.as_global_value().as_pointer_value().into(),
+                    closure.into(),
+                ],
+                "call_napi_with_callback",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(call, 0, "napi_callback_value")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let error = self
+            .builder
+            .build_extract_value(call, 1, "napi_callback_error")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "napi_callback_queued_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse did not return a value".into())
+    }
+
     fn compile_json_backend_call(
         &mut self,
         args: &[HirExpr],
@@ -4706,6 +4850,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "loadNativeAddon" => return self.compile_load_native_addon(args),
             "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
             "callNativeAddon" => return self.compile_call_native_addon(args),
+            "callNativeAddonWithCallback" => {
+                return self.compile_call_native_addon_with_callback(args)
+            }
             _ => {}
         }
 
@@ -6250,7 +6397,8 @@ mod tests {
             extern napi_status napi_create_async_work(napi_env, napi_value, napi_value, void (*)(napi_env, void*), void (*)(napi_env, napi_status, void*), void*, napi_async_work*);
             extern napi_status napi_queue_async_work(napi_env, napi_async_work);
             extern napi_status napi_delete_async_work(napi_env, napi_async_work);
-            struct async_data { napi_env env; napi_async_work work; int answer; };
+            extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
+            struct async_data { napi_env env; napi_async_work work; napi_value callback; int answer; };
             static napi_value add(napi_env env, napi_callback_info info) {
                 size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
                 napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -6266,13 +6414,19 @@ mod tests {
             static void complete_async(napi_env env, napi_status status, void* raw) {
                 struct async_data* data = raw;
                 printf("async %d status %d\n", data->answer, status);
+                napi_value args[2], ignored;
+                napi_get_undefined(env, &args[0]);
+                napi_create_double(env, data->answer, &args[1]);
+                napi_call_function(env, args[0], data->callback, 2, args, &ignored);
+                napi_call_function(env, args[0], data->callback, 2, args, &ignored);
                 napi_delete_async_work(env, data->work);
                 free(data);
             }
             static napi_value schedule(napi_env env, napi_callback_info info) {
-                (void)info;
                 struct async_data* data = calloc(1, sizeof(*data));
+                size_t argc = 1;
                 napi_value result;
+                napi_get_cb_info(env, info, &argc, &data->callback, 0, 0);
                 data->env = env;
                 napi_create_async_work(env, 0, 0, execute_async, complete_async, data, &data->work);
                 napi_queue_async_work(env, data->work);
@@ -6308,7 +6462,14 @@ mod tests {
                 }} catch (error) {{
                     console.log(error);
                 }}
-                const scheduled = callNativeAddon("schedule", JSON.parse("[]"));
+                const scheduled = callNativeAddonWithCallback(
+                    "schedule",
+                    JSON.parse("[]"),
+                    (error: Json, result: Json): Json => {{
+                        console.log(Number(result));
+                        return result;
+                    }}
+                );
             }}
         "#,
             addon.display()
@@ -6344,7 +6505,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "42\nnative addon failed\nasync 42 status 0\n"
+            "42\nnative addon failed\nasync 42 status 0\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

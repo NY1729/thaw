@@ -418,6 +418,18 @@ private Symbol propertyとして管理するため、FunctionもObjectと同様�
 `THAW_BCRYPT_NODE`で有効になる実package testは、公式`.node`をロードして
 `gen_salt_sync`と`encrypt_sync`を実行し、さらにcallbackを渡した`gen_salt`を共有
 worker poolで実行する。生成されたsaltがmain-thread complete callbackへ返るところまで
-検証する。次の課題はJsonだけに限定されている`callNativeAddon`引数へコンパイル済み
-Function値を渡せるcallback bridgeを追加し、この非同期呼び出しを生成実行ファイルの
-TypeScriptから直接表現することである。
+検証する。
+
+## 15. コンパイル済みcallback bridge
+
+`callNativeAddonWithCallback(name, args, callback)`は、従来のJson引数に生成コードの
+`(Json, Json) => Json` closureを追加する。LLVMはclosure環境をcontextとして渡し、
+N-API hostが作ったFunction値の呼び出しをC ABI adapterで受ける。adapterはerror/result
+JSON文字列を`thaw_json_parse`してclosureをmain threadで呼ぶ。非同期workが残る間は
+呼び出し用`Env`とFunction/referenceをhostが保持し、drain完了後にまとめて解放する。
+
+実C addon E2Eは同一callbackの複数回呼び出しとprocess終了前drainを検証する。
+`THAW_BCRYPT_NODE`付きCLI E2Eは公式prebuildを実行ファイルへ埋め込み、registry削除後に
+`gen_salt`、`encrypt`、`compare`を並行実行する。成功値だけでなく不正saltのerror引数も
+生成lambdaへ戻ることを検査する。待機中workのcancelとcancelled statusはhost unit test
+で競合を固定して検証済みである。
