@@ -10,6 +10,7 @@ use thaw_parser::ast::{
 #[derive(Debug)]
 struct LoadedModule {
     path: PathBuf,
+    source: String,
     module: Module,
     dependencies: HashMap<String, usize>,
 }
@@ -109,7 +110,11 @@ fn load_module(
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
     let mut dependencies = HashMap::new();
     for specifier in dependency_specifiers(&module)? {
-        let dependency_path = resolve_relative(&path, &specifier)?;
+        if !specifier.starts_with('.') {
+            continue;
+        }
+        let dependency_path = resolve_relative(&path, &specifier)
+            .map_err(|error| format!("{}: {error}", source_location(&path, &source, &specifier)))?;
         let dependency = load_module(dependency_path, None, modules, loaded, visiting)?;
         dependencies.insert(specifier, dependency);
     }
@@ -117,6 +122,7 @@ fn load_module(
     let index = modules.len();
     modules.push(LoadedModule {
         path: path.clone(),
+        source,
         module,
         dependencies,
     });
@@ -124,8 +130,28 @@ fn load_module(
     Ok(index)
 }
 
+fn module_location(module: &LoadedModule, specifier: &str) -> String {
+    source_location(&module.path, &module.source, specifier)
+}
+
+fn source_location(path: &Path, source: &str, specifier: &str) -> String {
+    let quoted = [format!("\"{specifier}\""), format!("'{specifier}'")];
+    let offset = quoted
+        .iter()
+        .find_map(|needle| source.find(needle))
+        .unwrap_or(0);
+    let before = &source[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = before
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail.chars().count() + 1)
+        .unwrap_or_else(|| before.chars().count() + 1);
+    format!("{}:{line}:{column}", path.display())
+}
+
 struct RenameReferences<'a> {
     names: &'a HashMap<String, String>,
+    namespaces: &'a HashMap<String, HashMap<String, String>>,
 }
 
 impl RenameReferences<'_> {
@@ -140,8 +166,25 @@ impl VisitMut for RenameReferences<'_> {
     fn visit_mut_call_expr(&mut self, call: &mut thaw_parser::ast::CallExpr) {
         call.visit_mut_children_with(self);
         if let Callee::Expr(callee) = &mut call.callee {
-            if let Expr::Ident(ident) = &mut **callee {
-                self.rename_ident(ident);
+            match &mut **callee {
+                Expr::Ident(ident) => self.rename_ident(ident),
+                Expr::Member(member) => {
+                    if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(property)) =
+                        (&*member.obj, &member.prop)
+                    {
+                        if let Some(target) = self
+                            .namespaces
+                            .get(namespace.sym.as_ref())
+                            .and_then(|exports| exports.get(property.sym.as_ref()))
+                        {
+                            **callee = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                                target.clone().into(),
+                                member.span,
+                            ));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -201,7 +244,39 @@ fn declared_names(module: &Module) -> Vec<String> {
         .collect()
 }
 
-pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
+pub fn external_specifiers(
+    entry: &Path,
+    entry_source: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let entry = entry
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?;
+    let mut modules = Vec::new();
+    load_module(
+        entry,
+        Some(entry_source),
+        &mut modules,
+        &mut HashMap::new(),
+        &mut Vec::new(),
+    )?;
+    let mut result = Vec::new();
+    for module in modules {
+        for specifier in dependency_specifiers(&module.module)? {
+            if !specifier.starts_with('.')
+                && !result.iter().any(|(existing, _)| existing == &specifier)
+            {
+                result.push((specifier.clone(), module_location(&module, &specifier)));
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub fn bundle(
+    entry: &Path,
+    entry_source: &str,
+    external_exports: &HashMap<String, HashMap<String, String>>,
+) -> Result<Module, String> {
     let entry = entry
         .canonicalize()
         .map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?;
@@ -220,6 +295,7 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
     for index in 0..modules.len() {
         let is_entry = index == entry_index;
         let mut names = HashMap::new();
+        let mut namespaces = HashMap::new();
         for name in declared_names(&modules[index].module) {
             let replacement = if is_entry && matches!(name.as_str(), "main" | "handler") {
                 name.clone()
@@ -236,7 +312,17 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                 let specifier = import.src.value.as_str().ok_or_else(|| {
                     format!("invalid import in `{}`", modules[index].path.display())
                 })?;
-                let dependency = modules[index].dependencies[specifier];
+                let dependency_exports = modules[index]
+                    .dependencies
+                    .get(specifier)
+                    .map(|dependency| &exports[*dependency])
+                    .or_else(|| external_exports.get(specifier))
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: unresolved module `{specifier}`",
+                            module_location(&modules[index], specifier)
+                        )
+                    })?;
                 for imported in &import.specifiers {
                     let (local, requested) = match imported {
                         ImportSpecifier::Named(named) => (
@@ -251,14 +337,18 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                         ImportSpecifier::Default(default) => {
                             (default.local.sym.to_string(), "default".to_string())
                         }
-                        ImportSpecifier::Namespace(_) => {
-                            return Err("namespace imports are not supported yet".to_string())
+                        ImportSpecifier::Namespace(namespace) => {
+                            namespaces.insert(
+                                namespace.local.sym.to_string(),
+                                dependency_exports.clone(),
+                            );
+                            continue;
                         }
                     };
-                    let target = exports[dependency].get(&requested).ok_or_else(|| {
+                    let target = dependency_exports.get(&requested).ok_or_else(|| {
                         format!(
-                            "`{specifier}` has no export named `{requested}` (imported by `{}`)",
-                            modules[index].path.display()
+                            "{}: `{specifier}` has no export named `{requested}`",
+                            module_location(&modules[index], specifier)
                         )
                     })?;
                     names.insert(local, target.clone());
@@ -271,7 +361,10 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
         for item in modules[index].module.body.clone() {
             match item {
                 ModuleItem::Stmt(mut statement) => {
-                    statement.visit_mut_with(&mut RenameReferences { names: &names });
+                    statement.visit_mut_with(&mut RenameReferences {
+                        names: &names,
+                        namespaces: &namespaces,
+                    });
                     items.push(ModuleItem::Stmt(statement));
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::Import(_)) => {}
@@ -281,9 +374,10 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                         Decl::TsInterface(decl) => Some(decl.id.sym.to_string()),
                         _ => None,
                     };
-                    export
-                        .decl
-                        .visit_mut_with(&mut RenameReferences { names: &names });
+                    export.decl.visit_mut_with(&mut RenameReferences {
+                        names: &names,
+                        namespaces: &namespaces,
+                    });
                     if let Some(original) = original {
                         public.insert(original.clone(), names[&original].clone());
                     }
@@ -292,7 +386,14 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                 ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) => {
                     let source_exports = if let Some(source) = &export.src {
                         let specifier = source.value.as_str().ok_or("invalid re-export")?;
-                        Some(&exports[modules[index].dependencies[specifier]])
+                        Some(
+                            modules[index]
+                                .dependencies
+                                .get(specifier)
+                                .map(|dependency| &exports[*dependency])
+                                .or_else(|| external_exports.get(specifier))
+                                .ok_or_else(|| format!("unresolved re-export `{specifier}`"))?,
+                        )
                     } else {
                         None
                     };
@@ -327,9 +428,10 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                                     "anonymous default functions are not supported yet".to_string()
                                 );
                             };
-                            function
-                                .function
-                                .visit_mut_with(&mut RenameReferences { names: &names });
+                            function.function.visit_mut_with(&mut RenameReferences {
+                                names: &names,
+                                namespaces: &namespaces,
+                            });
                             let mut ident = function.ident.take().unwrap();
                             if let Some(replacement) = names.get(&original) {
                                 ident.sym = replacement.clone().into();
@@ -345,7 +447,10 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                         }
                         thaw_parser::ast::DefaultDecl::TsInterfaceDecl(interface) => {
                             let original = interface.id.sym.to_string();
-                            interface.visit_mut_with(&mut RenameReferences { names: &names });
+                            interface.visit_mut_with(&mut RenameReferences {
+                                names: &names,
+                                namespaces: &namespaces,
+                            });
                             public.insert("default".to_string(), interface.id.sym.to_string());
                             items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(
                                 Decl::TsInterface(interface.clone()),
@@ -357,8 +462,13 @@ pub fn bundle(entry: &Path, entry_source: &str) -> Result<Module, String> {
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
                     let specifier = export.src.value.as_str().ok_or("invalid export-all")?;
-                    let dependency = modules[index].dependencies[specifier];
-                    for (name, target) in &exports[dependency] {
+                    let dependency_exports = modules[index]
+                        .dependencies
+                        .get(specifier)
+                        .map(|dependency| &exports[*dependency])
+                        .or_else(|| external_exports.get(specifier))
+                        .ok_or_else(|| format!("unresolved export-all `{specifier}`"))?;
+                    for (name, target) in dependency_exports {
                         if name != "default"
                             && public.insert(name.clone(), target.clone()).is_some()
                         {
