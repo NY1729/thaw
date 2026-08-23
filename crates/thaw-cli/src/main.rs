@@ -2429,6 +2429,45 @@ mod tests {
             &["@parcel/watcher".into()],
         )
         .unwrap();
+        let event_file = watched.join("event.txt");
+        let subscribe_args =
+            serde_json::to_string(&serde_json::json!([watched.to_string_lossy()])).unwrap();
+        let subscribe_literal = serde_json::to_string(&subscribe_args).unwrap();
+        let event_source = dir.join("events.ts");
+        let event_output = dir.join("events-app");
+        std::fs::write(
+            &event_source,
+            format!(
+                r#"import * as fs from "node:fs";
+                function main(): void {{
+                    let received: number = 0;
+                    const callback = (error: Json, result: Json): Json => {{
+                        received = 1;
+                        return result;
+                    }};
+                    const subscribed: Json = callNativeAddonWithCallback("subscribe", JSON.parse({subscribe_literal}), callback);
+                    fs.writeFileSync("{}", "event");
+                    while (received < 1) {{
+                        const count: number = pollNativeAddonEvents();
+                    }}
+                    const unsubscribed: Json = callNativeAddonWithCallback("unsubscribe", JSON.parse({subscribe_literal}), callback);
+                    console.log("watch-event");
+                }}
+                "#,
+                event_file.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        build(
+            &event_source,
+            &event_output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["@parcel/watcher".into()],
+        )
+        .unwrap();
         std::fs::remove_dir_all(&registry).unwrap();
         let result = Command::new(&output).output().unwrap();
         assert!(
@@ -2441,6 +2480,14 @@ mod tests {
             "snapshot-created\n"
         );
         assert!(snapshot.is_file());
+        let result = Command::new(&event_output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "watch-event\n");
+        assert!(event_file.is_file());
         let _ = std::fs::remove_dir_all(dir);
     }
 

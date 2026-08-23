@@ -351,11 +351,17 @@ main-thread completion and cancellation for the core async-work lifecycle.
 Thread-safe functions provide bounded blocking/nonblocking queues, worker-thread
 submission, main-thread callback dispatch, acquire/release and ref/unref
 lifecycle management, abort cleanup, and finalization.
+Compiled callback identities are stable across native calls, and
+`pollNativeAddonEvents()` lets a running program dispatch ready callbacks
+before its final drain. Environment cleanup hooks run before addon unload;
+unload is refused while native async work or thread-safe functions remain.
 N-API deferred Promises are settled through the same main-thread poller. The
 official `@parcel/watcher@2.5.1` Linux prebuild is verified by creating a real
 filesystem event subscription and by embedding its platform-specific optional
 dependency into a standalone executable that writes a snapshot after the
-registry directory has been removed.
+registry directory has been removed. A second standalone executable performs
+subscribe, filesystem mutation, event polling, callback delivery, unsubscribe,
+cleanup and normal process exit.
 Class-style addons can use `napi_define_class`, wrapped native instance data,
 prototype methods/accessors, construction, `instanceof`, and wrap finalizers.
 `thaw registry add`

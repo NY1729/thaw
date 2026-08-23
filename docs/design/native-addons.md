@@ -502,3 +502,27 @@ registryは現在のOS／architecture／libc suffixに一致するoptional depen
 `.node`なら自動選択し、従来と同じ`native.node`／`native-addon.json`へ格納する。
 `THAW_RUN_NPM_INTEGRATION=1`のCLI E2Eは実npm packageを取得し、snapshot実行ファイルをbuild、
 registry削除後の単独実行まで確認する。
+
+## 20. callback identityと実行中poll
+
+`callNativeAddonWithCallback`のLLVM adapterは呼び出し地点ごとに別symbolになるが、同じ
+closure valueのcontext pointerは安定している。hostはcontextをidentity keyとして生成済み
+N-API Functionを保持し、subscribeとunsubscribeが異なる呼び出し地点でも同じ`napi_value`を
+受け取れるようにする。最後のTSFNがfinalizeされた時点でcallback cacheと保持Envを破棄する。
+
+`pollNativeAddonEvents(): number`は`thaw_napi_poll_async_work`を呼び、現在readyなasync completion
+とTSFN callbackだけをmain threadで処理して待たずに返る。Parcel CLI E2Eは生成された単一
+実行ファイル内でsubscribeし、`node:fs`でファイルを作り、event到着までpollし、同じclosureで
+unsubscribeする。registry削除後の実行、event受信、正常終了まで検証する。
+
+## 21. cleanup、unload、fatal callback
+
+`napi_add_env_cleanup_hook`／`napi_remove_env_cleanup_hook`を実装し、Env破棄時に登録と逆順で
+cleanup hookを実行する。`thaw_napi_unload_all`はactive async-workまたはlive TSFNがあれば拒否
+する。安全に停止済みならcallback cacheとEnvを先に破棄してcleanup hook／finalizerをaddon
+codeがmappedな間に実行し、その後library handleを逆順に`dlclose`する。生成mainは最終drain後
+にunloadを呼ぶ。
+
+`napi_fatal_exception`は診断をstderrへ出し、process failure flagを設定する。生成mainはcleanup
+後にflagを一度だけ取得し、未処理callback例外があれば終了status 1を返す。cleanup hookのLIFO、
+remove、active TSFN中のunload拒否、fatal statusのconsume-onceをhost testで固定する。

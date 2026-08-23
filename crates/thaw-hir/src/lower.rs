@@ -2104,6 +2104,7 @@ impl<'a> FnLowerer<'a> {
                     "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
                     "callNativeAddon" => return Ok(HirType::Json),
                     "callNativeAddonWithCallback" => return Ok(HirType::Json),
+                    "pollNativeAddonEvents" => return Ok(HirType::F64),
                     _ => {}
                 }
                 if let Some(HirType::Function(params, ret)) = self.scope.get(name) {
