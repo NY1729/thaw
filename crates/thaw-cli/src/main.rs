@@ -469,7 +469,7 @@ fn generate_registry_shims(
         std::collections::HashMap::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
-    let mut native_addons: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut native_addons: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
     let no_qualified: Vec<thaw_bridge::QualifiedFallback> = Vec::new();
 
     for pkg in &resolved {
@@ -506,9 +506,15 @@ fn generate_registry_shims(
             native_libs.push(native_lib.clone());
         }
         if let Some(native_addon) = &pkg.native_addon {
+            let bytes = std::fs::read(native_addon).map_err(|error| {
+                format!(
+                    "failed to embed native addon `{}`: {error}",
+                    native_addon.display()
+                )
+            })?;
             native_addons.push((
                 pkg.name.clone(),
-                native_addon.to_string_lossy().into_owned(),
+                bytes,
                 (pkg.functions.len() == 1).then(|| pkg.functions[0].name.clone()),
             ));
         } else if let Some(bundle_js) = &pkg.bundle_js {
@@ -551,9 +557,9 @@ fn generate_registry_shims(
     shim.push_str(&thaw_bridge::generate_module_init(&module_bundles));
     let native_addons: Vec<thaw_bridge::NativeAddon<'_>> = native_addons
         .iter()
-        .map(|(name, path, root_export)| thaw_bridge::NativeAddon {
+        .map(|(name, bytes, root_export)| thaw_bridge::NativeAddon {
             package_name: name,
-            path,
+            bytes,
             root_export: root_export.as_deref(),
         })
         .collect();
@@ -1630,6 +1636,7 @@ mod tests {
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
         let result = Command::new(&output).output().unwrap();
         assert!(
             result.status.success(),

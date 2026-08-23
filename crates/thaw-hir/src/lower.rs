@@ -1953,6 +1953,7 @@ impl<'a> FnLowerer<'a> {
                     "loadScript" => return Ok(HirType::Bool),
                     "callDynamic" => return Ok(HirType::Json),
                     "loadNativeAddon" => return Ok(HirType::Bool),
+                    "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
                     "callNativeAddon" => return Ok(HirType::Json),
                     _ => {}
                 }
