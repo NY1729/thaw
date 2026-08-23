@@ -269,6 +269,10 @@ The workspace crates have narrow responsibilities:
   parent branch, and conditions plus branch bodies may both suspend
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
+- `Promise.all` joins a literal list of `Promise<number>` concurrently,
+  preserves input order, supports empty arrays, composes with async
+  `if`/`while`/`try`, and routes the first observed rejection to the nearest
+  catch after safely collecting every child
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result
@@ -286,10 +290,11 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
-- Block-scoped locals inside nested control flow, nested/control-flow await,
-  value-returning/general user-defined Promise async functions and concurrent
-  promise combinators. Other user-defined async calls still use the synchronous
-  V1 ABI
+- Block-scoped locals inside nested control flow and fully general
+  value-returning Promise APIs. `Promise.all` currently accepts only an array
+  literal of homogeneous `Promise<number>` values; heterogeneous tuples,
+  `Promise.race`/`any`/`allSettled`, and arbitrary Promise arrays remain
+  unsupported
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
