@@ -6,4 +6,5 @@
 //! thaw-runtime are.
 
 mod fetch;
+mod fs;
 mod json;

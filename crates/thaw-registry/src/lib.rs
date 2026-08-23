@@ -153,6 +153,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         }
         "process" => "export declare function cwd(argsArray: any): any;\n",
         "buffer" => "export declare function byteLength(argsArray: any): any;\n",
+        "fs" => {
+            "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
+        }
         _ => return Err(format!("unsupported Node built-in module `{specifier}`")),
     };
     let source = builtin_module_source(name)
