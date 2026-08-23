@@ -2,7 +2,27 @@ use std::ffi::{CStr, CString};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::raw::{c_char, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(test)]
+use thaw_runtime as _;
+
+unsafe extern "C" {
+    fn thaw_runtime_watch_fd(
+        fd: i32,
+        interests: u8,
+        callback: extern "C" fn(*mut u8, i16),
+        context: *mut u8,
+    ) -> u64;
+    fn thaw_runtime_unwatch_fd(id: u64) -> bool;
+    fn thaw_runtime_run_one_event() -> bool;
+}
+
+const THAW_FD_READABLE: u8 = 1;
+const THAW_FD_WRITABLE: u8 = 2;
+const MAX_REQUEST_HEAD: usize = 64 * 1024;
 
 fn string_from_ptr(value: *const c_char) -> String {
     if value.is_null() {
@@ -64,7 +84,14 @@ fn handle_stream(
     let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
     let method = request_line.next().unwrap_or("GET").to_string();
     let target = request_line.next().unwrap_or("/").to_string();
-    let response_spec = response_for(&method, &target);
+    let response = render_response(response_for(&method, &target));
+    stream
+        .write_all(&response)
+        .map_err(|error| format!("response write failed: {error}"))?;
+    Ok(target)
+}
+
+fn render_response(response_spec: ResponseSpec) -> Vec<u8> {
     let reason = match response_spec.status {
         201 => "Created",
         204 => "No Content",
@@ -85,10 +112,7 @@ fn handle_stream(
         response_spec.body.len(),
         response_spec.body
     ));
-    stream
-        .write_all(response.as_bytes())
-        .map_err(|error| format!("response write failed: {error}"))?;
-    Ok(target)
+    response.into_bytes()
 }
 
 /// Invokes a Thaw closure with the request target and uses its returned string
@@ -271,22 +295,288 @@ fn run_server_many(port: f64, state: &ServerState, count: usize) -> String {
 struct ServerState {
     callback: usize,
     closed: AtomicBool,
+    listener: Mutex<Option<TcpListener>>,
+    watcher: AtomicU64,
+    connections: AtomicUsize,
+    listen_callback: AtomicUsize,
+    close_callback: AtomicUsize,
+}
+
+fn active_servers() -> &'static Mutex<Vec<usize>> {
+    static SERVERS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+    SERVERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct ConnectionState {
+    stream: TcpStream,
+    server: *const ServerState,
+    request: Vec<u8>,
+    response: Vec<u8>,
+    written: usize,
+    watcher: u64,
+}
+
+fn register_server(state: *const ServerState) {
+    let address = state as usize;
+    let mut servers = active_servers().lock().unwrap();
+    if !servers.contains(&address) {
+        servers.push(address);
+    }
+}
+
+/// Drives all listeners registered by `Server.listen`. Generated native entry
+/// points call this after the user's main function has returned.
+#[no_mangle]
+pub extern "C" fn thaw_http_run_servers() {
+    loop {
+        {
+            let mut servers = active_servers().lock().unwrap();
+            servers.retain(|address| {
+                let state = unsafe { &*(*address as *const ServerState) };
+                invoke_pending_callback(&state.listen_callback);
+                if state.closed.load(Ordering::Acquire) {
+                    let watcher = state.watcher.swap(0, Ordering::AcqRel);
+                    if watcher != 0 {
+                        unsafe { thaw_runtime_unwatch_fd(watcher) };
+                    }
+                    *state.listener.lock().unwrap() = None;
+                    if state.connections.load(Ordering::Acquire) == 0 {
+                        invoke_pending_callback(&state.close_callback);
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            });
+            if servers.is_empty() && ACTIVE_CONNECTIONS.load(Ordering::Acquire) == 0 {
+                return;
+            }
+        }
+        if !unsafe { thaw_runtime_run_one_event() } {
+            return;
+        }
+    }
+}
+
+fn invoke_pending_callback(slot: &AtomicUsize) {
+    let callback = slot.swap(0, Ordering::AcqRel) as *const c_void;
+    if callback.is_null() {
+        return;
+    }
+    unsafe {
+        type Callback = unsafe extern "C" fn(*const c_void);
+        let code = *(callback as *const *const c_void);
+        let callback_fn: Callback = std::mem::transmute(code);
+        callback_fn(callback);
+    }
+}
+
+extern "C" fn server_listener_ready(context: *mut u8, _events: i16) {
+    let state = unsafe { &*(context as *const ServerState) };
+    if state.closed.load(Ordering::Acquire) {
+        return;
+    }
+    let accepted = {
+        let listener = state.listener.lock().unwrap();
+        listener.as_ref().map(TcpListener::accept)
+    };
+    match accepted {
+        Some(Ok((stream, _))) => register_connection(stream, state),
+        Some(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Some(Err(_)) | None => state.closed.store(true, Ordering::Release),
+    }
+}
+
+fn register_connection(stream: TcpStream, server: &ServerState) {
+    if stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    let connection = Box::into_raw(Box::new(ConnectionState {
+        stream,
+        server,
+        request: Vec::new(),
+        response: Vec::new(),
+        written: 0,
+        watcher: 0,
+    }));
+    let watcher = unsafe {
+        thaw_runtime_watch_fd(
+            (*connection).stream.as_raw_fd(),
+            THAW_FD_READABLE,
+            connection_ready,
+            connection.cast(),
+        )
+    };
+    if watcher == 0 {
+        unsafe { drop(Box::from_raw(connection)) };
+        return;
+    }
+    unsafe { (*connection).watcher = watcher };
+    ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
+    server.connections.fetch_add(1, Ordering::AcqRel);
+}
+
+extern "C" fn connection_ready(context: *mut u8, _events: i16) {
+    let connection = unsafe { &mut *(context as *mut ConnectionState) };
+    if connection.response.is_empty() {
+        if !read_request(connection) {
+            return;
+        }
+    }
+    write_response(connection);
+}
+
+fn read_request(connection: &mut ConnectionState) -> bool {
+    let mut chunk = [0_u8; 4096];
+    loop {
+        match connection.stream.read(&mut chunk) {
+            Ok(0) => {
+                finish_connection(connection);
+                return false;
+            }
+            Ok(length) => {
+                connection.request.extend_from_slice(&chunk[..length]);
+                if connection.request.len() > MAX_REQUEST_HEAD {
+                    finish_connection(connection);
+                    return false;
+                }
+                if connection
+                    .request
+                    .windows(4)
+                    .any(|bytes| bytes == b"\r\n\r\n")
+                {
+                    let request = String::from_utf8_lossy(&connection.request);
+                    let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
+                    let method = request_line.next().unwrap_or("GET");
+                    let target = request_line.next().unwrap_or("/");
+                    let server = unsafe { &*connection.server };
+                    connection.response = render_response(invoke_server_callback(
+                        server.callback as *const c_void,
+                        method,
+                        target,
+                    ));
+                    return true;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return false,
+            Err(_) => {
+                finish_connection(connection);
+                return false;
+            }
+        }
+    }
+}
+
+fn write_response(connection: &mut ConnectionState) {
+    while connection.written < connection.response.len() {
+        match connection
+            .stream
+            .write(&connection.response[connection.written..])
+        {
+            Ok(0) => {
+                finish_connection(connection);
+                return;
+            }
+            Ok(length) => connection.written += length,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                rewatch_connection(connection, THAW_FD_WRITABLE);
+                return;
+            }
+            Err(_) => {
+                finish_connection(connection);
+                return;
+            }
+        }
+    }
+    finish_connection(connection);
+}
+
+fn rewatch_connection(connection: &mut ConnectionState, interests: u8) {
+    unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
+    connection.watcher = unsafe {
+        thaw_runtime_watch_fd(
+            connection.stream.as_raw_fd(),
+            interests,
+            connection_ready,
+            (connection as *mut ConnectionState).cast(),
+        )
+    };
+    if connection.watcher == 0 {
+        finish_connection(connection);
+    }
+}
+
+fn finish_connection(connection: &mut ConnectionState) {
+    if connection.watcher != 0 {
+        unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
+        connection.watcher = 0;
+    }
+    ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+    unsafe { &*connection.server }
+        .connections
+        .fetch_sub(1, Ordering::AcqRel);
+    unsafe { drop(Box::from_raw(connection as *mut ConnectionState)) };
 }
 
 #[repr(C)]
 struct Server {
     listen: *const NativeClosure,
+    listen_with_callback: *const NativeClosure,
     listen_many: *const NativeClosure,
     close: *const NativeClosure,
+    close_with_callback: *const NativeClosure,
 }
 
 unsafe extern "C" fn server_listen(environment: *const c_void, port: f64) -> *const c_char {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
+    if !port.is_finite() || port < 0.0 || port > u16::MAX as f64 {
+        return CString::new("").unwrap().into_raw();
+    }
+    let Ok(listener) = TcpListener::bind(("127.0.0.1", port as u16)) else {
+        return CString::new("").unwrap().into_raw();
+    };
+    if listener.set_nonblocking(true).is_err() {
+        return CString::new("").unwrap().into_raw();
+    }
     state.closed.store(false, Ordering::Release);
-    CString::new(run_server_many(port, state, usize::MAX))
-        .unwrap_or_default()
-        .into_raw()
+    *state.listener.lock().unwrap() = Some(listener);
+    let old_watcher = state.watcher.swap(0, Ordering::AcqRel);
+    if old_watcher != 0 {
+        thaw_runtime_unwatch_fd(old_watcher);
+    }
+    let fd = state.listener.lock().unwrap().as_ref().unwrap().as_raw_fd();
+    let watcher = thaw_runtime_watch_fd(
+        fd,
+        THAW_FD_READABLE,
+        server_listener_ready,
+        (state as *const ServerState).cast_mut().cast(),
+    );
+    if watcher == 0 {
+        state.closed.store(true, Ordering::Release);
+        *state.listener.lock().unwrap() = None;
+        return CString::new("").unwrap().into_raw();
+    }
+    state.watcher.store(watcher, Ordering::Release);
+    register_server(state);
+    CString::new("").unwrap().into_raw()
+}
+
+unsafe extern "C" fn server_listen_with_callback(
+    environment: *const c_void,
+    port: f64,
+    callback: *const c_void,
+) -> *const c_char {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    state
+        .listen_callback
+        .store(callback as usize, Ordering::Release);
+    server_listen(environment, port)
 }
 
 unsafe extern "C" fn server_listen_many(
@@ -310,7 +600,28 @@ unsafe extern "C" fn server_listen_many(
 unsafe extern "C" fn server_close(environment: *const c_void) -> bool {
     let closure = &*(environment as *const NativeClosure);
     let state = &*(closure.context as *const ServerState);
-    !state.closed.swap(true, Ordering::AcqRel)
+    close_server_state(state)
+}
+
+unsafe extern "C" fn server_close_with_callback(
+    environment: *const c_void,
+    callback: *const c_void,
+) -> bool {
+    let closure = &*(environment as *const NativeClosure);
+    let state = &*(closure.context as *const ServerState);
+    state
+        .close_callback
+        .store(callback as usize, Ordering::Release);
+    close_server_state(state)
+}
+
+fn close_server_state(state: &ServerState) -> bool {
+    let was_open = !state.closed.swap(true, Ordering::AcqRel);
+    let watcher = state.watcher.swap(0, Ordering::AcqRel);
+    if watcher != 0 {
+        unsafe { thaw_runtime_unwatch_fd(watcher) };
+    }
+    was_open
 }
 
 /// Node-shaped constructor slice: returns an object with `listen(port)`.
@@ -322,6 +633,11 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
     let state = Box::into_raw(Box::new(ServerState {
         callback: callback as usize,
         closed: AtomicBool::new(false),
+        listener: Mutex::new(None),
+        watcher: AtomicU64::new(0),
+        connections: AtomicUsize::new(0),
+        listen_callback: AtomicUsize::new(0),
+        close_callback: AtomicUsize::new(0),
     }));
     let listen = Box::into_raw(Box::new(NativeClosure {
         code: server_listen as *const c_void,
@@ -331,14 +647,24 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_listen_many as *const c_void,
         context: state.cast(),
     }));
+    let listen_with_callback = Box::into_raw(Box::new(NativeClosure {
+        code: server_listen_with_callback as *const c_void,
+        context: state.cast(),
+    }));
     let close = Box::into_raw(Box::new(NativeClosure {
         code: server_close as *const c_void,
         context: state.cast(),
     }));
+    let close_with_callback = Box::into_raw(Box::new(NativeClosure {
+        code: server_close_with_callback as *const c_void,
+        context: state.cast(),
+    }));
     Box::into_raw(Box::new(Server {
         listen,
+        listen_with_callback,
         listen_many,
         close,
+        close_with_callback,
     }))
     .cast()
 }
@@ -398,6 +724,11 @@ mod tests {
         let state = Arc::new(ServerState {
             callback: callback as usize,
             closed: AtomicBool::new(false),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(0),
+            listen_callback: AtomicUsize::new(0),
+            close_callback: AtomicUsize::new(0),
         });
         let server_state = Arc::clone(&state);
         let server = thread::spawn(move || run_server_many(port as f64, &server_state, usize::MAX));
@@ -415,5 +746,78 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         state.closed.store(true, Ordering::Release);
         assert_eq!(server.join().unwrap(), "/first");
+    }
+
+    #[test]
+    fn lifecycle_loop_advances_a_complete_request_past_a_slow_connection() {
+        static CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn callback(
+            environment: *const c_void,
+            request: *const IncomingMessage,
+            response: *mut ServerResponse,
+        ) -> bool {
+            let body = CString::new(string_from_ptr((*request).url)).unwrap();
+            let ended = response_end((*response).end.cast(), body.as_ptr());
+            if CALLBACKS.fetch_add(1, Ordering::AcqRel) == 1 {
+                let closure = &*(environment as *const NativeClosure);
+                close_server_state(&*(closure.context as *const ServerState));
+            }
+            ended
+        }
+
+        CALLBACKS.store(0, Ordering::Release);
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let callback = Box::into_raw(Box::new(NativeClosure {
+            code: callback as *const c_void,
+            context: std::ptr::null_mut(),
+        }));
+        let state = Box::into_raw(Box::new(ServerState {
+            callback: callback as usize,
+            closed: AtomicBool::new(false),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(0),
+            listen_callback: AtomicUsize::new(0),
+            close_callback: AtomicUsize::new(0),
+        }));
+        unsafe { (*callback).context = state.cast() };
+        let listen = NativeClosure {
+            code: server_listen as *const c_void,
+            context: state.cast(),
+        };
+        unsafe {
+            let result = server_listen((&listen as *const NativeClosure).cast(), port as f64);
+            assert_eq!(CStr::from_ptr(result).to_bytes(), b"");
+        }
+
+        let client = thread::spawn(move || {
+            let mut slow = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            };
+            slow.write_all(b"GET /slow HTTP/1.1\r\nHost: localhost")
+                .unwrap();
+            let mut fast = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            fast.write_all(b"GET /fast HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut fast_response = String::new();
+            fast.read_to_string(&mut fast_response).unwrap();
+
+            slow.write_all(b"\r\n\r\n").unwrap();
+            let mut slow_response = String::new();
+            slow.read_to_string(&mut slow_response).unwrap();
+            (fast_response, slow_response)
+        });
+        thaw_http_run_servers();
+        let (fast_response, slow_response) = client.join().unwrap();
+        assert!(fast_response.ends_with("/fast"));
+        assert!(slow_response.ends_with("/slow"));
+        assert_eq!(CALLBACKS.load(Ordering::Acquire), 2);
+        assert!(unsafe { &*state }.closed.load(Ordering::Acquire));
     }
 }

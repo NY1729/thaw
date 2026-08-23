@@ -169,9 +169,15 @@ The workspace crates have narrow responsibilities:
   captured mutable bindings are shared with their outer scope
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
-  `setHeader`, `write`, and `end`; `listen` accepts sequential requests, while
+  `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
+  then the generated process entry point accepts sequential requests through
+  the same fd poller used by timers and asynchronous HTTP, while
   `listenMany(port, count)` provides deterministic bounded server execution;
-  idempotent `close()` interrupts the listener between requests
+  partial requests and response backpressure are advanced independently across
+  connections; callbacks remain single-threaded, and idempotent `close()`
+  interrupts the listener while allowing accepted connections to finish;
+  `listen(port, callback)` fires after registration and `close(callback)` after
+  those accepted connections drain
 - Native AWS Lambda Runtime API polling with synchronous or resumable async
   `(event: Json): Json` handlers; events are parsed before invocation and
   results are serialized for the response endpoint
