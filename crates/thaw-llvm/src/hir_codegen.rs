@@ -526,6 +526,13 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_load_embedded_hex",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_call_result",
             js_call_result_type,
             Some(Linkage::External),
@@ -3888,6 +3895,44 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_load_embedded_native_addon(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if args.len() != 2 {
+            return Err(
+                "loadNativeAddonEmbedded expects addon bytes and a root export name".into(),
+            );
+        }
+        let bytes = self.compile_expr(&args[0])?;
+        let root = self.compile_expr(&args[1])?;
+        let function = self
+            .module
+            .get_function("thaw_napi_load_embedded_hex")
+            .unwrap();
+        let loaded = self
+            .builder
+            .build_call(
+                function,
+                &[bytes.into(), root.into()],
+                "load_embedded_napi_u8",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_napi_load_embedded_hex did not return a value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                loaded,
+                self.context.i8_type().const_zero(),
+                "load_embedded_napi_ok",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     /// `callDynamic(name, args): Json` -- the QuickJS-NG fallback path
     /// (docs/design/bridge.md section 7). Composes thaw-std's
     /// `thaw_json_stringify`/`thaw_json_parse` with thaw-quickjs's
@@ -4409,6 +4454,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
             "loadNativeAddon" => return self.compile_load_native_addon(args),
+            "loadNativeAddonEmbedded" => return self.compile_load_embedded_native_addon(args),
             "callNativeAddon" => return self.compile_call_native_addon(args),
             _ => {}
         }

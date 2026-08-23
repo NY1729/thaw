@@ -5,6 +5,9 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
+use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
 use std::ptr;
 
 type NapiEnv = *mut Env;
@@ -230,6 +233,65 @@ pub unsafe extern "C" fn thaw_napi_load(path: *const c_char) -> u8 {
 pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *const c_char) -> u8 {
     let result = text(path)
         .and_then(|path| text(root_name).and_then(|root_name| load_impl(&path, Some(&root_name))));
+    match result {
+        Ok(()) => 1,
+        Err(error) => {
+            HOST.with(|host| host.borrow_mut().last_error = error.clone());
+            eprintln!("thaw-napi: {error}");
+            0
+        }
+    }
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
+    if input.len() % 2 != 0 {
+        return Err("embedded addon hex has an odd length".into());
+    }
+    input
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|error| error.to_string())?;
+            u8::from_str_radix(text, 16).map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
+    let name = CString::new("thaw-native-addon").unwrap();
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!(
+            "memfd_create failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| format!("failed to write embedded addon: {error}"))?;
+    unsafe { load_impl(&format!("/proc/self/fd/{fd}"), root_name) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn load_embedded_impl(bytes: &[u8], root_name: Option<&str>) -> Result<(), String> {
+    let path = std::env::temp_dir().join(format!("thaw-native-addon-{}.node", std::process::id()));
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("failed to write embedded addon: {error}"))?;
+    unsafe { load_impl(&path.to_string_lossy(), root_name) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_load_embedded_hex(
+    hex: *const c_char,
+    root_name: *const c_char,
+) -> u8 {
+    let result = text(hex).and_then(|hex| {
+        let bytes = decode_hex(&hex)?;
+        let root_name = text(root_name)?;
+        let root_name = (!root_name.is_empty()).then_some(root_name.as_str());
+        load_embedded_impl(&bytes, root_name)
+    });
     match result {
         Ok(()) => 1,
         Err(error) => {
