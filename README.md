@@ -41,7 +41,22 @@ target/release/thaw build app.ts --use left-pad -o app
 
 The default registry is `./thaw_modules`. `--registry <directory>` selects a
 different one. `--bridge <file.d.ts>` and `--link <library>` provide the manual
-FFI route.
+FFI route. Native functions returning an error-aware result struct can opt in
+with `--ffi-metadata <file.json>`:
+
+```json
+{
+  "version": 1,
+  "functions": {
+    "read_config": { "errorAbi": "thaw-result" }
+  }
+}
+```
+
+For a declared return type `T`, `thaw-result` expects the C function to return
+`struct { T value; const char *error; }`. Exactly one channel should be active;
+a non-null error propagates through Thaw `try/catch/finally`. Unlisted symbols
+keep the legacy direct return ABI.
 
 ## Architecture
 
@@ -181,6 +196,8 @@ The workspace crates have narrow responsibilities:
   ABI and propagate through Thaw `try/catch/finally`
 - Uncaught Lambda handler exceptions are posted to the Runtime API invocation
   error endpoint with their original message
+- Versioned FFI metadata can opt native functions into a typed
+  `{ value, error }` result ABI whose errors propagate through Thaw catch paths
 
 ### Not yet compatible
 
@@ -191,7 +208,8 @@ The workspace crates have narrow responsibilities:
   value-returning/general user-defined Promise async functions and concurrent
   promise combinators. Other user-defined async calls still use the synchronous
   V1 ABI
-- Exception propagation through external C calls that use the legacy direct ABI
+- Automatic exception propagation through external C calls that use the legacy
+  direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
   API
 - Full ESM semantics and a parser-backed production bundler

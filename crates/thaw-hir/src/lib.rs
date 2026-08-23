@@ -60,10 +60,17 @@ pub struct HirParam {
 /// thaw-bridge will eventually also generate these from `.d.ts` files for
 /// whole npm packages, via the same type-classification rules.
 #[derive(Debug, Clone, PartialEq)]
+pub enum FfiErrorAbi {
+    Direct,
+    ThawResult,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct FfiSignature {
     pub symbol: Symbol,
     pub params: Vec<HirType>,
     pub ret: HirType,
+    pub error_abi: FfiErrorAbi,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,4 +190,112 @@ pub struct HirProgram {
     /// step must resolve from elsewhere (a real native library today; a
     /// thaw-registry-fetched one eventually).
     pub extern_functions: Vec<FfiSignature>,
+}
+
+/// Applies an explicitly configured error ABI to an ambient symbol and every
+/// call site that carries its copied [`FfiSignature`]. Direct ABI remains the
+/// default so existing native libraries are unaffected.
+pub fn set_ffi_error_abi(
+    program: &mut HirProgram,
+    symbol: &str,
+    error_abi: FfiErrorAbi,
+) -> Result<(), String> {
+    let mut found = false;
+    for signature in &mut program.extern_functions {
+        if signature.symbol == symbol {
+            signature.error_abi = error_abi.clone();
+            found = true;
+        }
+    }
+
+    fn visit_expr(expr: &mut HirExpr, symbol: &str, abi: &FfiErrorAbi, found: &mut bool) {
+        match expr {
+            HirExpr::FfiCall(signature, args) => {
+                if signature.symbol == symbol {
+                    signature.error_abi = abi.clone();
+                    *found = true;
+                }
+                for arg in args {
+                    visit_expr(arg, symbol, abi, found);
+                }
+            }
+            HirExpr::BinOp(_, left, right) | HirExpr::Index(left, right) => {
+                visit_expr(left, symbol, abi, found);
+                visit_expr(right, symbol, abi, found);
+            }
+            HirExpr::Call(callee, args) | HirExpr::DynamicCall(callee, args) => {
+                visit_expr(callee, symbol, abi, found);
+                for arg in args {
+                    visit_expr(arg, symbol, abi, found);
+                }
+            }
+            HirExpr::Await(inner)
+            | HirExpr::Assign(_, inner)
+            | HirExpr::ArrayLen(inner)
+            | HirExpr::JsonAsNumber(inner)
+            | HirExpr::JsonAsString(inner)
+            | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
+            HirExpr::Lambda(_, body) => visit_expr(body, symbol, abi, found),
+            HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
+            HirExpr::ArrayLit(values) => {
+                for value in values {
+                    visit_expr(value, symbol, abi, found);
+                }
+            }
+            HirExpr::IndexAssign(array, index, value) => {
+                visit_expr(array, symbol, abi, found);
+                visit_expr(index, symbol, abi, found);
+                visit_expr(value, symbol, abi, found);
+            }
+            HirExpr::ObjectLit(fields) => {
+                for (_, value) in fields {
+                    visit_expr(value, symbol, abi, found);
+                }
+            }
+            HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => {
+                visit_expr(object, symbol, abi, found);
+            }
+            HirExpr::PropAssign(object, _, _, value) | HirExpr::JsonIndex(object, value) => {
+                visit_expr(object, symbol, abi, found);
+                visit_expr(value, symbol, abi, found);
+            }
+            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) => {}
+        }
+    }
+
+    fn visit_stmts(stmts: &mut [HirStmt], symbol: &str, abi: &FfiErrorAbi, found: &mut bool) {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
+                    visit_expr(expr, symbol, abi, found)
+                }
+                HirStmt::Return(Some(expr)) => visit_expr(expr, symbol, abi, found),
+                HirStmt::If(condition, then_body, else_body) => {
+                    visit_expr(condition, symbol, abi, found);
+                    visit_stmts(then_body, symbol, abi, found);
+                    visit_stmts(else_body, symbol, abi, found);
+                }
+                HirStmt::While(condition, body) => {
+                    visit_expr(condition, symbol, abi, found);
+                    visit_stmts(body, symbol, abi, found);
+                }
+                HirStmt::Try(body, _, catch_body) => {
+                    visit_stmts(body, symbol, abi, found);
+                    visit_stmts(catch_body, symbol, abi, found);
+                }
+                HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+            }
+        }
+    }
+
+    for function in &mut program.functions {
+        visit_stmts(&mut function.body, symbol, &error_abi, &mut found);
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "FFI metadata references unknown ambient function `{symbol}`"
+        ))
+    }
 }
