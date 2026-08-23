@@ -63,6 +63,7 @@ const USER_MAIN_SYMBOL: &str = "thaw_user_main";
 /// `compile_program` calls it first, if present, from both possible
 /// entry points (`main` and `handler`).
 const MODULE_INIT_SYMBOL: &str = "__thaw_module_init";
+const NATIVE_MODULE_INIT_SYMBOL: &str = "__thaw_native_module_init";
 /// A null pointer means normal execution; a non-null pointer is the string
 /// value currently unwinding through generated Thaw calls. Keeping this in
 /// generated-module state preserves the existing function ABI (important for
@@ -465,6 +466,13 @@ impl<'ctx> HirCompiler<'ctx> {
         let js_call_result_type = result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         self.module.add_function(
             "thaw_js_call_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module
+            .add_function("thaw_napi_load", js_load_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_napi_call_result",
             js_call_result_type,
             Some(Linkage::External),
         );
@@ -3790,14 +3798,60 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())
     }
 
+    fn compile_load_native_addon(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [path] = args else {
+            return Err("loadNativeAddon expects exactly one argument".to_string());
+        };
+        let path = self.compile_expr(path)?;
+        let function = self.module.get_function("thaw_napi_load").unwrap();
+        let loaded = self
+            .builder
+            .build_call(function, &[path.into()], "load_napi_u8")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_napi_load did not return a value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                loaded,
+                self.context.i8_type().const_zero(),
+                "load_napi_ok",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     /// `callDynamic(name, args): Json` -- the QuickJS-NG fallback path
     /// (docs/design/bridge.md section 7). Composes thaw-std's
     /// `thaw_json_stringify`/`thaw_json_parse` with thaw-quickjs's
     /// `thaw_js_call` so a `Json` value flows in and out without this
     /// module needing to know thaw-quickjs's internals (or vice versa).
     fn compile_call_dynamic(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_json_backend_call(args, "thaw_js_call_result", "callDynamic")
+    }
+
+    fn compile_call_native_addon(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_json_backend_call(args, "thaw_napi_call_result", "callNativeAddon")
+    }
+
+    fn compile_json_backend_call(
+        &mut self,
+        args: &[HirExpr],
+        backend_symbol: &str,
+        source_name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let [name, call_args] = args else {
-            return Err("callDynamic expects exactly two arguments (name, args)".to_string());
+            return Err(format!(
+                "{source_name} expects exactly two arguments (name, args)"
+            ));
         };
         let name_val = self.compile_expr(name)?;
         let args_json_val = self.compile_expr(call_args)?;
@@ -3815,7 +3869,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_stringify did not return a value")?;
 
-        let call_fn = self.module.get_function("thaw_js_call_result").unwrap();
+        let call_fn = self.module.get_function(backend_symbol).unwrap();
         let result = self
             .builder
             .build_call(
@@ -3826,7 +3880,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or("thaw_js_call_result did not return a value")?
+            .ok_or_else(|| format!("{backend_symbol} did not return a value"))?
             .into_struct_value();
         let result_json_str = self
             .builder
@@ -3978,6 +4032,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
+            "loadNativeAddon" => return self.compile_load_native_addon(args),
+            "callNativeAddon" => return self.compile_call_native_addon(args),
             _ => {}
         }
 
@@ -4414,10 +4470,13 @@ impl<'ctx> HirCompiler<'ctx> {
     /// one (see `MODULE_INIT_SYMBOL`). A no-op for programs with no
     /// registry packages that ship a `bundle.js`.
     fn call_module_init_if_present(&self) {
-        if let Some(init_fn) = self.module.get_function(MODULE_INIT_SYMBOL) {
-            self.builder
-                .build_call(init_fn, &[], "call_thaw_module_init")
-                .unwrap();
+        for (symbol, call_name) in [
+            (MODULE_INIT_SYMBOL, "call_thaw_module_init"),
+            (NATIVE_MODULE_INIT_SYMBOL, "call_thaw_native_module_init"),
+        ] {
+            if let Some(init_fn) = self.module.get_function(symbol) {
+                self.builder.build_call(init_fn, &[], call_name).unwrap();
+            }
         }
     }
 
@@ -5158,6 +5217,97 @@ mod tests {
             compile_and_run(source, "quickjs_fallback"),
             "true\n5\nhello, thaw\n42\n"
         );
+    }
+
+    #[test]
+    fn compiles_and_runs_a_synchronous_napi_addon() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-hir-codegen-test-napi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let addon_c = dir.join("addon.c");
+        let addon = dir.join("addon.node");
+        std::fs::write(&addon_c, r#"
+            #include <stddef.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_get_value_double(napi_env, napi_value, double*);
+            extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_create_function(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            extern napi_status napi_throw_error(napi_env, const char*, const char*);
+            static napi_value add(napi_env env, napi_callback_info info) {
+                size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
+                napi_get_cb_info(env, info, &argc, argv, 0, 0);
+                napi_get_value_double(env, argv[0], &a); napi_get_value_double(env, argv[1], &b);
+                napi_create_double(env, a + b, &result); return result;
+            }
+            static napi_value fail(napi_env env, napi_callback_info info) {
+                (void)info; napi_throw_error(env, 0, "native addon failed"); return 0;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value add_fn, fail_fn;
+                napi_create_function(env, "add", 3, add, 0, &add_fn);
+                napi_create_function(env, "fail", 4, fail, 0, &fail_fn);
+                napi_set_named_property(env, exports, "add", add_fn);
+                napi_set_named_property(env, exports, "fail", fail_fn); return exports;
+            }
+        "#).unwrap();
+        assert!(Command::new("cc")
+            .args(["-shared", "-fPIC"])
+            .arg(&addon_c)
+            .arg("-o")
+            .arg(&addon)
+            .status()
+            .unwrap()
+            .success());
+
+        let source = format!(
+            r#"
+            function main(): void {{
+                loadNativeAddon("{}");
+                console.log(Number(callNativeAddon("add", JSON.parse("[20,22]"))));
+                try {{
+                    const ignored = callNativeAddon("fail", JSON.parse("[]"));
+                }} catch (error) {{
+                    console.log(error);
+                }}
+            }}
+        "#,
+            addon.display()
+        );
+        let module = thaw_parser::parse_typescript(&source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "napi_addon");
+        compiler.compile_program(&program).unwrap();
+        let obj = dir.join("out.o");
+        let exe = dir.join("out");
+        compiler.write_object_file(&obj).unwrap();
+        let arena = build_staticlib("thaw-arena");
+        let std = build_staticlib("thaw-std");
+        let napi = build_staticlib("thaw-napi");
+        assert!(Command::new("cc")
+            .arg(&obj)
+            .arg(&arena)
+            .arg(&std)
+            .arg(&napi)
+            .args(["-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "42\nnative addon failed\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -49,14 +49,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A package resolved from a local registry directory. `native_lib` and
-/// `bundle_js` are independently optional: a pure Fast path package needs
-/// no `bundle.js`, and a pure Fallback package needs no `native.a`.
+/// A package resolved from a local registry directory. `native_lib`,
+/// `native_addon`, and `bundle_js` are independent runtime backends.
 #[derive(Debug)]
 pub struct ResolvedPackage {
     pub name: String,
     pub dts_source: String,
     pub native_lib: Option<PathBuf>,
+    /// A synchronous Node-API addon loaded through thaw-napi. Kept separate
+    /// from `native_lib` because `.node` uses N-API handles, not the Fast-path
+    /// C layout.
+    pub native_addon: Option<PathBuf>,
     pub bundle_js: Option<String>,
     /// The version `add` recorded in `version.txt`, if this package went
     /// through `add` (rather than hand-curation, or an `add` run before
@@ -87,6 +90,8 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
 
     let native_lib_path = dir.join("native.a");
     let native_lib = native_lib_path.is_file().then_some(native_lib_path);
+    let native_addon_path = dir.join("native.node");
+    let native_addon = native_addon_path.is_file().then_some(native_addon_path);
 
     let bundle_js_path = dir.join("bundle.js");
     let bundle_js = if bundle_js_path.is_file() {
@@ -112,6 +117,7 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         name: name.to_string(),
         dts_source,
         native_lib,
+        native_addon,
         bundle_js,
         version,
         dependency_versions,
@@ -1170,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_a_package_with_all_three_files() {
+    fn resolves_a_package_with_all_runtime_backends() {
         let registry = temp_registry("full");
         let pkg_dir = registry.join("left-pad");
         fs::create_dir_all(&pkg_dir).unwrap();
@@ -1180,6 +1186,7 @@ mod tests {
         )
         .unwrap();
         fs::write(pkg_dir.join("native.a"), b"fake archive").unwrap();
+        fs::write(pkg_dir.join("native.node"), b"fake addon").unwrap();
         fs::write(pkg_dir.join("bundle.js"), "function pad(s){return s;}").unwrap();
         fs::write(pkg_dir.join("version.txt"), "1.3.0").unwrap();
 
@@ -1187,6 +1194,7 @@ mod tests {
         assert_eq!(resolved.name, "left-pad");
         assert!(resolved.dts_source.contains("declare function pad"));
         assert_eq!(resolved.native_lib, Some(pkg_dir.join("native.a")));
+        assert_eq!(resolved.native_addon, Some(pkg_dir.join("native.node")));
         assert_eq!(
             resolved.bundle_js.as_deref(),
             Some("function pad(s){return s;}")
