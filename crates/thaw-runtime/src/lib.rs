@@ -37,6 +37,7 @@ pub type HandlerFn = extern "C" fn(*const c_char) -> *const c_char;
 pub type HandlerErrorSlot = *mut *const c_char;
 pub type PromiseResumeFn = extern "C" fn(*mut u8, *const u8);
 pub type PromiseTransformFn = extern "C" fn(*mut u8, *mut ThawPromise, *const u8);
+pub type PromiseFinallyFn = extern "C" fn(*mut u8, *mut ThawPromise, *const u8, u8);
 pub type FdWatcherFn = extern "C" fn(*mut u8, i16);
 
 #[derive(Clone, Copy)]
@@ -82,6 +83,7 @@ static FD_TIMEOUT_ERROR: &[u8] = b"file descriptor wait timed out\0";
 static PROMISE_ALL_INVALID_ERROR: &[u8] = b"Promise.all received an invalid promise\0";
 static PROMISE_RACE_EMPTY_ERROR: &[u8] = b"Promise.race requires at least one promise\0";
 static PROMISE_RACE_INVALID_ERROR: &[u8] = b"Promise.race received an invalid promise\0";
+static PROMISE_CYCLE_ERROR: &[u8] = b"Chaining cycle detected for promise\0";
 static PROMISE_ANY_REJECTED_ERROR: &[u8] = b"All promises were rejected\0";
 static PROMISE_SETTLED_FULFILLED: &[u8] = b"fulfilled\0";
 static PROMISE_SETTLED_REJECTED: &[u8] = b"rejected\0";
@@ -1565,11 +1567,103 @@ pub unsafe extern "C" fn thaw_promise_adopt(
     output: *mut ThawPromise,
     input: *mut ThawPromise,
 ) -> u8 {
-    if output.is_null() || input.is_null() || output == input {
+    if output.is_null() || input.is_null() {
+        return 0;
+    }
+    if output == input {
+        thaw_promise_reject(output, PROMISE_CYCLE_ERROR.as_ptr());
         return 0;
     }
     let state = Box::into_raw(Box::new(PromiseAdoptState { output, input }));
     thaw_promise_subscribe(input, resume_promise_adopt, state.cast());
+    1
+}
+
+struct PromiseFinallyState {
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+    callback: PromiseFinallyFn,
+    context: *mut u8,
+}
+
+extern "C" fn resume_promise_finally(frame: *mut u8, result: *const u8) {
+    let state = unsafe { Box::from_raw(frame.cast::<PromiseFinallyState>()) };
+    let rejected = unsafe { thaw_promise_state(state.input) } == 2;
+    (state.callback)(state.context, state.output, result, u8::from(rejected));
+    unsafe { thaw_promise_destroy(state.input) };
+}
+
+/// Runs a `.finally` callback for either settlement kind. The callback owns
+/// forwarding or replacing the original settlement. The input is consumed.
+///
+/// # Safety
+///
+/// `input` must point to a live Promise and `context` must outlive callback
+/// dispatch.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_finally(
+    input: *mut ThawPromise,
+    callback: PromiseFinallyFn,
+    context: *mut u8,
+) -> *mut ThawPromise {
+    let output = thaw_promise_new();
+    if input.is_null() {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    }
+    let state = Box::into_raw(Box::new(PromiseFinallyState {
+        output,
+        input,
+        callback,
+        context,
+    }));
+    thaw_promise_subscribe(input, resume_promise_finally, state.cast());
+    output
+}
+
+struct PromiseFinallyAdoptState {
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+    original: *const u8,
+    original_rejected: bool,
+}
+
+extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
+    let state = unsafe { Box::from_raw(frame.cast::<PromiseFinallyAdoptState>()) };
+    if unsafe { thaw_promise_state(state.input) } == 2 {
+        thaw_promise_reject(state.output, result);
+    } else if state.original_rejected {
+        thaw_promise_reject(state.output, state.original);
+    } else {
+        thaw_promise_resolve(state.output, state.original);
+    }
+    unsafe { thaw_promise_destroy(state.input) };
+}
+
+/// Waits for a Promise returned by `.finally`, then forwards the original
+/// settlement unless the returned Promise rejects.
+///
+/// # Safety
+///
+/// `output` and `input` must be distinct live Promises. `original` must remain
+/// valid until `input` settles.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_finally_adopt(
+    output: *mut ThawPromise,
+    input: *mut ThawPromise,
+    original: *const u8,
+    original_rejected: u8,
+) -> u8 {
+    if output.is_null() || input.is_null() || output == input {
+        return 0;
+    }
+    let state = Box::into_raw(Box::new(PromiseFinallyAdoptState {
+        output,
+        input,
+        original,
+        original_rejected: original_rejected != 0,
+    }));
+    thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
     1
 }
 
@@ -2460,6 +2554,16 @@ mod tests {
         assert_eq!(unsafe { *result.cast::<f64>() }, 7.0);
         assert_eq!(catch_context.calls, 0);
         unsafe { thaw_promise_destroy(chained) };
+
+        let cycle = thaw_promise_new();
+        assert_eq!(unsafe { thaw_promise_adopt(cycle, cycle) }, 0);
+        let error = thaw_runtime_run_until_resolved(cycle);
+        assert_eq!(thaw_promise_state(cycle), 2);
+        assert_eq!(
+            unsafe { CStr::from_ptr(error.cast()) }.to_string_lossy(),
+            "Chaining cycle detected for promise"
+        );
+        unsafe { thaw_promise_destroy(cycle) };
     }
 
     #[test]

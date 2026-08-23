@@ -2536,6 +2536,55 @@ mod tests {
     }
 
     #[test]
+    fn registry_add_runs_real_p_limit_promise_workload_when_enabled() {
+        if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-auto-p-limit-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let added = thaw_registry::add(&registry, "p-limit@2.3.0").unwrap();
+        assert_eq!(
+            added.dependency_versions.get("p-try").map(String::as_str),
+            Some("2.2.0")
+        );
+        let bundle = std::fs::read_to_string(registry.join("p-limit/bundle.js")).unwrap();
+        let bundle = bundle.replacen("module.exports = ", "globalThis.__thawPLimit = ", 1);
+        let script = format!(
+            r#"{bundle}
+            globalThis.runThawPLimit = async function() {{
+                const limit = globalThis.__thawPLimit(2);
+                const value = await limit(async function() {{ return 42; }});
+                return {{ sum: value }};
+            }};"#
+        );
+        let script_literal = serde_json::to_string(&script).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &source,
+            format!(
+                r#"function main(): void {{
+                    loadScript({script_literal});
+                    const result: Json = callDynamic("runThawPLimit", JSON.parse("[]"));
+                    console.log(Number(result.sum));
+                }}"#
+            ),
+        )
+        .unwrap();
+        build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn registry_add_fetches_and_runs_parcel_watcher_when_enabled() {
         if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
             return;

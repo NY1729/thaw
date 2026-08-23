@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 swc_common = "26.0.0"
 swc_ecma_ast = "29.0.0"
+swc_ecma_visit = "29.0.0"
 
 [dev-dependencies]
 thaw-parser = { path = "../thaw-parser" }
