@@ -30,7 +30,8 @@ use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl,
     Expr, FnDecl, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
     ObjectLit as SwcObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
-    TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, UpdateOp, VarDecl, VarDeclOrExpr,
+    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement,
+    UpdateOp, VarDecl, VarDeclOrExpr,
 };
 
 use crate::{
@@ -1109,6 +1110,33 @@ fn lower_ts_type(
             interfaces,
             generic_interfaces,
         )?))),
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            if function.type_params.is_some() {
+                return Err("generic function types are not supported yet".into());
+            }
+            let params = function
+                .params
+                .iter()
+                .map(|param| {
+                    let TsFnParam::Ident(param) = param else {
+                        return Err("function types only support identifier parameters".into());
+                    };
+                    let annotation = param.type_ann.as_ref().ok_or_else(|| {
+                        format!("function parameter `{}` needs a type annotation", param.id.sym)
+                    })?;
+                    lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let ret = lower_ts_type(
+                &function.type_ann.type_ann,
+                interfaces,
+                generic_interfaces,
+            )?;
+            Ok(HirType::Function(params, Box::new(ret)))
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(_)) => {
+            Err("constructor types are not supported yet".into())
+        }
         TsType::TsTypeRef(ty_ref) => {
             let ref_name = match &ty_ref.type_name {
                 swc_ecma_ast::TsEntityName::Ident(id) => Some(id.sym.as_str()),
@@ -1990,6 +2018,16 @@ impl<'a> FnLowerer<'a> {
                     "callNativeAddon" => return Ok(HirType::Json),
                     _ => {}
                 }
+                if let Some(HirType::Function(params, ret)) = self.scope.get(name) {
+                    if params.len() != args.len() {
+                        return Err(format!(
+                            "function value `{name}` expects {} argument(s), got {}",
+                            params.len(),
+                            args.len()
+                        ));
+                    }
+                    return Ok(ret.as_ref().clone());
+                }
                 let signature = self.signatures.get(name).or_else(|| {
                     name.split_once("__thaw_")
                         .and_then(|(base, _)| self.signatures.get(base))
@@ -2082,7 +2120,10 @@ impl<'a> FnLowerer<'a> {
             // but function values do not have a native ABI until the next
             // callback-lowering phase. Keep the enclosing local dynamic
             // instead of discarding or pretending to know that ABI.
-            HirExpr::Lambda(_, _) => Ok(HirType::Dynamic),
+            HirExpr::Lambda(params, ret, _) => Ok(HirType::Function(
+                params.iter().map(|param| param.ty.clone()).collect(),
+                Box::new(ret.clone()),
+            )),
             other => Err(format!(
                 "cannot infer the type of {other:?} (needs an explicit type annotation)"
             )),
@@ -2184,23 +2225,23 @@ impl<'a> FnLowerer<'a> {
                 params.push(HirParam { name, ty: param.ty });
             }
             self.ret_type = declared_return.clone().unwrap_or(HirType::Dynamic);
-            let body = match arrow.body.as_ref() {
+            let (body, inferred_return) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
                     let body = self.lower_expr(expr)?;
                     if let Some(expected) = &declared_return {
                         self.expect_type(expected, &body, "arrow function return value")?;
                     }
-                    body
+                    let inferred = self.infer_expr_type(&body)?;
+                    (body, inferred)
                 }
                 ArrowFunctionBody::FunctionBody(block) => {
                     let stmts = self.lower_stmts(&block.stmts)?;
-                    if declared_return.is_none() {
-                        self.infer_return_type(&stmts)?;
-                    }
-                    HirExpr::Block(stmts)
+                    let inferred = self.infer_return_type(&stmts)?;
+                    (HirExpr::Block(stmts), inferred)
                 }
             };
-            Ok(HirExpr::Lambda(params, Box::new(body)))
+            let return_type = declared_return.clone().unwrap_or(inferred_return);
+            Ok(HirExpr::Lambda(params, return_type, Box::new(body)))
         })();
         self.scope = saved_scope;
         self.bindings = saved_bindings;
@@ -2421,7 +2462,7 @@ impl<'a> FnLowerer<'a> {
         };
 
         let callee_name = match callee_expr.as_ref() {
-            Expr::Ident(ident) => ident.sym.to_string(),
+            Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
             // `console.log` has no dedicated HIR node; it's encoded as a
             // call to the synthetic name "console.log" and codegen
             // special-cases it.
@@ -2468,7 +2509,14 @@ impl<'a> FnLowerer<'a> {
         }
 
         let signature = self.signatures.get(&callee_name).cloned();
-        let param_types = signature.as_ref().map(|sig| sig.params.clone());
+        let local_function = self.scope.get(&callee_name).and_then(|ty| match ty {
+            HirType::Function(params, ret) => Some((params.clone(), ret.as_ref().clone())),
+            _ => None,
+        });
+        let param_types = signature
+            .as_ref()
+            .map(|sig| sig.params.clone())
+            .or_else(|| local_function.as_ref().map(|(params, _)| params.clone()));
 
         if let Some(params) = &param_types {
             if call.args.len() != params.len() {
@@ -3951,10 +3999,17 @@ mod tests {
             }"#,
         );
         let body = &program.functions[0].body;
-        let HirStmt::Let(_, HirType::Dynamic, HirExpr::Lambda(params, lambda_body)) = &body[1]
+        let HirStmt::Let(
+            _,
+            HirType::Function(param_types, return_type),
+            HirExpr::Lambda(params, lambda_return, lambda_body),
+        ) = &body[1]
         else {
             panic!("expected a lowered arrow function");
         };
+        assert_eq!(param_types, &[HirType::F64]);
+        assert_eq!(return_type.as_ref(), &HirType::F64);
+        assert_eq!(lambda_return, &HirType::F64);
         assert_eq!(
             params,
             &[HirParam {
@@ -3976,16 +4031,36 @@ mod tests {
                 const callback = (path: string): string => { return path; };
             }"#,
         );
-        let HirStmt::Let(_, _, HirExpr::Lambda(params, lambda_body)) =
+        let HirStmt::Let(_, _, HirExpr::Lambda(params, return_type, lambda_body)) =
             &program.functions[0].body[0]
         else {
             panic!("expected a lowered arrow function");
         };
         assert_eq!(params[0].ty, HirType::Str);
+        assert_eq!(return_type, &HirType::Str);
         assert!(matches!(
             lambda_body.as_ref(),
             HirExpr::Block(stmts)
                 if matches!(&stmts[0], HirStmt::Return(Some(HirExpr::Var(name))) if name == "path")
         ));
+    }
+
+    #[test]
+    fn lowers_function_type_annotations_and_calls_through_function_values() {
+        let program = lower(
+            r#"function main(): void {
+                const increment: (value: number) => number =
+                    (value: number): number => value + 1;
+                console.log(increment(41));
+            }"#,
+        );
+        let function_type = HirType::Function(vec![HirType::F64], Box::new(HirType::F64));
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Let(name, ty, HirExpr::Lambda(_, _, _))
+                if name == "increment" && ty == &function_type
+        ));
+        assert!(format!("{:?}", program.functions[0].body[1])
+            .contains("Call(Var(\"increment\"), [Lit(F64(41.0))])"));
     }
 }

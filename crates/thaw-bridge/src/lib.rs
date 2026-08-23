@@ -919,6 +919,15 @@ fn render_ts_type(ty: &HirType) -> String {
                 .join("; ");
             format!("{{ {rendered} }}")
         }
+        HirType::Function(params, ret) => {
+            let params = params
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| format!("arg{index}: {}", render_ts_type(ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({params}) => {}", render_ts_type(ret))
+        }
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
 }
