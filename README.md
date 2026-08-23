@@ -272,7 +272,8 @@ The workspace crates have narrow responsibilities:
 - `Promise.all` joins a literal list of `Promise<number>` concurrently,
   preserves input order, supports empty arrays, composes with async
   `if`/`while`/`try`, and routes the first observed rejection to the nearest
-  catch after safely collecting every child
+  catch immediately. Remaining children are retained and drained before the
+  process exits or the Lambda request arena resets
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result
