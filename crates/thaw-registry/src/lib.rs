@@ -8,6 +8,10 @@
 //!                                  package's Fast path native symbols;
 //!                                  auto-linked by thaw-cli (replaces a
 //!                                  manual `--link`)
+//!   native.node    (optional)  -- matching bundled N-API prebuild selected
+//!                                  by `add`; loaded by thaw-napi
+//!   native-addon.json (optional) -- source path, target tuple, and SHA-256
+//!                                  for `native.node`
 //!   bundle.js      (optional)  -- real JS implementation backing the
 //!                                  package's Fallback functions; its
 //!                                  source is fed to thaw-bridge's
@@ -30,7 +34,7 @@
 //!                                  informational, same as `version.txt`.
 //! ```
 //!
-//! Still no build step for the native lib, and no real dependency-graph
+//! Still no source build step for native code, and no real dependency-graph
 //! *resolution* (no semver range solving of our own -- `npm install`
 //! already did that once, for one `add` call, and `lock.json` just
 //! records what it picked) -- `add` resolves and records versions for
@@ -42,12 +46,15 @@
 //! differentiator" left undone; this is a placeholder for the local half
 //! of it, real enough to remove the remaining manual
 //! `--bridge`/`--link`/`loadScript` steps for a package that's already
-//! been fetched/built by some other means.
+//! been fetched/built by some other means. `add` does select already-bundled
+//! `.node` prebuilds; it never runs package install scripts or `node-gyp`.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use sha2::{Digest, Sha256};
 
 /// A package resolved from a local registry directory. `native_lib`,
 /// `native_addon`, and `bundle_js` are independent runtime backends.
@@ -151,6 +158,108 @@ pub struct AddedPackage {
     /// only when it has more than that one entry (see this module's
     /// top-level doc comment).
     pub dependency_versions: BTreeMap<String, String>,
+    /// Metadata for an automatically selected bundled `.node` prebuild.
+    pub native_addon: Option<NativeAddonMetadata>,
+    /// A non-fatal explanation when prebuilds existed but none matched the
+    /// current target. The JavaScript fallback remains usable in that case.
+    pub native_diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NativeAddonMetadata {
+    pub source: String,
+    pub sha256: String,
+    pub platform: String,
+    pub arch: String,
+    pub libc: String,
+}
+
+#[derive(Debug)]
+struct SelectedPrebuild {
+    path: PathBuf,
+    relative_path: String,
+    platform: String,
+    arch: String,
+    libc: String,
+}
+
+fn target_prebuild_components() -> (&'static str, &'static str, &'static str) {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let libc = if cfg!(target_env = "musl") {
+        "musl"
+    } else if platform == "linux" {
+        "glibc"
+    } else {
+        "system"
+    };
+    (platform, arch, libc)
+}
+
+fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>, String> {
+    let prebuilds = package_dir.join("prebuilds");
+    if !prebuilds.is_dir() {
+        return Ok(None);
+    }
+    let (platform, arch, libc) = target_prebuild_components();
+    let target_dir = prebuilds.join(format!("{platform}-{arch}"));
+    if !target_dir.is_dir() {
+        let mut available = fs::read_dir(&prebuilds)
+            .map_err(|error| format!("failed to inspect `{}`: {error}", prebuilds.display()))?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        available.sort();
+        return Err(format!(
+            "no bundled native addon matches {platform}-{arch}-{libc}; available targets: {}",
+            if available.is_empty() {
+                "none".into()
+            } else {
+                available.join(", ")
+            }
+        ));
+    }
+    let mut candidates = fs::read_dir(&target_dir)
+        .map_err(|error| format!("failed to inspect `{}`: {error}", target_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "node")
+        })
+        .filter(|path| {
+            let musl = path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(".musl."));
+            (libc == "musl") == musl || platform != "linux"
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    let Some(path) = candidates.into_iter().next() else {
+        return Err(format!(
+            "bundled addons exist for {platform}-{arch}, but none match libc `{libc}`"
+        ));
+    };
+    let relative_path = path
+        .strip_prefix(package_dir)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
+    Ok(Some(SelectedPrebuild {
+        path,
+        relative_path,
+        platform: platform.into(),
+        arch: arch.into(),
+        libc: libc.into(),
+    }))
 }
 
 /// Fetches `package` via `npm install` (into a throwaway scratch
@@ -275,6 +384,53 @@ fn fetch_and_copy(
     let dest_dir = registry_dir.join(name);
     fs::create_dir_all(&dest_dir)
         .map_err(|e| format!("failed to create `{}`: {e}", dest_dir.display()))?;
+
+    // Re-adding a package must never leave a stale binary selected for a
+    // previous version/target.
+    for stale in [
+        dest_dir.join("native.node"),
+        dest_dir.join("native-addon.json"),
+    ] {
+        if stale.is_file() {
+            fs::remove_file(&stale).map_err(|error| {
+                format!("failed to remove stale `{}`: {error}", stale.display())
+            })?;
+        }
+    }
+    let (native_addon, native_diagnostic) = match select_prebuilt_addon(&package_dir) {
+        Ok(Some(selected)) => {
+            let bytes = fs::read(&selected.path).map_err(|error| {
+                format!(
+                    "failed to read native addon `{}`: {error}",
+                    selected.path.display()
+                )
+            })?;
+            fs::write(dest_dir.join("native.node"), &bytes).map_err(|error| {
+                format!(
+                    "failed to write `{}`: {error}",
+                    dest_dir.join("native.node").display()
+                )
+            })?;
+            let metadata = NativeAddonMetadata {
+                source: selected.relative_path,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                platform: selected.platform,
+                arch: selected.arch,
+                libc: selected.libc,
+            };
+            let metadata_json = serde_json::to_string_pretty(&metadata)
+                .map_err(|error| format!("failed to serialize native addon metadata: {error}"))?;
+            fs::write(dest_dir.join("native-addon.json"), metadata_json).map_err(|error| {
+                format!(
+                    "failed to write `{}`: {error}",
+                    dest_dir.join("native-addon.json").display()
+                )
+            })?;
+            (Some(metadata), None)
+        }
+        Ok(None) => (None, None),
+        Err(diagnostic) => (None, Some(diagnostic)),
+    };
     fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
         format!(
             "failed to write `{}`: {e}",
@@ -315,6 +471,8 @@ fn fetch_and_copy(
         bundled_file_count,
         resolved_version,
         dependency_versions,
+        native_addon,
+        native_diagnostic,
     })
 }
 
@@ -1202,6 +1360,48 @@ mod tests {
         assert_eq!(resolved.version.as_deref(), Some("1.3.0"));
 
         let _ = fs::remove_dir_all(&registry);
+    }
+
+    #[test]
+    fn selects_the_current_targets_bundled_node_prebuild() {
+        let package = temp_registry("select_native_prebuild");
+        let (platform, arch, libc) = target_prebuild_components();
+        let target = package.join("prebuilds").join(format!("{platform}-{arch}"));
+        fs::create_dir_all(&target).unwrap();
+        let filename = if libc == "musl" {
+            "binding.musl.node"
+        } else {
+            "binding.node"
+        };
+        fs::write(target.join(filename), b"native bytes").unwrap();
+        // The opposite Linux libc must not be selected accidentally.
+        if platform == "linux" {
+            let opposite = if libc == "musl" {
+                "binding.node"
+            } else {
+                "binding.musl.node"
+            };
+            fs::write(target.join(opposite), b"wrong libc").unwrap();
+        }
+
+        let selected = select_prebuilt_addon(&package).unwrap().unwrap();
+        assert_eq!(selected.path, target.join(filename));
+        assert_eq!(selected.platform, platform);
+        assert_eq!(selected.arch, arch);
+        assert_eq!(selected.libc, libc);
+        let _ = fs::remove_dir_all(package);
+    }
+
+    #[test]
+    fn reports_available_targets_when_no_prebuild_matches() {
+        let package = temp_registry("mismatched_native_prebuild");
+        let target = package.join("prebuilds/imaginary-other");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("binding.node"), b"native bytes").unwrap();
+        let diagnostic = select_prebuilt_addon(&package).unwrap_err();
+        assert!(diagnostic.contains("no bundled native addon matches"));
+        assert!(diagnostic.contains("imaginary-other"));
+        let _ = fs::remove_dir_all(package);
     }
 
     #[test]

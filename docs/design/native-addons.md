@@ -328,9 +328,8 @@ registry は `native.a` と区別して `native.node` を検出する。bridge �
 `thaw-napi`、`libdl`、`--export-dynamic` を追加し、addon が参照する
 `napi_*` symbol を解決可能にする。
 
-V1 は Linux のローカル `native.node` を対象とする。プリビルドの自動取得、
-`node-gyp`、非同期work、class/wrap/finalizer、および実パッケージ固有APIは
-引き続きスコープ外である。
+V1 は Linux のローカル `native.node` を対象とする。`node-gyp`、非同期work、
+class/wrap/finalizer、および実パッケージ固有APIは引き続きスコープ外である。
 
 ## 10. 実パッケージ互換性
 
@@ -347,3 +346,21 @@ functionそのものを返すため、単一関数の`.d.ts`名をroot export名
 `true`/`false`になることをhost単体と`thaw build --use`の両方で検証する。
 回帰テストは再配布バイナリをrepositoryへ含めず、
 `THAW_UTF8_VALIDATE_NODE`にprebuildのpathが指定された環境で実行する。
+
+## 11. 同梱prebuildの自動取得
+
+`thaw registry add`が`npm install --ignore-scripts`で取得したpackage内の
+`prebuilds/<platform>-<arch>/`を探索し、現在のOS、CPU、libcに一致する
+`.node`を`native.node`としてregistryへコピーする。Linuxではglibc用と
+`.musl.node`を区別し、macOSのRust target名`macos`はnpm慣習の`darwin`へ、
+`x86_64`/`aarch64`は`x64`/`arm64`へ対応付ける。
+
+選択結果は`native-addon.json`へ元package内の相対path、SHA-256、platform、
+arch、libcとともに保存する。再追加時は以前の`native.node`とmetadataを先に
+除去するため、version/targetが変わっても古いbinaryは残らない。prebuildsが
+存在しない場合は従来通りJSのみ、存在するが一致しない場合は利用可能targetを
+診断に表示してJS fallbackを維持する。install scriptや`node-gyp`は実行しない。
+
+network統合テストは`THAW_RUN_NPM_INTEGRATION=1`で有効化し、
+`utf-8-validate@6.0.6`について`registry add`から`build --use`、有効/不正UTF-8
+の実行までを一続きで検証する。

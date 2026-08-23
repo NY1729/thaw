@@ -92,8 +92,18 @@ fn run_registry_add(args: &[String]) -> Result<(), String> {
     } else {
         String::new()
     };
+    let native_note = if let Some(native) = &added.native_addon {
+        format!(
+            "\n  native: {} ({}/{} {}, sha256 {})",
+            native.source, native.platform, native.arch, native.libc, native.sha256
+        )
+    } else if let Some(diagnostic) = &added.native_diagnostic {
+        format!("\n  native: skipped ({diagnostic}); using JavaScript fallback")
+    } else {
+        String::new()
+    };
     println!(
-        "added `{name}@{}` to `{}`\n  types: {}\n  main:  {}{bundle_note}{deps_note}",
+        "added `{name}@{}` to `{}`\n  types: {}\n  main:  {}{bundle_note}{deps_note}{native_note}",
         added.resolved_version,
         registry_dir.join(name).display(),
         added.dts_relative_path,
@@ -971,6 +981,55 @@ mod tests {
         )
         .unwrap();
         std::fs::copy(prebuild, package.join("native.node")).unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            r#"function main(): void {
+                console.log(Boolean(isValidUTF8(JSON.parse("[{\"type\":\"Buffer\",\"data\":[240,144,128,128]}]"))));
+                console.log(Boolean(isValidUTF8(JSON.parse("[{\"type\":\"Buffer\",\"data\":[255]}]"))));
+            }
+            "#,
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["utf-8-validate".into()],
+        )
+        .unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "true\nfalse\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registry_add_fetches_and_runs_utf8_validate_when_enabled() {
+        if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-auto-utf8-validate-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        let added = thaw_registry::add(&registry, "utf-8-validate@6.0.6").unwrap();
+        let native = added.native_addon.expect("a matching prebuild is bundled");
+        assert_eq!(native.platform, "linux");
+        assert_eq!(native.arch, "x64");
+        assert_eq!(native.libc, "glibc");
+        assert!(registry.join("utf-8-validate/native.node").is_file());
+        assert!(registry.join("utf-8-validate/native-addon.json").is_file());
+
         let source = dir.join("main.ts");
         let output = dir.join("app");
         std::fs::write(
