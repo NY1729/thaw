@@ -1153,6 +1153,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::F64 => Ok(self.context.f64_type().into()),
             HirType::I64 => Ok(self.context.i64_type().into()),
             HirType::Bool => Ok(self.context.bool_type().into()),
+            HirType::Undefined => Ok(self.context.bool_type().into()),
             // Strings and arrays are both represented as a single opaque
             // pointer at the LLVM level; what they point to differs (a
             // C string vs. a [len][elements...] buffer).
@@ -1196,6 +1197,13 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::Optional(payload) => {
+                let payload = self.basic_type(payload)?;
+                Ok(self
+                    .context
+                    .struct_type(&[self.context.bool_type().into(), payload], false)
+                    .into())
+            }
             other => Err(format!(
                 "Phase 1/2 codegen does not support type {other:?} yet"
             )),
@@ -4279,6 +4287,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Bool(b)) => {
                 Ok(self.context.bool_type().const_int(*b as u64, false).into())
             }
+            HirExpr::Lit(HirLit::Undefined) => Ok(self.context.bool_type().const_zero().into()),
             HirExpr::Lit(HirLit::Str(s)) => {
                 let global = self
                     .builder
@@ -4307,6 +4316,23 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(ptr, val)
                     .map_err(|e| e.to_string())?;
                 Ok(val)
+            }
+
+            HirExpr::OptionalSome(value, payload) => {
+                self.compile_optional(value.as_ref(), payload, true)
+            }
+            HirExpr::OptionalNone(payload) => self.compile_optional_none(payload),
+            HirExpr::OptionalIsNone(value, _) => {
+                let optional = self.compile_expr(value)?.into_struct_value();
+                let present = self
+                    .builder
+                    .build_extract_value(optional, 0, "optional_present")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_not(present, "optional_is_none")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string())
             }
 
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
@@ -4433,6 +4459,48 @@ impl<'ctx> HirCompiler<'ctx> {
 
             other => Err(format!("Phase 1/2 codegen does not support {other:?} yet")),
         }
+    }
+
+    fn compile_optional(
+        &mut self,
+        value: &HirExpr,
+        payload: &HirType,
+        present: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let value = self.compile_expr(value)?;
+        self.build_optional_value(value, payload, present)
+    }
+
+    fn compile_optional_none(&mut self, payload: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
+        let value = self.basic_type(payload)?.const_zero();
+        self.build_optional_value(value, payload, false)
+    }
+
+    fn build_optional_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        payload: &HirType,
+        present: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let optional_type = self
+            .basic_type(&HirType::Optional(Box::new(payload.clone())))?
+            .into_struct_type();
+        let tagged = self
+            .builder
+            .build_insert_value(
+                optional_type.get_undef(),
+                self.context
+                    .bool_type()
+                    .const_int(u64::from(present), false),
+                0,
+                "optional_with_tag",
+            )
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(tagged, value, 1, "optional_with_payload")
+            .map(|value| value.into_struct_value().into())
+            .map_err(|error| error.to_string())
     }
 
     fn compile_lambda(
@@ -7408,6 +7476,44 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    fn expr_hir_type(&self, expr: &HirExpr) -> Option<HirType> {
+        match expr {
+            HirExpr::Lit(HirLit::F64(_)) => Some(HirType::F64),
+            HirExpr::Lit(HirLit::Str(_)) => Some(HirType::Str),
+            HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
+            HirExpr::Lit(HirLit::Undefined) => Some(HirType::Undefined),
+            HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
+            HirExpr::Assign(_, value) => self.expr_hir_type(value),
+            HirExpr::OptionalSome(_, payload) | HirExpr::OptionalNone(payload) => {
+                Some(HirType::Optional(Box::new(payload.clone())))
+            }
+            HirExpr::OptionalIsNone(_, _) => Some(HirType::Bool),
+            HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
+            HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
+            HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
+            HirExpr::Lambda(_, params, ret, _) => Some(HirType::Function(
+                params.iter().map(|param| param.ty.clone()).collect(),
+                Box::new(ret.clone()),
+            )),
+            HirExpr::FunctionRef(_, params, ret) => {
+                Some(HirType::Function(params.clone(), Box::new(ret.clone())))
+            }
+            HirExpr::Call(callee, _) => {
+                if let HirExpr::Var(name) = callee.as_ref() {
+                    if let Some(ret) = self.function_return_types.get(name) {
+                        return Some(ret.clone());
+                    }
+                }
+                match self.expr_hir_type(callee)? {
+                    HirType::Function(_, ret) => Some(*ret),
+                    _ => None,
+                }
+            }
+            HirExpr::AwaitPromise(_, resolved) => Some(resolved.clone()),
+            _ => None,
+        }
+    }
+
     fn compile_binop(
         &mut self,
         op: BinOp,
@@ -9787,58 +9893,75 @@ impl<'ctx> HirCompiler<'ctx> {
         let [arg] = args else {
             return Err("console.log expects exactly one argument in Phase 0/1".to_string());
         };
+        let hir_type = self.expr_hir_type(arg);
         let value = self.compile_expr(arg)?;
 
-        match value {
-            BasicValueEnum::PointerValue(ptr) => {
-                let puts = self.module.get_function("puts").unwrap();
-                self.builder
-                    .build_call(puts, &[ptr.into()], "putscall")
-                    .map_err(|e| e.to_string())?;
-            }
-            BasicValueEnum::FloatValue(f) => {
-                let format = self
-                    .builder
-                    .build_global_string_ptr("%g\n", "numfmt")
-                    .map_err(|e| e.to_string())?;
-                let printf = self.module.get_function("printf").unwrap();
-                self.builder
-                    .build_call(
-                        printf,
-                        &[format.as_pointer_value().into(), f.into()],
-                        "printfcall",
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
-            // Our only first-class `IntValue` is `i1` (`HirType::Bool`) --
-            // nothing else reaches console.log as a raw `IntValue`.
-            BasicValueEnum::IntValue(b) => {
-                let true_str = self
-                    .builder
-                    .build_global_string_ptr("true", "true_str")
-                    .map_err(|e| e.to_string())?;
-                let false_str = self
-                    .builder
-                    .build_global_string_ptr("false", "false_str")
-                    .map_err(|e| e.to_string())?;
-                let selected = self
-                    .builder
-                    .build_select(
-                        b,
-                        true_str.as_pointer_value(),
-                        false_str.as_pointer_value(),
-                        "bool_str",
-                    )
-                    .map_err(|e| e.to_string())?;
-                let puts = self.module.get_function("puts").unwrap();
-                self.builder
-                    .build_call(puts, &[selected.into()], "putscall")
-                    .map_err(|e| e.to_string())?;
-            }
-            other => {
-                return Err(format!(
-                    "console.log does not support values of this kind yet: {other:?}"
-                ))
+        if let Some(HirType::Optional(payload)) = hir_type {
+            self.compile_console_optional(value.into_struct_value(), &payload)?;
+        } else if hir_type == Some(HirType::Undefined) {
+            let undefined = self
+                .builder
+                .build_global_string_ptr("undefined", "undefined_value")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("puts").unwrap(),
+                    &[undefined.as_pointer_value().into()],
+                    "puts_undefined_value",
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            match value {
+                BasicValueEnum::PointerValue(ptr) => {
+                    let puts = self.module.get_function("puts").unwrap();
+                    self.builder
+                        .build_call(puts, &[ptr.into()], "putscall")
+                        .map_err(|e| e.to_string())?;
+                }
+                BasicValueEnum::FloatValue(f) => {
+                    let format = self
+                        .builder
+                        .build_global_string_ptr("%g\n", "numfmt")
+                        .map_err(|e| e.to_string())?;
+                    let printf = self.module.get_function("printf").unwrap();
+                    self.builder
+                        .build_call(
+                            printf,
+                            &[format.as_pointer_value().into(), f.into()],
+                            "printfcall",
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                // Our only first-class `IntValue` is `i1` (`HirType::Bool`) --
+                // nothing else reaches console.log as a raw `IntValue`.
+                BasicValueEnum::IntValue(b) => {
+                    let true_str = self
+                        .builder
+                        .build_global_string_ptr("true", "true_str")
+                        .map_err(|e| e.to_string())?;
+                    let false_str = self
+                        .builder
+                        .build_global_string_ptr("false", "false_str")
+                        .map_err(|e| e.to_string())?;
+                    let selected = self
+                        .builder
+                        .build_select(
+                            b,
+                            true_str.as_pointer_value(),
+                            false_str.as_pointer_value(),
+                            "bool_str",
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let puts = self.module.get_function("puts").unwrap();
+                    self.builder
+                        .build_call(puts, &[selected.into()], "putscall")
+                        .map_err(|e| e.to_string())?;
+                }
+                other => {
+                    return Err(format!(
+                        "console.log does not support values of this kind yet: {other:?}"
+                    ))
+                }
             }
         }
 
@@ -9850,6 +9973,127 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    fn compile_console_optional(
+        &mut self,
+        value: StructValue<'ctx>,
+        payload_type: &HirType,
+    ) -> Result<(), String> {
+        let present = self
+            .builder
+            .build_extract_value(value, 0, "console_optional_present")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(value, 1, "console_optional_payload")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let present_block = self.context.append_basic_block(function, "optional_value");
+        let absent_block = self
+            .context
+            .append_basic_block(function, "optional_undefined");
+        let merge_block = self
+            .context
+            .append_basic_block(function, "optional_printed");
+        self.builder
+            .build_conditional_branch(present, present_block, absent_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(absent_block);
+        let undefined = self
+            .builder
+            .build_global_string_ptr("undefined", "undefined_string")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("puts").unwrap(),
+                &[undefined.as_pointer_value().into()],
+                "puts_undefined",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(present_block);
+        match payload_type {
+            HirType::F64 => {
+                let format = self
+                    .builder
+                    .build_global_string_ptr("%g\n", "optional_numfmt")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("printf").unwrap(),
+                        &[
+                            format.as_pointer_value().into(),
+                            payload.into_float_value().into(),
+                        ],
+                        "printf_optional_number",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            HirType::Bool => {
+                let true_string = self
+                    .builder
+                    .build_global_string_ptr("true", "optional_true")
+                    .map_err(|error| error.to_string())?;
+                let false_string = self
+                    .builder
+                    .build_global_string_ptr("false", "optional_false")
+                    .map_err(|error| error.to_string())?;
+                let selected = self
+                    .builder
+                    .build_select(
+                        payload.into_int_value(),
+                        true_string.as_pointer_value(),
+                        false_string.as_pointer_value(),
+                        "optional_bool_string",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[selected.into()],
+                        "puts_optional_bool",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            HirType::Str => {
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[payload.into_pointer_value().into()],
+                        "puts_optional_string",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            HirType::Object(_) => {
+                let object = self
+                    .builder
+                    .build_global_string_ptr("[object Object]", "optional_object")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[object.as_pointer_value().into()],
+                        "puts_optional_object",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            other => {
+                return Err(format!(
+                    "console.log does not support optional payload {other:?} yet"
+                ))
+            }
+        }
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_block);
+        Ok(())
     }
 
     /// Emits `int main(void) { thaw_user_main(); return 0; }`, the real
@@ -12229,6 +12473,107 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_some_every"),
             "1\n2\ntrue\n1\n2\n5\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nreceiver\nthisArg\ntrue\nawaited\nfalse\n2\n-1\n-1\n0\nawaited\n1\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_array_find_and_find_last() {
+        let source = r#"
+            interface Item { value: number; }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3, 2];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b", "a"];
+            }
+            function maybe(flag: boolean): number | undefined {
+                if (flag) {
+                    return 42;
+                }
+                return undefined;
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3].find(value => value === 2));
+                console.log([1, 2, 3].find(value => value === 9));
+                console.log(["a", "b"].find(value => value === "b"));
+                console.log([true, false].find(value => value === false));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 2 };
+                console.log([first, second].find(item => item.value === 2));
+                console.log(receiver().find((value, index, array) => value === 2 && index < array.length, thisValue()));
+                console.log([1, 2, 3, 2].findLast((value, index) => {
+                    console.log(index);
+                    return value === 2;
+                }));
+                const empty: number[] = Array.of<number>();
+                console.log(empty.find(() => true));
+                console.log(empty.findLast(() => true));
+                console.log((await delayed()).findLast(value => value === "a"));
+                const missing: number | undefined = [1].find(value => value === 9);
+                const present: number | undefined = [2].find(value => value === 2);
+                console.log(missing === undefined);
+                console.log(present !== undefined);
+                console.log(undefined);
+                console.log(maybe(true));
+                console.log(maybe(false));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_find"),
+            "2\nundefined\nb\nfalse\n[object Object]\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_array_at() {
+        let source = r#"
+            interface Item { value: number; }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function index(): string {
+                console.log("index");
+                return "-1";
+            }
+            async function delayedReceiver(): Promise<string[]> {
+                console.log("awaited receiver");
+                await sleep(1);
+                return ["a", "b"];
+            }
+            async function delayedIndex(): Promise<number> {
+                console.log("awaited index");
+                await sleep(1);
+                return 0;
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3].at(0));
+                console.log([1, 2, 3].at(-1));
+                console.log([1, 2, 3].at(1.9));
+                console.log([1, 2, 3].at(0 / 0));
+                console.log([1, 2, 3].at(3));
+                console.log([1, 2, 3].at(-4));
+                console.log([1, 2, 3].at(Infinity));
+                console.log(["a", "b"].at(1));
+                console.log([true, false].at(-1));
+                const item: Item = { value: 1 };
+                console.log([item].at(0));
+                const empty: number[] = Array.of<number>();
+                console.log(empty.at(0));
+                console.log(receiver().at(index()));
+                console.log((await delayedReceiver()).at(await delayedIndex()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_at"),
+            "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n[object Object]\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\n"
         );
     }
 

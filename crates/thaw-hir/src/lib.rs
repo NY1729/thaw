@@ -19,6 +19,7 @@ pub enum HirType {
     F64,
     I64,
     Bool,
+    Undefined,
     Void,
     Str,
     Json,
@@ -30,6 +31,9 @@ pub enum HirType {
     Object(Vec<(Symbol, HirType)>),
     Function(Vec<HirType>, Box<HirType>),
     Union(Vec<HirType>),
+    /// A native `T | undefined` value represented as an explicit presence
+    /// tag plus a payload. This avoids sentinel collisions with NaN/pointers.
+    Optional(Box<HirType>),
     /// Type inference failed / not yet supported for this expression ->
     /// falls back to QuickJS-NG at runtime (see design doc section 3.1).
     Dynamic,
@@ -40,6 +44,7 @@ pub enum HirLit {
     F64(f64),
     Str(String),
     Bool(bool),
+    Undefined,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +143,9 @@ pub enum HirExpr {
     Lit(HirLit),
     Var(Symbol),
     BinOp(BinOp, Box<HirExpr>, Box<HirExpr>),
+    OptionalSome(Box<HirExpr>, HirType),
+    OptionalNone(HirType),
+    OptionalIsNone(Box<HirExpr>, HirType),
     Call(Box<HirExpr>, Vec<HirExpr>),
     /// A homogeneous `Promise.all` join. The element type is retained so
     /// codegen can copy and later load non-number result slots correctly.
@@ -355,7 +363,9 @@ pub fn set_ffi_error_abi(
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
-            | HirExpr::JsonAsBool(inner) => visit_expr(inner, symbol, abi, found),
+            | HirExpr::JsonAsBool(inner)
+            | HirExpr::OptionalSome(inner, _)
+            | HirExpr::OptionalIsNone(inner, _) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -395,7 +405,11 @@ pub fn set_ffi_error_abi(
                 visit_expr(object, symbol, abi, found);
                 visit_expr(value, symbol, abi, found);
             }
-            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
+            HirExpr::Lit(_)
+            | HirExpr::OptionalNone(_)
+            | HirExpr::Var(_)
+            | HirExpr::EnvVar(_)
+            | HirExpr::FunctionRef(..) => {}
         }
     }
 
@@ -502,7 +516,11 @@ pub fn set_ffi_ownership(
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
-            | HirExpr::JsonAsBool(inner) => update_expr(inner, symbol, returns, errors, found),
+            | HirExpr::JsonAsBool(inner)
+            | HirExpr::OptionalSome(inner, _)
+            | HirExpr::OptionalIsNone(inner, _) => {
+                update_expr(inner, symbol, returns, errors, found)
+            }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
             HirExpr::PromiseNew(executor, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
@@ -533,7 +551,11 @@ pub fn set_ffi_ownership(
                 update_expr(object, symbol, returns, errors, found);
                 update_expr(value, symbol, returns, errors, found);
             }
-            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
+            HirExpr::Lit(_)
+            | HirExpr::OptionalNone(_)
+            | HirExpr::Var(_)
+            | HirExpr::EnvVar(_)
+            | HirExpr::FunctionRef(..) => {}
         }
     }
     fn update_stmts(
@@ -662,7 +684,9 @@ pub fn set_ffi_string_abi(
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
-            | HirExpr::JsonAsBool(inner) => {
+            | HirExpr::JsonAsBool(inner)
+            | HirExpr::OptionalSome(inner, _)
+            | HirExpr::OptionalIsNone(inner, _) => {
                 update_expr(inner, symbol, params, returns, calling_convention, found)
             }
             HirExpr::Lambda(_, _, _, body) => {
@@ -699,7 +723,11 @@ pub fn set_ffi_string_abi(
                 update_expr(object, symbol, params, returns, calling_convention, found);
                 update_expr(value, symbol, params, returns, calling_convention, found);
             }
-            HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
+            HirExpr::Lit(_)
+            | HirExpr::OptionalNone(_)
+            | HirExpr::Var(_)
+            | HirExpr::EnvVar(_)
+            | HirExpr::FunctionRef(..) => {}
         }
     }
     fn update_stmts(
