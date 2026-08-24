@@ -1507,6 +1507,13 @@ enum Target {
     Prop(HirExpr, HirType, Symbol),
 }
 
+#[derive(Clone, Copy)]
+enum ArrayPredicateMode {
+    Some,
+    Every,
+    FindIndex,
+}
+
 fn target_to_read_expr(target: &Target) -> HirExpr {
     match target {
         Target::Var(name) => HirExpr::Var(name.clone()),
@@ -5895,7 +5902,7 @@ impl<'a> FnLowerer<'a> {
         element_type: HirType,
         callback: HirExpr,
         this_arg: Option<HirExpr>,
-        some: bool,
+        mode: ArrayPredicateMode,
     ) -> Result<HirExpr, String> {
         let receiver_name = format!("__thaw_predicate_receiver_{}", self.next_binding);
         self.next_binding += 1;
@@ -5928,7 +5935,10 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Var(callback_name.clone())),
             available[..params.len()].to_vec(),
         );
-        let stop_condition = if some {
+        let stop_condition = if matches!(
+            mode,
+            ArrayPredicateMode::Some | ArrayPredicateMode::FindIndex
+        ) {
             callback_call
         } else {
             HirExpr::BinOp(
@@ -5936,6 +5946,16 @@ impl<'a> FnLowerer<'a> {
                 Box::new(callback_call),
                 Box::new(HirExpr::Lit(HirLit::Bool(false))),
             )
+        };
+        let stop_result = match mode {
+            ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(true)),
+            ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(false)),
+            ArrayPredicateMode::FindIndex => HirExpr::Var(index_name.clone()),
+        };
+        let final_result = match mode {
+            ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(false)),
+            ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(true)),
+            ArrayPredicateMode::FindIndex => HirExpr::Lit(HirLit::F64(-1.0)),
         };
         let one = || HirExpr::Lit(HirLit::F64(1.0));
         let body = HirExpr::Block(vec![
@@ -5967,7 +5987,7 @@ impl<'a> FnLowerer<'a> {
                     ),
                     HirStmt::If(
                         stop_condition,
-                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(some))))],
+                        vec![HirStmt::Return(Some(stop_result))],
                         Vec::new(),
                     ),
                     HirStmt::Expr(HirExpr::Assign(
@@ -5980,7 +6000,7 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(!some)))),
+            HirStmt::Return(Some(final_result)),
         ]);
         let mut bindings = vec![
             (receiver_name, array_type, receiver),
@@ -6577,7 +6597,7 @@ impl<'a> FnLowerer<'a> {
                         vec![receiver],
                     ));
                 }
-                if matches!(property.sym.as_ref(), "some" | "every") {
+                if matches!(property.sym.as_ref(), "some" | "every" | "findIndex") {
                     if !(1..=2).contains(&call.args.len()) {
                         return Err(format!(
                             "native `.{}()` expects a predicate and optional thisArg",
@@ -6612,7 +6632,12 @@ impl<'a> FnLowerer<'a> {
                         element_type,
                         callback,
                         this_arg,
-                        property.sym == *"some",
+                        match property.sym.as_ref() {
+                            "some" => ArrayPredicateMode::Some,
+                            "every" => ArrayPredicateMode::Every,
+                            "findIndex" => ArrayPredicateMode::FindIndex,
+                            _ => unreachable!(),
+                        },
                     );
                 }
                 if property.sym == *"slice" {

@@ -12078,11 +12078,16 @@ mod tests {
                 console.log([item].every(value => value.value === 2));
                 console.log(values().some(value => value === 3, thisValue()));
                 console.log((await delayed()).every((value, index) => value.length === index));
+                console.log([3, 5, 4].findIndex((value, index, array) => value === 4 && index === 2 && array.length === 3));
+                console.log([1, 2].findIndex(value => value === 9));
+                console.log(empty.findIndex(() => true));
+                console.log([item].findIndex(value => value.value === 2));
+                console.log((await delayed()).findIndex(value => value === ""));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "array_some_every"),
-            "1\n2\ntrue\n1\n2\n5\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nreceiver\nthisArg\ntrue\nawaited\nfalse\n"
+            "1\n2\ntrue\n1\n2\n5\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nreceiver\nthisArg\ntrue\nawaited\nfalse\n2\n-1\n-1\n0\nawaited\n1\n"
         );
     }
 

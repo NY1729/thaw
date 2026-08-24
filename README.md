@@ -454,10 +454,11 @@ The workspace crates have narrow responsibilities:
   source order, and `toSorted` returns an arena-owned shallow copy. A typed
   synchronous comparator may be a contextually typed arrow (including
   captures) or named function; stable HIR sorting propagates callback errors
-- Homogeneous native arrays implement short-circuiting `.some()` and `.every()`
-  with contextually typed or named boolean predicates receiving zero to three
-  `(element, index, array)` parameters. Captures, empty arrays, all native
-  element layouts, optional `thisArg` evaluation and awaited receivers work
+- Homogeneous native arrays implement short-circuiting `.some()`, `.every()`
+  and `.findIndex()` with contextually typed or named boolean predicates
+  receiving zero to three `(element, index, array)` parameters. Captures, empty
+  arrays, all native element layouts, optional `thisArg` evaluation and awaited
+  receivers work; `findIndex` returns the first match or `-1`
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
