@@ -44,14 +44,15 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    StructValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use thaw_hir::{
-    BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
-    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram,
-    HirStmt, HirType,
+    BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
+    FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi, HirExpr,
+    HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
 };
 
 /// The user's `main`, if any, is compiled under this symbol instead of
@@ -151,6 +152,7 @@ pub struct HirCompiler<'ctx> {
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
     function_return_types: HashMap<String, HirType>,
+    ffi_signatures: HashMap<String, FfiSignature>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
     /// call target the innermost entry; an empty stack propagates by returning
     /// from the current function with the pending exception left intact.
@@ -174,6 +176,7 @@ impl<'ctx> HirCompiler<'ctx> {
             variables: HashMap::new(),
             variable_hir_types: HashMap::new(),
             function_return_types: HashMap::new(),
+            ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
             loop_stack: Vec::new(),
             frame_async_functions: HashMap::new(),
@@ -193,6 +196,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|function| (function.name.clone(), function.ret.clone()))
             .collect();
 
+        self.ffi_signatures = program
+            .extern_functions
+            .iter()
+            .map(|signature| (signature.symbol.clone(), signature.clone()))
+            .collect();
         for sig in &program.extern_functions {
             self.declare_extern_function(sig)?;
         }
@@ -1448,13 +1456,21 @@ impl<'ctx> HirCompiler<'ctx> {
         if !matches!(sig.ret, HirType::Array(_) | HirType::Object(_)) {
             return false;
         }
-        sig.aggregate_return_abi == FfiAggregateAbi::Packed
+        sig.aggregate_return_layout
+            .as_ref()
+            .is_some_and(|layout| layout.indirect)
+            || sig.aggregate_return_abi == FfiAggregateAbi::Packed
             || Self::ffi_result_storage_bytes(sig) > 16
     }
 
     fn ffi_result_storage_bytes(sig: &FfiSignature) -> u64 {
-        let (value_size, value_align) =
-            Self::ffi_aggregate_storage_layout(&sig.ret, sig.aggregate_return_abi);
+        let (value_size, value_align) = sig
+            .aggregate_return_layout
+            .as_ref()
+            .map(|layout| (layout.size, u64::from(layout.alignment)))
+            .unwrap_or_else(|| {
+                Self::ffi_aggregate_storage_layout(&sig.ret, sig.aggregate_return_abi)
+            });
         if sig.error_abi == FfiErrorAbi::Direct {
             value_size
         } else {
@@ -1537,6 +1553,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 ret,
                                 sig.return_string_abi,
                                 sig.aggregate_return_abi,
+                                sig.aggregate_return_layout.as_ref(),
                             )?,
                             self.context.ptr_type(AddressSpace::default()).into(),
                         ],
@@ -1546,7 +1563,12 @@ impl<'ctx> HirCompiler<'ctx> {
             )),
             (FfiErrorAbi::Direct, HirType::Void) => Ok(None),
             (FfiErrorAbi::Direct, ret) => self
-                .ffi_return_type(ret, sig.return_string_abi, sig.aggregate_return_abi)
+                .ffi_return_type(
+                    ret,
+                    sig.return_string_abi,
+                    sig.aggregate_return_abi,
+                    sig.aggregate_return_layout.as_ref(),
+                )
                 .map(Some),
         }
     }
@@ -1556,6 +1578,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
         string_abi: FfiStringAbi,
         aggregate_abi: FfiAggregateAbi,
+        aggregate_layout: Option<&FfiAggregateLayout>,
     ) -> Result<BasicTypeEnum<'ctx>, String> {
         match ty {
             HirType::Str if string_abi == FfiStringAbi::PointerLength => Ok(self
@@ -1583,10 +1606,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into())
             }
             HirType::Object(fields) if aggregate_abi != FfiAggregateAbi::Internal => {
+                if let Some(layout) = aggregate_layout {
+                    return self
+                        .ffi_explicit_object_type(fields, layout)
+                        .map(|(ty, _)| ty.into());
+                }
                 let fields = fields
                     .iter()
                     .map(|(name, ty)| {
-                        self.ffi_return_type(ty, FfiStringAbi::NullTerminated, aggregate_abi)
+                        self.ffi_return_type(ty, FfiStringAbi::NullTerminated, aggregate_abi, None)
                             .map_err(|error| format!("FFI object field `{name}`: {error}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1597,6 +1625,43 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             other => self.basic_type(other),
         }
+    }
+
+    fn ffi_explicit_object_type(
+        &self,
+        fields: &[(String, HirType)],
+        layout: &FfiAggregateLayout,
+    ) -> Result<(inkwell::types::StructType<'ctx>, Vec<u32>), String> {
+        let mut native_fields = Vec::new();
+        let mut logical_indices = Vec::with_capacity(fields.len());
+        let mut cursor = 0_u64;
+        for ((name, field_ty), offset) in fields.iter().zip(&layout.field_offsets) {
+            if *offset > cursor {
+                let padding = u32::try_from(*offset - cursor)
+                    .map_err(|_| "FFI aggregate padding exceeds LLVM's array limit".to_owned())?;
+                native_fields.push(self.context.i8_type().array_type(padding).into());
+            }
+            logical_indices.push(native_fields.len() as u32);
+            native_fields.push(
+                self.ffi_return_type(
+                    field_ty,
+                    FfiStringAbi::NullTerminated,
+                    FfiAggregateAbi::Portable,
+                    None,
+                )
+                .map_err(|error| format!("FFI object field `{name}`: {error}"))?,
+            );
+            cursor = offset + Self::ffi_object_field_layout(field_ty, FfiAggregateAbi::Portable).0;
+        }
+        if layout.size > cursor {
+            let padding = u32::try_from(layout.size - cursor)
+                .map_err(|_| "FFI aggregate tail padding exceeds LLVM's array limit".to_owned())?;
+            native_fields.push(self.context.i8_type().array_type(padding).into());
+        }
+        Ok((
+            self.context.struct_type(&native_fields, true),
+            logical_indices,
+        ))
     }
 
     /// The real C ABI parameter list a Fast path native symbol is declared
@@ -9856,6 +9921,7 @@ impl<'ctx> HirCompiler<'ctx> {
         string_abi: FfiStringAbi,
         ownership: &FfiOwnership,
         aggregate_abi: FfiAggregateAbi,
+        aggregate_layout: Option<&FfiAggregateLayout>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
             HirType::Str if string_abi == FfiStringAbi::PointerLength => {
@@ -10006,6 +10072,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
             {
                 let native = value.into_struct_value();
+                let field_indices = aggregate_layout
+                    .map(|layout| {
+                        self.ffi_explicit_object_type(fields, layout)
+                            .map(|(_, indices)| indices)
+                    })
+                    .transpose()?;
                 let i64_type = self.context.i64_type();
                 let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
                 let result = self
@@ -10028,7 +10100,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 for (index, (name, field_ty)) in fields.iter().enumerate() {
                     let mut field = self
                         .builder
-                        .build_extract_value(native, index as u32, &format!("ffi_{name}"))
+                        .build_extract_value(
+                            native,
+                            field_indices
+                                .as_ref()
+                                .map_or(index as u32, |indices| indices[index]),
+                            &format!("ffi_{name}"),
+                        )
                         .map_err(|error| error.to_string())?;
                     field = match field_ty {
                         HirType::Str if *ownership != FfiOwnership::Borrowed => self
@@ -10045,6 +10123,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             FfiStringAbi::NullTerminated,
                             ownership,
                             aggregate_abi,
+                            None,
                         )?,
                         _ => field,
                     };
@@ -10081,6 +10160,12 @@ impl<'ctx> HirCompiler<'ctx> {
         sig: &FfiSignature,
         args: &[HirExpr],
     ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let sig = self
+            .ffi_signatures
+            .get(&sig.symbol)
+            .cloned()
+            .unwrap_or_else(|| sig.clone());
+        let sig = &sig;
         let function = self
             .module
             .get_function(&sig.symbol)
@@ -10199,6 +10284,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_alloca(return_type, "ffi_indirect_result")
                 .map_err(|error| error.to_string())?;
+            if let Some(layout) = &sig.aggregate_return_layout {
+                slot.as_instruction_value()
+                    .expect("alloca is an instruction")
+                    .set_alignment(layout.alignment)
+                    .map_err(|error| error.to_string())?;
+            }
             compiled_args.insert(0, slot.into());
             Some((slot, return_type))
         } else {
@@ -10258,6 +10349,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     sig.return_string_abi,
                     &sig.return_ownership,
                     sig.aggregate_return_abi,
+                    sig.aggregate_return_layout.as_ref(),
                 )
                 .map(Some);
         }
@@ -10293,6 +10385,7 @@ impl<'ctx> HirCompiler<'ctx> {
             sig.return_string_abi,
             &sig.return_ownership,
             sig.aggregate_return_abi,
+            sig.aggregate_return_layout.as_ref(),
         )
         .map(Some)
     }
@@ -18729,6 +18822,98 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             "true\n42\n14\npacked check failed\n"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
+        let source = r#"
+            declare function native_aligned_record(): { active: boolean; value: number };
+
+            function main(): void {
+                const record: { active: boolean; value: number } = native_aligned_record();
+                console.log(record.active);
+                console.log(record.value);
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_aligned_record",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+        let mut invalid_program = program.clone();
+        assert!(thaw_hir::set_ffi_aggregate_layout(
+            &mut invalid_program,
+            "native_aligned_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 0],
+                size: 16,
+                alignment: 8,
+                indirect: true,
+            },
+        )
+        .unwrap_err()
+        .contains("outside or overlaps"));
+        thaw_hir::set_ffi_aggregate_layout(
+            &mut program,
+            "native_aligned_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 16],
+                size: 32,
+                alignment: 32,
+                indirect: true,
+            },
+        )
+        .unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_explicit_aggregate_layout");
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.module.print_to_string().to_string();
+        assert!(ir.contains("alloca <{ i1, [15 x i8], double, [8 x i8] }>, align 32"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-explicit-layout-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "typedef struct __attribute__((aligned(32))) { _Bool active; char padding[15]; double value; char tail[8]; } AlignedRecord;\n\
+             AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n42\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 

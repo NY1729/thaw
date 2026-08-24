@@ -1184,6 +1184,7 @@ pub fn classify(func: &DtsFunction) -> Classification {
         return_string_abi: FfiStringAbi::NullTerminated,
         calling_convention: FfiCallingConvention::C,
         aggregate_return_abi: FfiAggregateAbi::Internal,
+        aggregate_return_layout: None,
     })
 }
 
@@ -1777,6 +1778,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
     }
@@ -1875,6 +1877,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
         assert_eq!(
@@ -1894,6 +1897,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
     }
@@ -2093,6 +2097,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
     }
@@ -2160,6 +2165,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
     }
@@ -2205,6 +2211,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
     }
@@ -2270,6 +2277,7 @@ mod tests {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             })
         );
     }
