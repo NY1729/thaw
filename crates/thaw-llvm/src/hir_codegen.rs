@@ -11992,6 +11992,10 @@ mod tests {
     fn compiles_default_native_array_sorting() {
         let source = r#"
             interface Item { value: number; }
+            interface Ranked { value: number; rank: number; }
+            function descending(left: number, right: number): number {
+                return right - left;
+            }
             async function delayed(): Promise<string[]> {
                 console.log("awaited");
                 await sleep(1);
@@ -12012,11 +12016,27 @@ mod tests {
                 console.log((await delayed()).toSorted().join(""));
                 const empty: number[] = [];
                 console.log(empty.sort().length);
+                const descendingNumbers: number[] = [1, 3, 2];
+                console.log(descendingNumbers.sort(descending).join(","));
+                const source: number[] = [3, 1, 2];
+                console.log(source.toSorted((left, right) => left - right).join(","));
+                console.log(source.join(","));
+                const direction: number = -1;
+                console.log(source.toSorted((left, right) => (left - right) * direction).join(","));
+                const ranked: Ranked[] = [
+                    { value: 2, rank: 1 },
+                    { value: 1, rank: 2 },
+                    { value: 2, rank: 3 }
+                ];
+                const ordered: Ranked[] = ranked.toSorted((left, right) => left.value - right.value);
+                console.log(ordered[0].rank);
+                console.log(ordered[1].rank);
+                console.log(ordered[2].rank);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "array_default_sort"),
-            "0,1,10,2,NaN\n0,1,10,2,NaN\na|z|ä|😀\nä|z|a|😀\nfalse-false-true-true\n2\nawaited\nab\n0\n"
+            "0,1,10,2,NaN\n0,1,10,2,NaN\na|z|ä|😀\nä|z|a|😀\nfalse-false-true-true\n2\nawaited\nab\n0\n3,2,1\n1,2,3\n3,1,2\n3,2,1\n2\n1\n3\n"
         );
     }
 
