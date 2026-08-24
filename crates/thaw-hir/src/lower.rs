@@ -5404,6 +5404,13 @@ impl<'a> FnLowerer<'a> {
                     vec![value],
                 ));
             }
+            if callee_name == "Boolean" && ty != HirType::Json {
+                let name = format!("__thaw_boolean_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                let converted = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
+                return self.wrap_call_argument_bindings(converted, &[(name, ty, value)]);
+            }
             if ty != HirType::Json {
                 return Err(format!(
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"

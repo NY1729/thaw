@@ -10315,6 +10315,37 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_boolean_conversion_with_single_evaluation() {
+        let source = r#"
+            function number(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                console.log("awaited-boolean");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(Boolean(number("zero", 0)));
+                console.log(Boolean(number("nonzero", -2)));
+                console.log(Boolean(0 / 0));
+                console.log(Boolean(""));
+                console.log(Boolean("text"));
+                const values: number[] = [];
+                console.log(Boolean(values));
+                const object: { value: number } = { value: 0 };
+                console.log(Boolean(object));
+                console.log(Boolean(await delayed(0)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_boolean_conversion"),
+            "zero\nfalse\nnonzero\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\nawaited-boolean\nfalse\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
