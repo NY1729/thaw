@@ -132,6 +132,8 @@ The workspace crates have narrow responsibilities:
   ordered comparisons, `if`, `while`, classic
   `for`, `do/while`, and typed-array `for...of`
 - Object fields and array indexing/mutation
+- Fixed-shape object fields can also use static string-computed reads,
+  assignments, compound assignments, and updates; JSON accepts string keys
 - Prefix and postfix `++`/`--` return the correct expression value and evaluate
   computed array and numeric object-field targets once, including awaited
   indexes and object expressions

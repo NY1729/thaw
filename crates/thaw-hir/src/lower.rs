@@ -3737,15 +3737,19 @@ impl<'a> FnLowerer<'a> {
             MemberProp::Computed(computed) => {
                 let obj = self.lower_expr(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
-                let index = self.lower_expr(&computed.expr)?;
-                self.expect_type(&HirType::F64, &index, "index expression")?;
                 match obj_ty {
-                    HirType::Array(element) => Ok(HirExpr::TypedIndex(
-                        Box::new(obj),
-                        Box::new(index),
-                        *element,
-                    )),
+                    HirType::Array(element) => {
+                        let index = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::F64, &index, "index expression")?;
+                        Ok(HirExpr::TypedIndex(
+                            Box::new(obj),
+                            Box::new(index),
+                            *element,
+                        ))
+                    }
                     HirType::Tuple(elements) => {
+                        let index = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::F64, &index, "index expression")?;
                         let HirExpr::Lit(HirLit::F64(position)) = index else {
                             return Err("tuple index must be a numeric literal".into());
                         };
@@ -3760,7 +3764,32 @@ impl<'a> FnLowerer<'a> {
                             element,
                         ))
                     }
-                    HirType::Json => Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index))),
+                    HirType::Object(fields) => {
+                        let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() else {
+                            return Err("computed object key must be a string literal".into());
+                        };
+                        let key = key.value.to_string_lossy().into_owned();
+                        if fields.iter().any(|(name, _)| name == &key) {
+                            Ok(HirExpr::PropAccess(
+                                Box::new(obj),
+                                HirType::Object(fields),
+                                key,
+                            ))
+                        } else {
+                            Err(format!("object has no field `{key}`"))
+                        }
+                    }
+                    HirType::Json => match computed.expr.as_ref() {
+                        Expr::Lit(Lit::Str(key)) => Ok(HirExpr::JsonGet(
+                            Box::new(obj),
+                            key.value.to_string_lossy().into_owned(),
+                        )),
+                        _ => {
+                            let index = self.lower_expr(&computed.expr)?;
+                            self.expect_type(&HirType::F64, &index, "JSON index expression")?;
+                            Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index)))
+                        }
+                    },
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
             }
@@ -3793,26 +3822,36 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    /// `array[index]` used as an assignment/`++`/`--` target. Checks
-    /// `array` is actually a `number[]` first -- `Str`/`Object`/`Json` all
-    /// share the same pointer representation as arrays at the LLVM level,
-    /// so building a `Target::Index` for one of those would silently
-    /// misinterpret its bytes as array elements at runtime instead of
-    /// failing to compile.
-    fn lower_index_target(
+    /// Resolves a computed assignment/update target without confusing the
+    /// pointer-compatible array, object, string and JSON layouts.
+    fn lower_computed_target(
         &mut self,
         member: &MemberExpr,
         computed: &ComputedPropName,
     ) -> Result<Target, String> {
-        let obj = self.lower_expr(&member.obj)?;
-        let obj_ty = self.infer_expr_type(&obj)?;
-        if obj_ty != HirType::Array(Box::new(HirType::F64)) {
-            return Err(format!(
-                "cannot assign to a computed index on a value of type {obj_ty:?} (only number[] supports this)"
-            ));
+        let object = self.lower_expr(&member.obj)?;
+        let object_type = self.infer_expr_type(&object)?;
+        match &object_type {
+            HirType::Array(element) if element.as_ref() == &HirType::F64 => {
+                let index = self.lower_expr(&computed.expr)?;
+                self.expect_type(&HirType::F64, &index, "index expression")?;
+                Ok(Target::Index(object, index))
+            }
+            HirType::Object(fields) => {
+                let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() else {
+                    return Err("computed object assignment key must be a string literal".into());
+                };
+                let key = key.value.to_string_lossy().into_owned();
+                if fields.iter().any(|(name, _)| name == &key) {
+                    Ok(Target::Prop(object, object_type, key))
+                } else {
+                    Err(format!("object has no field `{key}`"))
+                }
+            }
+            _ => Err(format!(
+                "cannot assign through a computed key on a value of type {object_type:?}"
+            )),
         }
-        let index = self.lower_expr(&computed.expr)?;
-        Ok(Target::Index(obj, index))
     }
 
     fn lower_assign_target(&mut self, target: &AssignTarget) -> Result<Target, String> {
@@ -3824,7 +3863,7 @@ impl<'a> FnLowerer<'a> {
                 Ok(Target::Var(self.resolve_binding(binding.id.sym.as_ref())))
             }
             SimpleAssignTarget::Member(member) => match &member.prop {
-                MemberProp::Computed(computed) => self.lower_index_target(member, computed),
+                MemberProp::Computed(computed) => self.lower_computed_target(member, computed),
                 MemberProp::Ident(prop) => {
                     let obj = self.lower_expr(&member.obj)?;
                     let obj_ty = self.infer_expr_type(&obj)?;
@@ -3927,7 +3966,7 @@ impl<'a> FnLowerer<'a> {
         let target = match update.arg.as_ref() {
             Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
             Expr::Member(member) => match &member.prop {
-                MemberProp::Computed(computed) => self.lower_index_target(member, computed)?,
+                MemberProp::Computed(computed) => self.lower_computed_target(member, computed)?,
                 MemberProp::Ident(prop) => {
                     let object = self.lower_expr(&member.obj)?;
                     let object_type = self.infer_expr_type(&object)?;
@@ -5399,6 +5438,31 @@ mod tests {
             .body
             .iter()
             .all(|statement| matches!(statement, HirStmt::Expr(HirExpr::Call(_, _)))));
+    }
+
+    #[test]
+    fn lowers_static_computed_object_reads_and_targets() {
+        let program = lower(
+            r#"function main(): void {
+                let point = { value: 1 };
+                console.log(point["value"]);
+                point["value"] = 2;
+                point["value"] += 3;
+                point["value"]++;
+            }"#,
+        );
+        let body = &program.functions[0].body;
+        assert!(matches!(
+            &body[1],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::PropAccess(_, _, field) if field == "value")
+        ));
+        assert!(matches!(
+            &body[2],
+            HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "value"
+        ));
+        assert!(matches!(&body[3], HirStmt::Expr(HirExpr::Call(_, _))));
+        assert!(matches!(&body[4], HirStmt::Expr(HirExpr::Call(_, _))));
     }
 
     #[test]

@@ -506,6 +506,9 @@ awaitが含まれる場合も、JavaScriptと同じreference-before-RHS順序を
 fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
 index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
 loop loweringを使う。
+fixed-shape objectの`obj["field"]`は静的string keyを通常の`PropAccess`/`PropAssign`へ
+解決し、read、単純/compound assignment、prefix/postfix updateでdot accessと同じABIを使う。
+JSONのstring-computed keyは`JsonGet`、number keyは`JsonIndex`へ型別にlowerする。
 
 ## 12. Promise constructorとcontinuation chain
 
