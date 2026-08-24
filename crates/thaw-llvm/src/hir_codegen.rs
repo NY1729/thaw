@@ -11812,11 +11812,13 @@ mod tests {
                 console.log(Number.isNaN(parseInt("10", 1)));
                 console.log((1 / parseInt("-0", 10)) < 0);
                 console.log(parseInt(await delayed(), 2));
+                console.log(Number.parseFloat("3.5tail"));
+                console.log(Number.parseInt("ff", 16));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "parse_float_int"),
-            "-12.5\n1\nnan\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n"
+            "-12.5\n1\nnan\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n3.5\n255\n"
         );
     }
 

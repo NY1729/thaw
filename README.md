@@ -408,6 +408,8 @@ The workspace crates have narrow responsibilities:
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
   trailing text, single evaluation and awaited arguments
+- `Number.parseFloat` and `Number.parseInt` are aliases of the same native
+  parsing paths, including radix inference, coercion and suspension behavior
 - Native homogeneous arrays and heterogeneous tuples implement `.join()` with
   JavaScript's default comma or a coerced custom separator. Number, string,
   boolean, fixed-object and nested aggregate elements, empty arrays, receiver
