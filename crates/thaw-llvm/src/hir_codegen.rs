@@ -7490,6 +7490,10 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::OptionalIsNone(_, _) => Some(HirType::Bool),
             HirExpr::OptionalValue(_, payload) => Some(payload.clone()),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
+            HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
+                .iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, ty)| ty.clone()),
             HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::Lambda(_, params, ret, _) => Some(HirType::Function(
@@ -12606,6 +12610,43 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "optional_nullish"),
             "1\nfallback\n9\na\ndefault\n6\na\nawaited fallback\nlater\n42\n"
+        );
+    }
+
+    #[test]
+    fn compiles_optional_nullish_assignment() {
+        let source = r#"
+            interface Box { value: number | undefined; }
+            function fallback(): number {
+                console.log("fallback");
+                return 9;
+            }
+            async function delayedFallback(): Promise<number> {
+                console.log("awaited fallback");
+                await sleep(1);
+                return 12;
+            }
+            async function main(): Promise<void> {
+                let value: number | undefined = undefined;
+                console.log(value ??= fallback());
+                console.log(value ??= fallback());
+                console.log(value ?? 0);
+                value = undefined;
+                console.log(value ??= await delayedFallback());
+                console.log(value ?? 0);
+
+                const box: Box = { value: undefined };
+                console.log(box.value ??= 5);
+                console.log(box.value ??= fallback());
+                console.log(box.value);
+
+                let plain: number = 4;
+                console.log(plain ??= fallback());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_nullish_assignment"),
+            "fallback\n9\n9\n9\nawaited fallback\n12\n12\n5\n5\n5\n4\n"
         );
     }
 
