@@ -351,7 +351,7 @@ extern "C" fn thaw_dynamic_call(
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
-  boolean bitfieldも明示できる。複数bitの整数field、
+  booleanおよび符号付き／符号なし整数bitfieldも明示できる。
   number／boolean／string以外のvariadicは未対応。
 # Result ABI metadata
 
@@ -401,9 +401,10 @@ pointer. `fieldLayouts` has one entry per field: scalar entries are `null`,
 while object entries recursively contain the child object's offsets, size,
 alignment, and optional child `fieldLayouts` (`indirect` defaults to `false`
 for children). `bitFields` contains `null` for ordinary fields or a
-`bitOffset`/`storageBytes` object for boolean fields. Multiple consecutive
-boolean entries may share the same 1/2/4/8-byte storage offset; LLVM loads that
-storage once and independently shifts/masks each field. LLVM represents the
+`bitOffset`/`bitWidth`/`storageBytes`/`signed` object for boolean or number
+fields. Multiple consecutive entries may share the same 1/2/4/8-byte storage
+offset; LLVM loads that storage once, shifts/masks each field, sign-extends
+signed fields, and converts integer fields to TypeScript numbers. LLVM represents the
 value as a packed structure with byte-array
 padding at the declared offsets and gives the storage the requested alignment.
 The implementation accepts direct and `thaw-result` portable/packed object
@@ -420,8 +421,8 @@ Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
 parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
 variadic declaration. Extra values are passed as C `double`, default-promoted
 `int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
-subject to the ordinary marshal rules. Multi-bit integer fields, explicit
-register-class returns and other vararg types remain future extensions.
+subject to the ordinary marshal rules. Explicit register-class returns and
+other vararg types remain future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`

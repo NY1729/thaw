@@ -10226,24 +10226,73 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &format!("ffi_{name}_shift"),
                             )
                             .map_err(|error| error.to_string())?;
+                        let storage_bits = storage_type.get_bit_width();
+                        let width = u32::from(bitfield.bit_width);
+                        let mask = if width == 64 {
+                            u64::MAX
+                        } else {
+                            (1_u64 << width) - 1
+                        };
                         let masked = self
                             .builder
                             .build_and(
                                 shifted,
-                                storage_type.const_int(1, false),
+                                storage_type.const_int(mask, false),
                                 &format!("ffi_{name}_mask"),
                             )
                             .map_err(|error| error.to_string())?;
-                        field = self
-                            .builder
-                            .build_int_compare(
-                                IntPredicate::NE,
-                                masked,
-                                storage_type.const_zero(),
-                                &format!("ffi_{name}_bool"),
-                            )
-                            .map_err(|error| error.to_string())?
-                            .into();
+                        field = match field_ty {
+                            HirType::Bool => self
+                                .builder
+                                .build_int_compare(
+                                    IntPredicate::NE,
+                                    masked,
+                                    storage_type.const_zero(),
+                                    &format!("ffi_{name}_bool"),
+                                )
+                                .map_err(|error| error.to_string())?
+                                .into(),
+                            HirType::F64 => {
+                                let integer = if bitfield.signed && width < storage_bits {
+                                    let extend = storage_type
+                                        .const_int(u64::from(storage_bits - width), false);
+                                    let left = self
+                                        .builder
+                                        .build_left_shift(
+                                            masked,
+                                            extend,
+                                            &format!("ffi_{name}_sign_left"),
+                                        )
+                                        .map_err(|error| error.to_string())?;
+                                    self.builder
+                                        .build_right_shift(
+                                            left,
+                                            extend,
+                                            true,
+                                            &format!("ffi_{name}_sign_right"),
+                                        )
+                                        .map_err(|error| error.to_string())?
+                                } else {
+                                    masked
+                                };
+                                if bitfield.signed {
+                                    self.builder.build_signed_int_to_float(
+                                        integer,
+                                        self.context.f64_type(),
+                                        &format!("ffi_{name}_number"),
+                                    )
+                                } else {
+                                    self.builder.build_unsigned_int_to_float(
+                                        integer,
+                                        self.context.f64_type(),
+                                        &format!("ffi_{name}_number"),
+                                    )
+                                }
+                                .map_err(|error| error.to_string())?
+                                .into()
+                            }
+                            _ => unreachable!("HIR validates bitfield field types"),
+                        };
                     }
                     field = match field_ty {
                         HirType::Str if *ownership != FfiOwnership::Borrowed => self
@@ -18970,7 +19019,7 @@ mod tests {
             declare function native_aligned_record(): { active: boolean; value: number };
             declare function native_checked_aligned_record(value: number): { active: boolean; value: number };
             declare function native_nested_aligned_record(): { meta: { active: boolean; value: number }; total: number };
-            declare function native_bit_record(): { active: boolean; ready: boolean; value: number };
+            declare function native_bit_record(): { active: boolean; ready: boolean; count: number; delta: number; value: number };
 
             function main(): void {
                 const record: { active: boolean; value: number } = native_aligned_record();
@@ -18989,6 +19038,8 @@ mod tests {
                 const bits = native_bit_record();
                 console.log(bits.active);
                 console.log(bits.ready);
+                console.log(bits.count);
+                console.log(bits.delta);
                 console.log(bits.value);
             }
         "#;
@@ -19045,16 +19096,32 @@ mod tests {
             &mut invalid_bits,
             "native_bit_record",
             thaw_hir::FfiAggregateLayout {
-                field_offsets: vec![0, 0, 8],
-                field_layouts: vec![None, None, None],
+                field_offsets: vec![0, 0, 0, 0, 8],
+                field_layouts: vec![None, None, None, None, None],
                 field_bitfields: vec![
                     Some(thaw_hir::FfiBitFieldLayout {
                         bit_offset: 32,
+                        bit_width: 1,
                         storage_bytes: 4,
+                        signed: false,
                     }),
                     Some(thaw_hir::FfiBitFieldLayout {
                         bit_offset: 1,
+                        bit_width: 1,
                         storage_bytes: 4,
+                        signed: false,
+                    }),
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 2,
+                        bit_width: 5,
+                        storage_bytes: 4,
+                        signed: false,
+                    }),
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 7,
+                        bit_width: 6,
+                        storage_bytes: 4,
+                        signed: true,
                     }),
                     None,
                 ],
@@ -19069,16 +19136,32 @@ mod tests {
             &mut program,
             "native_bit_record",
             thaw_hir::FfiAggregateLayout {
-                field_offsets: vec![0, 0, 8],
-                field_layouts: vec![None, None, None],
+                field_offsets: vec![0, 0, 0, 0, 8],
+                field_layouts: vec![None, None, None, None, None],
                 field_bitfields: vec![
                     Some(thaw_hir::FfiBitFieldLayout {
                         bit_offset: 0,
+                        bit_width: 1,
                         storage_bytes: 4,
+                        signed: false,
                     }),
                     Some(thaw_hir::FfiBitFieldLayout {
                         bit_offset: 1,
+                        bit_width: 1,
                         storage_bytes: 4,
+                        signed: false,
+                    }),
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 2,
+                        bit_width: 5,
+                        storage_bytes: 4,
+                        signed: false,
+                    }),
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 7,
+                        bit_width: 6,
+                        storage_bytes: 4,
+                        signed: true,
                     }),
                     None,
                 ],
@@ -19184,7 +19267,7 @@ mod tests {
              typedef struct __attribute__((aligned(32))) { _Bool active; char padding[15]; double value; char tail[8]; } AlignedRecord;\n\
              typedef struct { AlignedRecord value; const char *error; } AlignedRecordResult;\n\
              typedef struct __attribute__((aligned(32))) { AlignedRecord meta; char padding[16]; double total; char tail[8]; } NestedAlignedRecord;\n\
-             typedef struct __attribute__((aligned(32))) { unsigned active:1; unsigned ready:1; double value; } BitRecord;\n\
+             typedef struct __attribute__((aligned(32))) { unsigned active:1; unsigned ready:1; unsigned count:5; signed delta:6; double value; } BitRecord;\n\
              _Static_assert(sizeof(BitRecord) == 32, \"unexpected BitRecord size\");\n\
              _Static_assert(offsetof(BitRecord, value) == 8, \"unexpected BitRecord value offset\");\n\
              AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n\
@@ -19195,7 +19278,7 @@ mod tests {
              NestedAlignedRecord native_nested_aligned_record(void) {\n\
                return (NestedAlignedRecord){{1, {0}, 20, {0}}, {0}, 22, {0}};\n\
              }\n\
-             BitRecord native_bit_record(void) { return (BitRecord){1, 0, 42}; }\n",
+             BitRecord native_bit_record(void) { return (BitRecord){1, 0, 17, -7, 42}; }\n",
         )
         .unwrap();
         assert!(Command::new("cc")
@@ -19220,7 +19303,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "true\n42\n21\naligned check failed\ntrue\n42\ntrue\nfalse\n42\n"
+            "true\n42\n21\naligned check failed\ntrue\n42\ntrue\nfalse\n17\n-7\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
