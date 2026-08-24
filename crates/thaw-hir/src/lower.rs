@@ -3082,6 +3082,11 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_number_array_to_string"
+                    | "__thaw_string_array_to_string"
+                    | "__thaw_bool_array_to_string"
+                    | "__thaw_object_array_to_string"
+                    | "__thaw_object_to_string" => return Ok(HirType::Str),
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -3363,6 +3368,27 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                 vec![value],
             )),
+            HirType::Object(_) => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_object_to_string".to_string())),
+                vec![value],
+            )),
+            HirType::Array(element) => {
+                let builtin = match element.as_ref() {
+                    HirType::F64 => "__thaw_number_array_to_string",
+                    HirType::Str => "__thaw_string_array_to_string",
+                    HirType::Bool => "__thaw_bool_array_to_string",
+                    HirType::Object(_) => "__thaw_object_array_to_string",
+                    other => {
+                        return Err(format!(
+                            "array string conversion does not support element type {other:?}"
+                        ))
+                    }
+                };
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var(builtin.to_string())),
+                    vec![value],
+                ))
+            }
             other => Err(format!(
                 "string concatenation cannot convert native type {other:?}"
             )),
@@ -3489,30 +3515,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     if let Some(expression) = template.exprs.get(index) {
                         let mut value = self.lower_expr(expression)?;
-                        match self.infer_expr_type(&value)? {
-                            HirType::Str => {}
-                            HirType::Bool => {
-                                value = HirExpr::Call(
-                                    Box::new(HirExpr::Var(
-                                        "__thaw_bool_to_string".to_string(),
-                                    )),
-                                    vec![value],
-                                );
-                            }
-                            HirType::F64 => {
-                                value = HirExpr::Call(
-                                    Box::new(HirExpr::Var(
-                                        "__thaw_number_to_string".to_string(),
-                                    )),
-                                    vec![value],
-                                );
-                            }
-                            other => {
-                                return Err(format!(
-                                    "template interpolation cannot stringify {other:?} yet"
-                                ))
-                            }
-                        }
+                        value = self.coerce_primitive_to_string(value)?;
                         parts.push(value);
                     }
                 }
@@ -5460,6 +5463,9 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                     vec![value],
                 ));
+            }
+            if callee_name == "String" && matches!(ty, HirType::Array(_) | HirType::Object(_)) {
+                return self.coerce_primitive_to_string(value);
             }
             if callee_name == "Boolean" && ty != HirType::Json {
                 let name = format!("__thaw_boolean_value_{}", self.next_binding);
