@@ -6080,6 +6080,19 @@ impl<'ctx> HirCompiler<'ctx> {
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let HirExpr::Var(name) = callee else {
+            if let HirExpr::Lambda(_, params, ret, _) = callee {
+                let parameter_types = params
+                    .iter()
+                    .map(|parameter| parameter.ty.clone())
+                    .collect::<Vec<_>>();
+                return self.compile_closure_call(
+                    callee,
+                    &parameter_types,
+                    ret,
+                    args,
+                    "inline closure",
+                );
+            }
             if let HirExpr::PropAccess(_, HirType::Object(fields), field) = callee {
                 if let Some((_, HirType::Function(params, ret))) =
                     fields.iter().find(|(name, _)| name == field)
@@ -8711,6 +8724,28 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "objects"), "1\n3\n11\n7\n");
+    }
+
+    #[test]
+    fn runs_call_result_object_spread_once() {
+        let source = r#"
+            function makeConfig(): { x: number; label: string } {
+                console.log("make");
+                return { x: 7, label: "base" };
+            }
+            function main(): void {
+                const point: { x: number; label: string } = {
+                    ...makeConfig(),
+                    label: "point"
+                };
+                console.log(point.x);
+                console.log(point.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "call_result_object_spread"),
+            "make\n7\npoint\n"
+        );
     }
 
     #[test]
