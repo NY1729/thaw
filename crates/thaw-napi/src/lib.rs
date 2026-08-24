@@ -31,6 +31,7 @@ type NapiCleanupHook = unsafe extern "C" fn(*mut c_void);
 type NapiThreadsafeFunctionCallJs =
     unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void);
 const NAPI_OK: NapiStatus = 0;
+
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
 const NAPI_CANCELLED: NapiStatus = 11;
@@ -1121,6 +1122,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
     discard_result: u8,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
+        thaw_napi_run_async_work();
         let env = module_env_for_handle(receiver)?;
         let method_name = text(method)?;
         let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
@@ -3299,6 +3301,9 @@ fn run_one_async_completion() -> Option<()> {
     ACTIVE_ASYNC_WORK.fetch_sub(1, Ordering::AcqRel);
     if let Some(complete) = complete {
         unsafe { complete(env, status, data) };
+    }
+    if let Err(error) = unsafe { take_env_exception(env) } {
+        HOST.with(|host| host.borrow_mut().last_error = error);
     }
     Some(())
 }
