@@ -693,6 +693,8 @@ Array／Buffer／ArrayBuffer／view／Function／Promise／Error／Dateを含む
 `napi_create_external`はdataと任意のfinalizer／hintをEnvに保持し、Env破棄時に一度だけ実行する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
+scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
+handleも型判定やbacking memory参照より先にinvalid-argとして拒否する。
 generic property APIはArray／Buffer／ArrayBuffer／SharedArrayBuffer／TypedArray／DataView／Promise／
 Error／Dateにもnamed／Symbol data propertyとaccessorを保持する。prototype探索、own判定、descriptor属性、
 列挙順、delete、seal／freezeはplain Object／Functionと同じmetadata経路を使う。Arrayのcanonical数値名は
