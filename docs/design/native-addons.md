@@ -702,6 +702,8 @@ wrap／unwrap／remove-wrap／add-finalizer／object type-tagはidentity metadat
 named／generic／descriptor property APIはobject、N-API key、代入valueの全handleについて所有Envを検証する。
 element API、property-name列挙、run-scriptもobject／value／source handleの所有Envを先に検証する。
 Buffer-from-ArrayBuffer、Error作成、fatal-exception、callback／constructor戻り値もforeign handleを拒否する。
+基本値／文字列／BigInt／Object／Array／Buffer／view作成はresultを確保前に検証し、Symbol descriptionも
+作成Envのhandleだけを受理する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
