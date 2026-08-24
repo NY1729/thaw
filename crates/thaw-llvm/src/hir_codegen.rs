@@ -1545,22 +1545,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .into(),
             )),
-            (FfiErrorAbi::ThawResult, ret) => Ok(Some(
-                self.context
-                    .struct_type(
-                        &[
-                            self.ffi_return_type(
-                                ret,
-                                sig.return_string_abi,
-                                sig.aggregate_return_abi,
-                                sig.aggregate_return_layout.as_ref(),
-                            )?,
-                            self.context.ptr_type(AddressSpace::default()).into(),
-                        ],
-                        false,
-                    )
-                    .into(),
-            )),
+            (FfiErrorAbi::ThawResult, ret) => {
+                let value_type = self.ffi_return_type(
+                    ret,
+                    sig.return_string_abi,
+                    sig.aggregate_return_abi,
+                    sig.aggregate_return_layout.as_ref(),
+                )?;
+                if let Some(layout) = &sig.aggregate_return_layout {
+                    Ok(Some(
+                        self.ffi_explicit_result_type(value_type, layout)?.0.into(),
+                    ))
+                } else {
+                    Ok(Some(
+                        self.context
+                            .struct_type(
+                                &[
+                                    value_type,
+                                    self.context.ptr_type(AddressSpace::default()).into(),
+                                ],
+                                false,
+                            )
+                            .into(),
+                    ))
+                }
+            }
             (FfiErrorAbi::Direct, HirType::Void) => Ok(None),
             (FfiErrorAbi::Direct, ret) => self
                 .ffi_return_type(
@@ -1662,6 +1671,45 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.struct_type(&native_fields, true),
             logical_indices,
         ))
+    }
+
+    fn ffi_explicit_result_type(
+        &self,
+        value_type: BasicTypeEnum<'ctx>,
+        layout: &FfiAggregateLayout,
+    ) -> Result<(inkwell::types::StructType<'ctx>, (u32, u32)), String> {
+        let pointer_size = 8_u64;
+        let error_offset = Self::align_to(layout.size, pointer_size);
+        let result_alignment = u64::from(layout.alignment).max(pointer_size);
+        let result_size = Self::align_to(error_offset + pointer_size, result_alignment);
+        let mut fields = vec![value_type];
+        if error_offset > layout.size {
+            let padding = u32::try_from(error_offset - layout.size)
+                .map_err(|_| "FFI result padding exceeds LLVM's array limit".to_owned())?;
+            fields.push(self.context.i8_type().array_type(padding).into());
+        }
+        let error_index = fields.len() as u32;
+        fields.push(self.context.ptr_type(AddressSpace::default()).into());
+        if result_size > error_offset + pointer_size {
+            let padding = u32::try_from(result_size - error_offset - pointer_size)
+                .map_err(|_| "FFI result tail padding exceeds LLVM's array limit".to_owned())?;
+            fields.push(self.context.i8_type().array_type(padding).into());
+        }
+        Ok((self.context.struct_type(&fields, true), (0, error_index)))
+    }
+
+    fn ffi_result_field_indices(&self, sig: &FfiSignature) -> Result<(u32, u32), String> {
+        let Some(layout) = &sig.aggregate_return_layout else {
+            return Ok((0, 1));
+        };
+        let value_type = self.ffi_return_type(
+            &sig.ret,
+            sig.return_string_abi,
+            sig.aggregate_return_abi,
+            Some(layout),
+        )?;
+        self.ffi_explicit_result_type(value_type, layout)
+            .map(|(_, indices)| indices)
     }
 
     /// The real C ABI parameter list a Fast path native symbol is declared
@@ -10355,13 +10403,14 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         let result = returned.into_struct_value();
+        let (value_index, error_index) = self.ffi_result_field_indices(sig)?;
         let value = self
             .builder
-            .build_extract_value(result, 0, "ffi_result_value")
+            .build_extract_value(result, value_index, "ffi_result_value")
             .map_err(|e| e.to_string())?;
         let error = self
             .builder
-            .build_extract_value(result, 1, "ffi_result_error")
+            .build_extract_value(result, error_index, "ffi_result_error")
             .map_err(|e| e.to_string())?
             .into_pointer_value();
         let error = self.apply_ffi_string_ownership(error, &sig.error_ownership, "ffi_error")?;
@@ -18829,11 +18878,19 @@ mod tests {
     fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         let source = r#"
             declare function native_aligned_record(): { active: boolean; value: number };
+            declare function native_checked_aligned_record(value: number): { active: boolean; value: number };
 
             function main(): void {
                 const record: { active: boolean; value: number } = native_aligned_record();
                 console.log(record.active);
                 console.log(record.value);
+                const checked: { active: boolean; value: number } = native_checked_aligned_record(7);
+                console.log(checked.value);
+                try {
+                    native_checked_aligned_record(0 - 1);
+                } catch (error) {
+                    console.log(error);
+                }
             }
         "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
@@ -18871,6 +18928,32 @@ mod tests {
             },
         )
         .unwrap();
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_checked_aligned_record",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_checked_aligned_record",
+            vec![thaw_hir::FfiStringAbi::NullTerminated],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_aggregate_layout(
+            &mut program,
+            "native_checked_aligned_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 16],
+                size: 32,
+                alignment: 32,
+                indirect: true,
+            },
+        )
+        .unwrap();
         let context = Context::create();
         let mut compiler = HirCompiler::new(&context, "ffi_explicit_aggregate_layout");
         compiler.compile_program(&program).unwrap();
@@ -18890,7 +18973,12 @@ mod tests {
         std::fs::write(
             &native_c_path,
             "typedef struct __attribute__((aligned(32))) { _Bool active; char padding[15]; double value; char tail[8]; } AlignedRecord;\n\
-             AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n",
+             typedef struct { AlignedRecord value; const char *error; } AlignedRecordResult;\n\
+             AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n\
+             AlignedRecordResult native_checked_aligned_record(double value) {\n\
+               if (value < 0) return (AlignedRecordResult){{0, {0}, 0, {0}}, \"aligned check failed\"};\n\
+               return (AlignedRecordResult){{1, {0}, value * 3, {0}}, 0};\n\
+             }\n",
         )
         .unwrap();
         assert!(Command::new("cc")
@@ -18913,7 +19001,10 @@ mod tests {
             .success());
         let output = Command::new(&exe_path).output().unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "true\n42\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "true\n42\n21\naligned check failed\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
