@@ -12699,6 +12699,19 @@ mod tests {
                 value = undefined;
                 return value ?? 3;
             }
+            function conjunction(value: number | undefined): number {
+                if (value !== undefined && value > 2) {
+                    return value * 2;
+                }
+                return 0;
+            }
+            function disjunction(value: number | undefined): number {
+                if (value === undefined || value > 5) {
+                    return 1;
+                } else {
+                    return value + 10;
+                }
+            }
             async function delayed(value: number | undefined): Promise<number> {
                 if (value !== undefined) {
                     await sleep(1);
@@ -12721,13 +12734,17 @@ mod tests {
                 console.log(guardedNegation(undefined));
                 console.log(assigned(undefined));
                 console.log(reset(8));
+                console.log(conjunction(4));
+                console.log(conjunction(undefined));
+                console.log(disjunction(3));
+                console.log(disjunction(undefined));
                 console.log(await delayed(6));
                 console.log(await delayed(undefined));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "optional_branch_narrowing"),
-            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n10\n10\n8\n20\n6\n3\n12\n3\n"
+            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n10\n10\n8\n20\n6\n3\n8\n0\n13\n1\n12\n3\n"
         );
     }
 

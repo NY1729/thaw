@@ -2186,6 +2186,20 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
+    fn lower_expr_with_optional_narrowing(
+        &mut self,
+        expr: &Expr,
+        narrowing: Option<&(Symbol, HirType)>,
+    ) -> Result<HirExpr, String> {
+        let saved = self.narrowings.clone();
+        if let Some((name, payload)) = narrowing {
+            self.narrowings.insert(name.clone(), payload.clone());
+        }
+        let lowered = self.lower_expr(expr);
+        self.narrowings = saved;
+        lowered
+    }
+
     /// Returns the optional binding tested by an undefined comparison and
     /// whether its payload is present in the true branch.
     fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool)> {
@@ -2203,6 +2217,16 @@ impl<'a> FnLowerer<'a> {
         let Expr::Bin(binary) = expr else {
             return None;
         };
+        if binary.op == BinaryOp::LogicalAnd {
+            return self
+                .optional_undefined_narrowing(&binary.left)
+                .filter(|(_, _, present)| *present);
+        }
+        if binary.op == BinaryOp::LogicalOr {
+            return self
+                .optional_undefined_narrowing(&binary.left)
+                .filter(|(_, _, present)| !*present);
+        }
         let present_when_true = match binary.op {
             BinaryOp::NotEqEq | BinaryOp::NotEq => true,
             BinaryOp::EqEqEq | BinaryOp::EqEq => false,
@@ -4251,7 +4275,15 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Bin(bin) => {
                 let mut lhs = self.lower_expr(&bin.left)?;
-                let mut rhs = self.lower_expr(&bin.right)?;
+                let rhs_narrowing = self
+                    .optional_undefined_narrowing(&bin.left)
+                    .filter(|(_, _, present)| {
+                        (bin.op == BinaryOp::LogicalAnd && *present)
+                            || (bin.op == BinaryOp::LogicalOr && !*present)
+                    })
+                    .map(|(name, payload, _)| (name, payload));
+                let mut rhs = self
+                    .lower_expr_with_optional_narrowing(&bin.right, rhs_narrowing.as_ref())?;
                 let mut bindings = Vec::new();
                 if !matches!(
                     bin.op,
