@@ -4371,11 +4371,11 @@ pub unsafe extern "C" fn napi_get_and_clear_last_exception(
     write_value(out, value)
 }
 #[no_mangle]
-pub unsafe extern "C" fn napi_get_version(_env: NapiEnv, out: *mut u32) -> NapiStatus {
-    if out.is_null() {
+pub unsafe extern "C" fn napi_get_version(env: NapiEnv, out: *mut u32) -> NapiStatus {
+    if env.is_null() || out.is_null() {
         NAPI_INVALID_ARG
     } else {
-        *out = 8;
+        *out = 10;
         NAPI_OK
     }
 }
@@ -5909,10 +5909,10 @@ static NODE_VERSION: NapiNodeVersion = NapiNodeVersion {
 unsafe impl Sync for NapiNodeVersion {}
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_node_version(
-    _env: NapiEnv,
+    env: NapiEnv,
     out: *mut *const NapiNodeVersion,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || out.is_null() {
         NAPI_INVALID_ARG
     } else {
         *out = &NODE_VERSION;
@@ -7910,6 +7910,32 @@ mod tests {
             );
             assert_eq!(napi_is_array(env_ptr, array, &mut result), NAPI_OK);
             assert!(result);
+        }
+    }
+
+    #[test]
+    fn version_queries_match_the_exported_node_api_surface() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut version = 0;
+            assert_eq!(napi_get_version(env_ptr, &mut version), NAPI_OK);
+            assert_eq!(version, 10);
+            assert_eq!(
+                napi_get_version(ptr::null_mut(), &mut version),
+                NAPI_INVALID_ARG
+            );
+            let mut first = ptr::null();
+            let mut second = ptr::null();
+            assert_eq!(napi_get_node_version(env_ptr, &mut first), NAPI_OK);
+            assert_eq!(napi_get_node_version(env_ptr, &mut second), NAPI_OK);
+            assert_eq!(first, second);
+            assert!(!first.is_null());
+            assert_eq!(CStr::from_ptr((*first).release).to_bytes(), b"thaw");
+            assert_eq!(
+                napi_get_node_version(ptr::null_mut(), &mut first),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
