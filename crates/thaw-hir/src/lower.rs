@@ -4682,6 +4682,22 @@ impl<'a> FnLowerer<'a> {
                     };
                     return Ok(HirExpr::Lit(HirLit::F64(value)));
                 }
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Number") {
+                    let value = match prop.sym.as_ref() {
+                        "NaN" => f64::NAN,
+                        "POSITIVE_INFINITY" => f64::INFINITY,
+                        "NEGATIVE_INFINITY" => f64::NEG_INFINITY,
+                        "MAX_VALUE" => f64::MAX,
+                        "MIN_VALUE" => f64::from_bits(1),
+                        "MAX_SAFE_INTEGER" => 9_007_199_254_740_991.0,
+                        "MIN_SAFE_INTEGER" => -9_007_199_254_740_991.0,
+                        "EPSILON" => f64::EPSILON,
+                        _ => {
+                            return Err(format!("unsupported Number property `{}`", prop.sym));
+                        }
+                    };
+                    return Ok(HirExpr::Lit(HirLit::F64(value)));
+                }
                 let obj = self.lower_expr(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 match &obj_ty {
