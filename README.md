@@ -277,7 +277,8 @@ The workspace crates have narrow responsibilities:
   and void `.then()`/`.catch()` callbacks settle their derived Promise
 - `.finally()` runs for either settlement, preserves the original value/error,
   waits for returned Promises, and replaces the result when cleanup throws or
-  rejects. Promise callbacks accept arrows, function variables, and named
+  rejects. Directly awaited `.finally()` chains use the same async-frame
+  rejection path as constructors and continuations. Promise callbacks accept arrows, function variables, and named
   functions; constructor `T` is inferred from consistent `resolve(value)` calls
 - Resolving with another native Promise adopts its eventual state, while a
   self-resolution cycle becomes an explicit rejection
