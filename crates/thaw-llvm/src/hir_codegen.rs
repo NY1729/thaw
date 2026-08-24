@@ -12578,6 +12578,49 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_of() {
+        let source = r#"
+            interface Item { value: number; }
+            function first(): number {
+                console.log("first");
+                return 1;
+            }
+            function middle(): number[] {
+                console.log("middle");
+                return [2, 3];
+            }
+            function last(): number {
+                console.log("last");
+                return 4;
+            }
+            async function delayed(): Promise<number[]> {
+                console.log("awaited");
+                await sleep(1);
+                return [6, 7];
+            }
+            async function main(): Promise<void> {
+                console.log(Array.of(1, 2, 3).join(","));
+                console.log(Array.of("a", "b").join("|"));
+                console.log(Array.of(true, false).join("-"));
+                const item: Item = { value: 5 };
+                const objects: Item[] = Array.of(item);
+                objects[0].value = 9;
+                console.log(item.value);
+                const nested: number[][] = Array.of([1], [2, 3]);
+                console.log(nested[1][1]);
+                const empty: string[] = Array.of<string>();
+                console.log(empty.length);
+                console.log(Array.of(first(), ...middle(), last()).join(","));
+                console.log(Array.of(5, ...(await delayed()), 8).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_of"),
+            "1,2,3\na|b\ntrue-false\n9\n3\n0\nfirst\nmiddle\nlast\n1,2,3,4\nawaited\n5,6,7,8\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
