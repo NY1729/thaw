@@ -459,6 +459,10 @@ The workspace crates have narrow responsibilities:
   receiving zero to three `(element, index, array)` parameters. Captures, empty
   arrays, all native element layouts, optional `thisArg` evaluation and awaited
   receivers work; `findIndex` returns the first match or `-1`
+- Homogeneous native arrays implement `.forEach()` with the same typed callback
+  arguments and receiver/optional `thisArg` ordering, visiting every element
+  once in index order and returning `void`; captures, empty arrays, every native
+  element layout and awaited receivers are supported
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
