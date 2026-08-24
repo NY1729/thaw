@@ -4328,6 +4328,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirExpr::ArrayLit(elems) => self.compile_array_lit(elems),
             HirExpr::ArrayConcat(parts, _) => self.compile_array_concat(parts),
+            HirExpr::ArrayAlloc(length, _) => self.compile_array_alloc(length),
             HirExpr::Index(arr, idx) => {
                 let elem_ptr = self.compile_element_ptr(arr, idx)?;
                 self.builder
@@ -4666,6 +4667,50 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         Ok(base_ptr.into())
+    }
+
+    fn compile_array_alloc(&mut self, length: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let length = self.compile_expr(length)?.into_float_value();
+        let length = self
+            .builder
+            .build_float_to_signed_int(length, i64_type, "array_alloc_length")
+            .map_err(|error| error.to_string())?;
+        let payload_size = self
+            .builder
+            .build_int_mul(
+                length,
+                i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                "array_alloc_payload_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let allocation_size = self
+            .builder
+            .build_int_add(
+                payload_size,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "array_alloc_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    allocation_size.into(),
+                    i64_type.const_int(ARRAY_ELEM_BYTES, false).into(),
+                ],
+                "array_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an array")?
+            .into_pointer_value();
+        self.builder
+            .build_store(result, length)
+            .map_err(|error| error.to_string())?;
+        Ok(result.into())
     }
 
     /// Evaluates each array part once from left to right and copies their
@@ -12210,6 +12255,48 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_reduce"),
             "1\n2\n6\nreceiver\ninitial\n16\ncba\n12\n7\n2\nawaited\ncba\nReduce of empty array with no initial value\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_array_map() {
+        let source = r#"
+            interface Item { value: number; }
+            function project(value: number, index: number, array: number[]): number {
+                return value * 2 + index + array.length;
+            }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b"];
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3].map(project).join(","));
+                const suffix: string = "!";
+                console.log(["a", "b"].map((value, index) => value + String(index) + suffix).join("|"));
+                console.log([true, false].map(value => value === false).join("-"));
+                const items: Item[] = [{ value: 1 }, { value: 2 }];
+                const mapped: Item[] = items.map(item => ({ value: item.value + 10 }));
+                console.log(mapped[0].value + mapped[1].value);
+                const nested: number[][] = [1, 2].map(value => [value]);
+                console.log(nested[1][0]);
+                const empty: number[] = [];
+                console.log(empty.map(value => value + 1).length);
+                console.log(receiver().map(value => value + 1, thisValue()).join(","));
+                console.log((await delayed()).map(value => value + value).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_map"),
+            "5,8,11\na0!|b1!\nfalse-true\n23\n2\n0\nreceiver\nthisArg\n2,3\nawaited\naa,bb\n"
         );
     }
 
