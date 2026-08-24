@@ -699,7 +699,8 @@ The workspace crates have narrow responsibilities:
   Buffer and async-work host. The async-work lifecycle, including
   `napi_cancel_async_work`, is supported by a bounded shared worker pool.
   UTF-8, Latin-1 and UTF-16 string creation/extraction follow N-API length,
-  truncation and null-termination rules
+  truncation and null-termination rules. Signed/unsigned 32-bit and signed
+  64-bit number constructors share the existing JavaScript-number conversion path
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design
 
