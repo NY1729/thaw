@@ -3381,6 +3381,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, value, "string iterator source")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
+                    "__thaw_string_repeat" => {
+                        let [value, count] = args.as_slice() else {
+                            return Err("string repeat expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "string repeat receiver")?;
+                        self.expect_type(&HirType::F64, count, "string repeat count")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());
@@ -7828,6 +7836,82 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
                         vec![receiver],
                     ));
+                }
+                if property.sym == *"repeat" {
+                    let [count] = call.args.as_slice() else {
+                        return Err("native `.repeat()` expects exactly one count".into());
+                    };
+                    if count.spread.is_some() {
+                        return Err("string repeat spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "string repeat receiver")?;
+                    let count = self.lower_expr(&count.expr)?;
+                    let count = self.coerce_primitive_to_number(count)?;
+                    let receiver_name = format!("__thaw_repeat_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let count_name = format!("__thaw_repeat_count_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let normalized_name = format!("__thaw_repeat_normalized_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(count_name.clone(), HirType::F64);
+                    self.scope.insert(normalized_name.clone(), HirType::F64);
+                    let number = |value| HirExpr::Lit(HirLit::F64(value));
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let assign = |value| {
+                        HirStmt::Expr(HirExpr::Assign(normalized_name.clone(), Box::new(value)))
+                    };
+                    let range_error = || {
+                        HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                            "Invalid count value for String.prototype.repeat".into(),
+                        )))
+                    };
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(normalized_name.clone(), HirType::F64, var(&count_name)),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(var(&normalized_name)),
+                                Box::new(var(&normalized_name)),
+                            ),
+                            Vec::new(),
+                            vec![assign(number(0.0))],
+                        ),
+                        assign(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                            vec![var(&normalized_name)],
+                        )),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(var(&normalized_name)),
+                                Box::new(number(0.0)),
+                            ),
+                            vec![range_error()],
+                            Vec::new(),
+                        ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(var(&normalized_name)),
+                                Box::new(number(f64::INFINITY)),
+                            ),
+                            vec![range_error()],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_repeat".into())),
+                            vec![var(&receiver_name), var(&normalized_name)],
+                        ))),
+                    ]);
+                    return self.wrap_call_argument_bindings(
+                        body,
+                        &[
+                            (receiver_name, HirType::Str, receiver),
+                            (count_name, HirType::F64, count),
+                        ],
+                    );
                 }
                 if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase") {
                     if !call.args.is_empty() {

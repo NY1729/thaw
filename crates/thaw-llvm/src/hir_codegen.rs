@@ -736,6 +736,11 @@ impl<'ctx> HirCompiler<'ctx> {
             string_transform_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_string_repeat",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
         let string_length_type = f64_type.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
             "thaw_string_length",
@@ -7908,6 +7913,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     "string iterator array",
                 )
             }
+            "__thaw_string_repeat" => {
+                let [value, count] = args else {
+                    return Err("string repeat expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let count = self.compile_expr(count)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_repeat").unwrap(),
+                        &[value.into(), count.into()],
+                        "string_repeat",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string repeat returned no value".into());
+            }
             "__thaw_string_length" => {
                 return self.compile_single_arg_call("thaw_string_length", args, "string length")
             }
@@ -13043,6 +13066,53 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "string_concat_method"),
             "receiver\nargument\nvalue=42;values=1,2;object=[object Object]\nempty\nawaited-concat\nflag=true\nreceiver\nargument\nawaited-concat\nvalue=42true\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_string_repeat() {
+        let source = r#"
+            function text(): string {
+                console.log("receiver");
+                return "ab";
+            }
+            function count(): number {
+                console.log("count");
+                return 2;
+            }
+            async function delayedText(): Promise<string> {
+                console.log("awaited receiver");
+                await sleep(1);
+                return "😀";
+            }
+            async function delayedCount(): Promise<number> {
+                console.log("awaited count");
+                await sleep(1);
+                return 2;
+            }
+            async function main(): Promise<void> {
+                console.log("ab".repeat(3));
+                console.log("😀".repeat(2));
+                console.log("xy".repeat(2.9));
+                console.log("x".repeat(0 / 0).length);
+                console.log("z".repeat("2"));
+                console.log(text().repeat(count()));
+                console.log((await delayedText()).repeat(await delayedCount()));
+                try {
+                    "x".repeat(-1);
+                } catch (error) {
+                    console.log(error);
+                }
+                try {
+                    "x".repeat(Infinity);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_repeat"),
+            "ababab\n😀😀\nxyxy\n0\nzz\nreceiver\ncount\nabab\nawaited receiver\nawaited count\n😀😀\nInvalid count value for String.prototype.repeat\nInvalid count value for String.prototype.repeat\n"
         );
     }
 

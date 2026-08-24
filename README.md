@@ -540,6 +540,10 @@ The workspace crates have narrow responsibilities:
 - Native strings implement variadic `.concat()` with left-to-right receiver
   and argument evaluation, aggregate/primitive conversion, arena ownership and
   awaited operands
+- Native strings implement `.repeat()` with numeric coercion, JavaScript
+  truncation and `NaN` handling, Unicode-preserving arena-owned output,
+  receiver-before-count evaluation, awaited operands and range errors for
+  negative or infinite counts
 - Native string `.length` and `.charCodeAt()` operate on JavaScript UTF-16
   code units, including surrogate pairs, default/converted indices, out-of-range
   `NaN`, receiver-before-index evaluation and awaited receivers
