@@ -657,6 +657,156 @@ unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey
         .unwrap_or(usize::MAX)
 }
 
+unsafe fn typedarray_index_parts(object: NapiValue, key: &PropertyKey) -> Option<(i32, *mut u8)> {
+    let index = property_array_index(key)?;
+    let Value::TypedArray {
+        array_type,
+        length,
+        array_buffer,
+        byte_offset,
+    } = value_ref(object).ok()?
+    else {
+        return None;
+    };
+    if index >= *length {
+        return None;
+    }
+    let (bytes, _, detached) = arraybuffer_parts(*array_buffer).ok()?;
+    if detached {
+        return None;
+    }
+    let element_size = typedarray_element_size(*array_type)?;
+    Some((*array_type, bytes.add(*byte_offset + index * element_size)))
+}
+
+unsafe fn read_typedarray_index(
+    env: NapiEnv,
+    object: NapiValue,
+    key: &PropertyKey,
+) -> Option<NapiValue> {
+    let (array_type, data) = typedarray_index_parts(object, key)?;
+    let env = env_mut(env).ok()?;
+    Some(match array_type {
+        0 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<i8>()) as f64)),
+        1 | 2 => env.alloc(Value::Number(ptr::read_unaligned(data) as f64)),
+        3 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<i16>()) as f64)),
+        4 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<u16>()) as f64)),
+        5 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<i32>()) as f64)),
+        6 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<u32>()) as f64)),
+        7 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<f32>()) as f64)),
+        8 => env.alloc(Value::Number(ptr::read_unaligned(data.cast::<f64>()))),
+        9 => {
+            let value = ptr::read_unaligned(data.cast::<i64>());
+            env.alloc(Value::BigInt {
+                negative: value.is_negative(),
+                words: vec![value.unsigned_abs()],
+            })
+        }
+        10 => env.alloc(Value::BigInt {
+            negative: false,
+            words: vec![ptr::read_unaligned(data.cast::<u64>())],
+        }),
+        _ => return None,
+    })
+}
+
+fn number_for_typedarray(value: &Value) -> Result<f64, NapiStatus> {
+    Ok(match value {
+        Value::Undefined => f64::NAN,
+        Value::Null => 0.0,
+        Value::Bool(value) => u8::from(*value) as f64,
+        Value::Number(value) => *value,
+        Value::String(value) => javascript_number_from_string(value),
+        Value::BigInt { .. } | Value::Symbol { .. } => return Err(NAPI_GENERIC_FAILURE),
+        _ => f64::NAN,
+    })
+}
+
+fn integer_modulo(number: f64, bits: u32) -> u64 {
+    if !number.is_finite() || number == 0.0 {
+        return 0;
+    }
+    number.trunc().rem_euclid(2_f64.powi(bits as i32)) as u64
+}
+
+fn uint8_clamp(number: f64) -> u8 {
+    if number.is_nan() || number <= 0.0 {
+        return 0;
+    }
+    if number >= 255.0 {
+        return 255;
+    }
+    let floor = number.floor();
+    let fraction = number - floor;
+    if fraction > 0.5 || (fraction == 0.5 && floor as u64 % 2 == 1) {
+        floor as u8 + 1
+    } else {
+        floor as u8
+    }
+}
+
+unsafe fn write_typedarray_index(
+    env: &mut Env,
+    object: NapiValue,
+    key: &PropertyKey,
+    value: NapiValue,
+) -> Option<NapiStatus> {
+    let (array_type, data) = typedarray_index_parts(object, key)?;
+    let value_ref = match value_ref(value) {
+        Ok(value) => value,
+        Err(status) => return Some(status),
+    };
+    let status = match array_type {
+        0..=8 => {
+            let number = match number_for_typedarray(value_ref) {
+                Ok(number) => number,
+                Err(_) => {
+                    let error =
+                        env.alloc(Value::Error("typed array value has the wrong type".into()));
+                    env.exception = Some(error);
+                    return Some(NAPI_PENDING_EXCEPTION);
+                }
+            };
+            match array_type {
+                0 => ptr::write_unaligned(data.cast::<i8>(), integer_modulo(number, 8) as u8 as i8),
+                1 => ptr::write_unaligned(data, integer_modulo(number, 8) as u8),
+                2 => ptr::write_unaligned(data, uint8_clamp(number)),
+                3 => ptr::write_unaligned(
+                    data.cast::<i16>(),
+                    integer_modulo(number, 16) as u16 as i16,
+                ),
+                4 => ptr::write_unaligned(data.cast::<u16>(), integer_modulo(number, 16) as u16),
+                5 => ptr::write_unaligned(
+                    data.cast::<i32>(),
+                    integer_modulo(number, 32) as u32 as i32,
+                ),
+                6 => ptr::write_unaligned(data.cast::<u32>(), integer_modulo(number, 32) as u32),
+                7 => ptr::write_unaligned(data.cast::<f32>(), number as f32),
+                8 => ptr::write_unaligned(data.cast::<f64>(), number),
+                _ => unreachable!(),
+            }
+            NAPI_OK
+        }
+        9 | 10 => {
+            let Value::BigInt { negative, words } = value_ref else {
+                let error = env.alloc(Value::Error("BigInt typed arrays require a BigInt".into()));
+                env.exception = Some(error);
+                return Some(NAPI_PENDING_EXCEPTION);
+            };
+            let magnitude = words.first().copied().unwrap_or(0);
+            let bits = if *negative {
+                0_u64.wrapping_sub(magnitude)
+            } else {
+                magnitude
+            };
+            ptr::write_unaligned(data.cast::<u64>(), bits);
+            NAPI_OK
+        }
+        _ => NAPI_INVALID_ARG,
+    };
+    Some(status)
+}
+
 unsafe fn own_property_value(
     env: NapiEnv,
     owner: NapiValue,
@@ -699,6 +849,8 @@ unsafe fn own_property_value(
                     .ok()
                     .map(|env| env.alloc(Value::Number(byte.into())))
             })
+            .or_else(|| host_property_for_owner(env, owner as usize, key)),
+        Ok(Value::TypedArray { .. }) => read_typedarray_index(env, owner, key)
             .or_else(|| host_property_for_owner(env, owner as usize, key)),
         Ok(value) if is_object_value(value) => host_property_for_owner(env, owner as usize, key),
         _ => None,
@@ -760,6 +912,11 @@ unsafe fn set_own_property(
                 }
             }
         }
+        Some(Value::TypedArray { .. }) if property_array_index(key).is_some() => {
+            if let Some(status) = write_typedarray_index(env, object, key, value) {
+                return status;
+            }
+        }
         Some(object_value) if is_object_value(object_value) => {
             env.host_properties
                 .entry(object as usize)
@@ -803,6 +960,7 @@ unsafe fn fixed_index_exists(object: NapiValue, key: &PropertyKey) -> bool {
             index < *length
                 && arraybuffer_parts(*array_buffer).is_ok_and(|(_, _, detached)| !detached)
         }
+        Ok(Value::TypedArray { .. }) => typedarray_index_parts(object, key).is_some(),
         _ => false,
     }
 }
@@ -3998,6 +4156,18 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                 Vec::new()
             }
             Ok(Value::BufferView {
+                array_buffer,
+                length,
+                ..
+            }) => {
+                if arraybuffer_parts(*array_buffer).is_ok_and(|(_, _, detached)| !detached) {
+                    keys.extend(
+                        (0..*length).map(|index| (EnumeratedPropertyKey::Number(index), owner)),
+                    );
+                }
+                Vec::new()
+            }
+            Ok(Value::TypedArray {
                 array_buffer,
                 length,
                 ..
@@ -7254,6 +7424,103 @@ mod tests {
                 napi_create_typedarray(env_ptr, 8, 5, buffer, 0, &mut view),
                 NAPI_INVALID_ARG
             );
+        }
+    }
+
+    #[test]
+    fn typed_array_indexes_apply_kind_specific_conversions() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let numeric_cases = [
+                (0, -129.0, 127.0),
+                (1, -1.0, 255.0),
+                (2, 3.5, 4.0),
+                (3, 65_535.0, -1.0),
+                (4, -1.0, 65_535.0),
+                (5, 4_294_967_295.0, -1.0),
+                (6, -1.0, 4_294_967_295.0),
+                (7, 1.25, 1.25),
+                (8, 1.5, 1.5),
+            ];
+            for (kind, input, expected) in numeric_cases {
+                let mut backing = ptr::null_mut();
+                assert_eq!(
+                    napi_create_arraybuffer(
+                        env_ptr,
+                        typedarray_element_size(kind).unwrap(),
+                        ptr::null_mut(),
+                        &mut backing,
+                    ),
+                    NAPI_OK
+                );
+                let mut view = ptr::null_mut();
+                assert_eq!(
+                    napi_create_typedarray(env_ptr, kind, 1, backing, 0, &mut view),
+                    NAPI_OK
+                );
+                let input = env.alloc(Value::Number(input));
+                assert_eq!(napi_set_element(env_ptr, view, 0, input), NAPI_OK);
+                let mut result = ptr::null_mut();
+                assert_eq!(napi_get_element(env_ptr, view, 0, &mut result), NAPI_OK);
+                assert!(
+                    matches!(value_ref(result), Ok(Value::Number(value)) if *value == expected),
+                    "typed array kind {kind} returned an unexpected value"
+                );
+                let mut deleted = true;
+                assert_eq!(napi_delete_element(env_ptr, view, 0, &mut deleted), NAPI_OK);
+                assert!(!deleted);
+            }
+
+            for (kind, negative, word) in [(9, true, 1_u64), (10, false, u64::MAX)] {
+                let mut backing = ptr::null_mut();
+                assert_eq!(
+                    napi_create_arraybuffer(env_ptr, 8, ptr::null_mut(), &mut backing),
+                    NAPI_OK
+                );
+                let mut view = ptr::null_mut();
+                assert_eq!(
+                    napi_create_typedarray(env_ptr, kind, 1, backing, 0, &mut view),
+                    NAPI_OK
+                );
+                let input = env.alloc(Value::BigInt {
+                    negative,
+                    words: vec![word],
+                });
+                assert_eq!(napi_set_element(env_ptr, view, 0, input), NAPI_OK);
+                let mut result = ptr::null_mut();
+                assert_eq!(napi_get_element(env_ptr, view, 0, &mut result), NAPI_OK);
+                assert!(matches!(
+                    value_ref(result),
+                    Ok(Value::BigInt { negative: actual_negative, words })
+                        if *actual_negative == negative && words == &[word]
+                ));
+            }
+
+            let mut data = ptr::null_mut();
+            let mut backing = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 8, &mut data, &mut backing),
+                NAPI_OK
+            );
+            let mut offset_view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 4, 2, backing, 2, &mut offset_view),
+                NAPI_OK
+            );
+            let value = env.alloc(Value::Number(513.0));
+            assert_eq!(napi_set_element(env_ptr, offset_view, 1, value), NAPI_OK);
+            assert_eq!(
+                ptr::read_unaligned((data as *const u8).add(4).cast::<u16>()),
+                513
+            );
+            assert_eq!(napi_detach_arraybuffer(env_ptr, backing), NAPI_OK);
+            let mut present = true;
+            assert_eq!(
+                napi_has_element(env_ptr, offset_view, 1, &mut present),
+                NAPI_OK
+            );
+            assert!(!present);
         }
     }
 
