@@ -334,10 +334,12 @@ The workspace crates have narrow responsibilities:
   JavaScript truthiness to booleans, numbers (including `NaN`), strings,
   JSON and reference values, evaluate the left side once, and short-circuit
   synchronous or awaited right sides
-- Template literals with string and boolean interpolations concatenate into
+- Template literals with string, boolean, and number interpolations concatenate into
   arena-owned native strings, preserve left-to-right evaluation, and allow
-  interpolations that suspend with `await`; `String(boolean)` uses the same
-  native conversion
+  interpolations that suspend with `await`; `String(boolean)` and
+  `String(number)` use the same native conversions. Number formatting follows
+  JavaScript's `NaN`, infinity, signed-zero, fixed/exponential boundary and
+  shortest-round-trip rules
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
