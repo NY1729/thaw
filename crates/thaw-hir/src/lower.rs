@@ -3877,6 +3877,25 @@ impl<'a> FnLowerer<'a> {
             Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
             Expr::Member(member) => match &member.prop {
                 MemberProp::Computed(computed) => self.lower_index_target(member, computed)?,
+                MemberProp::Ident(prop) => {
+                    let object = self.lower_expr(&member.obj)?;
+                    let object_type = self.infer_expr_type(&object)?;
+                    match &object_type {
+                        HirType::Object(fields)
+                            if fields.iter().any(|(name, ty)| {
+                                name == prop.sym.as_str() && *ty == HirType::F64
+                            }) =>
+                        {
+                            Target::Prop(object, object_type, prop.sym.to_string())
+                        }
+                        _ => {
+                            return Err(format!(
+                                "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
+                                prop.sym
+                            ))
+                        }
+                    }
+                }
                 _ => return Err("unsupported ++/-- target".into()),
             },
             _ => return Err("unsupported ++/-- target".into()),
@@ -3910,7 +3929,13 @@ impl<'a> FnLowerer<'a> {
                 bindings.push((index_name.clone(), HirType::F64, index));
                 Target::Index(HirExpr::Var(array_name), HirExpr::Var(index_name))
             }
-            Target::Prop(_, _, _) => unreachable!("property updates are rejected above"),
+            Target::Prop(object, object_type, field) => {
+                let object_name = format!("__thaw_update_object_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(object_name.clone(), object_type.clone());
+                bindings.push((object_name.clone(), object_type.clone(), object));
+                Target::Prop(HirExpr::Var(object_name), object_type, field)
+            }
         };
         let old_name = format!("__thaw_update_old_{}", self.next_binding);
         self.next_binding += 1;
@@ -5257,6 +5282,25 @@ mod tests {
         assert!(matches!(
             &main.body[4],
             HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
+        ));
+    }
+
+    #[test]
+    fn lowers_number_field_update_expressions() {
+        let program = lower(
+            r#"function main(): void {
+                let point = { value: 2 };
+                const old = point.value++;
+                const current = --point.value;
+            }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[1],
+            HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
+        ));
+        assert!(matches!(
+            &program.functions[0].body[2],
+            HirStmt::Let(_, HirType::F64, HirExpr::PropAssign(_, _, field, _)) if field == "value"
         ));
     }
 
