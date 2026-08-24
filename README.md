@@ -330,6 +330,10 @@ The workspace crates have narrow responsibilities:
   propagate to the enclosing async loop guards
 - Nested `if` conditions may await as well; their Promise is guarded by the
   parent branch, and conditions plus branch bodies may both suspend
+- `&&` and `||` preserve and return same-typed native operands, apply
+  JavaScript truthiness to booleans, numbers (including `NaN`), strings,
+  JSON and reference values, evaluate the left side once, and short-circuit
+  synchronous or awaited right sides
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
