@@ -1761,6 +1761,12 @@ fn compound_op(op: AssignOp) -> Option<BinOp> {
         AssignOp::DivAssign => Some(BinOp::Div),
         AssignOp::ModAssign => Some(BinOp::Mod),
         AssignOp::ExpAssign => Some(BinOp::Exp),
+        AssignOp::BitOrAssign => Some(BinOp::BitOr),
+        AssignOp::BitXorAssign => Some(BinOp::BitXor),
+        AssignOp::BitAndAssign => Some(BinOp::BitAnd),
+        AssignOp::LShiftAssign => Some(BinOp::LShift),
+        AssignOp::RShiftAssign => Some(BinOp::RShift),
+        AssignOp::ZeroFillRShiftAssign => Some(BinOp::ZeroFillRShift),
         _ => None,
     }
 }
@@ -1773,6 +1779,12 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
         BinaryOp::Div => Ok(BinOp::Div),
         BinaryOp::Mod => Ok(BinOp::Mod),
         BinaryOp::Exp => Ok(BinOp::Exp),
+        BinaryOp::BitOr => Ok(BinOp::BitOr),
+        BinaryOp::BitXor => Ok(BinOp::BitXor),
+        BinaryOp::BitAnd => Ok(BinOp::BitAnd),
+        BinaryOp::LShift => Ok(BinOp::LShift),
+        BinaryOp::RShift => Ok(BinOp::RShift),
+        BinaryOp::ZeroFillRShift => Ok(BinOp::ZeroFillRShift),
         BinaryOp::Lt => Ok(BinOp::Lt),
         BinaryOp::Gt => Ok(BinOp::Gt),
         BinaryOp::EqEqEq => Ok(BinOp::EqEqEq),
@@ -2626,7 +2638,18 @@ impl<'a> FnLowerer<'a> {
                         }
                         Ok(HirType::Bool)
                     }
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Exp => {
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::Exp
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::BitAnd
+                    | BinOp::LShift
+                    | BinOp::RShift
+                    | BinOp::ZeroFillRShift => {
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
                         {
@@ -4920,6 +4943,37 @@ mod tests {
             HirStmt::Expr(HirExpr::Assign(_, value))
                 if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Exp, _, _))
         ));
+    }
+
+    #[test]
+    fn lowers_bitwise_and_shift_operators() {
+        let program = lower(
+            r#"function main(): void {
+                let value = 5;
+                console.log(value | 2);
+                console.log(value ^ 1);
+                console.log(value & 3);
+                value <<= 2;
+                value >>= 1;
+                value >>>= 1;
+            }"#,
+        );
+        let expected = [BinOp::BitOr, BinOp::BitXor, BinOp::BitAnd];
+        for (statement, expected) in program.functions[0].body[1..4].iter().zip(expected) {
+            assert!(matches!(
+                statement,
+                HirStmt::Expr(HirExpr::Call(_, args))
+                    if matches!(&args[0], HirExpr::BinOp(op, _, _) if *op == expected)
+            ));
+        }
+        let expected = [BinOp::LShift, BinOp::RShift, BinOp::ZeroFillRShift];
+        for (statement, expected) in program.functions[0].body[4..7].iter().zip(expected) {
+            assert!(matches!(
+                statement,
+                HirStmt::Expr(HirExpr::Assign(_, value))
+                    if matches!(value.as_ref(), HirExpr::BinOp(op, _, _) if *op == expected)
+            ));
+        }
     }
 
     #[test]

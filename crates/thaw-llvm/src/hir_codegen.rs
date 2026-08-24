@@ -6649,6 +6649,51 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "pow returned no value".to_string()),
+            BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::BitAnd
+            | BinOp::LShift
+            | BinOp::RShift
+            | BinOp::ZeroFillRShift => {
+                let i32_type = self.context.i32_type();
+                let lhs_int = self
+                    .builder
+                    .build_float_to_signed_int(lhs_val, i32_type, "bit_lhs")
+                    .map_err(|error| error.to_string())?;
+                let rhs_int = self
+                    .builder
+                    .build_float_to_signed_int(rhs_val, i32_type, "bit_rhs")
+                    .map_err(|error| error.to_string())?;
+                let shift = self
+                    .builder
+                    .build_and(rhs_int, i32_type.const_int(31, false), "shift_count")
+                    .map_err(|error| error.to_string())?;
+                let result = match op {
+                    BinOp::BitOr => self.builder.build_or(lhs_int, rhs_int, "bitor"),
+                    BinOp::BitXor => self.builder.build_xor(lhs_int, rhs_int, "bitxor"),
+                    BinOp::BitAnd => self.builder.build_and(lhs_int, rhs_int, "bitand"),
+                    BinOp::LShift => self.builder.build_left_shift(lhs_int, shift, "lshift"),
+                    BinOp::RShift => self
+                        .builder
+                        .build_right_shift(lhs_int, shift, true, "rshift"),
+                    BinOp::ZeroFillRShift => self
+                        .builder
+                        .build_right_shift(lhs_int, shift, false, "urshift"),
+                    _ => unreachable!(),
+                }
+                .map_err(|error| error.to_string())?;
+                if op == BinOp::ZeroFillRShift {
+                    self.builder
+                        .build_unsigned_int_to_float(result, self.context.f64_type(), "bit_number")
+                        .map(Into::into)
+                        .map_err(|error| error.to_string())
+                } else {
+                    self.builder
+                        .build_signed_int_to_float(result, self.context.f64_type(), "bit_number")
+                        .map(Into::into)
+                        .map_err(|error| error.to_string())
+                }
+            }
             BinOp::Lt => self
                 .builder
                 .build_float_compare(FloatPredicate::OLT, lhs_val, rhs_val, "lttmp")
@@ -9432,6 +9477,37 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "remainder_exponentiation"),
             "1\n8\n8\n2\n1024\n"
+        );
+    }
+
+    #[test]
+    fn compiles_bitwise_shift_and_compound_forms() {
+        let source = r#"
+            async function numberValue(): Promise<number> {
+                await sleep(1);
+                return 5;
+            }
+            async function main(): Promise<void> {
+                console.log(5 | 2);
+                console.log(5 ^ 1);
+                console.log(5 & 3);
+                console.log(3 << 2);
+                console.log(-8 >> 2);
+                console.log((-1 >>> 0) === 4294967295);
+                console.log(1 << 33);
+                let value = await numberValue();
+                value |= 2;
+                value ^= 1;
+                value &= 6;
+                value <<= 2;
+                value >>= 1;
+                value >>>= 1;
+                console.log(value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "bitwise_shift"),
+            "7\n4\n1\n12\n-2\ntrue\n2\n6\n"
         );
     }
 
