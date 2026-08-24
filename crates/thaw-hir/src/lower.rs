@@ -29,7 +29,7 @@ use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl,
     Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
-    ObjectLit as SwcObjectLit, ObjectPatProp, Pat, Prop, PropName, PropOrSpread,
+    ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat, Prop, PropName, PropOrSpread,
     SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind,
     TsType, TsTypeElement, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
@@ -3405,6 +3405,14 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Call(call) => self.lower_call(call),
 
+            Expr::OptChain(chain) => match chain.base.as_ref() {
+                OptChainBase::Member(member) => self.lower_member_read(member),
+                OptChainBase::Call(call) => {
+                    let call = CallExpr::from(call.clone());
+                    self.lower_call(&call)
+                }
+            },
+
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
 
             Expr::Array(array_lit) => {
@@ -6101,6 +6109,29 @@ mod tests {
             statement,
             HirStmt::Let(name, HirType::Bool, _) if name == "flag"
         )));
+    }
+
+    #[test]
+    fn lowers_optional_chains_on_statically_non_null_values() {
+        let program = lower(
+            r#"function invoke(callback: (value: number) => number): number {
+                return callback?.(2);
+            }
+            function main(): void {
+                const box = { value: 1 };
+                console.log(box?.value);
+                console.log(box?.["value"]);
+            }"#,
+        );
+        let invoke = program
+            .functions
+            .iter()
+            .find(|function| function.name == "invoke")
+            .unwrap();
+        assert!(matches!(
+            &invoke.body[0],
+            HirStmt::Return(Some(HirExpr::Call(_, _)))
+        ));
     }
 
     #[test]

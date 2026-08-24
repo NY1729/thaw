@@ -520,6 +520,9 @@ destructuring assignmentも同じfixed-layout展開を使い、既存bindingへ�
 function parameter patternは固定layout型の内部ABI parameterを一つ受け、body先頭で通常の
 destructuring bindingへ展開する。typed arrowと文脈型付きPromise callbackも同じ変換を使うため、
 nested/rest patternを保ったままnative closure ABIとasync continuationへ統合できる。
+static型がnull/undefinedを含まないnative valueのoptional member/computed accessとoptional callは、
+通常のaccess/callへ正規化する。awaited receiverも同じframe extractionを通る。nullish
+short-circuitはnative null/undefined表現の導入後に別途扱う。
 
 ## 12. Promise constructorとcontinuation chain
 
