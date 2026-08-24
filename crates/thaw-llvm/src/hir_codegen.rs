@@ -10589,6 +10589,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_heterogeneous_tuple_string_conversion_once() {
+        let source = r#"
+            function tupleValue(): [number, string, boolean, { value: number }, number[], [string, boolean]] {
+                console.log("tuple-evaluated");
+                return [1.5, "word", true, { value: 2 }, [3, 4], ["inner", false]];
+            }
+            function main(): void {
+                console.log(String(tupleValue()));
+                const tuple: [number, string, boolean] = [7, "x", false];
+                console.log(`tuple=${tuple}`);
+                console.log("prefix:" + tuple);
+                const empty: [] = [];
+                console.log(`empty-tuple=${empty}`);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "tuple_string_conversion"),
+            "tuple-evaluated\n1.5,word,true,[object Object],3,4,inner,false\ntuple=7,x,false\nprefix:7,x,false\nempty-tuple=\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {

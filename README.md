@@ -361,6 +361,9 @@ The workspace crates have narrow responsibilities:
   objects to `[object Object]` and homogeneous number/string/boolean/object
   arrays with JavaScript comma-join semantics, using arena-owned results and
   evaluating aggregate expressions once
+- Heterogeneous typed tuples use the same comma-join conversion recursively,
+  selecting each slot by its static type and evaluating the tuple source once;
+  nested tuples, arrays and objects compose without a dynamic value box
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

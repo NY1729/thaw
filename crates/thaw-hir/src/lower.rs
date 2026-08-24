@@ -3357,7 +3357,7 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
 
-    fn coerce_primitive_to_string(&self, value: HirExpr) -> Result<HirExpr, String> {
+    fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::Str => Ok(value),
             HirType::Bool => Ok(HirExpr::Call(
@@ -3388,6 +3388,43 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var(builtin.to_string())),
                     vec![value],
                 ))
+            }
+            HirType::Tuple(elements) => {
+                let tuple_type = HirType::Tuple(elements.clone());
+                let (tuple, binding) = if matches!(value, HirExpr::Var(_) | HirExpr::TypedIndex(..))
+                {
+                    (value, None)
+                } else {
+                    let name = format!("__thaw_string_tuple_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), tuple_type.clone());
+                    (
+                        HirExpr::Var(name.clone()),
+                        Some((name, tuple_type.clone(), value)),
+                    )
+                };
+                let mut result = HirExpr::Lit(HirLit::Str(String::new()));
+                for (index, element) in elements.iter().enumerate() {
+                    if index != 0 {
+                        result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![result, HirExpr::Lit(HirLit::Str(",".to_string()))],
+                        );
+                    }
+                    let part = self.coerce_primitive_to_string(HirExpr::TypedIndex(
+                        Box::new(tuple.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        element.clone(),
+                    ))?;
+                    result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                        vec![result, part],
+                    );
+                }
+                match binding {
+                    Some(binding) => self.wrap_call_argument_bindings(result, &[binding]),
+                    None => Ok(result),
+                }
             }
             other => Err(format!(
                 "string concatenation cannot convert native type {other:?}"
@@ -5464,7 +5501,12 @@ impl<'a> FnLowerer<'a> {
                     vec![value],
                 ));
             }
-            if callee_name == "String" && matches!(ty, HirType::Array(_) | HirType::Object(_)) {
+            if callee_name == "String"
+                && matches!(
+                    ty,
+                    HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                )
+            {
                 return self.coerce_primitive_to_string(value);
             }
             if callee_name == "Boolean" && ty != HirType::Json {
