@@ -725,6 +725,9 @@ The workspace crates have narrow responsibilities:
   Env access and repeated queue, cancel or delete operations safe state errors.
   Async-work and thread-safe-function creation validates supplied async
   resources, resource-name strings and callback functions against the Env.
+  Thread-safe-function handles retain stable process-lifetime identity after
+  finalization, so subsequent calls return `napi_closing` instead of touching
+  freed memory.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
