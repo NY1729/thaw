@@ -622,3 +622,8 @@ Number表現へ統合し、対応するgetterとの境界値往復をhost test�
 low 64 bitとlossless flagをN-API規約どおり返す。`napi_typeof`は`napi_bigint`を返す。
 `napi_create_bigint_words`／`napi_get_value_bigint_words`はlittle-endian `u64` word列、sign bit、
 必要word数の照会、呼び出し側capacityまでのcopyを扱い、上位zero wordとnegative zeroを正規化する。
+
+`napi_create_arraybuffer`／`napi_get_arraybuffer_info`と`napi_create_typedarray`／
+`napi_get_typedarray_info`は独立したbacking storageとviewを保持する。11種のelement typeごとの
+byte幅、alignment、offset、範囲を検証し、viewのdata pointerは共有buffer内を指す。Nodeの
+Bufferは従来どおりUint8Array互換viewとして扱う。

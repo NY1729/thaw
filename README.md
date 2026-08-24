@@ -705,6 +705,8 @@ The workspace crates have narrow responsibilities:
   Signed and unsigned 64-bit BigInt creation/extraction preserves low bits and
   reports whether conversion was lossless. Arbitrary-precision little-endian
   word arrays support sign, size queries and capacity-limited extraction.
+  ArrayBuffer and all N-API TypedArray element kinds retain shared backing
+  storage, byte offsets, alignment and bounds; Buffer remains a Uint8Array view.
   Own-property checks and property deletion are supported for objects and functions
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design

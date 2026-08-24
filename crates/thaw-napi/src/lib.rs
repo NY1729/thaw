@@ -43,6 +43,7 @@ const NAPI_NUMBER_EXPECTED: NapiStatus = 6;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
 const NAPI_BOOLEAN_EXPECTED: NapiStatus = 7;
 const NAPI_DATE_EXPECTED: NapiStatus = 18;
+const NAPI_ARRAYBUFFER_EXPECTED: NapiStatus = 19;
 const NAPI_BIGINT_EXPECTED: NapiStatus = 17;
 const NAPI_AUTO_LENGTH: usize = usize::MAX;
 
@@ -193,11 +194,21 @@ pub enum Value {
     Bool(bool),
     Number(f64),
     Date(f64),
-    BigInt { negative: bool, words: Vec<u64> },
+    BigInt {
+        negative: bool,
+        words: Vec<u64>,
+    },
     String(String),
     Object(HashMap<String, NapiValue>),
     Array(Vec<NapiValue>),
     Buffer(Vec<u8>),
+    ArrayBuffer(Vec<u8>),
+    TypedArray {
+        array_type: i32,
+        length: usize,
+        array_buffer: NapiValue,
+        byte_offset: usize,
+    },
     External(*mut c_void),
     Symbol(String),
     Function(Function),
@@ -742,6 +753,9 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         ),
         Value::Buffer(values) => {
             JsonValue::Array(values.iter().map(|value| JsonValue::from(*value)).collect())
+        }
+        Value::ArrayBuffer(_) | Value::TypedArray { .. } => {
+            return Err("cannot JSON-encode an ArrayBuffer view".into());
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
         Value::External(_) => return Err("cannot JSON-encode an external value".into()),
@@ -2952,6 +2966,121 @@ pub unsafe extern "C" fn napi_is_buffer(
     NAPI_OK
 }
 
+fn typedarray_element_size(array_type: i32) -> Option<usize> {
+    match array_type {
+        0..=2 => Some(1),
+        3 | 4 => Some(2),
+        5..=7 => Some(4),
+        8..=10 => Some(8),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_arraybuffer(
+    env: NapiEnv,
+    length: usize,
+    data: *mut *mut c_void,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::ArrayBuffer(vec![0; length]));
+    if !data.is_null() {
+        let Some(Value::ArrayBuffer(bytes)) = value.as_mut() else {
+            unreachable!();
+        };
+        *data = bytes.as_mut_ptr().cast();
+    }
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_is_arraybuffer(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *out = matches!(value_ref(value), Ok(Value::ArrayBuffer(_)));
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_arraybuffer_info(
+    _env: NapiEnv,
+    value: NapiValue,
+    data: *mut *mut c_void,
+    length: *mut usize,
+) -> NapiStatus {
+    let Some(Value::ArrayBuffer(bytes)) = value.as_mut() else {
+        return NAPI_ARRAYBUFFER_EXPECTED;
+    };
+    if !data.is_null() {
+        *data = bytes.as_mut_ptr().cast();
+    }
+    if !length.is_null() {
+        *length = bytes.len();
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_typedarray(
+    env: NapiEnv,
+    array_type: i32,
+    length: usize,
+    array_buffer: NapiValue,
+    byte_offset: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let Some(element_size) = typedarray_element_size(array_type) else {
+        return NAPI_INVALID_ARG;
+    };
+    let buffer_length = match value_ref(array_buffer) {
+        Ok(Value::ArrayBuffer(bytes)) => bytes.len(),
+        _ => return NAPI_ARRAYBUFFER_EXPECTED,
+    };
+    let Some(byte_length) = length.checked_mul(element_size) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Some(end) = byte_offset.checked_add(byte_length) else {
+        return NAPI_INVALID_ARG;
+    };
+    if !byte_offset.is_multiple_of(element_size) || end > buffer_length {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::TypedArray {
+        array_type,
+        length,
+        array_buffer,
+        byte_offset,
+    });
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_is_typedarray(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *out = matches!(
+        value_ref(value),
+        Ok(Value::TypedArray { .. } | Value::Buffer(_))
+    );
+    NAPI_OK
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_typedarray_info(
     _env: NapiEnv,
@@ -2962,25 +3091,55 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
     array_buffer: *mut NapiValue,
     byte_offset: *mut usize,
 ) -> NapiStatus {
-    let Some(Value::Buffer(bytes)) = value.as_mut() else {
-        return NAPI_INVALID_ARG;
-    };
-    if !array_type.is_null() {
-        *array_type = 1;
+    match value.as_mut() {
+        Some(Value::TypedArray {
+            array_type: kind,
+            length: view_length,
+            array_buffer: backing,
+            byte_offset: offset,
+        }) => {
+            let (kind, view_length, backing, offset) = (*kind, *view_length, *backing, *offset);
+            let Some(Value::ArrayBuffer(bytes)) = backing.as_mut() else {
+                return NAPI_ARRAYBUFFER_EXPECTED;
+            };
+            if !array_type.is_null() {
+                *array_type = kind;
+            }
+            if !length.is_null() {
+                *length = view_length;
+            }
+            if !data.is_null() {
+                *data = bytes.as_mut_ptr().add(offset).cast();
+            }
+            if !array_buffer.is_null() {
+                *array_buffer = backing;
+            }
+            if !byte_offset.is_null() {
+                *byte_offset = offset;
+            }
+            NAPI_OK
+        }
+        Some(Value::Buffer(bytes)) => {
+            let buffer_length = bytes.len();
+            if !array_type.is_null() {
+                *array_type = 1;
+            }
+            if !length.is_null() {
+                *length = buffer_length;
+            }
+            if !data.is_null() {
+                *data = bytes.as_mut_ptr().cast();
+            }
+            if !array_buffer.is_null() {
+                *array_buffer = value;
+            }
+            if !byte_offset.is_null() {
+                *byte_offset = 0;
+            }
+            NAPI_OK
+        }
+        _ => NAPI_INVALID_ARG,
     }
-    if !length.is_null() {
-        *length = bytes.len();
-    }
-    if !data.is_null() {
-        *data = bytes.as_mut_ptr().cast();
-    }
-    if !array_buffer.is_null() {
-        *array_buffer = value;
-    }
-    if !byte_offset.is_null() {
-        *byte_offset = 0;
-    }
-    NAPI_OK
 }
 
 #[no_mangle]
@@ -4118,6 +4277,69 @@ mod tests {
             );
             assert_eq!(sign, 0);
             assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn typed_arrays_share_arraybuffer_storage_with_offsets() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut data = ptr::null_mut();
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 32, &mut data, &mut buffer),
+                NAPI_OK
+            );
+            assert!(!data.is_null());
+            *(data as *mut u8).add(4) = 42;
+
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 6, 3, buffer, 4, &mut view),
+                NAPI_OK
+            );
+            let mut is_view = false;
+            let mut is_buffer = false;
+            assert_eq!(napi_is_typedarray(env_ptr, view, &mut is_view), NAPI_OK);
+            assert_eq!(
+                napi_is_arraybuffer(env_ptr, buffer, &mut is_buffer),
+                NAPI_OK
+            );
+            assert!(is_view && is_buffer);
+
+            let mut kind = -1;
+            let mut length = 0;
+            let mut view_data = ptr::null_mut();
+            let mut backing = ptr::null_mut();
+            let mut offset = 0;
+            assert_eq!(
+                napi_get_typedarray_info(
+                    env_ptr,
+                    view,
+                    &mut kind,
+                    &mut length,
+                    &mut view_data,
+                    &mut backing,
+                    &mut offset,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(kind, 6);
+            assert_eq!(length, 3);
+            assert_eq!(offset, 4);
+            assert_eq!(backing, buffer);
+            assert_eq!(view_data, data.add(4));
+            assert_eq!(*(view_data as *const u8), 42);
+
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 6, 1, buffer, 2, &mut view),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 8, 5, buffer, 0, &mut view),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
