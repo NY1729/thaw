@@ -35,6 +35,7 @@ const NAPI_OK: NapiStatus = 0;
 
 const NAPI_INVALID_ARG: NapiStatus = 1;
 const NAPI_OBJECT_EXPECTED: NapiStatus = 2;
+const NAPI_FUNCTION_EXPECTED: NapiStatus = 5;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
 const NAPI_CANCELLED: NapiStatus = 11;
 const NAPI_QUEUE_FULL: NapiStatus = 15;
@@ -3823,13 +3824,37 @@ pub unsafe extern "C" fn napi_instanceof(
     constructor: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
-    if result.is_null() {
+    if env.is_null() || result.is_null() {
         return NAPI_INVALID_ARG;
     }
-    let Ok(env) = env_mut(env) else {
+    if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, constructor)
+    {
         return NAPI_INVALID_ARG;
+    }
+    if !matches!(value_ref(constructor), Ok(Value::Function(_))) {
+        return NAPI_FUNCTION_EXPECTED;
+    }
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        *result = false;
+        return NAPI_OK;
+    }
+    let prototype_key = PropertyKey::String("prototype".into());
+    let Some(expected) = find_property_value(env, constructor, &prototype_key) else {
+        return NAPI_GENERIC_FAILURE;
     };
-    *result = env.instances.get(&(object as usize)).copied() == Some(constructor as usize);
+    if !matches!(value_ref(expected), Ok(value) if is_object_value(value)) {
+        return NAPI_GENERIC_FAILURE;
+    }
+    let mut current = prototype_for_owner(env, object as usize);
+    let mut visited = HashSet::new();
+    *result = false;
+    while let Some(prototype) = current.filter(|prototype| visited.insert(*prototype)) {
+        if prototype == expected as usize {
+            *result = true;
+            break;
+        }
+        current = prototype_for_owner(env, prototype);
+    }
     NAPI_OK
 }
 
@@ -7293,6 +7318,79 @@ mod tests {
                 NAPI_OK
             );
             assert!(!deleted);
+        }
+    }
+
+    #[test]
+    fn instanceof_walks_constructor_prototype_chains() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut base = ptr::null_mut();
+            let mut derived = ptr::null_mut();
+            for (name, out) in [(c"Base", &mut base), (c"Derived", &mut derived)] {
+                assert_eq!(
+                    napi_define_class(
+                        env_ptr,
+                        name.as_ptr(),
+                        NAPI_AUTO_LENGTH,
+                        Some(thaw_compiled_callback),
+                        ptr::null_mut(),
+                        0,
+                        ptr::null(),
+                        out,
+                    ),
+                    NAPI_OK
+                );
+            }
+            let mut base_prototype = ptr::null_mut();
+            let mut derived_prototype = ptr::null_mut();
+            assert_eq!(
+                napi_get_named_property(env_ptr, base, c"prototype".as_ptr(), &mut base_prototype,),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_named_property(
+                    env_ptr,
+                    derived,
+                    c"prototype".as_ptr(),
+                    &mut derived_prototype,
+                ),
+                NAPI_OK
+            );
+            env.prototypes
+                .insert(derived_prototype as usize, base_prototype as usize);
+            let mut instance = ptr::null_mut();
+            assert_eq!(
+                napi_new_instance(env_ptr, derived, 0, ptr::null(), &mut instance),
+                NAPI_OK
+            );
+            let mut matches = false;
+            assert_eq!(
+                napi_instanceof(env_ptr, instance, derived, &mut matches),
+                NAPI_OK
+            );
+            assert!(matches);
+            assert_eq!(
+                napi_instanceof(env_ptr, instance, base, &mut matches),
+                NAPI_OK
+            );
+            assert!(matches);
+
+            let primitive = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_instanceof(env_ptr, primitive, base, &mut matches),
+                NAPI_OK
+            );
+            assert!(!matches);
+            assert_eq!(
+                napi_instanceof(env_ptr, instance, primitive, &mut matches),
+                NAPI_FUNCTION_EXPECTED
+            );
+            let mut plain = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
+            assert_eq!(napi_instanceof(env_ptr, plain, base, &mut matches), NAPI_OK);
+            assert!(!matches);
         }
     }
 

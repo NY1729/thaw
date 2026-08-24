@@ -856,6 +856,8 @@ check refcount underflow and overflow while allowing omitted count results.
 Callback invocation validates receiver/function/argument ownership, propagates
 pending exceptions, fills missing callback arguments with undefined, and honors
 all object-valued constructor returns.
+Instance checks walk the live constructor-prototype chain, including class
+inheritance, primitive receivers, invalid constructors, and cycle protection.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and

@@ -719,6 +719,9 @@ Referenceは生成元Env identityを保持し、create／get／ref／unref／del
 pending exceptionを検証する。callbackがnullを返し例外がない場合はundefinedとし、constructorがArrayや
 Buffer等の任意Objectを返した場合もそのidentityを採用する。`napi_get_cb_info`は要求capacityが実引数より
 大きい場合、余剰slotをundefinedで埋める。
+`napi_instanceof`はinstance作成時のconstructor直結判定ではなく、constructorの現在の`prototype`
+identityをreceiverのprototype chain上で探索する。derived prototypeからbase prototypeへの継承、
+primitive receiver=false、非Function constructor=function-expected、prototype cycle停止を扱う。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
