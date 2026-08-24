@@ -47,7 +47,9 @@ constructor等の先行async workをdrainし、各complete境界で例外を回�
 実引数個数と末尾callbackの有無で選択するよう拡張した。inline callbackに加えて、
 local変数へ代入したarrow/functionも追跡する。同じ引数個数を持つ非callback overloadも、
 number、string、boolean、number array、objectのliteralと、それらを代入したlocal変数を
-使って選択する。より複雑な式の型推論とoptional/rest parameterは引き続き残課題である。
+使って選択する。末尾optional parameterは必須prefixから完全signatureまでの各arityを
+個別に生成し、実行ファイルE2Eで0引数・1引数の双方を検証した。より複雑な式の型推論と
+rest parameterは引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
