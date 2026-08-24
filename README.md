@@ -664,7 +664,9 @@ The workspace crates have narrow responsibilities:
   builtins preserve their URL. Other meta properties, non-JSON attributes and
   runtime-computed imports of undeclared packages/subpaths remain outside the
   supported subset. A package with a nonliteral dynamic import pre-bundles
-  installed `dependencies`, `optionalDependencies`, and `peerDependencies`.
+  installed `dependencies`, `optionalDependencies`, and `peerDependencies`,
+  including exact and file-backed wildcard entries from each dependency's
+  conditional `exports` map.
   Expression-free
   templates, parentheses and string-only concatenations are folded and bundled;
   conditional branches and template interpolations composed from those values

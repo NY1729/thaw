@@ -1135,6 +1135,53 @@ fn declared_runtime_dependencies(package_dir: &Path) -> Vec<String> {
     dependencies
 }
 
+fn runtime_export_specifiers(
+    package_name: &str,
+    package_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let Ok(source) = fs::read_to_string(package_dir.join("package.json")) else {
+        return Ok(Vec::new());
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return Ok(Vec::new());
+    };
+    let Some(exports) = manifest
+        .get("exports")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut files = Vec::new();
+    let mut specifiers = Vec::new();
+    for (key, target) in exports {
+        let Some(subpath) = key.strip_prefix("./") else {
+            continue;
+        };
+        let Some(runtime) = select_export_condition(target, &["require", "import", "default"])
+        else {
+            continue;
+        };
+        if subpath.contains('*') {
+            if files.is_empty() {
+                collect_relative_files(package_dir, package_dir, &mut files)?;
+            }
+            for file in &files {
+                if let Some(capture) = wildcard_capture(runtime, file) {
+                    let expanded = subpath.replacen('*', capture, 1);
+                    if validate_export_subpath(&expanded).is_ok() {
+                        specifiers.push(format!("{package_name}/{expanded}"));
+                    }
+                }
+            }
+        } else if validate_export_subpath(subpath).is_ok() {
+            specifiers.push(format!("{package_name}/{subpath}"));
+        }
+    }
+    specifiers.sort();
+    specifiers.dedup();
+    Ok(specifiers)
+}
+
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
 /// `main_relative` (its `main` field, or a default) -- into a single
 /// self-contained JS string with a small embedded module-system
@@ -1269,11 +1316,31 @@ fn bundle_commonjs_package(
                     resolve_bare_require(node_modules_dir, &specifier)
                 {
                     let dep_key = format!("{dep_name}/{dep_relative}");
-                    requires.push((specifier, dep_key.clone()));
+                    requires.push((specifier.clone(), dep_key.clone()));
                     if !visited.contains(&dep_key) {
                         visited.push(dep_key.clone());
                         record_package_version(&mut dependency_versions, &dep_name, &dep_dir);
-                        worklist.push((dep_key, dep_abs, dep_name, dep_dir));
+                        worklist.push((dep_key, dep_abs, dep_name.clone(), dep_dir.clone()));
+                    }
+                    for subpath in runtime_export_specifiers(&specifier, &dep_dir)? {
+                        if requires.iter().any(|(source, _)| source == &subpath) {
+                            continue;
+                        }
+                        if let Some((sub_name, relative, absolute, directory)) =
+                            resolve_bare_require(node_modules_dir, &subpath)
+                        {
+                            let target = format!("{sub_name}/{relative}");
+                            requires.push((subpath, target.clone()));
+                            if !visited.contains(&target) {
+                                visited.push(target.clone());
+                                record_package_version(
+                                    &mut dependency_versions,
+                                    &sub_name,
+                                    &directory,
+                                );
+                                worklist.push((target, absolute, sub_name, directory));
+                            }
+                        }
                     }
                 }
             }
@@ -4206,9 +4273,14 @@ mod tests {
         for (name, value) in [("dep-a", 41), ("dep-b", 42)] {
             let dependency = node_modules.join(name);
             fs::create_dir_all(&dependency).unwrap();
+            let exports = if name == "dep-a" {
+                r#", "exports":{".":"./index.js","./feature":"./feature.js","./features/*":"./features/*.js"}"#
+            } else {
+                ""
+            };
             fs::write(
                 dependency.join("package.json"),
-                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"}}"#),
+                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"{exports}}}"#),
             )
             .unwrap();
             fs::write(
@@ -4216,10 +4288,15 @@ mod tests {
                 format!("exports.value = {value};"),
             )
             .unwrap();
+            if name == "dep-a" {
+                fs::create_dir_all(dependency.join("features")).unwrap();
+                fs::write(dependency.join("feature.js"), "exports.value = 43;").unwrap();
+                fs::write(dependency.join("features/math.js"), "exports.value = 44;").unwrap();
+            }
         }
         let (bundle, _, file_count, versions) =
             bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 4);
+        assert_eq!(file_count, 6);
         assert_eq!(versions.get("dep-a").map(String::as_str), Some("1.0.0"));
         assert_eq!(versions.get("dep-b").map(String::as_str), Some("1.0.0"));
         let script = format!(
@@ -4232,7 +4309,12 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("runConstantExternalImport").unwrap();
-        for (args, expected) in [(r#"["dep-a"]"#, "41"), (r#"["dep-b"]"#, "42")] {
+        for (args, expected) in [
+            (r#"["dep-a"]"#, "41"),
+            (r#"["dep-b"]"#, "42"),
+            (r#"["dep-a/feature"]"#, "43"),
+            (r#"["dep-a/features/math"]"#, "44"),
+        ] {
             let args = CString::new(args).unwrap();
             let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
             assert_eq!(
