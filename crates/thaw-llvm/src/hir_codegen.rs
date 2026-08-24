@@ -8372,10 +8372,14 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.branch_on_pending_exception()?;
 
-        call_site
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| format!("`{name}` does not return a value"))
+        if function.get_type().get_return_type().is_none() {
+            Ok(self.context.f64_type().const_zero().into())
+        } else {
+            call_site
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| format!("`{name}` does not return a value"))
+        }
     }
 
     /// `console.log` is bridged straight to libc for Phase 0/1: strings go
@@ -9545,6 +9549,39 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "loose_equality"),
             "true\ntrue\nfalse\ntrue\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_call_argument_spreads_in_left_to_right_order() {
+        let source = r#"
+            function first(): number {
+                console.log("first");
+                return 1;
+            }
+            async function middle(): Promise<[string, number]> {
+                await sleep(1);
+                console.log("middle");
+                return ["two", 3];
+            }
+            function last(): boolean {
+                console.log("last");
+                return true;
+            }
+            function emit(a: number, b: string, c: number, d: boolean): void {
+                console.log(a);
+                console.log(b);
+                console.log(c);
+                console.log(d);
+            }
+            async function main(): Promise<void> {
+                emit(first(), ...(await middle()), last());
+                emit(...[4, "five", 6, false]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "call_argument_spread"),
+            "first\nmiddle\nlast\n1\ntwo\n3\ntrue\n4\nfive\n6\nfalse\n"
         );
     }
 

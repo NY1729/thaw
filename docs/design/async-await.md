@@ -466,6 +466,10 @@ assignment headも同じloweringを共有し、ループ終了後に最後の要
 frame splitter上で維持する。同期typed arrayは通常値として同じループを通る。
 array literalのspreadは各sourceをtyped array partとして保持し、awaitを含むpart/elementを
 左から右へframe temporaryへ抽出してから、LLVMが合計長を計算してarena配列へ連結する。
+named function callのargument spreadは、array literalまたは静的長を持つtyped tupleを
+個別の引数へ展開する。通常引数を含む各sourceを左から右のnested closure parameterへ一度だけ
+束縛するため、副作用の順序を保ち、`...(await tuplePromise)`もframe splitterで処理できる。
+動的長arrayは呼び出し先の固定ABI arityを決定できないため明示的なエラーにする。
 `switch`は一度だけ評価したdiscriminantと選択case indexへlowerする。case testは未選択時だけ
 順に評価し、case bodyは選択indexを次へ送ってfallthroughする。breakはexit indexへ変換し、
 awaitを含むcase test/bodyも通常のnested-if frame guardとして分割する。
