@@ -504,6 +504,16 @@ impl<'ctx> HirCompiler<'ctx> {
             string_to_number_type,
             Some(Linkage::External),
         );
+        let array_to_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        for name in [
+            "thaw_number_array_to_string",
+            "thaw_string_array_to_string",
+            "thaw_bool_array_to_string",
+            "thaw_object_array_to_string",
+        ] {
+            self.module
+                .add_function(name, array_to_string_type, Some(Linkage::External));
+        }
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -4831,6 +4841,20 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_object_to_string(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("object string conversion expects one operand".to_string());
+        };
+        let _ = self.compile_expr(value)?;
+        self.builder
+            .build_global_string_ptr("[object Object]", "object_string")
+            .map(|value| value.as_pointer_value().into())
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -7002,6 +7026,35 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_string_gt" => return self.compile_string_comparison(args, IntPredicate::SGT),
             "__thaw_string_lte" => return self.compile_string_comparison(args, IntPredicate::SLE),
             "__thaw_string_gte" => return self.compile_string_comparison(args, IntPredicate::SGE),
+            "__thaw_number_array_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_number_array_to_string",
+                    args,
+                    "String(number[])",
+                )
+            }
+            "__thaw_string_array_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_string_array_to_string",
+                    args,
+                    "String(string[])",
+                )
+            }
+            "__thaw_bool_array_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_bool_array_to_string",
+                    args,
+                    "String(boolean[])",
+                )
+            }
+            "__thaw_object_array_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_object_array_to_string",
+                    args,
+                    "String(object[])",
+                )
+            }
+            "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10504,6 +10557,34 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "primitive_relational"),
             "true\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nawaited-relation\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_object_and_typed_array_string_conversion() {
+        let source = r#"
+            function objectValue(): { value: number } {
+                console.log("object-evaluated");
+                return { value: 1 };
+            }
+            function main(): void {
+                const numbers: number[] = [1, -0, 2.5, 1000000000000000000000];
+                const words: string[] = ["a", "", "c"];
+                const flags: boolean[] = [true, false, true];
+                const objects: { value: number }[] = [{ value: 1 }, { value: 2 }];
+                console.log(String(numbers));
+                console.log(`words=${words}`);
+                console.log("flags=" + flags);
+                console.log(String(objects));
+                console.log(String(objectValue()));
+                console.log(`object=${{ value: 3 }}`);
+                const empty: number[] = [];
+                console.log(`empty=${empty}`);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "aggregate_string_conversion"),
+            "1,0,2.5,1e+21\nwords=a,,c\nflags=true,false,true\n[object Object],[object Object]\nobject-evaluated\n[object Object]\nobject=[object Object]\nempty=\n"
         );
     }
 
