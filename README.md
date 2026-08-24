@@ -742,6 +742,8 @@ The workspace crates have narrow responsibilities:
   exposed through their `node_api_*` entry points.
   Node-API v10 can create zero-copy Buffer views over bounded ArrayBuffer
   ranges and intern UTF-8, Latin-1 and UTF-16 optimized property keys.
+  External Latin-1 and UTF-16 strings use the host's copied representation,
+  report `copied=true` and immediately honor their native finalizers.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
