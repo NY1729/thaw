@@ -387,6 +387,10 @@ The workspace crates have narrow responsibilities:
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
   trailing text, single evaluation and awaited arguments
+- Native homogeneous arrays and heterogeneous tuples implement `.join()` with
+  JavaScript's default comma or a coerced custom separator. Number, string,
+  boolean, fixed-object and nested aggregate elements, empty arrays, receiver
+  ordering and awaited receivers are supported
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
