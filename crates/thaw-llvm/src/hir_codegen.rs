@@ -1370,30 +1370,21 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let param_types = self.ffi_param_types(&sig.params, &sig.param_string_abis)?;
 
-        let fn_type = match (&sig.error_abi, &sig.ret) {
-            (FfiErrorAbi::ThawResult, HirType::Void) => self
-                .context
-                .struct_type(
-                    &[self.context.ptr_type(AddressSpace::default()).into()],
-                    false,
-                )
-                .fn_type(&param_types, false),
-            (FfiErrorAbi::ThawResult, ret) => self
-                .context
-                .struct_type(
-                    &[
-                        self.ffi_return_type(ret, sig.return_string_abi, sig.aggregate_return_abi)?,
-                        self.context.ptr_type(AddressSpace::default()).into(),
-                    ],
-                    false,
-                )
-                .fn_type(&param_types, false),
-            (FfiErrorAbi::Direct, HirType::Void) => {
-                self.context.void_type().fn_type(&param_types, false)
-            }
-            (FfiErrorAbi::Direct, ret) => self
-                .ffi_return_type(ret, sig.return_string_abi, sig.aggregate_return_abi)?
-                .fn_type(&param_types, false),
+        let return_type = self.ffi_call_return_type(sig)?;
+        let fn_type = if Self::uses_indirect_ffi_return(sig) {
+            let mut indirect_params = Vec::with_capacity(param_types.len() + 1);
+            indirect_params.push(
+                self.context
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum()
+                    .into(),
+            );
+            indirect_params.extend(param_types);
+            self.context.void_type().fn_type(&indirect_params, false)
+        } else if let Some(return_type) = return_type {
+            return_type.fn_type(&param_types, false)
+        } else {
+            self.context.void_type().fn_type(&param_types, false)
         };
 
         let function = self
@@ -1408,6 +1399,46 @@ impl<'ctx> HirCompiler<'ctx> {
             FfiCallingConvention::C => 0,
             FfiCallingConvention::Fast => 8,
             FfiCallingConvention::Cold => 9,
+        }
+    }
+
+    fn uses_indirect_ffi_return(sig: &FfiSignature) -> bool {
+        sig.aggregate_return_abi == FfiAggregateAbi::Packed
+            && matches!(sig.ret, HirType::Array(_) | HirType::Object(_))
+    }
+
+    fn ffi_call_return_type(
+        &self,
+        sig: &FfiSignature,
+    ) -> Result<Option<BasicTypeEnum<'ctx>>, String> {
+        match (&sig.error_abi, &sig.ret) {
+            (FfiErrorAbi::ThawResult, HirType::Void) => Ok(Some(
+                self.context
+                    .struct_type(
+                        &[self.context.ptr_type(AddressSpace::default()).into()],
+                        false,
+                    )
+                    .into(),
+            )),
+            (FfiErrorAbi::ThawResult, ret) => Ok(Some(
+                self.context
+                    .struct_type(
+                        &[
+                            self.ffi_return_type(
+                                ret,
+                                sig.return_string_abi,
+                                sig.aggregate_return_abi,
+                            )?,
+                            self.context.ptr_type(AddressSpace::default()).into(),
+                        ],
+                        false,
+                    )
+                    .into(),
+            )),
+            (FfiErrorAbi::Direct, HirType::Void) => Ok(None),
+            (FfiErrorAbi::Direct, ret) => self
+                .ffi_return_type(ret, sig.return_string_abi, sig.aggregate_return_abi)
+                .map(Some),
         }
     }
 
@@ -1429,7 +1460,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .into()),
             HirType::Array(element)
-                if **element == HirType::F64 && aggregate_abi == FfiAggregateAbi::Portable =>
+                if **element == HirType::F64 && aggregate_abi != FfiAggregateAbi::Internal =>
             {
                 Ok(self
                     .context
@@ -1438,11 +1469,11 @@ impl<'ctx> HirCompiler<'ctx> {
                             self.context.ptr_type(AddressSpace::default()).into(),
                             self.context.i64_type().into(),
                         ],
-                        false,
+                        aggregate_abi == FfiAggregateAbi::Packed,
                     )
                     .into())
             }
-            HirType::Object(fields) if aggregate_abi == FfiAggregateAbi::Portable => {
+            HirType::Object(fields) if aggregate_abi != FfiAggregateAbi::Internal => {
                 let fields = fields
                     .iter()
                     .map(|(name, ty)| {
@@ -1450,7 +1481,10 @@ impl<'ctx> HirCompiler<'ctx> {
                             .map_err(|error| format!("FFI object field `{name}`: {error}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(self.context.struct_type(&fields, false).into())
+                Ok(self
+                    .context
+                    .struct_type(&fields, aggregate_abi == FfiAggregateAbi::Packed)
+                    .into())
             }
             other => self.basic_type(other),
         }
@@ -10001,12 +10035,33 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
+        let indirect_return = if Self::uses_indirect_ffi_return(sig) {
+            let return_type = self
+                .ffi_call_return_type(sig)?
+                .expect("packed aggregate returns always have a value type");
+            let slot = self
+                .builder
+                .build_alloca(return_type, "ffi_indirect_result")
+                .map_err(|error| error.to_string())?;
+            compiled_args.insert(0, slot.into());
+            Some((slot, return_type))
+        } else {
+            None
+        };
         let call_site = self
             .builder
             .build_call(function, &compiled_args, "ffi_calltmp")
             .map_err(|e| e.to_string())?;
         call_site.set_call_convention(Self::ffi_calling_convention(sig.calling_convention));
-        let returned = call_site.try_as_basic_value().basic();
+        let returned = if let Some((slot, return_type)) = indirect_return {
+            Some(
+                self.builder
+                    .build_load(return_type, slot, "ffi_indirect_result_value")
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            call_site.try_as_basic_value().basic()
+        };
         if sig.ret == HirType::Void {
             if sig.error_abi == FfiErrorAbi::Direct {
                 return Ok(None);
@@ -18317,6 +18372,102 @@ mod tests {
         let output = Command::new(&exe_path).output().unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "10\n18\n1\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_call_marshals_object_returns_from_packed_c_structs() {
+        let source = r#"
+            declare function native_record(): { active: boolean; value: number };
+            declare function native_checked_record(value: number): { active: boolean; value: number };
+
+            function main(): void {
+                const record: { active: boolean; value: number } = native_record();
+                console.log(record.active);
+                console.log(record.value);
+                const checked: { active: boolean; value: number } = native_checked_record(7);
+                console.log(checked.value);
+                try {
+                    native_checked_record(0 - 1);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_record",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Packed,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_checked_record",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_checked_record",
+            vec![thaw_hir::FfiStringAbi::NullTerminated],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Packed,
+        )
+        .unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_packed_return");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-packed-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "typedef struct __attribute__((packed)) { _Bool active; double value; } PackedRecord;\n\
+             typedef struct { PackedRecord value; const char *error; } PackedRecordResult;\n\
+             PackedRecord native_record(void) { return (PackedRecord){1, 42}; }\n\
+             PackedRecordResult native_checked_record(double value) {\n\
+               if (value < 0) return (PackedRecordResult){{0, 0}, \"packed check failed\"};\n\
+               return (PackedRecordResult){{1, value * 2}, 0};\n\
+             }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "true\n42\n14\npacked check failed\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

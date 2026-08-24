@@ -116,6 +116,7 @@ pub enum FfiCallingConvention {
 pub enum FfiAggregateAbi {
     Internal,
     Portable,
+    Packed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -674,6 +675,7 @@ pub fn set_ffi_string_abi(
         params: &[FfiStringAbi],
         returns: FfiStringAbi,
         calling_convention: FfiCallingConvention,
+        aggregate_return_abi: FfiAggregateAbi,
         found: &mut bool,
     ) {
         if let HirExpr::FfiCall(signature, _) = expr {
@@ -681,6 +683,7 @@ pub fn set_ffi_string_abi(
                 signature.param_string_abis = params.to_vec();
                 signature.return_string_abi = returns;
                 signature.calling_convention = calling_convention;
+                signature.aggregate_return_abi = aggregate_return_abi;
                 *found = true;
             }
         }
@@ -694,26 +697,74 @@ pub fn set_ffi_string_abi(
             | HirExpr::PromiseAny(values, _)
             | HirExpr::PromiseAllSettled(values, _) => {
                 for value in values {
-                    update_expr(value, symbol, params, returns, calling_convention, found);
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
                 }
             }
             HirExpr::Call(callee, values) => {
-                update_expr(callee, symbol, params, returns, calling_convention, found);
+                update_expr(
+                    callee,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
                 for value in values {
-                    update_expr(value, symbol, params, returns, calling_convention, found);
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
                 }
             }
             HirExpr::DynamicCall(_, values) => {
                 for value in values {
-                    update_expr(value, symbol, params, returns, calling_convention, found);
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
                 }
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _) => {
-                update_expr(left, symbol, params, returns, calling_convention, found);
-                update_expr(right, symbol, params, returns, calling_convention, found);
+                update_expr(
+                    left,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    right,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
             }
             HirExpr::Await(inner)
             | HirExpr::AwaitPromise(inner, _)
@@ -737,42 +788,152 @@ pub fn set_ffi_string_abi(
             | HirExpr::NullishIsNull(inner, _)
             | HirExpr::NullishIsUndefined(inner, _)
             | HirExpr::NullishIsNone(inner, _)
-            | HirExpr::NullishValue(inner, _) => {
-                update_expr(inner, symbol, params, returns, calling_convention, found)
-            }
-            HirExpr::Lambda(_, _, _, body) => {
-                update_expr(body, symbol, params, returns, calling_convention, found)
-            }
-            HirExpr::PromiseNew(executor, _, _) => {
-                update_expr(executor, symbol, params, returns, calling_convention, found)
-            }
+            | HirExpr::NullishValue(inner, _) => update_expr(
+                inner,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
+            HirExpr::Lambda(_, _, _, body) => update_expr(
+                body,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
+            HirExpr::PromiseNew(executor, _, _) => update_expr(
+                executor,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
-                update_expr(source, symbol, params, returns, calling_convention, found);
-                update_expr(callback, symbol, params, returns, calling_convention, found);
+                update_expr(
+                    source,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    callback,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
             }
             HirExpr::PromiseFinally(source, callback, _, _) => {
-                update_expr(source, symbol, params, returns, calling_convention, found);
-                update_expr(callback, symbol, params, returns, calling_convention, found);
+                update_expr(
+                    source,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    callback,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
             }
-            HirExpr::Block(stmts) => {
-                update_stmts(stmts, symbol, params, returns, calling_convention, found)
-            }
+            HirExpr::Block(stmts) => update_stmts(
+                stmts,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
             HirExpr::IndexAssign(a, b, c) => {
-                update_expr(a, symbol, params, returns, calling_convention, found);
-                update_expr(b, symbol, params, returns, calling_convention, found);
-                update_expr(c, symbol, params, returns, calling_convention, found);
+                update_expr(
+                    a,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    b,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    c,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
             }
             HirExpr::ObjectLit(fields) => {
                 for (_, value) in fields {
-                    update_expr(value, symbol, params, returns, calling_convention, found);
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
                 }
             }
-            HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => {
-                update_expr(object, symbol, params, returns, calling_convention, found)
-            }
+            HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => update_expr(
+                object,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
             HirExpr::PropAssign(object, _, _, value) | HirExpr::JsonIndex(object, value) => {
-                update_expr(object, symbol, params, returns, calling_convention, found);
-                update_expr(value, symbol, params, returns, calling_convention, found);
+                update_expr(
+                    object,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    value,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
             }
             HirExpr::Lit(_)
             | HirExpr::OptionalNone(_)
@@ -790,16 +951,31 @@ pub fn set_ffi_string_abi(
         params: &[FfiStringAbi],
         returns: FfiStringAbi,
         calling_convention: FfiCallingConvention,
+        aggregate_return_abi: FfiAggregateAbi,
         found: &mut bool,
     ) {
         for stmt in stmts {
             match stmt {
                 HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
-                    update_expr(expr, symbol, params, returns, calling_convention, found)
+                    update_expr(
+                        expr,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    )
                 }
-                HirStmt::Return(Some(expr)) => {
-                    update_expr(expr, symbol, params, returns, calling_convention, found)
-                }
+                HirStmt::Return(Some(expr)) => update_expr(
+                    expr,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                ),
                 HirStmt::If(condition, then_body, else_body) => {
                     update_expr(
                         condition,
@@ -807,6 +983,7 @@ pub fn set_ffi_string_abi(
                         params,
                         returns,
                         calling_convention,
+                        aggregate_return_abi,
                         found,
                     );
                     update_stmts(
@@ -815,6 +992,7 @@ pub fn set_ffi_string_abi(
                         params,
                         returns,
                         calling_convention,
+                        aggregate_return_abi,
                         found,
                     );
                     update_stmts(
@@ -823,6 +1001,7 @@ pub fn set_ffi_string_abi(
                         params,
                         returns,
                         calling_convention,
+                        aggregate_return_abi,
                         found,
                     );
                 }
@@ -833,18 +1012,36 @@ pub fn set_ffi_string_abi(
                         params,
                         returns,
                         calling_convention,
+                        aggregate_return_abi,
                         found,
                     );
-                    update_stmts(body, symbol, params, returns, calling_convention, found);
+                    update_stmts(
+                        body,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
                 }
                 HirStmt::Try(body, _, catch_body) => {
-                    update_stmts(body, symbol, params, returns, calling_convention, found);
+                    update_stmts(
+                        body,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
                     update_stmts(
                         catch_body,
                         symbol,
                         params,
                         returns,
                         calling_convention,
+                        aggregate_return_abi,
                         found,
                     );
                 }
@@ -893,6 +1090,7 @@ pub fn set_ffi_string_abi(
             &param_abis,
             return_abi,
             calling_convention,
+            aggregate_return_abi,
             &mut found,
         );
     }
