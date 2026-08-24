@@ -54,6 +54,10 @@ method戻り値の双方を検証した。終了時drainにはdefault libuv loop
 constructor等の先行async workをdrainし、各complete境界で例外を回収して後続callへ
 漏らさない。これにより公式sqlite3の実`Database`を構築し、registry削除後の単一実行
 ファイルで`close(callback)`の完了通知まで検証できた。
+private/non-default loop向けにはhost拡張`thaw_napi_register_uv_loop`／
+`thaw_napi_unregister_uv_loop`を追加した。登録loopをdefault loopと同じmain threadで
+`UV_RUN_NOWAIT`駆動し、終了drainのalive判定にも含める。実`uv_loop_t`を初期化してtimerを
+発火・closeし、登録解除後に`uv_loop_close`できることまで回帰testで検証した。
 同名instance methodは対応可能な全signatureへ固有symbolを生成し、source rewrite時に
 実引数個数と末尾callbackの有無で選択するよう拡張した。inline callbackに加えて、
 local変数へ代入したarrow/functionも追跡する。同じ引数個数を持つ非callback overloadも、

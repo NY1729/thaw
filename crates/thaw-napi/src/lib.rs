@@ -99,6 +99,11 @@ static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 static THREADSAFE_FUNCTIONS: OnceLock<Mutex<Vec<Box<ThreadsafeFunction>>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
 static ASYNC_CLEANUP_HANDLES: OnceLock<Mutex<Vec<Box<AsyncCleanupHookHandle>>>> = OnceLock::new();
+static REGISTERED_UV_LOOPS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+
+fn registered_uv_loops() -> &'static Mutex<Vec<usize>> {
+    REGISTERED_UV_LOOPS.get_or_init(|| Mutex::new(Vec::new()))
+}
 
 pub struct ThreadsafeFunction {
     env: usize,
@@ -5288,6 +5293,42 @@ pub unsafe extern "C" fn napi_get_uv_event_loop(env: NapiEnv, out: *mut *mut c_v
     }
 }
 
+/// Thaw host extension for addons or generated native shims which own a
+/// non-default libuv loop. Registered loops are driven on the generated
+/// program's main thread alongside Node-API async completions.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_register_uv_loop(event_loop: *mut c_void) -> NapiStatus {
+    if event_loop.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let mut loops = registered_uv_loops()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let address = event_loop as usize;
+    if !loops.contains(&address) {
+        loops.push(address);
+    }
+    NAPI_OK
+}
+
+/// Stops host polling for a private libuv loop before its owner closes and
+/// frees the `uv_loop_t` storage.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_unregister_uv_loop(event_loop: *mut c_void) -> NapiStatus {
+    if event_loop.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let mut loops = registered_uv_loops()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let address = event_loop as usize;
+    let Some(index) = loops.iter().position(|registered| *registered == address) else {
+        return NAPI_INVALID_ARG;
+    };
+    loops.swap_remove(index);
+    NAPI_OK
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i32) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
@@ -7257,13 +7298,22 @@ unsafe fn poll_uv_loop() -> bool {
     let default_loop = std::mem::transmute::<*mut c_void, UvDefaultLoop>(default_loop);
     let run = std::mem::transmute::<*mut c_void, UvRun>(run);
     let alive = std::mem::transmute::<*mut c_void, UvLoopAlive>(alive);
-    let event_loop = default_loop();
-    if event_loop.is_null() {
-        return false;
-    }
     const UV_RUN_NOWAIT: i32 = 2;
-    run(event_loop, UV_RUN_NOWAIT);
-    alive(event_loop) != 0
+    let default_loop = default_loop();
+    let mut loops = registered_uv_loops()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if !default_loop.is_null() && !loops.contains(&(default_loop as usize)) {
+        loops.push(default_loop as usize);
+    }
+    let mut any_alive = false;
+    for event_loop in loops {
+        let event_loop = event_loop as *mut c_void;
+        run(event_loop, UV_RUN_NOWAIT);
+        any_alive |= alive(event_loop) != 0;
+    }
+    any_alive
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -11512,6 +11562,72 @@ mod tests {
             assert!(UV_TIMER_FIRED.load(Ordering::Acquire));
             poll_uv_loop();
             libc::free(timer);
+            libc::dlclose(library);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn async_drain_drives_registered_private_libuv_loops() {
+        let _guard = lock_async_test();
+        unsafe {
+            type UvLoopSize = unsafe extern "C" fn() -> usize;
+            type UvLoopInit = unsafe extern "C" fn(*mut c_void) -> i32;
+            type UvLoopClose = unsafe extern "C" fn(*mut c_void) -> i32;
+            type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
+            type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+            type UvTimerStart = unsafe extern "C" fn(
+                *mut c_void,
+                Option<unsafe extern "C" fn(*mut c_void)>,
+                u64,
+                u64,
+            ) -> i32;
+
+            let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            assert!(!library.is_null());
+            let loop_size = std::mem::transmute::<*mut c_void, UvLoopSize>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_loop_size".as_ptr(),
+            ));
+            let loop_init = std::mem::transmute::<*mut c_void, UvLoopInit>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_loop_init".as_ptr(),
+            ));
+            let loop_close = std::mem::transmute::<*mut c_void, UvLoopClose>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_loop_close".as_ptr(),
+            ));
+            let handle_size = std::mem::transmute::<*mut c_void, UvHandleSize>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_handle_size".as_ptr(),
+            ));
+            let timer_init = std::mem::transmute::<*mut c_void, UvTimerInit>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_timer_init".as_ptr(),
+            ));
+            let timer_start = std::mem::transmute::<*mut c_void, UvTimerStart>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_timer_start".as_ptr(),
+            ));
+
+            let event_loop = libc::calloc(1, loop_size());
+            assert!(!event_loop.is_null());
+            assert_eq!(loop_init(event_loop), 0);
+            assert_eq!(thaw_napi_register_uv_loop(event_loop), NAPI_OK);
+            assert_eq!(thaw_napi_register_uv_loop(event_loop), NAPI_OK);
+            const UV_TIMER: i32 = 13;
+            let timer = libc::calloc(1, handle_size(UV_TIMER));
+            assert!(!timer.is_null());
+            assert_eq!(timer_init(event_loop, timer), 0);
+            UV_TIMER_FIRED.store(false, Ordering::Release);
+            assert_eq!(timer_start(timer, Some(test_uv_timer_callback), 1, 0), 0);
+            thaw_napi_run_async_work();
+            assert!(UV_TIMER_FIRED.load(Ordering::Acquire));
+            assert_eq!(thaw_napi_unregister_uv_loop(event_loop), NAPI_OK);
+            assert_eq!(thaw_napi_unregister_uv_loop(event_loop), NAPI_INVALID_ARG);
+            assert_eq!(loop_close(event_loop), 0);
+            libc::free(timer);
+            libc::free(event_loop);
             libc::dlclose(library);
         }
     }
