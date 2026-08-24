@@ -498,6 +498,10 @@ The workspace crates have narrow responsibilities:
 - `Array.of()` constructs homogeneous native arrays for every supported
   element layout, preserves scalar/spread evaluation order and accepts awaited
   spreads. Explicit element type arguments support empty construction
+- `Array.from()` copies homogeneous native arrays or maps them through a typed
+  zero-to-two-argument callback into a new element type. Explicit input/output
+  type arguments, shallow object identity, empty and awaited sources, named
+  callbacks, captures and optional `thisArg` evaluation are supported
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
