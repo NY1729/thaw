@@ -723,6 +723,8 @@ The workspace crates have narrow responsibilities:
   keys in the same way as JavaScript.
   Property-name enumeration supports N-API string/Symbol skipping, descriptor
   attribute filters, own-key mode and numeric array-index conversion.
+  Class instances retain their constructor relationship and expose the class
+  prototype through `napi_get_prototype`.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
