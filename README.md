@@ -719,6 +719,8 @@ The workspace crates have narrow responsibilities:
   TypedArray/DataView views while preserving external finalizer ownership.
   Async contexts validate resource names and Env ownership, reject double
   destruction, and are checked by callback scopes and `napi_make_callback`.
+  Deferred Promise handles remain Env-owned after settlement so repeated
+  resolve/reject calls fail safely, and settlement values must share the Env.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
