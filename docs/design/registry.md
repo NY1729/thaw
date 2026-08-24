@@ -1036,6 +1036,9 @@ exportsに現れず実行時に組み立てる未知のdeep subpathはまだ対�
 `file://` URLへ変換する。Node互換の`import.meta.filename`/`dirname`はpercent encodeしない
 絶対filesystem pathへ変換する。bare registry package/subpathは選択済みの`bundle.js`、
 `native.node`、`native.a`の実pathへ解決し、`node:` builtinはspecifier自体をURLとして保つ。
+通常のstatic/dynamic importでもquery/fragmentをfilesystem解決から除外しつつmodule cache key
+には保持する。同一URLの再importはnamespaceを再利用し、suffixが異なるURLは別module instanceとして
+初期化する。JSON attributeの拡張子検証もsuffixを除いたpathに対して行う。
 その他のmeta propertyはまだ対象外である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
