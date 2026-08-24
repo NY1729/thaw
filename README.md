@@ -744,6 +744,8 @@ The workspace crates have narrow responsibilities:
   output writes; Symbol descriptions must belong to the creating Env.
   Raw string, word and function-name inputs are read only after the Env and
   result handle have been validated.
+  Property and class descriptor batches are fully preflighted before applying
+  the first property or allocating a constructor/prototype.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
