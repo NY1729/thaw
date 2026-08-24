@@ -3901,7 +3901,13 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     }
     let attribute_filter = key_filter & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
     keys.retain(|(key, owner)| match key {
-        EnumeratedPropertyKey::Number(_) => key_filter & NAPI_KEY_SKIP_STRINGS == 0,
+        EnumeratedPropertyKey::Number(index) => {
+            let key = PropertyKey::String(index.to_string());
+            key_filter & NAPI_KEY_SKIP_STRINGS == 0
+                && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
+                    || property_attributes_for(env_ptr, *owner, &key) & attribute_filter
+                        == attribute_filter)
+        }
         EnumeratedPropertyKey::Property(PropertyKey::String(_)) => {
             key_filter & NAPI_KEY_SKIP_STRINGS == 0
                 && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
@@ -6061,6 +6067,16 @@ mod tests {
                     attributes: 0,
                     data: ptr::null_mut(),
                 },
+                NapiPropertyDescriptor {
+                    utf8name: c"2".as_ptr(),
+                    name: ptr::null_mut(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value,
+                    attributes: 0,
+                    data: ptr::null_mut(),
+                },
             ];
             assert_eq!(
                 napi_define_properties(env_ptr, object, descriptors.len(), descriptors.as_ptr()),
@@ -6108,6 +6124,26 @@ mod tests {
                 panic!("symbol names were not returned as an array");
             };
             assert_eq!(names.as_slice(), &[Some(symbol)]);
+
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    object,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_ALL_PROPERTIES,
+                    NAPI_KEY_KEEP_NUMBERS,
+                    &mut names_value,
+                ),
+                NAPI_OK
+            );
+            let Ok(Value::Array(names)) = value_ref(names_value) else {
+                panic!("all property names were not returned as an array");
+            };
+            assert_eq!(names.len(), 4);
+            assert!(matches!(
+                names[0].and_then(|value| value_ref(value).ok()),
+                Some(Value::Number(2.0))
+            ));
 
             let mut array = ptr::null_mut();
             assert_eq!(
