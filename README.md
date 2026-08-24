@@ -146,6 +146,8 @@ The workspace crates have narrow responsibilities:
   types whose static layout excludes `null`/`undefined`
 - String-literal `in` checks use fixed object shapes while still evaluating
   both operands once in source order
+- Comma/sequence expressions evaluate every operand from left to right and
+  return only the final value, including awaited and throwing operands
 - Prefix and postfix `++`/`--` return the correct expression value and evaluate
   computed array and numeric object-field targets once, including awaited
   indexes and object expressions
