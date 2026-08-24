@@ -322,6 +322,7 @@ pub struct Env {
     exception: Option<NapiValue>,
     wraps: HashMap<usize, WrapRecord>,
     instances: HashMap<usize, usize>,
+    prototypes: HashMap<usize, usize>,
     accessors: HashMap<(usize, PropertyKey), Accessor>,
     finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
@@ -366,6 +367,7 @@ impl Env {
             exception: None,
             wraps: HashMap::new(),
             instances: HashMap::new(),
+            prototypes: HashMap::new(),
             accessors: HashMap::new(),
             finalizers: Vec::new(),
             instance_data: None,
@@ -516,44 +518,151 @@ fn is_object_value(value: &Value) -> bool {
 }
 
 unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &PropertyKey) -> Option<Accessor> {
-    if let Some(accessor) = env
-        .as_ref()
-        .and_then(|env| env.accessors.get(&(object as usize, name.clone())).copied())
-    {
-        return Some(accessor);
+    let mut current = Some(object as usize);
+    let mut visited = HashSet::new();
+    while let Some(owner) = current.filter(|owner| visited.insert(*owner)) {
+        let has_data_property = match value_ref(owner as NapiValue) {
+            Ok(Value::Object(properties)) => properties.contains_key(name),
+            Ok(Value::Function(function)) => function.properties.contains_key(name),
+            _ => false,
+        };
+        if has_data_property {
+            return None;
+        }
+        if let Some(accessor) = accessor_for_owner(env, owner, name) {
+            return Some(accessor);
+        }
+        current = prototype_for_owner(env, owner);
     }
-    HOST.with(|host| {
-        host.borrow().module_envs.iter().find_map(|module_env| {
-            module_env
-                .accessors
-                .get(&(object as usize, name.clone()))
-                .copied()
-        })
-    })
+    None
 }
 
-unsafe fn find_accessors(env: NapiEnv, object: NapiValue) -> Vec<(PropertyKey, Accessor)> {
-    let from = |env: &Env| {
-        env.accessors
-            .iter()
-            .filter(|((owner, _), _)| *owner == object as usize)
-            .map(|((_, name), accessor)| (name.clone(), *accessor))
-            .collect::<Vec<_>>()
-    };
-    let current = env.as_ref().map(from).unwrap_or_default();
-    if !current.is_empty() {
-        return current;
-    }
-    HOST.with(|host| {
-        host.borrow()
-            .module_envs
-            .iter()
-            .find_map(|module_env| {
-                let accessors = from(module_env);
-                (!accessors.is_empty()).then_some(accessors)
+unsafe fn accessor_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey) -> Option<Accessor> {
+    env.as_ref()
+        .and_then(|env| env.accessors.get(&(owner, key.clone())).copied())
+        .or_else(|| {
+            HOST.with(|host| {
+                host.borrow()
+                    .module_envs
+                    .iter()
+                    .find_map(|module_env| module_env.accessors.get(&(owner, key.clone())).copied())
             })
-            .unwrap_or_default()
-    })
+        })
+}
+
+unsafe fn prototype_for_owner(env: NapiEnv, owner: usize) -> Option<usize> {
+    env.as_ref()
+        .and_then(|env| env.prototypes.get(&owner).copied())
+        .or_else(|| {
+            HOST.with(|host| {
+                host.borrow()
+                    .module_envs
+                    .iter()
+                    .find_map(|module_env| module_env.prototypes.get(&owner).copied())
+            })
+        })
+}
+
+unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
+    let mut keys = env
+        .as_ref()
+        .map(|env| {
+            env.accessors
+                .keys()
+                .filter(|(accessor_owner, _)| *accessor_owner == owner)
+                .map(|(_, key)| key.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    HOST.with(|host| {
+        for module_env in &host.borrow().module_envs {
+            keys.extend(
+                module_env
+                    .accessors
+                    .keys()
+                    .filter(|(accessor_owner, _)| *accessor_owner == owner)
+                    .map(|(_, key)| key.clone()),
+            );
+        }
+    });
+    keys
+}
+
+unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey) -> u32 {
+    env.as_ref()
+        .and_then(|env| env.property_attributes.get(&(owner, key.clone())).copied())
+        .or_else(|| {
+            HOST.with(|host| {
+                host.borrow().module_envs.iter().find_map(|module_env| {
+                    module_env
+                        .property_attributes
+                        .get(&(owner, key.clone()))
+                        .copied()
+                })
+            })
+        })
+        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
+}
+
+unsafe fn symbol_for(env: NapiEnv, id: u64) -> Option<NapiValue> {
+    env.as_ref()
+        .and_then(|env| env.symbols.get(&id).copied())
+        .or_else(|| {
+            HOST.with(|host| {
+                host.borrow()
+                    .module_envs
+                    .iter()
+                    .find_map(|module_env| module_env.symbols.get(&id).copied())
+            })
+        })
+}
+
+unsafe fn find_property_value(
+    env: NapiEnv,
+    object: NapiValue,
+    key: &PropertyKey,
+) -> Option<NapiValue> {
+    let mut current = Some(object);
+    let mut visited = HashSet::new();
+    while let Some(value) = current.filter(|value| visited.insert(*value as usize)) {
+        let property = match value_ref(value) {
+            Ok(Value::Object(properties)) => properties.get(key).copied(),
+            Ok(Value::Function(function)) => function.properties.get(key).copied(),
+            _ => None,
+        };
+        if property.is_some() {
+            return property;
+        }
+        if accessor_for_owner(env, value as usize, key).is_some() {
+            return None;
+        }
+        current = prototype_for_owner(env, value as usize).map(|prototype| prototype as NapiValue);
+    }
+    None
+}
+
+unsafe fn find_data_property_owner(
+    env: NapiEnv,
+    object: NapiValue,
+    key: &PropertyKey,
+) -> Option<usize> {
+    let mut current = Some(object as usize);
+    let mut visited = HashSet::new();
+    while let Some(owner) = current.filter(|owner| visited.insert(*owner)) {
+        let contains = match value_ref(owner as NapiValue) {
+            Ok(Value::Object(properties)) => properties.contains_key(key),
+            Ok(Value::Function(function)) => function.properties.contains_key(key),
+            _ => false,
+        };
+        if contains {
+            return Some(owner);
+        }
+        if accessor_for_owner(env, owner, key).is_some() {
+            return None;
+        }
+        current = prototype_for_owner(env, owner);
+    }
+    None
 }
 
 unsafe fn write_value(out: *mut NapiValue, value: NapiValue) -> NapiStatus {
@@ -1914,13 +2023,15 @@ pub unsafe extern "C" fn napi_set_named_property(
         return NAPI_INVALID_ARG;
     };
     let name = PropertyKey::String(name);
-    let accessor = find_accessor(env, object, &name);
-    if let Some(setter) = accessor.and_then(|accessor| accessor.setter) {
+    if let Some(accessor) = find_accessor(env, object, &name) {
+        let Some(setter) = accessor.setter else {
+            return NAPI_GENERIC_FAILURE;
+        };
         let mut info = CallbackInfo {
             args: vec![value],
             this_arg: object,
             new_target: ptr::null_mut(),
-            data: accessor.unwrap().data,
+            data: accessor.data,
         };
         setter(env, &mut info);
         return if env_mut(env)
@@ -1932,25 +2043,25 @@ pub unsafe extern "C" fn napi_set_named_property(
             NAPI_OK
         };
     }
-    let (frozen, sealed, writable) = env
+    let inherited_owner = find_data_property_owner(env, object, &name);
+    let (frozen, sealed) = env
         .as_ref()
         .map(|env| {
             (
                 env.frozen_objects.contains(&(object as usize)),
                 env.sealed_objects.contains(&(object as usize)),
-                env.property_attributes
-                    .get(&(object as usize, name.clone()))
-                    .map(|attributes| attributes & NAPI_WRITABLE != 0)
-                    .unwrap_or(true),
             )
         })
-        .unwrap_or((false, false, true));
+        .unwrap_or((false, false));
+    let writable = inherited_owner
+        .map(|owner| property_attributes_for(env, owner, &name) & NAPI_WRITABLE != 0)
+        .unwrap_or(true);
     let exists = match value_ref(object) {
         Ok(Value::Object(values)) => values.contains_key(&name),
         Ok(Value::Function(function)) => function.properties.contains_key(&name),
         _ => return NAPI_INVALID_ARG,
     };
-    if frozen || (exists && !writable) || (sealed && !exists) {
+    if frozen || (inherited_owner.is_some() && !writable) || (sealed && !exists) {
         return NAPI_GENERIC_FAILURE;
     }
     let status = match object.as_mut() {
@@ -1984,11 +2095,7 @@ pub unsafe extern "C" fn napi_get_named_property(
         return NAPI_INVALID_ARG;
     };
     let name = PropertyKey::String(name);
-    let value = match value_ref(object) {
-        Ok(Value::Object(values)) => values.get(&name).copied(),
-        Ok(Value::Function(function)) => function.properties.get(&name).copied(),
-        _ => None,
-    };
+    let value = find_property_value(env, object, &name);
     if value.is_none() {
         let accessor = find_accessor(env, object, &name);
         if let Some(getter) = accessor.and_then(|accessor| accessor.getter) {
@@ -2034,6 +2141,26 @@ unsafe fn set_property_key(
         };
         return napi_set_named_property(env, object, name.as_ptr(), value);
     }
+    if let Some(accessor) = find_accessor(env, object, &key) {
+        let Some(setter) = accessor.setter else {
+            return NAPI_GENERIC_FAILURE;
+        };
+        let mut info = CallbackInfo {
+            args: vec![value],
+            this_arg: object,
+            new_target: ptr::null_mut(),
+            data: accessor.data,
+        };
+        setter(env, &mut info);
+        return if env_mut(env)
+            .map(|env| env.exception.is_some())
+            .unwrap_or(false)
+        {
+            NAPI_PENDING_EXCEPTION
+        } else {
+            NAPI_OK
+        };
+    }
     let exists = match value_ref(object) {
         Ok(Value::Object(values)) => values.contains_key(&key),
         Ok(Value::Function(function)) => function.properties.contains_key(&key),
@@ -2042,13 +2169,12 @@ unsafe fn set_property_key(
     let Some(env_ref) = env.as_ref() else {
         return NAPI_INVALID_ARG;
     };
-    let writable = env_ref
-        .property_attributes
-        .get(&(object as usize, key.clone()))
-        .map(|attributes| attributes & NAPI_WRITABLE != 0)
+    let property_owner = find_data_property_owner(env, object, &key);
+    let writable = property_owner
+        .map(|owner| property_attributes_for(env, owner, &key) & NAPI_WRITABLE != 0)
         .unwrap_or(true);
     if env_ref.frozen_objects.contains(&(object as usize))
-        || (exists && !writable)
+        || (property_owner.is_some() && !writable)
         || (env_ref.sealed_objects.contains(&(object as usize)) && !exists)
     {
         return NAPI_GENERIC_FAILURE;
@@ -2083,11 +2209,10 @@ unsafe fn get_property_key(
         };
         return napi_get_named_property(env, object, name.as_ptr(), out);
     }
-    let value = match value_ref(object) {
-        Ok(Value::Object(values)) => values.get(key).copied(),
-        Ok(Value::Function(function)) => function.properties.get(key).copied(),
-        _ => return NAPI_INVALID_ARG,
-    };
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_INVALID_ARG;
+    }
+    let value = find_property_value(env, object, key);
     match value {
         Some(value) => write_value(out, value),
         None => napi_get_undefined(env, out),
@@ -2133,11 +2258,8 @@ pub unsafe extern "C" fn napi_has_property(
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
-    *out = match value_ref(object) {
-        Ok(Value::Object(values)) => values.contains_key(&key),
-        Ok(Value::Function(function)) => function.properties.contains_key(&key),
-        _ => false,
-    } || find_accessor(env, object, &key).is_some();
+    *out = find_property_value(env, object, &key).is_some()
+        || find_accessor(env, object, &key).is_some();
     NAPI_OK
 }
 
@@ -2159,9 +2281,7 @@ pub unsafe extern "C" fn napi_has_own_property(
         Ok(Value::Function(function)) => function.properties.contains_key(&key),
         _ => return NAPI_OBJECT_EXPECTED,
     };
-    let own_accessor = env_mut(env)
-        .map(|env| env.accessors.contains_key(&(object as usize, key)))
-        .unwrap_or(false);
+    let own_accessor = accessor_for_owner(env, object as usize, &key).is_some();
     *out = own_value || own_accessor;
     NAPI_OK
 }
@@ -2225,14 +2345,11 @@ pub unsafe extern "C" fn napi_has_named_property(
         return NAPI_INVALID_ARG;
     };
     let name = PropertyKey::String(name);
-    let Ok(env) = env_mut(env) else {
+    if env.is_null() {
         return NAPI_INVALID_ARG;
-    };
-    *result = match value_ref(object) {
-        Ok(Value::Object(properties)) => properties.contains_key(&name),
-        Ok(Value::Function(function)) => function.properties.contains_key(&name),
-        _ => false,
-    } || env.accessors.contains_key(&(object as usize, name));
+    }
+    *result = find_property_value(env, object, &name).is_some()
+        || find_accessor(env, object, &name).is_some();
     NAPI_OK
 }
 
@@ -2569,23 +2686,14 @@ pub unsafe extern "C" fn napi_new_instance(
         .properties
         .get(&PropertyKey::String("prototype".into()))
         .copied();
-    let properties = prototype
-        .and_then(|value| match value_ref(value) {
-            Ok(Value::Object(properties)) => Some(properties.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    let prototype_accessors = prototype
-        .map(|prototype| find_accessors(env, prototype))
-        .unwrap_or_default();
-    let instance = host_env.alloc(Value::Object(properties));
+    let instance = host_env.alloc(Value::Object(HashMap::new()));
     host_env
         .instances
         .insert(instance as usize, constructor as usize);
-    for (name, accessor) in prototype_accessors {
+    if let Some(prototype) = prototype {
         host_env
-            .accessors
-            .insert((instance as usize, name), accessor);
+            .prototypes
+            .insert(instance as usize, prototype as usize);
     }
     let args = if argc == 0 {
         Vec::new()
@@ -2641,20 +2749,12 @@ pub unsafe extern "C" fn napi_get_prototype(
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let prototype = env
-        .instances
-        .get(&(object as usize))
-        .and_then(|constructor| value_ref(*constructor as NapiValue).ok())
-        .and_then(|constructor| match constructor {
-            Value::Function(function) => function
-                .properties
-                .get(&PropertyKey::String("prototype".into()))
-                .copied(),
-            _ => None,
-        });
+    let prototype =
+        prototype_for_owner(env_ptr, object as usize).map(|prototype| prototype as NapiValue);
     match prototype {
         Some(prototype) => write_value(result, prototype),
         None => {
@@ -3052,74 +3152,82 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     {
         return NAPI_INVALID_ARG;
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let mut keys = match value_ref(object) {
-        Ok(Value::Object(properties)) => properties
-            .keys()
-            .cloned()
-            .map(EnumeratedPropertyKey::Property)
-            .collect::<Vec<_>>(),
-        Ok(Value::Function(function)) => function
-            .properties
-            .keys()
-            .cloned()
-            .map(EnumeratedPropertyKey::Property)
-            .collect::<Vec<_>>(),
-        Ok(Value::Array(values)) => (0..values.len())
-            .map(EnumeratedPropertyKey::Number)
-            .collect(),
-        _ => return NAPI_OBJECT_EXPECTED,
-    };
-    keys.extend(
-        env.accessors
-            .keys()
-            .filter(|(owner, _)| *owner == object as usize)
-            .map(|(_, key)| EnumeratedPropertyKey::Property(key.clone())),
-    );
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let mut keys = Vec::new();
+    let mut current = Some(object as usize);
+    let mut visited = HashSet::new();
+    while let Some(owner) = current.filter(|owner| visited.insert(*owner)) {
+        let value = owner as NapiValue;
+        match value_ref(value) {
+            Ok(Value::Object(properties)) => keys.extend(
+                properties
+                    .keys()
+                    .cloned()
+                    .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
+            ),
+            Ok(Value::Function(function)) => keys.extend(
+                function
+                    .properties
+                    .keys()
+                    .cloned()
+                    .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
+            ),
+            Ok(Value::Array(values)) => keys.extend(
+                (0..values.len()).map(|index| (EnumeratedPropertyKey::Number(index), owner)),
+            ),
+            _ => {}
+        }
+        keys.extend(
+            accessors_for_owner(env_ptr, owner)
+                .into_iter()
+                .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
+        );
+        current = if key_mode == NAPI_KEY_INCLUDE_PROTOTYPES {
+            prototype_for_owner(env_ptr, owner)
+        } else {
+            None
+        };
+    }
     let attribute_filter = key_filter & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
-    keys.retain(|key| match key {
+    keys.retain(|(key, owner)| match key {
         EnumeratedPropertyKey::Number(_) => key_filter & NAPI_KEY_SKIP_STRINGS == 0,
         EnumeratedPropertyKey::Property(PropertyKey::String(_)) => {
             key_filter & NAPI_KEY_SKIP_STRINGS == 0
                 && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
-                    || env
-                        .property_attributes
-                        .get(&(
-                            object as usize,
-                            match key {
-                                EnumeratedPropertyKey::Property(key) => key.clone(),
-                                _ => unreachable!(),
-                            },
-                        ))
-                        .copied()
-                        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
-                        & attribute_filter
+                    || property_attributes_for(
+                        env_ptr,
+                        *owner,
+                        match key {
+                            EnumeratedPropertyKey::Property(key) => key,
+                            _ => unreachable!(),
+                        },
+                    ) & attribute_filter
                         == attribute_filter)
         }
         EnumeratedPropertyKey::Property(PropertyKey::Symbol(_)) => {
             key_filter & NAPI_KEY_SKIP_SYMBOLS == 0
                 && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
-                    || env
-                        .property_attributes
-                        .get(&(
-                            object as usize,
-                            match key {
-                                EnumeratedPropertyKey::Property(key) => key.clone(),
-                                _ => unreachable!(),
-                            },
-                        ))
-                        .copied()
-                        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
-                        & attribute_filter
+                    || property_attributes_for(
+                        env_ptr,
+                        *owner,
+                        match key {
+                            EnumeratedPropertyKey::Property(key) => key,
+                            _ => unreachable!(),
+                        },
+                    ) & attribute_filter
                         == attribute_filter)
         }
     });
-    keys.sort();
-    keys.dedup();
+    keys.sort_by(|(left, _), (right, _)| left.cmp(right));
+    keys.dedup_by(|(left, _), (right, _)| left == right);
     let mut values = Vec::with_capacity(keys.len());
-    for key in keys {
+    for (key, _) in keys {
         let value = match key {
             EnumeratedPropertyKey::Number(index) if key_conversion == NAPI_KEY_KEEP_NUMBERS => {
                 env.alloc(Value::Number(index as f64))
@@ -3129,7 +3237,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                 env.alloc(Value::String(name))
             }
             EnumeratedPropertyKey::Property(PropertyKey::Symbol(id)) => {
-                let Some(value) = env.symbols.get(&id).copied() else {
+                let Some(value) = symbol_for(env_ptr, id) else {
                     return NAPI_GENERIC_FAILURE;
                 };
                 value
@@ -4987,6 +5095,101 @@ mod tests {
             let mut actual = ptr::null_mut();
             assert_eq!(napi_get_prototype(env_ptr, instance, &mut actual), NAPI_OK);
             assert_eq!(actual, expected);
+
+            let inherited = env.alloc(Value::Number(7.0));
+            assert_eq!(
+                napi_set_named_property(env_ptr, expected, c"late".as_ptr(), inherited),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, instance, c"late".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, inherited);
+            let mut key = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"late".as_ptr(), 4, &mut key),
+                NAPI_OK
+            );
+            let mut present = true;
+            assert_eq!(
+                napi_has_own_property(env_ptr, instance, key, &mut present),
+                NAPI_OK
+            );
+            assert!(!present);
+            assert_eq!(
+                napi_has_property(env_ptr, instance, key, &mut present),
+                NAPI_OK
+            );
+            assert!(present);
+
+            let mut names = ptr::null_mut();
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    instance,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_ALL_PROPERTIES,
+                    NAPI_KEY_NUMBERS_TO_STRINGS,
+                    &mut names,
+                ),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(names), Ok(Value::Array(values)) if values.is_empty()));
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    instance,
+                    NAPI_KEY_INCLUDE_PROTOTYPES,
+                    NAPI_KEY_ALL_PROPERTIES,
+                    NAPI_KEY_NUMBERS_TO_STRINGS,
+                    &mut names,
+                ),
+                NAPI_OK
+            );
+            assert!(
+                matches!(value_ref(names), Ok(Value::Array(values)) if values.iter().any(
+                    |value| matches!(value_ref(*value), Ok(Value::String(name)) if name == "late")
+                ))
+            );
+
+            let own = env.alloc(Value::Number(9.0));
+            assert_eq!(napi_set_property(env_ptr, instance, key, own), NAPI_OK);
+            assert_eq!(
+                napi_get_named_property(env_ptr, instance, c"late".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, own);
+            assert_eq!(
+                napi_get_named_property(env_ptr, expected, c"late".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, inherited);
+
+            let locked = env.alloc(Value::Number(11.0));
+            let locked_descriptor = NapiPropertyDescriptor {
+                utf8name: c"locked".as_ptr(),
+                name: ptr::null_mut(),
+                method: None,
+                getter: None,
+                setter: None,
+                value: locked,
+                attributes: 0,
+                data: ptr::null_mut(),
+            };
+            assert_eq!(
+                napi_define_properties(env_ptr, expected, 1, &locked_descriptor),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_set_named_property(env_ptr, instance, c"locked".as_ptr(), own),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, instance, c"locked".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, locked);
 
             let mut plain = ptr::null_mut();
             assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
