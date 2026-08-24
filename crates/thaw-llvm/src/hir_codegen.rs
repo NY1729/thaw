@@ -9911,6 +9911,23 @@ mod tests {
     }
 
     #[test]
+    fn compiles_fixed_object_in_checks_in_operand_order() {
+        let source = r#"
+            async function object(label: string): Promise<{ value: number; flag: boolean }> {
+                await sleep(1); console.log(label); return { value: 1, flag: true };
+            }
+            async function main(): Promise<void> {
+                console.log("value" in (await object("first")));
+                console.log("missing" in (await object("second")));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "fixed_object_in"),
+            "first\ntrue\nsecond\nfalse\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
