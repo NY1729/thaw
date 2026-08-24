@@ -4688,7 +4688,7 @@ pub unsafe extern "C" fn napi_run_script(
     script: NapiValue,
     result: *mut NapiValue,
 ) -> NapiStatus {
-    if result.is_null() {
+    if result.is_null() || !value_belongs_to_environment(env, script) {
         return NAPI_INVALID_ARG;
     }
     let source = match value_ref(script) {
@@ -4752,6 +4752,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null()
+        || !value_belongs_to_environment(env, object)
         || !matches!(key_mode, NAPI_KEY_INCLUDE_PROTOTYPES | NAPI_KEY_OWN_ONLY)
         || !matches!(
             key_conversion,
@@ -5087,6 +5088,9 @@ pub unsafe extern "C" fn napi_set_element(
     index: u32,
     value: NapiValue,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
     set_property_key(env, object, PropertyKey::String(index.to_string()), value)
 }
 
@@ -5097,6 +5101,9 @@ pub unsafe extern "C" fn napi_has_element(
     index: u32,
     result: *mut bool,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     let Some(result) = result.as_mut() else {
         return NAPI_INVALID_ARG;
     };
@@ -5116,7 +5123,7 @@ pub unsafe extern "C" fn napi_delete_element(
     index: u32,
     result: *mut bool,
 ) -> NapiStatus {
-    if env.is_null() {
+    if !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
     let key = PropertyKey::String(index.to_string());
@@ -5165,6 +5172,9 @@ pub unsafe extern "C" fn napi_get_element(
     index: u32,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() || !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     let key = PropertyKey::String(index.to_string());
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
@@ -7600,6 +7610,34 @@ mod tests {
             );
             assert_eq!(
                 napi_define_properties(env_ptr, foreign_object, 0, ptr::null()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_set_element(env_ptr, foreign_object, 0, value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_set_element(env_ptr, object, 0, foreign_value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_element(env_ptr, foreign_object, 0, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_has_element(env_ptr, foreign_object, 0, &mut present),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_delete_element(env_ptr, foreign_object, 0, &mut present),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_property_names(env_ptr, foreign_object, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_run_script(env_ptr, foreign_key, &mut value_out),
                 NAPI_INVALID_ARG
             );
         }
