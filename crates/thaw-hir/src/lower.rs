@@ -235,9 +235,13 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                             &mut Vec::new(),
                         )?;
                         match ty {
-                            HirType::Array(element) if *element == HirType::F64 => Ok(*element),
+                            HirType::Array(element)
+                                if matches!(*element, HirType::F64 | HirType::Bool | HirType::Str) =>
+                            {
+                                Ok(*element)
+                            }
                             other => Err(format!(
-                                "ambient variadic function `{name}` currently requires a number[] rest parameter, found {other:?}"
+                                "ambient variadic function `{name}` requires a number[], boolean[], or string[] rest parameter, found {other:?}"
                             )),
                         }
                     }).transpose()?
@@ -13026,13 +13030,13 @@ mod tests {
     #[test]
     fn rejects_unsupported_ambient_variadic_element_types() {
         let module = thaw_parser::parse_typescript(
-            r#"declare function native_join(...values: string[]): string;
-               function main(): void { console.log(native_join("a", "b")); }"#,
+            r#"declare function native_merge(...values: { value: number }[]): number;
+               function main(): void { console.log(native_merge({ value: 1 })); }"#,
         )
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(
-            error.contains("requires a number[] rest parameter"),
+            error.contains("requires a number[], boolean[], or string[] rest parameter"),
             "{error}"
         );
     }
