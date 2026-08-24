@@ -463,6 +463,10 @@ The workspace crates have narrow responsibilities:
 - `Object.hasOwn` checks fixed-layout own fields after native primitive-to-key
   string conversion, including empty objects and synchronous/awaited object
   plus key evaluation in source order
+- `Object.is` implements SameValue for statically native operands: all `NaN`
+  values compare equal, signed zeros remain distinct, primitive strings compare
+  by contents, and aggregate/Promise values use reference identity; both
+  operands are evaluated once in order and may await
 - Native strings implement `.indexOf()`, `.lastIndexOf()`, `.includes()`,
   `.startsWith()` and `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
   byte offsets. Search values and positions are coerced left-to-right, clamped

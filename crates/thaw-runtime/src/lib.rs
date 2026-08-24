@@ -437,6 +437,17 @@ unsafe fn native_array_length(array: *const u8) -> Option<usize> {
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_number_object_is(left: f64, right: f64) -> u8 {
+    if left.is_nan() && right.is_nan() {
+        return 1;
+    }
+    if left == 0.0 && right == 0.0 {
+        return (left.is_sign_negative() == right.is_sign_negative()).into();
+    }
+    (left == right).into()
+}
+
+#[no_mangle]
 /// Reverses an eight-byte-slot native array in place and returns the receiver.
 ///
 /// # Safety
