@@ -668,6 +668,38 @@ unsafe fn own_property_value(
         Ok(Value::Array(values)) => property_array_index(key)
             .and_then(|index| values.get(index).copied().flatten())
             .or_else(|| host_property_for_owner(env, owner as usize, key)),
+        Ok(Value::Buffer(bytes)) => property_array_index(key)
+            .and_then(|index| bytes.get(index).copied())
+            .and_then(|byte| {
+                env_mut(env)
+                    .ok()
+                    .map(|env| env.alloc(Value::Number(byte.into())))
+            })
+            .or_else(|| host_property_for_owner(env, owner as usize, key)),
+        Ok(Value::ExternalBuffer { data, length }) => property_array_index(key)
+            .filter(|index| *index < *length && !data.is_null())
+            .and_then(|index| {
+                env_mut(env)
+                    .ok()
+                    .map(|env| env.alloc(Value::Number((*data.add(index)).into())))
+            })
+            .or_else(|| host_property_for_owner(env, owner as usize, key)),
+        Ok(Value::BufferView {
+            array_buffer,
+            byte_offset,
+            length,
+        }) => property_array_index(key)
+            .filter(|index| *index < *length)
+            .and_then(|index| {
+                let (bytes, _, detached) = arraybuffer_parts(*array_buffer).ok()?;
+                (!detached).then(|| *bytes.add(*byte_offset + index))
+            })
+            .and_then(|byte| {
+                env_mut(env)
+                    .ok()
+                    .map(|env| env.alloc(Value::Number(byte.into())))
+            })
+            .or_else(|| host_property_for_owner(env, owner as usize, key)),
         Ok(value) if is_object_value(value) => host_property_for_owner(env, owner as usize, key),
         _ => None,
     }
@@ -688,8 +720,45 @@ unsafe fn set_own_property(
         }
         Some(Value::Array(values)) if property_array_index(key).is_some() => {
             let index = property_array_index(key).unwrap();
-            values.resize(index.saturating_add(1), None);
+            if values.len() <= index {
+                values.resize(index.saturating_add(1), None);
+            }
             values[index] = Some(value);
+        }
+        Some(Value::Buffer(bytes)) if property_array_index(key).is_some() => {
+            if let Some(byte) = bytes.get_mut(property_array_index(key).unwrap()) {
+                *byte = match uint8_from_value(value) {
+                    Ok(value) => value,
+                    Err(status) => return status,
+                };
+            }
+        }
+        Some(Value::ExternalBuffer { data, length }) if property_array_index(key).is_some() => {
+            let index = property_array_index(key).unwrap();
+            if index < *length && !data.is_null() {
+                *data.add(index) = match uint8_from_value(value) {
+                    Ok(value) => value,
+                    Err(status) => return status,
+                };
+            }
+        }
+        Some(Value::BufferView {
+            array_buffer,
+            byte_offset,
+            length,
+        }) if property_array_index(key).is_some() => {
+            let index = property_array_index(key).unwrap();
+            if index < *length {
+                let Ok((bytes, _, detached)) = arraybuffer_parts(*array_buffer) else {
+                    return NAPI_ARRAYBUFFER_EXPECTED;
+                };
+                if !detached {
+                    *bytes.add(*byte_offset + index) = match uint8_from_value(value) {
+                        Ok(value) => value,
+                        Err(status) => return status,
+                    };
+                }
+            }
         }
         Some(object_value) if is_object_value(object_value) => {
             env.host_properties
@@ -700,6 +769,42 @@ unsafe fn set_own_property(
         _ => return NAPI_OBJECT_EXPECTED,
     }
     NAPI_OK
+}
+
+unsafe fn uint8_from_value(value: NapiValue) -> Result<u8, NapiStatus> {
+    let number = match value_ref(value)? {
+        Value::Undefined => f64::NAN,
+        Value::Null => 0.0,
+        Value::Bool(value) => u8::from(*value) as f64,
+        Value::Number(value) => *value,
+        Value::String(value) => javascript_number_from_string(value),
+        Value::BigInt { .. } | Value::Symbol { .. } => return Err(NAPI_GENERIC_FAILURE),
+        _ => f64::NAN,
+    };
+    Ok(if number.is_finite() {
+        number.trunc().rem_euclid(256.0) as u8
+    } else {
+        0
+    })
+}
+
+unsafe fn fixed_index_exists(object: NapiValue, key: &PropertyKey) -> bool {
+    let Some(index) = property_array_index(key) else {
+        return false;
+    };
+    match value_ref(object) {
+        Ok(Value::Buffer(bytes)) => index < bytes.len(),
+        Ok(Value::ExternalBuffer { data, length }) => index < *length && !data.is_null(),
+        Ok(Value::BufferView {
+            array_buffer,
+            length,
+            ..
+        }) => {
+            index < *length
+                && arraybuffer_parts(*array_buffer).is_ok_and(|(_, _, detached)| !detached)
+        }
+        _ => false,
+    }
 }
 
 unsafe fn remove_own_property(env: &mut Env, object: NapiValue, key: &PropertyKey) -> NapiStatus {
@@ -2737,7 +2842,9 @@ pub unsafe extern "C" fn napi_delete_property(
         }
         return NAPI_OK;
     }
-    if own && property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0 {
+    if fixed_index_exists(object, &key)
+        || (own && property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0)
+    {
         if let Some(out) = out.as_mut() {
             *out = false;
         }
@@ -3876,6 +3983,32 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                 );
                 Vec::new()
             }
+            Ok(Value::Buffer(bytes)) => {
+                keys.extend(
+                    (0..bytes.len()).map(|index| (EnumeratedPropertyKey::Number(index), owner)),
+                );
+                Vec::new()
+            }
+            Ok(Value::ExternalBuffer { data, length }) => {
+                if !data.is_null() {
+                    keys.extend(
+                        (0..*length).map(|index| (EnumeratedPropertyKey::Number(index), owner)),
+                    );
+                }
+                Vec::new()
+            }
+            Ok(Value::BufferView {
+                array_buffer,
+                length,
+                ..
+            }) => {
+                if arraybuffer_parts(*array_buffer).is_ok_and(|(_, _, detached)| !detached) {
+                    keys.extend(
+                        (0..*length).map(|index| (EnumeratedPropertyKey::Number(index), owner)),
+                    );
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         };
         property_keys.extend(host_property_keys_for_owner(env_ptr, owner));
@@ -4135,39 +4268,7 @@ pub unsafe extern "C" fn napi_set_element(
     index: u32,
     value: NapiValue,
 ) -> NapiStatus {
-    let key = PropertyKey::String(index.to_string());
-    if matches!(value_ref(object), Ok(Value::Object(_) | Value::Function(_))) {
-        return set_property_key(env, object, key, value);
-    }
-    let (frozen, sealed) = env
-        .as_ref()
-        .map(|env| {
-            (
-                env.frozen_objects.contains(&(object as usize)),
-                env.sealed_objects.contains(&(object as usize)),
-            )
-        })
-        .unwrap_or((false, false));
-    let exists = match value_ref(object) {
-        Ok(Value::Array(values)) => values.get(index as usize).is_some_and(Option::is_some),
-        _ => return NAPI_INVALID_ARG,
-    };
-    if frozen || (sealed && !exists) {
-        return NAPI_GENERIC_FAILURE;
-    }
-    if env.is_null() {
-        return NAPI_INVALID_ARG;
-    }
-    match object.as_mut() {
-        Some(Value::Array(values)) => {
-            while values.len() <= index as usize {
-                values.push(None);
-            }
-            values[index as usize] = Some(value);
-            NAPI_OK
-        }
-        _ => NAPI_INVALID_ARG,
-    }
+    set_property_key(env, object, PropertyKey::String(index.to_string()), value)
 }
 
 #[no_mangle]
@@ -4181,14 +4282,11 @@ pub unsafe extern "C" fn napi_has_element(
         return NAPI_INVALID_ARG;
     };
     let key = PropertyKey::String(index.to_string());
-    *result = match value_ref(object) {
-        Ok(Value::Array(values)) => values.get(index as usize).is_some_and(Option::is_some),
-        Ok(Value::Object(_) | Value::Function(_)) => {
-            find_property_value(env, object, &key).is_some()
-                || find_accessor(env, object, &key).is_some()
-        }
-        _ => return NAPI_OBJECT_EXPECTED,
-    };
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    *result = find_property_value(env, object, &key).is_some()
+        || find_accessor(env, object, &key).is_some();
     NAPI_OK
 }
 
@@ -4218,7 +4316,9 @@ pub unsafe extern "C" fn napi_delete_element(
         }
         return NAPI_OK;
     }
-    if own && property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0 {
+    if fixed_index_exists(object, &key)
+        || (own && property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0)
+    {
         if let Some(result) = result.as_mut() {
             *result = false;
         }
@@ -4247,11 +4347,10 @@ pub unsafe extern "C" fn napi_get_element(
     out: *mut NapiValue,
 ) -> NapiStatus {
     let key = PropertyKey::String(index.to_string());
-    let value = match value_ref(object) {
-        Ok(Value::Array(values)) => values.get(index as usize).copied().flatten(),
-        Ok(Value::Object(_) | Value::Function(_)) => find_property_value(env, object, &key),
-        _ => return NAPI_OBJECT_EXPECTED,
-    };
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let value = find_property_value(env, object, &key);
     if value.is_none() {
         if let Some(accessor) = find_accessor(env, object, &key) {
             if let Some(getter) = accessor.getter {
@@ -7215,6 +7314,92 @@ mod tests {
             );
             assert!(view_data.is_null());
             assert_eq!(length, 0);
+        }
+    }
+
+    #[test]
+    fn buffer_indexes_share_backing_memory_and_cannot_be_deleted() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut data = ptr::null_mut();
+            let mut owned = ptr::null_mut();
+            assert_eq!(
+                napi_create_buffer(env_ptr, 3, &mut data, &mut owned),
+                NAPI_OK
+            );
+            let negative = env.alloc(Value::Number(-1.0));
+            assert_eq!(napi_set_element(env_ptr, owned, 1, negative), NAPI_OK);
+            assert_eq!(*(data as *const u8).add(1), 255);
+            let mut actual = ptr::null_mut();
+            assert_eq!(napi_get_element(env_ptr, owned, 1, &mut actual), NAPI_OK);
+            assert!(matches!(value_ref(actual), Ok(Value::Number(255.0))));
+
+            let key = env.alloc(Value::String("2".into()));
+            let wrapped = env.alloc(Value::String("258".into()));
+            assert_eq!(napi_set_property(env_ptr, owned, key, wrapped), NAPI_OK);
+            assert_eq!(*(data as *const u8).add(2), 2);
+            let mut deleted = true;
+            assert_eq!(
+                napi_delete_element(env_ptr, owned, 2, &mut deleted),
+                NAPI_OK
+            );
+            assert!(!deleted);
+
+            let mut external_bytes = [4_u8, 5];
+            let mut external = ptr::null_mut();
+            assert_eq!(
+                napi_create_external_buffer(
+                    env_ptr,
+                    external_bytes.len(),
+                    external_bytes.as_mut_ptr().cast(),
+                    None,
+                    ptr::null_mut(),
+                    &mut external,
+                ),
+                NAPI_OK
+            );
+            let seven = env.alloc(Value::Number(7.0));
+            assert_eq!(napi_set_element(env_ptr, external, 0, seven), NAPI_OK);
+            assert_eq!(external_bytes[0], 7);
+
+            let mut array_buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 4, &mut data, &mut array_buffer),
+                NAPI_OK
+            );
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                node_api_create_buffer_from_arraybuffer(env_ptr, array_buffer, 1, 2, &mut view),
+                NAPI_OK
+            );
+            assert_eq!(napi_set_element(env_ptr, view, 1, seven), NAPI_OK);
+            assert_eq!(*(data as *const u8).add(2), 7);
+
+            let mut names = ptr::null_mut();
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    view,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_ALL_PROPERTIES,
+                    NAPI_KEY_KEEP_NUMBERS,
+                    &mut names,
+                ),
+                NAPI_OK
+            );
+            let Ok(Value::Array(names)) = value_ref(names) else {
+                panic!("buffer indexes were not returned as an array");
+            };
+            assert_eq!(names.len(), 2);
+            assert!(matches!(
+                value_ref(names[0].unwrap()),
+                Ok(Value::Number(0.0))
+            ));
+            assert!(matches!(
+                value_ref(names[1].unwrap()),
+                Ok(Value::Number(1.0))
+            ));
         }
     }
 
