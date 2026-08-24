@@ -3072,6 +3072,61 @@ pub unsafe extern "C" fn napi_create_object(env: NapiEnv, out: *mut NapiValue) -
     let value = env.alloc(Value::Object(HashMap::new()));
     write_value(out, value)
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_create_object_with_properties(
+    env: NapiEnv,
+    prototype_or_null: NapiValue,
+    property_names: *mut NapiValue,
+    property_values: *mut NapiValue,
+    property_count: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null() || !value_belongs_to_environment(env, prototype_or_null) {
+        return NAPI_INVALID_ARG;
+    }
+    if !matches!(value_ref(prototype_or_null), Ok(value) if is_object_value(value) || matches!(value, Value::Null))
+    {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    if property_count != 0 && (property_names.is_null() || property_values.is_null()) {
+        return NAPI_INVALID_ARG;
+    }
+
+    let (names, values) = if property_count == 0 {
+        (&[][..], &[][..])
+    } else {
+        (
+            std::slice::from_raw_parts(property_names, property_count),
+            std::slice::from_raw_parts(property_values, property_count),
+        )
+    };
+    for (&name, &value) in names.iter().zip(values) {
+        if !value_belongs_to_environment(env, name)
+            || !value_belongs_to_environment(env, value)
+            || property_key(name).is_err()
+        {
+            return NAPI_INVALID_ARG;
+        }
+    }
+
+    let mut object = ptr::null_mut();
+    let status = napi_create_object(env, &mut object);
+    if status != NAPI_OK {
+        return status;
+    }
+    let status = node_api_set_prototype(env, object, prototype_or_null);
+    if status != NAPI_OK {
+        return status;
+    }
+    for (&name, &value) in names.iter().zip(values) {
+        let status = napi_set_property(env, object, name, value);
+        if status != NAPI_OK {
+            return status;
+        }
+    }
+    write_value(out, object)
+}
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_array(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
     napi_create_array_with_length(env, 0, out)
@@ -8250,6 +8305,81 @@ mod tests {
                 node_api_set_prototype(env_ptr, object, prototype),
                 NAPI_GENERIC_FAILURE
             );
+        }
+    }
+
+    #[test]
+    fn experimental_create_object_with_properties_preflights_inputs() {
+        unsafe {
+            let mut env = Env::new();
+            let mut other_env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let prototype = env.alloc(Value::Object(HashMap::new()));
+            let first_name = env.alloc(Value::String("first".into()));
+            let second_name = env.alloc(Value::String("second".into()));
+            let first_value = env.alloc(Value::Number(1.0));
+            let second_value = env.alloc(Value::Number(2.0));
+            let mut names = [first_name, second_name];
+            let mut values = [first_value, second_value];
+            let mut object = ptr::null_mut();
+            assert_eq!(
+                node_api_create_object_with_properties(
+                    env_ptr,
+                    prototype,
+                    names.as_mut_ptr(),
+                    values.as_mut_ptr(),
+                    names.len(),
+                    &mut object,
+                ),
+                NAPI_OK
+            );
+            let mut actual = ptr::null_mut();
+            assert_eq!(napi_get_prototype(env_ptr, object, &mut actual), NAPI_OK);
+            assert_eq!(actual, prototype);
+            assert_eq!(
+                napi_get_named_property(env_ptr, object, c"first".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, first_value);
+            assert_eq!(
+                napi_get_named_property(env_ptr, object, c"second".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, second_value);
+
+            let values_before = env.values.len();
+            let foreign = other_env.alloc(Value::Number(3.0));
+            values[1] = foreign;
+            object = first_value;
+            assert_eq!(
+                node_api_create_object_with_properties(
+                    env_ptr,
+                    prototype,
+                    names.as_mut_ptr(),
+                    values.as_mut_ptr(),
+                    names.len(),
+                    &mut object,
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(object, first_value);
+            assert_eq!(env.values.len(), values_before);
+
+            let null = env.alloc(Value::Null);
+            object = ptr::null_mut();
+            assert_eq!(
+                node_api_create_object_with_properties(
+                    env_ptr,
+                    null,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    &mut object,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(napi_get_prototype(env_ptr, object, &mut actual), NAPI_OK);
+            assert_eq!(actual, null);
         }
     }
 
