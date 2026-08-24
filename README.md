@@ -546,13 +546,15 @@ path; an omitted `else` joins against the unchanged incoming path. `while` and
 classic `for` loops join the body/update result against the zero-iteration path,
 retaining only facts unchanged by a possible iteration. `do/while` lowers to
 the same loop form while preserving its mandatory first iteration and
-condition-before-continue behavior, including async bodies. `for-in` remains
-unavailable in HIR lowering. Ordinary `for...of`
+condition-before-continue behavior, including async bodies. Ordinary `for...of`
 supports typed arrays, evaluates its iterable once, and preserves
 break/continue across synchronous and async bodies. Its loop head may declare
 an identifier or assign each element to an existing same-typed variable.
 `for await...of` additionally unwraps typed Promise-array elements in order,
 accepts synchronous typed arrays, and routes rejection to async `try/catch`.
+`for...in` evaluates a fixed-shape object once and enumerates its statically
+known keys in layout order, with declaration/assignment heads and async bodies.
+Dynamic indexed reads such as `object[key]` remain a separate unsupported path.
 `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
