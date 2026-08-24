@@ -5319,8 +5319,8 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let method = signature
             .symbol
-            .rsplit('$')
-            .next()
+            .split('$')
+            .nth(3)
             .ok_or("invalid typed N-API method symbol")?;
         let method = self
             .builder
