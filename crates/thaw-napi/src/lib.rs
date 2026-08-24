@@ -47,6 +47,7 @@ const NAPI_WOULD_DEADLOCK: NapiStatus = 21;
 const NAPI_NUMBER_EXPECTED: NapiStatus = 6;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
 const NAPI_BOOLEAN_EXPECTED: NapiStatus = 7;
+const NAPI_ARRAY_EXPECTED: NapiStatus = 8;
 const NAPI_DATE_EXPECTED: NapiStatus = 18;
 const NAPI_ARRAYBUFFER_EXPECTED: NapiStatus = 19;
 const NAPI_BIGINT_EXPECTED: NapiStatus = 17;
@@ -4501,7 +4502,7 @@ pub unsafe extern "C" fn napi_coerce_to_bool(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let boolean = match value_ref(value) {
         Ok(Value::Undefined | Value::Null) => false,
@@ -4509,9 +4510,10 @@ pub unsafe extern "C" fn napi_coerce_to_bool(
         Ok(Value::Number(value)) => *value != 0.0 && !value.is_nan(),
         Ok(Value::String(value)) => !value.is_empty(),
         Ok(_) => true,
-        Err(status) => return status,
+        Err(status) => return record_status(env, status),
     };
-    napi_get_boolean(env, boolean, out)
+    let status = napi_get_boolean(env, boolean, out);
+    record_status(env, status)
 }
 
 fn javascript_number_from_string(value: &str) -> f64 {
@@ -4632,7 +4634,7 @@ unsafe fn coercion_type_error(env: NapiEnv, message: &str) -> NapiStatus {
     };
     let error = env.alloc(Value::Error(message.into()));
     env.exception = Some(error);
-    NAPI_PENDING_EXCEPTION
+    record_status(env, NAPI_PENDING_EXCEPTION)
 }
 
 #[no_mangle]
@@ -4642,7 +4644,7 @@ pub unsafe extern "C" fn napi_coerce_to_number(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let number = match value_ref(value) {
         Ok(Value::Undefined) => f64::NAN,
@@ -4659,9 +4661,10 @@ pub unsafe extern "C" fn napi_coerce_to_number(
             Err(()) => return coercion_type_error(env, "value cannot be converted to a number"),
         },
         Ok(_) => f64::NAN,
-        Err(status) => return status,
+        Err(status) => return record_status(env, status),
     };
-    napi_create_double(env, number, out)
+    let status = napi_create_double(env, number, out);
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -4671,7 +4674,7 @@ pub unsafe extern "C" fn napi_coerce_to_string(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let string = match javascript_string(env, value, &mut HashSet::new()) {
         Ok(string) => string,
@@ -4691,13 +4694,13 @@ pub unsafe extern "C" fn napi_coerce_to_object(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if matches!(value_ref(value), Ok(value) if is_object_value(value)) {
         return write_value(out, value);
     }
     if matches!(value_ref(value), Ok(Value::Undefined | Value::Null)) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5254,7 +5257,7 @@ pub unsafe extern "C" fn napi_get_uv_event_loop(env: NapiEnv, out: *mut *mut c_v
 #[no_mangle]
 pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i32) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = match value_ref(value) {
         Ok(Value::Undefined) => 0,
@@ -5267,7 +5270,7 @@ pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i
         Ok(Value::External(_)) => 8,
         Ok(Value::BigInt { .. }) => 9,
         Ok(_) => 6,
-        Err(_) => return NAPI_INVALID_ARG,
+        Err(_) => return record_status(env, NAPI_INVALID_ARG),
     };
     NAPI_OK
 }
@@ -5279,7 +5282,7 @@ pub unsafe extern "C" fn napi_is_array(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = matches!(value_ref(value), Ok(Value::Array(_)));
     NAPI_OK
@@ -5295,7 +5298,7 @@ pub unsafe extern "C" fn napi_is_promise(
         return NAPI_INVALID_ARG;
     }
     let Some(result) = result.as_mut() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     *result = matches!(value_ref(value), Ok(Value::Promise(_)));
     NAPI_OK
@@ -5308,15 +5311,16 @@ pub unsafe extern "C" fn napi_get_array_length(
     out: *mut u32,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Array(values)) => {
             *out = values.len() as u32;
             NAPI_OK
         }
-        _ => NAPI_INVALID_ARG,
-    }
+        _ => NAPI_ARRAY_EXPECTED,
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -5329,7 +5333,8 @@ pub unsafe extern "C" fn napi_set_element(
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
-    set_property_key(env, object, PropertyKey::String(index.to_string()), value)
+    let status = set_property_key(env, object, PropertyKey::String(index.to_string()), value);
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -5343,11 +5348,11 @@ pub unsafe extern "C" fn napi_has_element(
         return NAPI_INVALID_ARG;
     }
     let Some(result) = result.as_mut() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let key = PropertyKey::String(index.to_string());
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     *result = find_property_value(env, object, &key).is_some()
         || find_accessor(env, object, &key).is_some();
@@ -5366,7 +5371,7 @@ pub unsafe extern "C" fn napi_delete_element(
     }
     let key = PropertyKey::String(index.to_string());
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let own = own_property_value(env, object, &key).is_some()
         || accessor_for_owner(env, object as usize, &key).is_some();
@@ -5391,7 +5396,7 @@ pub unsafe extern "C" fn napi_delete_element(
     if let Ok(env) = env_mut(env) {
         let status = remove_own_property(env, object, &key);
         if status != NAPI_OK {
-            return status;
+            return record_status(env, status);
         }
         env.accessors.remove(&(object as usize, key.clone()));
         remove_property_order(env, object as usize, &key);
@@ -5411,11 +5416,11 @@ pub unsafe extern "C" fn napi_get_element(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, object) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let key = PropertyKey::String(index.to_string());
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let value = find_property_value(env, object, &key);
     if value.is_none() {
@@ -5432,16 +5437,18 @@ pub unsafe extern "C" fn napi_get_element(
                     .map(|env| env.exception.is_some())
                     .unwrap_or(false)
                 {
-                    return NAPI_PENDING_EXCEPTION;
+                    return record_status(env, NAPI_PENDING_EXCEPTION);
                 }
-                return write_callback_value(env, out, value);
+                let status = write_callback_value(env, out, value);
+                return record_status(env, status);
             }
         }
     }
-    match value {
+    let status = match value {
         Some(value) => write_value(out, value),
         None => napi_get_undefined(env, out),
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -9363,7 +9370,25 @@ mod tests {
                 napi_coerce_to_string(env_ptr, symbol, &mut result),
                 NAPI_PENDING_EXCEPTION
             );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_PENDING_EXCEPTION);
             assert!(env.exception.take().is_some());
+
+            let mut length = 0;
+            assert_eq!(
+                napi_get_array_length(env_ptr, one, &mut length),
+                NAPI_ARRAY_EXPECTED
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_ARRAY_EXPECTED);
+            let mut present = false;
+            assert_eq!(
+                napi_has_element(env_ptr, one, 0, &mut present),
+                NAPI_OBJECT_EXPECTED
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_OBJECT_EXPECTED);
         }
     }
 
