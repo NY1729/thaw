@@ -126,7 +126,8 @@ The workspace crates have narrow responsibilities:
   objects
 - `interface`, interface inheritance and generic interface instantiation
 - Local-variable inference from supported expressions
-- `let`/`const`, assignment, arithmetic, typed unary `+`/`-`/`!`, strict
+- `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
+  and their compound assignments), typed unary `+`/`-`/`!`, strict
   equality/inequality and ordered comparisons, `if`, `while`, classic
   `for`, `do/while`, and typed-array `for...of`
 - Object fields and array indexing/mutation
