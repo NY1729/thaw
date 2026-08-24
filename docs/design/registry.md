@@ -1026,7 +1026,9 @@ attributeを明示エラーにする。dynamic importは実行時式を`requireA
 最大64件の有限候補へ展開し、各外部packageを通常の依存graphへ載せる。user moduleの
 `import.meta.url`はsourceごとの絶対`file://` URLへ変換する。star exportは明示exportを
 優先し、異なるbindingの曖昧性をbarrel越しに伝播してimport時に診断する。任意の実行時
-文字列から決まる外部packageと、`import.meta.url`以外のmeta propertyはまだ対象外である。
+文字列から決まる外部packageはまだ対象外である。user moduleの静的なrelative/absolute
+`import.meta.resolve()`はsource directory基準でpathを正規化し、query/fragmentを保った
+`file://` URLへ変換する。bare packageのresolveとその他のmeta propertyはまだ対象外である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

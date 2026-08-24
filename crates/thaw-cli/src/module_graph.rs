@@ -39,6 +39,51 @@ fn file_url(path: &Path) -> String {
     url
 }
 
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(Path::new("/")),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normalized != Path::new("/") {
+                    normalized.pop();
+                }
+            }
+            std::path::Component::Normal(component) => normalized.push(component),
+        }
+    }
+    normalized
+}
+
+fn resolve_import_meta(module_path: &Path, specifier: &str) -> Option<String> {
+    if specifier.starts_with("file://") {
+        return Some(specifier.to_string());
+    }
+    if !specifier.starts_with('.') && !specifier.starts_with('/') {
+        return None;
+    }
+    let suffix_at = specifier
+        .char_indices()
+        .find_map(|(index, character)| matches!(character, '?' | '#').then_some(index));
+    let (path, suffix) = suffix_at
+        .map(|index| specifier.split_at(index))
+        .unwrap_or((specifier, ""));
+    let target = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        module_path
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .join(path)
+    };
+    Some(format!(
+        "{}{suffix}",
+        file_url(&normalize_absolute_path(&target))
+    ))
+}
+
 fn resolve_relative(from: &Path, specifier: &str) -> Result<PathBuf, String> {
     if !specifier.starts_with('.') {
         return Err(format!(
@@ -166,6 +211,7 @@ struct RenameReferences<'a> {
     names: &'a HashMap<String, String>,
     namespaces: &'a HashMap<String, HashMap<String, String>>,
     import_meta_url: &'a str,
+    module_path: &'a Path,
 }
 
 impl RenameReferences<'_> {
@@ -179,6 +225,28 @@ impl RenameReferences<'_> {
 impl VisitMut for RenameReferences<'_> {
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
+        if let Expr::Call(call) = expr {
+            let is_resolve = matches!(&call.callee, Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Member(member)
+                    if matches!(member.obj.as_ref(), Expr::MetaProp(meta)
+                        if meta.kind == thaw_parser::ast::MetaPropKind::ImportMeta)
+                    && matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(property)
+                        if property.sym == *"resolve")));
+            if is_resolve && call.args.len() == 1 && call.args[0].spread.is_none() {
+                if let Expr::Lit(thaw_parser::ast::Lit::Str(specifier)) = call.args[0].expr.as_ref()
+                {
+                    let specifier = specifier.value.to_string_lossy();
+                    if let Some(resolved) = resolve_import_meta(self.module_path, &specifier) {
+                        *expr = Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {
+                            span: call.span,
+                            value: resolved.into(),
+                            raw: None,
+                        }));
+                        return;
+                    }
+                }
+            }
+        }
         let Expr::Member(member) = expr else {
             return;
         };
@@ -430,6 +498,7 @@ pub fn bundle(
                         names: &names,
                         namespaces: &namespaces,
                         import_meta_url: &import_meta_url,
+                        module_path: &modules[index].path,
                     });
                     items.push(ModuleItem::Stmt(statement));
                 }
@@ -444,6 +513,7 @@ pub fn bundle(
                         names: &names,
                         namespaces: &namespaces,
                         import_meta_url: &import_meta_url,
+                        module_path: &modules[index].path,
                     });
                     if let Some(original) = original {
                         public.insert(original.clone(), names[&original].clone());
@@ -537,6 +607,7 @@ pub fn bundle(
                                 names: &names,
                                 namespaces: &namespaces,
                                 import_meta_url: &import_meta_url,
+                                module_path: &modules[index].path,
                             });
                             let mut ident = function.ident.take().unwrap_or_else(|| {
                                 thaw_parser::ast::Ident::new_no_ctxt(
@@ -563,6 +634,7 @@ pub fn bundle(
                                 names: &names,
                                 namespaces: &namespaces,
                                 import_meta_url: &import_meta_url,
+                                module_path: &modules[index].path,
                             });
                             public.insert("default".to_string(), interface.id.sym.to_string());
                             explicit_exports.insert("default".to_string());
