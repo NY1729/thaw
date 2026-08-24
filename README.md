@@ -748,6 +748,8 @@ The workspace crates have narrow responsibilities:
   non-detachable shared backing for TypedArray, DataView and Buffer views.
   `node_api_post_finalizer` defers GC-sensitive cleanup into the main-thread
   poller while retaining a live environment for ordinary Node-API calls.
+  Addons can query their stable absolute `file://` load URL through
+  `node_api_get_module_file_name`, including from generated top-level calls.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
