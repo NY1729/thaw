@@ -257,6 +257,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 matches!(
                     inner.as_ref(),
                     HirExpr::PromiseNew(_, _, _)
+                        | HirExpr::PromiseThen(_, _, _, _, _, _)
                         | HirExpr::PromiseAll(_, _)
                         | HirExpr::PromiseAllArray(_, _)
                         | HirExpr::PromiseAllTuple(_, _)
@@ -2108,6 +2109,7 @@ impl<'ctx> HirCompiler<'ctx> {
         matches!(
             expr,
             HirExpr::PromiseNew(_, _, _)
+                | HirExpr::PromiseThen(_, _, _, _, _, _)
                 | HirExpr::PromiseAll(_, _)
                 | HirExpr::PromiseAllArray(_, _)
                 | HirExpr::PromiseAllTuple(_, _)
@@ -2161,6 +2163,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         HirType::Str
                     }
                     HirExpr::PromiseNew(_, resolved, _) => resolved.clone(),
+                    HirExpr::PromiseThen(_, _, _, output, _, _) => output.clone(),
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
                         HirType::Array(Box::new(element.clone()))
                     }
@@ -6821,12 +6824,16 @@ impl<'ctx> HirCompiler<'ctx> {
         let promise = adapter.get_nth_param(1).unwrap();
         let result = adapter.get_nth_param(2).unwrap().into_pointer_value();
         let callback_input = if on_rejected { &HirType::Str } else { input };
-        let value = if on_rejected {
-            result.into()
+        let value = if !on_rejected && callback_input == &HirType::Void {
+            None
+        } else if on_rejected {
+            Some(result.into())
         } else {
-            self.builder
-                .build_load(self.basic_type(callback_input)?, result, "chain_input")
-                .map_err(|error| error.to_string())?
+            Some(
+                self.builder
+                    .build_load(self.basic_type(callback_input)?, result, "chain_input")
+                    .map_err(|error| error.to_string())?,
+            )
         };
         let code = self
             .builder
@@ -6838,20 +6845,25 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             output.clone()
         };
-        let callback_type =
-            self.function_type(std::slice::from_ref(callback_input), &callback_return)?;
+        let callback_params = if callback_input == &HirType::Void {
+            &[][..]
+        } else {
+            std::slice::from_ref(callback_input)
+        };
+        let callback_type = self.function_type(callback_params, &callback_return)?;
+        let mut callback_args = vec![context.into()];
+        if let Some(value) = value {
+            callback_args.push(value.into());
+        }
         let transformed = self
             .builder
-            .build_indirect_call(
-                callback_type,
-                code,
-                &[context.into(), value.into()],
-                "invoke_chain_callback",
-            )
+            .build_indirect_call(callback_type, code, &callback_args, "invoke_chain_callback")
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
-            .basic()
-            .ok_or("Promise callback must return a value")?;
+            .basic();
+        if transformed.is_none() && (flatten || output != &HirType::Void) {
+            return Err("Promise callback must return a value".into());
+        }
         let pending_slot = self.pending_exception().as_pointer_value();
         let pending = self
             .builder
@@ -6886,15 +6898,23 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_adopt").unwrap(),
-                    &[promise.into(), transformed.into()],
+                    &[promise.into(), transformed.unwrap().into()],
                     "adopt_chain",
+                )
+                .map_err(|error| error.to_string())?;
+        } else if output == &HirType::Void {
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_promise_resolve").unwrap(),
+                    &[promise.into(), ptr.const_null().into()],
+                    "resolve_void_chain",
                 )
                 .map_err(|error| error.to_string())?;
         } else {
             let output_type = self.basic_type(output)?;
             let output_slot = self.allocate_variable_cell(output_type, "chain_output")?;
             self.builder
-                .build_store(output_slot, transformed)
+                .build_store(output_slot, transformed.unwrap())
                 .map_err(|error| error.to_string())?;
             self.builder
                 .build_call(
@@ -10445,6 +10465,25 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "promise_void_constructor"),
             "executor\nvoid failure\ndone\n"
+        );
+    }
+
+    #[test]
+    fn promise_void_continuations_run_and_settle() {
+        let source = r#"
+            async function main(): Promise<void> {
+                await new Promise<void>((resolve, reject) => resolve()).then(() => {
+                    console.log("then");
+                });
+                await new Promise<void>((resolve, reject) => reject("failure")).catch(error => {
+                    console.log(error);
+                });
+                console.log("done");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_void_continuations"),
+            "then\nfailure\ndone\n"
         );
     }
 
