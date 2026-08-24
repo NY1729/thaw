@@ -10402,6 +10402,38 @@ mod tests {
     }
 
     #[test]
+    fn compiles_primitive_abstract_equality_with_ordered_awaits() {
+        let source = r#"
+            function number(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            function text(label: string, value: string): string {
+                console.log(label);
+                return value;
+            }
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited-equality");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(text("left", "1") == number("right", 1));
+                console.log("" == 0);
+                console.log("bad" != 0);
+                console.log(true == 1);
+                console.log(false == "0");
+                console.log("NaN" == (0 / 0));
+                console.log((await delayed("42")) == 42);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "primitive_abstract_equality"),
+            "left\nright\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\nawaited-equality\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {

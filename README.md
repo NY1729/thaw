@@ -350,6 +350,10 @@ The workspace crates have narrow responsibilities:
   covers ECMAScript whitespace, signs, decimal/exponent syntax, arbitrary-size
   hexadecimal/octal/binary input, infinities and `NaN` for invalid input, and
   works after an awaited string expression
+- Primitive `==` and `!=` implement JavaScript abstract equality conversion
+  across number, string and boolean operands, including `NaN`, while preserving
+  left-to-right single evaluation and awaited operands; same-typed values keep
+  the existing strict-layout comparison
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
