@@ -10475,12 +10475,10 @@ mod tests {
     fn promise_void_continuations_run_and_settle() {
         let source = r#"
             async function main(): Promise<void> {
-                await new Promise<void>((resolve, reject) => resolve()).then(() => {
-                    console.log("then");
-                });
-                await new Promise<void>((resolve, reject) => reject("failure")).catch(error => {
-                    console.log(error);
-                });
+                await new Promise<void>((resolve, reject) => resolve())
+                    .then(() => console.log("then"));
+                await new Promise<void>((resolve, reject) => reject("failure"))
+                    .catch(error => console.log(error));
                 console.log("done");
             }
         "#;
@@ -10546,9 +10544,7 @@ mod tests {
             async function main(): Promise<void> {
                 const fulfilled: number = await new Promise<number>((resolve, reject) => {
                     resolve(41);
-                }).finally(() => {
-                    console.log("fulfilled cleanup");
-                });
+                }).finally(() => console.log("fulfilled cleanup"));
                 console.log(fulfilled);
                 const recovered: number = await new Promise<number>((resolve, reject) => {
                     reject("original rejection");
@@ -10593,9 +10589,7 @@ mod tests {
                 try {
                     await new Promise<number>((resolve, reject) => {
                         reject("finally rejection");
-                    }).finally(() => {
-                        console.log("rejected cleanup");
-                    });
+                    }).finally(() => console.log("rejected cleanup"));
                 } catch (error) {
                     console.log(error);
                 }
