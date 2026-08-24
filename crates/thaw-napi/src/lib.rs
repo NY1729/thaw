@@ -379,11 +379,11 @@ unsafe fn validate_property_descriptors(
         return NAPI_OK;
     }
     if env.is_null() || descriptors.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     for descriptor in std::slice::from_raw_parts(descriptors, count) {
         if descriptor.utf8name.is_null() && !value_belongs_to_environment(env, descriptor.name) {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         }
         if descriptor.method.is_none()
             && descriptor.getter.is_none()
@@ -391,7 +391,7 @@ unsafe fn validate_property_descriptors(
             && !descriptor.value.is_null()
             && !value_belongs_to_environment(env, descriptor.value)
         {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         }
     }
     NAPI_OK
@@ -2643,7 +2643,7 @@ pub unsafe extern "C" fn napi_is_date(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = matches!(value_ref(value), Ok(Value::Date(_)));
     NAPI_OK
@@ -5488,14 +5488,14 @@ pub unsafe extern "C" fn napi_create_buffer_copy(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if source.is_null() && length != 0 {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let status = napi_create_buffer(env, length, data, out);
     if status == NAPI_OK && length != 0 {
         let target = if data.is_null() {
             match (*out).as_mut() {
                 Some(Value::Buffer(bytes)) => bytes.as_mut_ptr().cast(),
-                _ => return NAPI_INVALID_ARG,
+                _ => return record_status(env, NAPI_INVALID_ARG),
             }
         } else {
             *data
@@ -5515,7 +5515,7 @@ pub unsafe extern "C" fn napi_create_external_buffer(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || (length != 0 && data.is_null()) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5705,7 +5705,7 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || (length != 0 && data.is_null()) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5735,7 +5735,7 @@ pub unsafe extern "C" fn node_api_create_external_sharedarraybuffer(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || (length != 0 && data.is_null()) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5762,7 +5762,7 @@ pub unsafe extern "C" fn node_api_create_sharedarraybuffer(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5787,7 +5787,7 @@ pub unsafe extern "C" fn node_api_is_sharedarraybuffer(
         return NAPI_INVALID_ARG;
     }
     let Some(result) = result.as_mut() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     *result = matches!(
         value_ref(value),
@@ -5803,13 +5803,14 @@ pub unsafe extern "C" fn napi_adjust_external_memory(
     adjusted_value: *mut i64,
 ) -> NapiStatus {
     if adjusted_value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     let Some(adjusted) = env.external_memory.checked_add(change_in_bytes) else {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env_ptr, NAPI_GENERIC_FAILURE);
     };
     env.external_memory = adjusted;
     *adjusted_value = adjusted;
@@ -5823,7 +5824,7 @@ pub unsafe extern "C" fn napi_is_arraybuffer(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = matches!(
         value_ref(value),
@@ -5940,7 +5941,7 @@ pub unsafe extern "C" fn napi_is_typedarray(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = matches!(
         value_ref(value),
@@ -5993,7 +5994,7 @@ pub unsafe extern "C" fn napi_is_dataview(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = matches!(value_ref(value), Ok(Value::DataView { .. }));
     NAPI_OK
@@ -6424,7 +6425,7 @@ pub unsafe extern "C" fn napi_is_error(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = matches!(value_ref(value), Ok(Value::Error(_)));
     NAPI_OK
@@ -9053,6 +9054,13 @@ mod tests {
             let value = env.alloc(Value::Number(1.0));
             let mut info = ptr::null();
 
+            assert_eq!(
+                napi_define_properties(env_ptr, object, 1, ptr::null()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+
             assert_eq!(napi_object_seal(env_ptr, object), NAPI_OK);
             assert_eq!(
                 napi_set_property(env_ptr, object, key, value),
@@ -9086,6 +9094,27 @@ mod tests {
             let env_ptr: NapiEnv = &mut env;
             let number = env.alloc(Value::Number(1.0));
             let mut info = ptr::null();
+
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_external_buffer(
+                    env_ptr,
+                    1,
+                    ptr::null_mut(),
+                    None,
+                    ptr::null_mut(),
+                    &mut buffer,
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_is_buffer(env_ptr, number, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
 
             assert_eq!(
                 napi_get_arraybuffer_info(env_ptr, number, ptr::null_mut(), ptr::null_mut()),
