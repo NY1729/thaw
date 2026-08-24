@@ -632,6 +632,15 @@ impl<'ctx> HirCompiler<'ctx> {
             string_index_of_type,
             Some(Linkage::External),
         );
+        let string_transform_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        for name in [
+            "thaw_string_trim",
+            "thaw_string_trim_start",
+            "thaw_string_trim_end",
+        ] {
+            self.module
+                .add_function(name, string_transform_type, Some(Linkage::External));
+        }
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -7583,6 +7592,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
+            "__thaw_string_trim" | "__thaw_string_trim_start" | "__thaw_string_trim_end" => {
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                return self.compile_single_arg_call(&runtime, args, "string trim");
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
@@ -11417,6 +11430,32 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "string_search"),
             "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\nawaited-text\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_ecmascript_string_trimming() {
+        let source = r#"
+            function value(): string {
+                console.log("receiver-evaluated");
+                return "  thaw  ";
+            }
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-trim");
+                return "\u{feff}\u{00a0}done\u{3000}";
+            }
+            async function main(): Promise<void> {
+                console.log(value().trim());
+                console.log("  start  ".trimStart().startsWith("start"));
+                console.log("  end  ".trimEnd().endsWith("end"));
+                console.log("\u{0085}kept\u{0085}".trim().startsWith("\u{0085}"));
+                console.log((await delayed()).trim());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_trim"),
+            "receiver-evaluated\nthaw\ntrue\ntrue\ntrue\nawaited-trim\ndone\n"
         );
     }
 
