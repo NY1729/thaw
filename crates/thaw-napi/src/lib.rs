@@ -3282,6 +3282,110 @@ pub unsafe extern "C" fn napi_coerce_to_bool(
     napi_get_boolean(env, boolean, out)
 }
 
+fn javascript_number_from_string(value: &str) -> f64 {
+    let value = value.trim();
+    if value.is_empty() {
+        return 0.0;
+    }
+    match value {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    let radix = [
+        ("0x", 16),
+        ("0X", 16),
+        ("0b", 2),
+        ("0B", 2),
+        ("0o", 8),
+        ("0O", 8),
+    ]
+    .into_iter()
+    .find_map(|(prefix, radix)| value.strip_prefix(prefix).map(|digits| (digits, radix)));
+    if let Some((digits, radix)) = radix {
+        return u128::from_str_radix(digits, radix)
+            .map(|number| number as f64)
+            .unwrap_or(f64::NAN);
+    }
+    value.parse().unwrap_or(f64::NAN)
+}
+
+fn bigint_to_decimal(negative: bool, words: &[u64]) -> String {
+    const BASE: u128 = 1_000_000_000;
+    let mut decimal = vec![0_u32];
+    for word in words.iter().rev() {
+        let mut carry = *word as u128;
+        for limb in &mut decimal {
+            let value = (*limb as u128) * (1_u128 << 64) + carry;
+            *limb = (value % BASE) as u32;
+            carry = value / BASE;
+        }
+        while carry != 0 {
+            decimal.push((carry % BASE) as u32);
+            carry /= BASE;
+        }
+    }
+    while decimal.len() > 1 && decimal.last() == Some(&0) {
+        decimal.pop();
+    }
+    let mut result = decimal.last().unwrap_or(&0).to_string();
+    for limb in decimal.iter().rev().skip(1) {
+        result.push_str(&format!("{limb:09}"));
+    }
+    if negative && result != "0" {
+        result.insert(0, '-');
+    }
+    result
+}
+
+unsafe fn javascript_string(value: NapiValue, arrays: &mut HashSet<usize>) -> Result<String, ()> {
+    Ok(match value_ref(value).map_err(|_| ())? {
+        Value::Undefined => "undefined".into(),
+        Value::Null => "null".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) if *value == 0.0 => "0".into(),
+        Value::Number(value) if value.is_infinite() => {
+            if value.is_sign_negative() {
+                "-Infinity".into()
+            } else {
+                "Infinity".into()
+            }
+        }
+        Value::Number(value) => value.to_string(),
+        Value::BigInt { negative, words } => bigint_to_decimal(*negative, words),
+        Value::String(value) => value.clone(),
+        Value::Error(value) => format!("Error: {value}"),
+        Value::Symbol { .. } => return Err(()),
+        Value::Array(values) => {
+            if !arrays.insert(value as usize) {
+                return Ok(String::new());
+            }
+            let result = values
+                .iter()
+                .map(|item| {
+                    match item.and_then(|item| value_ref(item).ok().map(|value| (item, value))) {
+                        None | Some((_, Value::Undefined | Value::Null)) => Ok(String::new()),
+                        Some((item, _)) => javascript_string(item, arrays),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",");
+            arrays.remove(&(value as usize));
+            result
+        }
+        _ => "[object Object]".into(),
+    })
+}
+
+unsafe fn coercion_type_error(env: NapiEnv, message: &str) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let error = env.alloc(Value::Error(message.into()));
+    env.exception = Some(error);
+    NAPI_PENDING_EXCEPTION
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_coerce_to_number(
     env: NapiEnv,
@@ -3293,7 +3397,14 @@ pub unsafe extern "C" fn napi_coerce_to_number(
         Ok(Value::Null) => 0.0,
         Ok(Value::Bool(value)) => u8::from(*value) as f64,
         Ok(Value::Number(value)) => *value,
-        Ok(Value::String(value)) => value.trim().parse().unwrap_or(f64::NAN),
+        Ok(Value::String(value)) => javascript_number_from_string(value),
+        Ok(Value::BigInt { .. } | Value::Symbol { .. }) => {
+            return coercion_type_error(env, "value cannot be converted to a number");
+        }
+        Ok(Value::Array(_)) => match javascript_string(value, &mut HashSet::new()) {
+            Ok(value) => javascript_number_from_string(&value),
+            Err(()) => return coercion_type_error(env, "value cannot be converted to a number"),
+        },
         Ok(_) => f64::NAN,
         Err(status) => return status,
     };
@@ -3306,16 +3417,9 @@ pub unsafe extern "C" fn napi_coerce_to_string(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let string = match value_ref(value) {
-        Ok(Value::Undefined) => "undefined".into(),
-        Ok(Value::Null) => "null".into(),
-        Ok(Value::Bool(value)) => value.to_string(),
-        Ok(Value::Number(value)) => value.to_string(),
-        Ok(Value::String(value) | Value::Error(value)) => value.clone(),
-        Ok(Value::Symbol { description, .. }) => description.clone(),
-        Ok(Value::Array(_)) => "".into(),
-        Ok(_) => "[object Object]".into(),
-        Err(status) => return status,
+    let string = match javascript_string(value, &mut HashSet::new()) {
+        Ok(string) => string,
+        Err(()) => return coercion_type_error(env, "a Symbol cannot be converted to a string"),
     };
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -6517,6 +6621,54 @@ mod tests {
             );
             assert_ne!(boxed, primitive);
             assert!(matches!(value_ref(boxed), Ok(Value::Object(_))));
+        }
+    }
+
+    #[test]
+    fn coercions_follow_ecmascript_primitive_rules() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut result = ptr::null_mut();
+
+            for (input, expected) in [("", 0.0), ("  0x2a  ", 42.0), ("0b101", 5.0)] {
+                let value = env.alloc(Value::String(input.into()));
+                assert_eq!(napi_coerce_to_number(env_ptr, value, &mut result), NAPI_OK);
+                assert!(
+                    matches!(value_ref(result), Ok(Value::Number(number)) if *number == expected)
+                );
+            }
+
+            let one = env.alloc(Value::Number(1.0));
+            let text = env.alloc(Value::String("x".into()));
+            let nested = env.alloc(Value::Array(vec![Some(text), None]));
+            let array = env.alloc(Value::Array(vec![Some(one), None, Some(nested)]));
+            assert_eq!(napi_coerce_to_string(env_ptr, array, &mut result), NAPI_OK);
+            assert!(matches!(value_ref(result), Ok(Value::String(value)) if value == "1,,x,"));
+
+            let bigint = env.alloc(Value::BigInt {
+                negative: false,
+                words: vec![0, 1],
+            });
+            assert_eq!(napi_coerce_to_string(env_ptr, bigint, &mut result), NAPI_OK);
+            assert!(
+                matches!(value_ref(result), Ok(Value::String(value)) if value == "18446744073709551616")
+            );
+            assert_eq!(
+                napi_coerce_to_number(env_ptr, bigint, &mut result),
+                NAPI_PENDING_EXCEPTION
+            );
+            assert!(env.exception.take().is_some());
+
+            let symbol = env.alloc(Value::Symbol {
+                id: 999,
+                description: "token".into(),
+            });
+            assert_eq!(
+                napi_coerce_to_string(env_ptr, symbol, &mut result),
+                NAPI_PENDING_EXCEPTION
+            );
+            assert!(env.exception.take().is_some());
         }
     }
 

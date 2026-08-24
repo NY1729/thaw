@@ -827,6 +827,8 @@ Object coercion preserves the identity of every existing host object, including
 arrays, buffers and views, promises, errors, dates, and functions.
 Property-name enumeration follows JavaScript key order: integer indexes first in
 ascending order, then strings and symbols in their respective insertion order.
+N-API coercion covers JavaScript radix strings, infinities, negative zero,
+arbitrary-width BigInt strings, array joins, and Symbol/BigInt conversion errors.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
