@@ -202,7 +202,15 @@ pub enum Value {
     Object(HashMap<String, NapiValue>),
     Array(Vec<NapiValue>),
     Buffer(Vec<u8>),
+    ExternalBuffer {
+        data: *mut u8,
+        length: usize,
+    },
     ArrayBuffer(Vec<u8>),
+    ExternalArrayBuffer {
+        data: *mut u8,
+        length: usize,
+    },
     TypedArray {
         array_type: i32,
         length: usize,
@@ -759,7 +767,18 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         Value::Buffer(values) => {
             JsonValue::Array(values.iter().map(|value| JsonValue::from(*value)).collect())
         }
-        Value::ArrayBuffer(_) | Value::TypedArray { .. } | Value::DataView { .. } => {
+        Value::ExternalBuffer { data, length } => {
+            let bytes = if *length == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(*data, *length)
+            };
+            JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
+        }
+        Value::ArrayBuffer(_)
+        | Value::ExternalArrayBuffer { .. }
+        | Value::TypedArray { .. }
+        | Value::DataView { .. } => {
             return Err("cannot JSON-encode an ArrayBuffer view".into());
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
@@ -2946,6 +2965,35 @@ pub unsafe extern "C" fn napi_create_buffer_copy(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_external_buffer(
+    env: NapiEnv,
+    length: usize,
+    data: *mut c_void,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null() || (length != 0 && data.is_null()) {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::ExternalBuffer {
+        data: data.cast(),
+        length,
+    });
+    if finalize.is_some() {
+        env.finalizers.push(FinalizeRecord {
+            data,
+            finalize,
+            hint,
+        });
+    }
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_buffer_info(
     _env: NapiEnv,
     value: NapiValue,
@@ -2962,6 +3010,18 @@ pub unsafe extern "C" fn napi_get_buffer_info(
             }
             NAPI_OK
         }
+        Some(Value::ExternalBuffer {
+            data: external,
+            length: external_length,
+        }) => {
+            if !data.is_null() {
+                *data = external.cast();
+            }
+            if !length.is_null() {
+                *length = *external_length;
+            }
+            NAPI_OK
+        }
         _ => NAPI_INVALID_ARG,
     }
 }
@@ -2975,8 +3035,19 @@ pub unsafe extern "C" fn napi_is_buffer(
     if out.is_null() {
         return NAPI_INVALID_ARG;
     }
-    *out = matches!(value_ref(value), Ok(Value::Buffer(_)));
+    *out = matches!(
+        value_ref(value),
+        Ok(Value::Buffer(_) | Value::ExternalBuffer { .. })
+    );
     NAPI_OK
+}
+
+unsafe fn arraybuffer_parts(value: NapiValue) -> Result<(*mut u8, usize), NapiStatus> {
+    match value.as_mut() {
+        Some(Value::ArrayBuffer(bytes)) => Ok((bytes.as_mut_ptr(), bytes.len())),
+        Some(Value::ExternalArrayBuffer { data, length }) => Ok((*data, *length)),
+        _ => Err(NAPI_ARRAYBUFFER_EXPECTED),
+    }
 }
 
 fn typedarray_element_size(array_type: i32) -> Option<usize> {
@@ -3010,6 +3081,35 @@ pub unsafe extern "C" fn napi_create_arraybuffer(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_external_arraybuffer(
+    env: NapiEnv,
+    data: *mut c_void,
+    length: usize,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null() || (length != 0 && data.is_null()) {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::ExternalArrayBuffer {
+        data: data.cast(),
+        length,
+    });
+    if finalize.is_some() {
+        env.finalizers.push(FinalizeRecord {
+            data,
+            finalize,
+            hint,
+        });
+    }
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_is_arraybuffer(
     _env: NapiEnv,
     value: NapiValue,
@@ -3018,7 +3118,10 @@ pub unsafe extern "C" fn napi_is_arraybuffer(
     if out.is_null() {
         return NAPI_INVALID_ARG;
     }
-    *out = matches!(value_ref(value), Ok(Value::ArrayBuffer(_)));
+    *out = matches!(
+        value_ref(value),
+        Ok(Value::ArrayBuffer(_) | Value::ExternalArrayBuffer { .. })
+    );
     NAPI_OK
 }
 
@@ -3029,14 +3132,14 @@ pub unsafe extern "C" fn napi_get_arraybuffer_info(
     data: *mut *mut c_void,
     length: *mut usize,
 ) -> NapiStatus {
-    let Some(Value::ArrayBuffer(bytes)) = value.as_mut() else {
+    let Ok((bytes, byte_length)) = arraybuffer_parts(value) else {
         return NAPI_ARRAYBUFFER_EXPECTED;
     };
     if !data.is_null() {
-        *data = bytes.as_mut_ptr().cast();
+        *data = bytes.cast();
     }
     if !length.is_null() {
-        *length = bytes.len();
+        *length = byte_length;
     }
     NAPI_OK
 }
@@ -3053,9 +3156,8 @@ pub unsafe extern "C" fn napi_create_typedarray(
     let Some(element_size) = typedarray_element_size(array_type) else {
         return NAPI_INVALID_ARG;
     };
-    let buffer_length = match value_ref(array_buffer) {
-        Ok(Value::ArrayBuffer(bytes)) => bytes.len(),
-        _ => return NAPI_ARRAYBUFFER_EXPECTED,
+    let Ok((_, buffer_length)) = arraybuffer_parts(array_buffer) else {
+        return NAPI_ARRAYBUFFER_EXPECTED;
     };
     let Some(byte_length) = length.checked_mul(element_size) else {
         return NAPI_INVALID_ARG;
@@ -3089,7 +3191,7 @@ pub unsafe extern "C" fn napi_is_typedarray(
     }
     *out = matches!(
         value_ref(value),
-        Ok(Value::TypedArray { .. } | Value::Buffer(_))
+        Ok(Value::TypedArray { .. } | Value::Buffer(_) | Value::ExternalBuffer { .. })
     );
     NAPI_OK
 }
@@ -3102,9 +3204,8 @@ pub unsafe extern "C" fn napi_create_dataview(
     byte_offset: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let buffer_length = match value_ref(array_buffer) {
-        Ok(Value::ArrayBuffer(bytes)) => bytes.len(),
-        _ => return NAPI_ARRAYBUFFER_EXPECTED,
+    let Ok((_, buffer_length)) = arraybuffer_parts(array_buffer) else {
+        return NAPI_ARRAYBUFFER_EXPECTED;
     };
     let Some(end) = byte_offset.checked_add(length) else {
         return NAPI_INVALID_ARG;
@@ -3154,14 +3255,14 @@ pub unsafe extern "C" fn napi_get_dataview_info(
         return NAPI_INVALID_ARG;
     };
     let (view_length, backing, offset) = (*view_length, *backing, *offset);
-    let Some(Value::ArrayBuffer(bytes)) = backing.as_mut() else {
+    let Ok((bytes, _)) = arraybuffer_parts(backing) else {
         return NAPI_ARRAYBUFFER_EXPECTED;
     };
     if !length.is_null() {
         *length = view_length;
     }
     if !data.is_null() {
-        *data = bytes.as_mut_ptr().add(offset).cast();
+        *data = bytes.add(offset).cast();
     }
     if !array_buffer.is_null() {
         *array_buffer = backing;
@@ -3190,7 +3291,7 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
             byte_offset: offset,
         }) => {
             let (kind, view_length, backing, offset) = (*kind, *view_length, *backing, *offset);
-            let Some(Value::ArrayBuffer(bytes)) = backing.as_mut() else {
+            let Ok((bytes, _)) = arraybuffer_parts(backing) else {
                 return NAPI_ARRAYBUFFER_EXPECTED;
             };
             if !array_type.is_null() {
@@ -3200,7 +3301,7 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
                 *length = view_length;
             }
             if !data.is_null() {
-                *data = bytes.as_mut_ptr().add(offset).cast();
+                *data = bytes.add(offset).cast();
             }
             if !array_buffer.is_null() {
                 *array_buffer = backing;
@@ -3220,6 +3321,27 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
             }
             if !data.is_null() {
                 *data = bytes.as_mut_ptr().cast();
+            }
+            if !array_buffer.is_null() {
+                *array_buffer = value;
+            }
+            if !byte_offset.is_null() {
+                *byte_offset = 0;
+            }
+            NAPI_OK
+        }
+        Some(Value::ExternalBuffer {
+            data: external,
+            length: buffer_length,
+        }) => {
+            if !array_type.is_null() {
+                *array_type = 1;
+            }
+            if !length.is_null() {
+                *length = *buffer_length;
+            }
+            if !data.is_null() {
+                *data = external.cast();
             }
             if !array_buffer.is_null() {
                 *array_buffer = value;
@@ -4119,10 +4241,11 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
 mod tests {
     use super::*;
     use std::process::Command;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     static BCRYPT_ASYNC_RESULT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static EXTERNAL_MEMORY_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     #[cfg(target_os = "linux")]
     static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
@@ -4139,6 +4262,14 @@ mod tests {
             std::mem::transmute::<*mut c_void, UvClose>(close)(timer, None);
         }
         UV_TIMER_FIRED.store(true, Ordering::Release);
+    }
+
+    unsafe extern "C" fn external_memory_finalize(
+        _env: NapiEnv,
+        _data: *mut c_void,
+        _hint: *mut c_void,
+    ) {
+        EXTERNAL_MEMORY_FINALIZED.fetch_add(1, Ordering::AcqRel);
     }
 
     fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
@@ -4501,6 +4632,75 @@ mod tests {
                 napi_create_dataview(env_ptr, 14, buffer, 3, &mut view),
                 NAPI_INVALID_ARG
             );
+        }
+    }
+
+    #[test]
+    fn external_buffers_share_memory_and_finalize_once() {
+        unsafe {
+            EXTERNAL_MEMORY_FINALIZED.store(0, Ordering::Release);
+            let mut array_storage = [0_u8; 16];
+            let mut buffer_storage = [1_u8, 2, 3, 4];
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+
+            let mut array_buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_external_arraybuffer(
+                    env_ptr,
+                    array_storage.as_mut_ptr().cast(),
+                    array_storage.len(),
+                    Some(external_memory_finalize),
+                    ptr::null_mut(),
+                    &mut array_buffer,
+                ),
+                NAPI_OK
+            );
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 4, 3, array_buffer, 2, &mut view),
+                NAPI_OK
+            );
+            let mut view_data = ptr::null_mut();
+            assert_eq!(
+                napi_get_typedarray_info(
+                    env_ptr,
+                    view,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut view_data,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OK
+            );
+            *(view_data as *mut u8) = 42;
+            assert_eq!(array_storage[2], 42);
+
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_external_buffer(
+                    env_ptr,
+                    buffer_storage.len(),
+                    buffer_storage.as_mut_ptr().cast(),
+                    Some(external_memory_finalize),
+                    ptr::null_mut(),
+                    &mut buffer,
+                ),
+                NAPI_OK
+            );
+            let mut data = ptr::null_mut();
+            let mut length = 0;
+            assert_eq!(
+                napi_get_buffer_info(env_ptr, buffer, &mut data, &mut length),
+                NAPI_OK
+            );
+            assert_eq!(length, 4);
+            *(data as *mut u8).add(1) = 9;
+            assert_eq!(buffer_storage[1], 9);
+            assert_eq!(EXTERNAL_MEMORY_FINALIZED.load(Ordering::Acquire), 0);
+            drop(env);
+            assert_eq!(EXTERNAL_MEMORY_FINALIZED.load(Ordering::Acquire), 2);
         }
     }
 
