@@ -56,10 +56,12 @@ parameterはsourceで観測した実引数個数だけを展開するため、�
 戻り値annotation、または全returnから一意に推論できる型を使ってoverloadを選択する。
 複数回収集により前方call chainも解決する。parameter依存／競合するreturnと、現在の
 native表現を越えるrest要素型は引き続き残課題である。
-object literalはfield名と再帰的に推論した型を保持し、property readと同一arityの
+object literalは`{ value }`のshorthandを含めてfield名と再帰的に推論した型を保持し、
+property readと同一arityの
 structural object overloadを選択する。直線的な`=`代入はlocal変数とnested propertyの
 型を更新し、静的文字列のcomputed propertyも扱う。未知またはcompound assignmentは
-該当する型情報を破棄する。computed/spread object literalは引き続き残課題である。
+該当する型情報を破棄する。computed/spread object literalはlocal推論とHIR loweringの
+双方で引き続き残課題である。
 `if/else`は同じ入力状態から両branchを解析し、全ての出口で一致する
 value、class instance、callback情報だけを保持する。`else`省略時は未変更の入力経路と
 joinする。`while`とclassic `for`はbody／update後の状態を0回実行経路とjoinし、iteration
