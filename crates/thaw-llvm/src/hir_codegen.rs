@@ -4909,6 +4909,90 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_integer_predicate(
+        &mut self,
+        args: &[HirExpr],
+        safe: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("integer predicate expects one operand".to_string());
+        };
+        let value = self.compile_expr(value)?.into_float_value();
+        let truncated = self
+            .builder
+            .build_call(
+                self.module.get_function("llvm.trunc.f64").unwrap(),
+                &[value.into()],
+                "integer_truncated",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("llvm.trunc returned no value")?
+            .into_float_value();
+        let integral = self
+            .builder
+            .build_float_compare(FloatPredicate::OEQ, value, truncated, "number_is_integral")
+            .map_err(|error| error.to_string())?;
+        let finite_upper = self
+            .builder
+            .build_float_compare(
+                FloatPredicate::OLE,
+                value,
+                self.context.f64_type().const_float(f64::MAX),
+                "integer_finite_upper",
+            )
+            .map_err(|error| error.to_string())?;
+        let finite_lower = self
+            .builder
+            .build_float_compare(
+                FloatPredicate::OGE,
+                value,
+                self.context.f64_type().const_float(-f64::MAX),
+                "integer_finite_lower",
+            )
+            .map_err(|error| error.to_string())?;
+        let finite = self
+            .builder
+            .build_and(finite_upper, finite_lower, "integer_finite")
+            .map_err(|error| error.to_string())?;
+        let mut result = self
+            .builder
+            .build_and(integral, finite, "number_is_integer")
+            .map_err(|error| error.to_string())?;
+        if safe {
+            let safe_upper = self
+                .builder
+                .build_float_compare(
+                    FloatPredicate::OLE,
+                    value,
+                    self.context.f64_type().const_float(9_007_199_254_740_991.0),
+                    "safe_integer_upper",
+                )
+                .map_err(|error| error.to_string())?;
+            let safe_lower = self
+                .builder
+                .build_float_compare(
+                    FloatPredicate::OGE,
+                    value,
+                    self.context
+                        .f64_type()
+                        .const_float(-9_007_199_254_740_991.0),
+                    "safe_integer_lower",
+                )
+                .map_err(|error| error.to_string())?;
+            result = self
+                .builder
+                .build_and(result, safe_upper, "safe_integer_below_max")
+                .and_then(|result| {
+                    self.builder
+                        .build_and(result, safe_lower, "number_is_safe_integer")
+                })
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(result.into())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -7111,6 +7195,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
+            "__thaw_number_is_integer" => return self.compile_integer_predicate(args, false),
+            "__thaw_number_is_safe_integer" => return self.compile_integer_predicate(args, true),
             "__thaw_math_abs" => {
                 return self.compile_single_arg_call("llvm.fabs.f64", args, "Math.abs")
             }
@@ -10776,6 +10862,38 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "unary_math_functions"),
             "math-argument\n3.5\n2\n-2\n-2\n1\n3\ntrue\ntrue\nawaited-math\n4\n"
+        );
+    }
+
+    #[test]
+    fn compiles_integer_and_safe_integer_predicates() {
+        let source = r#"
+            function text(): string {
+                console.log("integer-non-number");
+                return "1";
+            }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                console.log("awaited-integer");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(Number.isInteger(3));
+                console.log(Number.isInteger(3.5));
+                console.log(Number.isInteger(0 / 0));
+                console.log(Number.isInteger(Number("Infinity")));
+                console.log(Number.isInteger(-0));
+                console.log(Number.isInteger(text()));
+                console.log(Number.isSafeInteger(9007199254740991));
+                console.log(Number.isSafeInteger(9007199254740992));
+                console.log(Number.isSafeInteger(-9007199254740991));
+                console.log(Number.isSafeInteger(-9007199254740992));
+                console.log(Number.isSafeInteger(await delayed(42)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "integer_predicates"),
+            "true\nfalse\nfalse\nfalse\ntrue\ninteger-non-number\nfalse\ntrue\nfalse\ntrue\nfalse\nawaited-integer\ntrue\n"
         );
     }
 

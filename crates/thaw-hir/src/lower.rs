@@ -3087,7 +3087,10 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bool_array_to_string"
                     | "__thaw_object_array_to_string"
                     | "__thaw_object_to_string" => return Ok(HirType::Str),
-                    "__thaw_number_is_nan" | "__thaw_number_is_finite" => {
+                    "__thaw_number_is_nan"
+                    | "__thaw_number_is_finite"
+                    | "__thaw_number_is_integer"
+                    | "__thaw_number_is_safe_integer" => {
                         let [argument] = args.as_slice() else {
                             return Err("number predicate expects one operand".into());
                         };
@@ -5097,7 +5100,10 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     if object.sym == *"Number"
-                        && matches!(property.sym.as_ref(), "isNaN" | "isFinite")
+                        && matches!(
+                            property.sym.as_ref(),
+                            "isNaN" | "isFinite" | "isInteger" | "isSafeInteger"
+                        )
                     {
                         let [argument] = call.args.as_slice() else {
                             return Err(format!(
@@ -5113,10 +5119,12 @@ impl<'a> FnLowerer<'a> {
                         if ty == HirType::F64 {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var(
-                                    if property.sym == *"isNaN" {
-                                        "__thaw_number_is_nan"
-                                    } else {
-                                        "__thaw_number_is_finite"
+                                    match property.sym.as_ref() {
+                                        "isNaN" => "__thaw_number_is_nan",
+                                        "isFinite" => "__thaw_number_is_finite",
+                                        "isInteger" => "__thaw_number_is_integer",
+                                        "isSafeInteger" => "__thaw_number_is_safe_integer",
+                                        _ => unreachable!(),
                                     }
                                     .to_string(),
                                 )),
