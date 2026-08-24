@@ -701,6 +701,7 @@ async cleanup hook handleもremove後に安定identityを保持し、二重remov
 wrap／unwrap／remove-wrap／add-finalizer／object type-tagはidentity metadataへ触れる前に所有Envを検証する。
 named／generic／descriptor property APIはobject、N-API key、代入valueの全handleについて所有Envを検証する。
 element API、property-name列挙、run-scriptもobject／value／source handleの所有Envを先に検証する。
+Buffer-from-ArrayBuffer、Error作成、fatal-exception、callback／constructor戻り値もforeign handleを拒否する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
