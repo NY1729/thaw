@@ -7,7 +7,7 @@
 use libc::{c_char, c_void};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
 use std::io::Write;
 #[cfg(target_os = "linux")]
@@ -294,6 +294,8 @@ pub struct Env {
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
     external_memory: i64,
+    sealed_objects: HashSet<usize>,
+    frozen_objects: HashSet<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -334,6 +336,8 @@ impl Env {
             instance_data: None,
             cleanup_hooks: Vec::new(),
             external_memory: 0,
+            sealed_objects: HashSet::new(),
+            frozen_objects: HashSet::new(),
         }
     }
 
@@ -454,6 +458,24 @@ unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {
 
 unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
     value.as_ref().ok_or(NAPI_INVALID_ARG)
+}
+
+fn is_object_value(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Object(_)
+            | Value::Array(_)
+            | Value::Buffer(_)
+            | Value::ExternalBuffer { .. }
+            | Value::ArrayBuffer { .. }
+            | Value::ExternalArrayBuffer { .. }
+            | Value::TypedArray { .. }
+            | Value::DataView { .. }
+            | Value::Function(_)
+            | Value::Promise(_)
+            | Value::Error(_)
+            | Value::Date(_)
+    )
 }
 
 unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &str) -> Option<Accessor> {
@@ -1865,6 +1887,23 @@ pub unsafe extern "C" fn napi_set_named_property(
             NAPI_OK
         };
     }
+    let (frozen, sealed) = env
+        .as_ref()
+        .map(|env| {
+            (
+                env.frozen_objects.contains(&(object as usize)),
+                env.sealed_objects.contains(&(object as usize)),
+            )
+        })
+        .unwrap_or((false, false));
+    let exists = match value_ref(object) {
+        Ok(Value::Object(values)) => values.contains_key(&name),
+        Ok(Value::Function(function)) => function.properties.contains_key(&name),
+        _ => return NAPI_INVALID_ARG,
+    };
+    if frozen || (sealed && !exists) {
+        return NAPI_GENERIC_FAILURE;
+    }
     match object.as_mut() {
         Some(Value::Object(values)) => {
             values.insert(name, value);
@@ -2018,6 +2057,13 @@ pub unsafe extern "C" fn napi_delete_property(
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
+    if env
+        .as_ref()
+        .is_some_and(|env| env.sealed_objects.contains(&(object as usize)))
+    {
+        *out = false;
+        return NAPI_OK;
+    }
     match object.as_mut() {
         Some(Value::Object(values)) => {
             values.remove(&key);
@@ -2813,6 +2859,31 @@ pub unsafe extern "C" fn napi_get_property_names(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> NapiStatus {
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    env.sealed_objects.insert(object as usize);
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> NapiStatus {
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    env.sealed_objects.insert(object as usize);
+    env.frozen_objects.insert(object as usize);
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_uv_event_loop(
     _env: NapiEnv,
     out: *mut *mut c_void,
@@ -2899,6 +2970,22 @@ pub unsafe extern "C" fn napi_set_element(
     index: u32,
     value: NapiValue,
 ) -> NapiStatus {
+    let (frozen, sealed) = env
+        .as_ref()
+        .map(|env| {
+            (
+                env.frozen_objects.contains(&(array as usize)),
+                env.sealed_objects.contains(&(array as usize)),
+            )
+        })
+        .unwrap_or((false, false));
+    let existing_length = match value_ref(array) {
+        Ok(Value::Array(values)) => values.len(),
+        _ => return NAPI_INVALID_ARG,
+    };
+    if frozen || (sealed && index as usize >= existing_length) {
+        return NAPI_GENERIC_FAILURE;
+    }
     let Ok(host_env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -4931,6 +5018,64 @@ mod tests {
             assert_eq!(
                 napi_async_init(env_ptr, ptr::null_mut(), number, &mut context),
                 NAPI_STRING_EXPECTED
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_and_frozen_objects_enforce_integrity_levels() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            let mut existing = ptr::null_mut();
+            let mut added = ptr::null_mut();
+            let mut value = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"existing".as_ptr(), 8, &mut existing),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"added".as_ptr(), 5, &mut added),
+                NAPI_OK
+            );
+            assert_eq!(napi_create_int32(env_ptr, 1, &mut value), NAPI_OK);
+            assert_eq!(napi_set_property(env_ptr, object, existing, value), NAPI_OK);
+            assert_eq!(napi_object_seal(env_ptr, object), NAPI_OK);
+            assert_eq!(napi_create_int32(env_ptr, 2, &mut value), NAPI_OK);
+            assert_eq!(napi_set_property(env_ptr, object, existing, value), NAPI_OK);
+            assert_eq!(
+                napi_set_property(env_ptr, object, added, value),
+                NAPI_GENERIC_FAILURE
+            );
+            let mut deleted = true;
+            assert_eq!(
+                napi_delete_property(env_ptr, object, existing, &mut deleted),
+                NAPI_OK
+            );
+            assert!(!deleted);
+            assert_eq!(napi_object_freeze(env_ptr, object), NAPI_OK);
+            assert_eq!(
+                napi_set_property(env_ptr, object, existing, value),
+                NAPI_GENERIC_FAILURE
+            );
+
+            let mut array = ptr::null_mut();
+            assert_eq!(
+                napi_create_array_with_length(env_ptr, 1, &mut array),
+                NAPI_OK
+            );
+            assert_eq!(napi_object_seal(env_ptr, array), NAPI_OK);
+            assert_eq!(napi_set_element(env_ptr, array, 0, value), NAPI_OK);
+            assert_eq!(
+                napi_set_element(env_ptr, array, 1, value),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(napi_object_freeze(env_ptr, array), NAPI_OK);
+            assert_eq!(
+                napi_set_element(env_ptr, array, 0, value),
+                NAPI_GENERIC_FAILURE
             );
         }
     }
