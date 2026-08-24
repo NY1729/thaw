@@ -1170,6 +1170,12 @@ fn lower_ts_type(
                 if elements[1] == HirType::Undefined {
                     return Ok(HirType::Optional(Box::new(elements[0].clone())));
                 }
+                if elements[0] == HirType::Null {
+                    return Ok(HirType::Nullable(Box::new(elements[1].clone())));
+                }
+                if elements[1] == HirType::Null {
+                    return Ok(HirType::Nullable(Box::new(elements[0].clone())));
+                }
             }
             Err(format!(
                 "unsupported union type {elements:?} (only T | undefined is native)"
@@ -1611,7 +1617,10 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::JsonAsBool(value)
         | HirExpr::OptionalSome(value, _)
         | HirExpr::OptionalIsNone(value, _)
-        | HirExpr::OptionalValue(value, _) => collect_referenced_bindings(value, names),
+        | HirExpr::OptionalValue(value, _)
+        | HirExpr::NullableSome(value, _)
+        | HirExpr::NullableIsNone(value, _)
+        | HirExpr::NullableValue(value, _) => collect_referenced_bindings(value, names),
         HirExpr::Lambda(captures, _, _, _) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
         }
@@ -1656,6 +1665,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::Lit(_)
         | HirExpr::OptionalNone(_)
+        | HirExpr::NullableNone(_)
         | HirExpr::EnvVar(_)
         | HirExpr::FunctionRef(..) => {}
     }
@@ -1694,7 +1704,10 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::JsonAsBool(value)
         | HirExpr::OptionalSome(value, _)
         | HirExpr::OptionalIsNone(value, _)
-        | HirExpr::OptionalValue(value, _) => contains_await(value),
+        | HirExpr::OptionalValue(value, _)
+        | HirExpr::NullableSome(value, _)
+        | HirExpr::NullableIsNone(value, _)
+        | HirExpr::NullableValue(value, _) => contains_await(value),
         HirExpr::PromiseThen(source, callback, _, _, _, _)
         | HirExpr::PromiseFinally(source, callback, _, _) => {
             contains_await(source) || contains_await(callback)
@@ -1711,6 +1724,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::FunctionRef(..)
         | HirExpr::Lit(_)
         | HirExpr::OptionalNone(_)
+        | HirExpr::NullableNone(_)
         | HirExpr::Var(_)
         | HirExpr::EnvVar(_) => false,
     }
@@ -1998,7 +2012,11 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
                 .all(|element| native_typeof_name(element) == Some(first))
                 .then_some(first)
         }
-        HirType::Optional(_) | HirType::Void | HirType::Dynamic | HirType::JsValue => None,
+        HirType::Optional(_)
+        | HirType::Nullable(_)
+        | HirType::Void
+        | HirType::Dynamic
+        | HirType::JsValue => None,
     }
 }
 
@@ -2009,6 +2027,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     narrowings: HashMap<Symbol, HirType>,
+    nullable_narrowings: HashMap<Symbol, HirType>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -2041,6 +2060,7 @@ impl<'a> FnLowerer<'a> {
         Self {
             scope: HashMap::new(),
             narrowings: HashMap::new(),
+            nullable_narrowings: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
             signatures,
@@ -2080,9 +2100,11 @@ impl<'a> FnLowerer<'a> {
     fn lower_scoped_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let saved = self.bindings.clone();
         let saved_narrowings = self.narrowings.clone();
+        let saved_nullable_narrowings = self.nullable_narrowings.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
         self.narrowings = saved_narrowings;
+        self.nullable_narrowings = saved_nullable_narrowings;
         lowered
     }
 
@@ -2092,11 +2114,15 @@ impl<'a> FnLowerer<'a> {
             out.extend(self.lower_stmt_seq(stmt)?);
             if let Stmt::If(if_stmt) = stmt {
                 if if_stmt.alt.is_none() && Self::stmt_definitely_exits(&if_stmt.cons) {
-                    if let Some((name, payload, present_when_true)) =
+                    if let Some((name, payload, present_when_true, nullable)) =
                         self.optional_undefined_narrowing(&if_stmt.test)
                     {
                         if !present_when_true {
-                            self.narrowings.insert(name, payload);
+                            if nullable {
+                                self.nullable_narrowings.insert(name, payload);
+                            } else {
+                                self.narrowings.insert(name, payload);
+                            }
                         }
                     }
                 }
@@ -2189,34 +2215,48 @@ impl<'a> FnLowerer<'a> {
     fn lower_body_with_optional_narrowing(
         &mut self,
         stmt: &Stmt,
-        narrowing: Option<&(Symbol, HirType)>,
+        narrowing: Option<&(Symbol, HirType, bool)>,
     ) -> Result<Vec<HirStmt>, String> {
         let saved = self.narrowings.clone();
-        if let Some((name, payload)) = narrowing {
-            self.narrowings.insert(name.clone(), payload.clone());
+        let saved_nullable = self.nullable_narrowings.clone();
+        if let Some((name, payload, nullable)) = narrowing {
+            if *nullable {
+                self.nullable_narrowings
+                    .insert(name.clone(), payload.clone());
+            } else {
+                self.narrowings.insert(name.clone(), payload.clone());
+            }
         }
         let lowered = self.lower_body(stmt);
         self.narrowings = saved;
+        self.nullable_narrowings = saved_nullable;
         lowered
     }
 
     fn lower_expr_with_optional_narrowing(
         &mut self,
         expr: &Expr,
-        narrowing: Option<&(Symbol, HirType)>,
+        narrowing: Option<&(Symbol, HirType, bool)>,
     ) -> Result<HirExpr, String> {
         let saved = self.narrowings.clone();
-        if let Some((name, payload)) = narrowing {
-            self.narrowings.insert(name.clone(), payload.clone());
+        let saved_nullable = self.nullable_narrowings.clone();
+        if let Some((name, payload, nullable)) = narrowing {
+            if *nullable {
+                self.nullable_narrowings
+                    .insert(name.clone(), payload.clone());
+            } else {
+                self.narrowings.insert(name.clone(), payload.clone());
+            }
         }
         let lowered = self.lower_expr(expr);
         self.narrowings = saved;
+        self.nullable_narrowings = saved_nullable;
         lowered
     }
 
     /// Returns the optional binding tested by an undefined comparison and
     /// whether its payload is present in the true branch.
-    fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool)> {
+    fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool, bool)> {
         if let Expr::Paren(paren) = expr {
             return self.optional_undefined_narrowing(&paren.expr);
         }
@@ -2224,7 +2264,7 @@ impl<'a> FnLowerer<'a> {
             if unary.op == swc_ecma_ast::UnaryOp::Bang {
                 return self
                     .optional_undefined_narrowing(&unary.arg)
-                    .map(|(name, payload, present)| (name, payload, !present));
+                    .map(|(name, payload, present, nullable)| (name, payload, !present, nullable));
             }
             return None;
         }
@@ -2234,12 +2274,12 @@ impl<'a> FnLowerer<'a> {
         if binary.op == BinaryOp::LogicalAnd {
             return self
                 .optional_undefined_narrowing(&binary.left)
-                .filter(|(_, _, present)| *present);
+                .filter(|(_, _, present, _)| *present);
         }
         if binary.op == BinaryOp::LogicalOr {
             return self
                 .optional_undefined_narrowing(&binary.left)
-                .filter(|(_, _, present)| !*present);
+                .filter(|(_, _, present, _)| !*present);
         }
         let present_when_true = match binary.op {
             BinaryOp::NotEqEq | BinaryOp::NotEq => true,
@@ -2270,21 +2310,28 @@ impl<'a> FnLowerer<'a> {
             let HirType::Optional(payload) = self.scope.get(&name)? else {
                 return None;
             };
-            return Some((name, payload.as_ref().clone(), present_when_true));
+            return Some((name, payload.as_ref().clone(), present_when_true, false));
         }
-        let ident = match (binary.left.as_ref(), binary.right.as_ref()) {
-            (Expr::Ident(value), Expr::Ident(undefined)) if undefined.sym == *"undefined" => value,
-            (Expr::Ident(undefined), Expr::Ident(value)) if undefined.sym == *"undefined" => value,
+        let (ident, nullable) = match (binary.left.as_ref(), binary.right.as_ref()) {
+            (Expr::Ident(value), Expr::Ident(undefined)) if undefined.sym == *"undefined" => {
+                (value, false)
+            }
+            (Expr::Ident(undefined), Expr::Ident(value)) if undefined.sym == *"undefined" => {
+                (value, false)
+            }
+            (Expr::Ident(value), Expr::Lit(Lit::Null(_))) => (value, true),
+            (Expr::Lit(Lit::Null(_)), Expr::Ident(value)) => (value, true),
             _ => return None,
         };
-        if self.scope.contains_key("undefined") {
+        if !nullable && self.scope.contains_key("undefined") {
             return None;
         }
         let name = self.resolve_binding(ident.sym.as_ref());
-        let HirType::Optional(payload) = self.scope.get(&name)? else {
-            return None;
+        let payload = match (self.scope.get(&name)?, nullable) {
+            (HirType::Optional(payload), false) | (HirType::Nullable(payload), true) => payload,
+            _ => return None,
         };
-        Some((name, payload.as_ref().clone(), present_when_true))
+        Some((name, payload.as_ref().clone(), present_when_true, nullable))
     }
 
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
@@ -2324,12 +2371,16 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&HirType::Bool, &cond, "if condition")?;
                 let then_narrowing = narrowing
                     .as_ref()
-                    .filter(|(_, _, present)| *present)
-                    .map(|(name, payload, _)| (name.clone(), payload.clone()));
+                    .filter(|(_, _, present, _)| *present)
+                    .map(|(name, payload, _, nullable)| {
+                        (name.clone(), payload.clone(), *nullable)
+                    });
                 let else_narrowing = narrowing
                     .as_ref()
-                    .filter(|(_, _, present)| !*present)
-                    .map(|(name, payload, _)| (name.clone(), payload.clone()));
+                    .filter(|(_, _, present, _)| !*present)
+                    .map(|(name, payload, _, nullable)| {
+                        (name.clone(), payload.clone(), *nullable)
+                    });
                 let then_branch = self
                     .lower_body_with_optional_narrowing(&if_stmt.cons, then_narrowing.as_ref())?;
                 let else_branch = match &if_stmt.alt {
@@ -3210,6 +3261,19 @@ impl<'a> FnLowerer<'a> {
                 }
             };
         }
+        if let HirType::Nullable(payload) = declared {
+            return match self.infer_expr_type(&value)? {
+                HirType::Null => Ok(HirExpr::NullableNone(payload.as_ref().clone())),
+                actual if actual == *declared => Ok(value),
+                _ => {
+                    let value = self.coerce_to_declared(payload.as_ref(), value)?;
+                    Ok(HirExpr::NullableSome(
+                        Box::new(value),
+                        payload.as_ref().clone(),
+                    ))
+                }
+            };
+        }
         if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
             if expected.len() != values.len() {
                 return Err(format!(
@@ -3312,6 +3376,27 @@ impl<'a> FnLowerer<'a> {
                     &HirType::Optional(Box::new(payload.clone())),
                     value,
                     "optional value extraction",
+                )?;
+                Ok(payload.clone())
+            }
+            HirExpr::NullableSome(value, payload) => {
+                self.expect_type(payload, value, "nullable payload")?;
+                Ok(HirType::Nullable(Box::new(payload.clone())))
+            }
+            HirExpr::NullableNone(payload) => Ok(HirType::Nullable(Box::new(payload.clone()))),
+            HirExpr::NullableIsNone(value, payload) => {
+                self.expect_type(
+                    &HirType::Nullable(Box::new(payload.clone())),
+                    value,
+                    "nullable null check",
+                )?;
+                Ok(HirType::Bool)
+            }
+            HirExpr::NullableValue(value, payload) => {
+                self.expect_type(
+                    &HirType::Nullable(Box::new(payload.clone())),
+                    value,
+                    "nullable payload extraction",
                 )?;
                 Ok(payload.clone())
             }
@@ -4000,23 +4085,46 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_nullish_coalescing(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
-        let HirType::Optional(payload) = lhs_type.clone() else {
-            // Native values other than Optional cannot be nullish. The RHS is
-            // deliberately omitted so its side effects remain short-circuited.
-            return Ok(lhs);
+        let (payload, is_none, value) = match lhs_type.clone() {
+            HirType::Optional(payload) => {
+                let is_none = HirExpr::OptionalIsNone(
+                    Box::new(HirExpr::Var(String::new())),
+                    payload.as_ref().clone(),
+                );
+                (payload, is_none, true)
+            }
+            HirType::Nullable(payload) => {
+                let is_none = HirExpr::NullableIsNone(
+                    Box::new(HirExpr::Var(String::new())),
+                    payload.as_ref().clone(),
+                );
+                (payload, is_none, false)
+            }
+            _ => return Ok(lhs),
         };
         self.expect_type(payload.as_ref(), &rhs, "nullish fallback")?;
         let name = format!("__thaw_nullish_left_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(name.clone(), lhs_type.clone());
         let left = HirExpr::Var(name.clone());
+        let is_none = match is_none {
+            HirExpr::OptionalIsNone(_, payload) => {
+                HirExpr::OptionalIsNone(Box::new(left.clone()), payload)
+            }
+            HirExpr::NullableIsNone(_, payload) => {
+                HirExpr::NullableIsNone(Box::new(left.clone()), payload)
+            }
+            _ => unreachable!(),
+        };
+        let present = if value {
+            HirExpr::OptionalValue(Box::new(left), payload.as_ref().clone())
+        } else {
+            HirExpr::NullableValue(Box::new(left), payload.as_ref().clone())
+        };
         let result = HirExpr::Block(vec![HirStmt::If(
-            HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+            is_none,
             vec![HirStmt::Return(Some(rhs))],
-            vec![HirStmt::Return(Some(HirExpr::OptionalValue(
-                Box::new(left),
-                payload.as_ref().clone(),
-            )))],
+            vec![HirStmt::Return(Some(present))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
@@ -4148,6 +4256,29 @@ impl<'a> FnLowerer<'a> {
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
+        let nullish_check =
+            match (&lhs_type, &rhs_type) {
+                (HirType::Optional(payload), HirType::Null)
+                | (HirType::Optional(payload), HirType::Undefined) => Some(
+                    HirExpr::OptionalIsNone(Box::new(lhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Null, HirType::Optional(payload))
+                | (HirType::Undefined, HirType::Optional(payload)) => Some(
+                    HirExpr::OptionalIsNone(Box::new(rhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Nullable(payload), HirType::Null)
+                | (HirType::Nullable(payload), HirType::Undefined) => Some(
+                    HirExpr::NullableIsNone(Box::new(lhs.clone()), payload.as_ref().clone()),
+                ),
+                (HirType::Null, HirType::Nullable(payload))
+                | (HirType::Undefined, HirType::Nullable(payload)) => Some(
+                    HirExpr::NullableIsNone(Box::new(rhs.clone()), payload.as_ref().clone()),
+                ),
+                _ => None,
+            };
+        if let Some(check) = nullish_check {
+            return Ok(check);
+        }
         if matches!(
             (&lhs_type, &rhs_type),
             (HirType::Null, HirType::Undefined) | (HirType::Undefined, HirType::Null)
@@ -4238,6 +4369,16 @@ impl<'a> FnLowerer<'a> {
                 Box::new(rhs),
                 payload.as_ref().clone(),
             )),
+            (HirType::Nullable(payload), HirType::Null) => Some(HirExpr::NullableIsNone(
+                Box::new(lhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Null, HirType::Nullable(payload)) => Some(HirExpr::NullableIsNone(
+                Box::new(rhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
+            (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
             (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
             (HirType::Undefined, _) | (_, HirType::Undefined) => {
                 Some(HirExpr::Lit(HirLit::Bool(false)))
@@ -4265,8 +4406,21 @@ impl<'a> FnLowerer<'a> {
                         _ => {}
                     }
                 }
-                match self.narrowings.get(&name) {
-                    Some(payload) => Ok(HirExpr::OptionalValue(
+                match self
+                    .narrowings
+                    .get(&name)
+                    .map(|payload| (payload, false))
+                    .or_else(|| {
+                        self.nullable_narrowings
+                            .get(&name)
+                            .map(|payload| (payload, true))
+                    })
+                {
+                    Some((payload, true)) => Ok(HirExpr::NullableValue(
+                        Box::new(HirExpr::Var(name)),
+                        payload.clone(),
+                    )),
+                    Some((payload, false)) => Ok(HirExpr::OptionalValue(
                         Box::new(HirExpr::Var(name)),
                         payload.clone(),
                     )),
@@ -4351,11 +4505,11 @@ impl<'a> FnLowerer<'a> {
                 let mut lhs = self.lower_expr(&bin.left)?;
                 let rhs_narrowing = self
                     .optional_undefined_narrowing(&bin.left)
-                    .filter(|(_, _, present)| {
+                    .filter(|(_, _, present, _)| {
                         (bin.op == BinaryOp::LogicalAnd && *present)
                             || (bin.op == BinaryOp::LogicalOr && !*present)
                     })
-                    .map(|(name, payload, _)| (name, payload));
+                    .map(|(name, payload, _, nullable)| (name, payload, nullable));
                 let mut rhs = self
                     .lower_expr_with_optional_narrowing(&bin.right, rhs_narrowing.as_ref())?;
                 let mut bindings = Vec::new();
@@ -4511,8 +4665,16 @@ impl<'a> FnLowerer<'a> {
                         }
                         .map(Ok)
                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
-                        if let HirType::Optional(payload) = &operand_type {
-                            let Some(type_name) = native_typeof_name(payload.as_ref()) else {
+                        if let Some((payload, absent, nullable)) = match &operand_type {
+                            HirType::Optional(payload) => {
+                                Some((payload.as_ref(), "undefined", false))
+                            }
+                            HirType::Nullable(payload) => {
+                                Some((payload.as_ref(), "object", true))
+                            }
+                            _ => None,
+                        } {
+                            let Some(type_name) = native_typeof_name(payload) else {
                                 return Err(format!(
                                     "`typeof` optional payload has no supported runtime category: {payload:?}"
                                 ));
@@ -4521,13 +4683,15 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(parameter.clone(), operand_type.clone());
                             let bound = HirExpr::Var(parameter.clone());
+                            let is_none = if nullable {
+                                HirExpr::NullableIsNone(Box::new(bound), payload.clone())
+                            } else {
+                                HirExpr::OptionalIsNone(Box::new(bound), payload.clone())
+                            };
                             let result = HirExpr::Block(vec![HirStmt::If(
-                                HirExpr::OptionalIsNone(
-                                    Box::new(bound),
-                                    payload.as_ref().clone(),
-                                ),
+                                is_none,
                                 vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
-                                    "undefined".into(),
+                                    absent.into(),
                                 ))))],
                                 vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
                                     type_name.into(),
@@ -5553,16 +5717,20 @@ impl<'a> FnLowerer<'a> {
     fn lower_optional_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         let object = self.lower_expr(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
-        let HirType::Optional(payload) = object_type.clone() else {
-            // Optional access on a statically non-nullish native value has the
-            // same runtime behavior as ordinary member access.
-            return self.lower_member_read(member);
+        let (payload, nullable) = match object_type.clone() {
+            HirType::Optional(payload) => (payload, false),
+            HirType::Nullable(payload) => (payload, true),
+            _ => return self.lower_member_read(member),
         };
         let name = format!("__thaw_optional_receiver_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(name.clone(), object_type.clone());
         let bound = HirExpr::Var(name.clone());
-        let unwrapped = HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone());
+        let unwrapped = if nullable {
+            HirExpr::NullableValue(Box::new(bound.clone()), payload.as_ref().clone())
+        } else {
+            HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone())
+        };
         let (access, field_type) = match payload.as_ref() {
             HirType::Object(fields) => {
                 let field = match &member.prop {
@@ -5643,14 +5811,25 @@ impl<'a> FnLowerer<'a> {
         };
         let (result_payload, present_value) = match &field_type {
             HirType::Optional(inner) => (inner.as_ref().clone(), None),
+            HirType::Nullable(_) => {
+                return Err(
+                    "optional chaining over an already-nullable field requires a three-way nullish union"
+                        .into(),
+                )
+            }
             other => (other.clone(), Some(other.clone())),
         };
         let present_value = match present_value {
             Some(payload) => HirExpr::OptionalSome(Box::new(access), payload),
             None => access,
         };
+        let is_none = if nullable {
+            HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone())
+        } else {
+            HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone())
+        };
         let result = HirExpr::Block(vec![HirStmt::If(
-            HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+            is_none,
             vec![HirStmt::Return(Some(HirExpr::OptionalNone(
                 result_payload.clone(),
             )))],
@@ -5811,10 +5990,10 @@ impl<'a> FnLowerer<'a> {
         if assign.op == AssignOp::NullishAssign {
             let current = target_to_read_expr(&target);
             let current_type = self.infer_expr_type(&current)?;
-            let HirType::Optional(payload) = current_type.clone() else {
-                // A native non-optional value can never be nullish. Preserve
-                // evaluation of the assignment target while omitting the RHS.
-                return self.wrap_call_argument_bindings(current, &bindings);
+            let (payload, nullable) = match current_type.clone() {
+                HirType::Optional(payload) => (payload, false),
+                HirType::Nullable(payload) => (payload, true),
+                _ => return self.wrap_call_argument_bindings(current, &bindings),
             };
             let rhs = self.coerce_to_declared(payload.as_ref(), rhs)?;
             let current_name = format!("__thaw_nullish_assign_current_{}", self.next_binding);
@@ -5826,14 +6005,19 @@ impl<'a> FnLowerer<'a> {
             self.scope
                 .insert(rhs_name.clone(), payload.as_ref().clone());
 
+            let stored = if nullable {
+                HirExpr::NullableSome(
+                    Box::new(HirExpr::Var(rhs_name.clone())),
+                    payload.as_ref().clone(),
+                )
+            } else {
+                HirExpr::OptionalSome(
+                    Box::new(HirExpr::Var(rhs_name.clone())),
+                    payload.as_ref().clone(),
+                )
+            };
             let assigned = HirExpr::Block(vec![
-                HirStmt::Expr(build_assign(
-                    target,
-                    HirExpr::OptionalSome(
-                        Box::new(HirExpr::Var(rhs_name.clone())),
-                        payload.as_ref().clone(),
-                    ),
-                )),
+                HirStmt::Expr(build_assign(target, stored)),
                 HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
             ]);
             let assigned = self.wrap_call_argument_bindings(
@@ -5841,17 +6025,29 @@ impl<'a> FnLowerer<'a> {
                 &[(rhs_name, payload.as_ref().clone(), rhs)],
             )?;
             let current_value = HirExpr::Var(current_name.clone());
+            let is_none = if nullable {
+                HirExpr::NullableIsNone(Box::new(current_value.clone()), payload.as_ref().clone())
+            } else {
+                HirExpr::OptionalIsNone(Box::new(current_value.clone()), payload.as_ref().clone())
+            };
+            let present = if nullable {
+                HirExpr::NullableValue(Box::new(current_value), payload.as_ref().clone())
+            } else {
+                HirExpr::OptionalValue(Box::new(current_value), payload.as_ref().clone())
+            };
             let result = HirExpr::Block(vec![HirStmt::If(
-                HirExpr::OptionalIsNone(Box::new(current_value.clone()), payload.as_ref().clone()),
+                is_none,
                 vec![HirStmt::Return(Some(assigned))],
-                vec![HirStmt::Return(Some(HirExpr::OptionalValue(
-                    Box::new(current_value),
-                    payload.as_ref().clone(),
-                )))],
+                vec![HirStmt::Return(Some(present))],
             )]);
             bindings.push((current_name, current_type, current));
             if let Some(name) = assigned_variable {
-                self.narrowings.insert(name, payload.as_ref().clone());
+                if nullable {
+                    self.nullable_narrowings
+                        .insert(name, payload.as_ref().clone());
+                } else {
+                    self.narrowings.insert(name, payload.as_ref().clone());
+                }
             }
             return self.wrap_call_argument_bindings(result, &bindings);
         }
@@ -5917,6 +6113,13 @@ impl<'a> FnLowerer<'a> {
                     self.narrowings.insert(name, payload.as_ref().clone());
                 } else {
                     self.narrowings.remove(&name);
+                }
+            } else if let Some(HirType::Nullable(payload)) = self.scope.get(&name) {
+                if rhs_type == **payload || assign.op != AssignOp::Assign {
+                    self.nullable_narrowings
+                        .insert(name, payload.as_ref().clone());
+                } else {
+                    self.nullable_narrowings.remove(&name);
                 }
             }
         }
@@ -9547,6 +9750,7 @@ impl<'a> FnLowerer<'a> {
                     .narrowings
                     .get(&object_name)
                     .cloned()
+                    .or_else(|| self.nullable_narrowings.get(&object_name).cloned())
                     .or_else(|| self.scope.get(&object_name).cloned());
                 let callable = object_ty.as_ref().and_then(|ty| match ty {
                     HirType::Object(fields) => fields
@@ -10184,12 +10388,21 @@ impl<'a> FnLowerer<'a> {
         if let Some(member) = optional_member {
             let receiver = self.lower_expr(&member.obj)?;
             let receiver_type = self.infer_expr_type(&receiver)?;
-            if let HirType::Optional(payload) = receiver_type.clone() {
+            if let Some((payload, nullable)) = match receiver_type.clone() {
+                HirType::Optional(payload) => Some((payload, false)),
+                HirType::Nullable(payload) => Some((payload, true)),
+                _ => None,
+            } {
                 let name = format!("__thaw_optional_method_receiver_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), receiver_type.clone());
-                self.narrowings
-                    .insert(name.clone(), payload.as_ref().clone());
+                if nullable {
+                    self.nullable_narrowings
+                        .insert(name.clone(), payload.as_ref().clone());
+                } else {
+                    self.narrowings
+                        .insert(name.clone(), payload.as_ref().clone());
+                }
 
                 let mut rebound = member.clone();
                 rebound.obj = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
@@ -10200,12 +10413,20 @@ impl<'a> FnLowerer<'a> {
                 ordinary.callee = Callee::Expr(Box::new(Expr::Member(rebound)));
                 let invoked = self.lower_call(&ordinary);
                 self.narrowings.remove(&name);
+                self.nullable_narrowings.remove(&name);
                 let invoked = invoked?;
                 let return_type = self.infer_expr_type(&invoked)?;
                 let bound = HirExpr::Var(name.clone());
+                let is_none = |bound: HirExpr| {
+                    if nullable {
+                        HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone())
+                    } else {
+                        HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone())
+                    }
+                };
                 let result = if return_type == HirType::Void {
                     HirExpr::Block(vec![HirStmt::If(
-                        HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                        is_none(bound),
                         vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))],
                         vec![
                             HirStmt::Expr(invoked),
@@ -10215,13 +10436,19 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     let (result_payload, present) = match &return_type {
                         HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
+                        HirType::Nullable(_) => {
+                            return Err(
+                                "optional method returning a nullable requires a three-way nullish union"
+                                    .into(),
+                            )
+                        }
                         output => (
                             output.clone(),
                             HirExpr::OptionalSome(Box::new(invoked), output.clone()),
                         ),
                     };
                     HirExpr::Block(vec![HirStmt::If(
-                        HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                        is_none(bound),
                         vec![HirStmt::Return(Some(HirExpr::OptionalNone(result_payload)))],
                         vec![HirStmt::Return(Some(present))],
                     )])
@@ -10233,8 +10460,10 @@ impl<'a> FnLowerer<'a> {
 
         let callee = self.lower_expr(&call.callee)?;
         let callee_type = self.infer_expr_type(&callee)?;
-        let HirType::Optional(payload) = callee_type.clone() else {
-            return self.lower_call(&CallExpr::from(call.clone()));
+        let (payload, nullable) = match callee_type.clone() {
+            HirType::Optional(payload) => (payload, false),
+            HirType::Nullable(payload) => (payload, true),
+            _ => return self.lower_call(&CallExpr::from(call.clone())),
         };
         let HirType::Function(params, return_type) = payload.as_ref() else {
             return Err(format!(
@@ -10268,11 +10497,22 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(name.clone(), callee_type.clone());
         let bound = HirExpr::Var(name.clone());
-        let function = HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone());
+        let function = if nullable {
+            HirExpr::NullableValue(Box::new(bound.clone()), payload.as_ref().clone())
+        } else {
+            HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone())
+        };
         let invoked = HirExpr::Call(Box::new(function), arguments);
+        let is_none = |bound: HirExpr| {
+            if nullable {
+                HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone())
+            } else {
+                HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone())
+            }
+        };
         let result = if return_type.as_ref() == &HirType::Void {
             HirExpr::Block(vec![HirStmt::If(
-                HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                is_none(bound),
                 vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))],
                 vec![
                     HirStmt::Expr(invoked),
@@ -10282,13 +10522,19 @@ impl<'a> FnLowerer<'a> {
         } else {
             let (result_payload, present) = match return_type.as_ref() {
                 HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
+                HirType::Nullable(_) => {
+                    return Err(
+                        "optional call returning a nullable requires a three-way nullish union"
+                            .into(),
+                    )
+                }
                 output => (
                     output.clone(),
                     HirExpr::OptionalSome(Box::new(invoked), output.clone()),
                 ),
             };
             HirExpr::Block(vec![HirStmt::If(
-                HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                is_none(bound),
                 vec![HirStmt::Return(Some(HirExpr::OptionalNone(result_payload)))],
                 vec![HirStmt::Return(Some(present))],
             )])
