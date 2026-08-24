@@ -698,6 +698,7 @@ thread-safe function handleはfinalize後も安定identityを保持し、call／
 `napi_closing`を返す。これにより終了済みhandleの解放済みメモリ参照を避ける。
 reference handleもEnv終了まで保持し、delete後のdelete／get／ref／unrefをinvalid-argとして安全に拒否する。
 async cleanup hook handleもremove後に安定identityを保持し、二重removeを安全にinvalid-argとする。
+wrap／unwrap／remove-wrap／add-finalizer／object type-tagはidentity metadataへ触れる前に所有Envを検証する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する

@@ -732,6 +732,8 @@ The workspace crates have narrow responsibilities:
   repeated delete/get/ref/unref calls to reject safely without use-after-free.
   Async cleanup handles also retain stable identity after removal, making a
   repeated remove return `napi_invalid_arg` safely.
+  Wrap, finalizer and object type-tag APIs reject objects owned by another Env
+  before reading or mutating identity metadata.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.

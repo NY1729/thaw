@@ -3595,6 +3595,9 @@ pub unsafe extern "C" fn napi_type_tag_object(
     let Some(type_tag) = type_tag.as_ref().copied() else {
         return NAPI_INVALID_ARG;
     };
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
@@ -3618,6 +3621,9 @@ pub unsafe extern "C" fn napi_check_object_type_tag(
     let (Some(type_tag), Some(result)) = (type_tag.as_ref(), result.as_mut()) else {
         return NAPI_INVALID_ARG;
     };
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
@@ -3637,6 +3643,9 @@ pub unsafe extern "C" fn napi_wrap(
     hint: *mut c_void,
     result: *mut *mut Reference,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -3688,6 +3697,9 @@ pub unsafe extern "C" fn napi_remove_wrap(
     object: NapiValue,
     result: *mut *mut c_void,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -3712,6 +3724,9 @@ pub unsafe extern "C" fn napi_add_finalizer(
     hint: *mut c_void,
     result: *mut *mut Reference,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
@@ -7820,6 +7835,16 @@ mod tests {
                 napi_check_object_type_tag(env_ptr, number, &tag, &mut matches),
                 NAPI_OBJECT_EXPECTED
             );
+            let mut foreign_env = Env::new();
+            let foreign = foreign_env.alloc(Value::Object(HashMap::new()));
+            assert_eq!(
+                napi_type_tag_object(env_ptr, foreign, &tag),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_check_object_type_tag(env_ptr, foreign, &tag, &mut matches),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
@@ -8261,6 +8286,36 @@ mod tests {
                     ptr::null_mut(),
                 ),
                 NAPI_OBJECT_EXPECTED
+            );
+            let mut foreign_env = Env::new();
+            let foreign = foreign_env.alloc(Value::Object(HashMap::new()));
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_wrap(
+                    env_ptr,
+                    foreign,
+                    ptr::null_mut(),
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_unwrap(env_ptr, foreign, &mut actual), NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_remove_wrap(env_ptr, foreign, &mut actual),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_add_finalizer(
+                    env_ptr,
+                    foreign,
+                    ptr::null_mut(),
+                    Some(noop_finalize),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_INVALID_ARG
             );
         }
     }
