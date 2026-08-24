@@ -377,12 +377,14 @@ fn typed_dynamic_declaration(
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
 type ClassConstructorRewrite = (String, String);
+type ClassMethodRewrite = (String, String, String);
 type ExternalExports = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
 type RegistryShims = (
     String,
     Vec<PathBuf>,
     Vec<QualifiedCallRewrite>,
     Vec<ClassConstructorRewrite>,
+    Vec<ClassMethodRewrite>,
     ExternalExports,
 );
 
@@ -550,6 +552,7 @@ fn generate_registry_shims(
     let mut class_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     let mut class_rewrites = Vec::new();
+    let mut class_method_rewrites = Vec::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -602,6 +605,89 @@ fn generate_registry_shims(
                     qualifier_identifier(&pkg.name).to_string(),
                     class.name.clone(),
                 ));
+
+                let mut method_names = std::collections::HashSet::new();
+                for method in &class.methods {
+                    if method.is_static
+                        || method.kind != thaw_bridge::DtsMethodKind::Method
+                        || !method_names.insert(method.name.clone())
+                    {
+                        continue;
+                    }
+                    let Some(overload) = class
+                        .methods
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.name == method.name
+                                && !candidate.is_static
+                                && candidate.kind == thaw_bridge::DtsMethodKind::Method
+                        })
+                        .filter(|candidate| {
+                            candidate.params.iter().all(|(_, ty)| {
+                                matches!(
+                                    ty,
+                                    thaw_bridge::DtsType::Native(
+                                        thaw_hir::HirType::F64
+                                            | thaw_hir::HirType::Str
+                                            | thaw_hir::HirType::Bool
+                                            | thaw_hir::HirType::Json
+                                            | thaw_hir::HirType::Object(_)
+                                    )
+                                ) || matches!(
+                                    ty,
+                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+                                        if **element == thaw_hir::HirType::F64
+                                )
+                            })
+                        })
+                        .filter(|candidate| {
+                            matches!(
+                                &candidate.ret,
+                                thaw_bridge::DtsType::Native(
+                                    thaw_hir::HirType::F64
+                                        | thaw_hir::HirType::Str
+                                        | thaw_hir::HirType::Bool
+                                        | thaw_hir::HirType::Json
+                                        | thaw_hir::HirType::Object(_)
+                                )
+                            ) || matches!(
+                                &candidate.ret,
+                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+                                    if **element == thaw_hir::HirType::F64
+                            )
+                        })
+                        .min_by_key(|candidate| candidate.params.len())
+                    else {
+                        continue;
+                    };
+                    let params = std::iter::once("receiver: JsValue".to_string())
+                        .chain(overload.params.iter().map(|(name, ty)| match ty {
+                            thaw_bridge::DtsType::Native(native) => format!(
+                                "{name}: {}",
+                                render_dynamic_type(native).expect("filtered above")
+                            ),
+                            thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                        }))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
+                        continue;
+                    };
+                    let Some(return_type) = render_dynamic_type(return_type) else {
+                        continue;
+                    };
+                    let runtime_key = format!("$method${}${}", class.name, method.name);
+                    let encoded = runtime_key
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    let symbol = format!("__thaw_typed_napi_{encoded}");
+                    shim.push_str(&format!(
+                        "declare function {symbol}({params}): {return_type};\n"
+                    ));
+                    class_method_rewrites.push((class.name.clone(), method.name.clone(), symbol));
+                }
             }
         }
         for function in &pkg.functions {
@@ -725,8 +811,126 @@ fn generate_registry_shims(
         native_libs,
         rewrites,
         class_rewrites,
+        class_method_rewrites,
         external_exports,
     ))
+}
+
+fn rewrite_external_class_methods(
+    source: &str,
+    classes: &[ClassConstructorRewrite],
+    methods: &[ClassMethodRewrite],
+) -> Result<String, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp, Pat, VarDeclarator};
+    use thaw_parser::common::Spanned;
+
+    if methods.is_empty() {
+        return Ok(source.to_string());
+    }
+
+    fn constructed_class<'a>(
+        expression: &'a Expr,
+        classes: &'a [ClassConstructorRewrite],
+    ) -> Option<&'a str> {
+        let Expr::New(new_expression) = expression else {
+            return None;
+        };
+        match new_expression.callee.as_ref() {
+            Expr::Ident(class) => classes
+                .iter()
+                .find(|(_, name)| name == class.sym.as_str())
+                .map(|(_, name)| name.as_str()),
+            Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                (Expr::Ident(package), MemberProp::Ident(class)) => classes
+                    .iter()
+                    .find(|(qualifier, name)| {
+                        qualifier == package.sym.as_str() && name == class.sym.as_str()
+                    })
+                    .map(|(_, name)| name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    struct Finder<'a> {
+        classes: &'a [ClassConstructorRewrite],
+        methods: &'a [ClassMethodRewrite],
+        variables: std::collections::HashMap<String, String>,
+        edits: Vec<(u32, u32, String)>,
+    }
+    impl Visit for Finder<'_> {
+        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
+            {
+                if let Some(class) = constructed_class(initializer, self.classes) {
+                    self.variables
+                        .insert(binding.id.sym.to_string(), class.to_string());
+                }
+            }
+            declaration.visit_children_with(self);
+        }
+
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let (Expr::Ident(receiver), MemberProp::Ident(method)) =
+                        (member.obj.as_ref(), &member.prop)
+                    {
+                        if let Some(class) = self.variables.get(receiver.sym.as_str()) {
+                            if let Some((_, _, helper)) = self.methods.iter().find(
+                                |(candidate_class, candidate_method, _)| {
+                                    candidate_class == class
+                                        && candidate_method == method.sym.as_str()
+                                },
+                            ) {
+                                let span = member.span();
+                                self.edits.push((span.lo.0, span.hi.0, helper.clone()));
+                                let insertion = if call.args.is_empty() {
+                                    receiver.sym.to_string()
+                                } else {
+                                    format!("{}, ", receiver.sym)
+                                };
+                                self.edits.push((span.hi.0 + 1, span.hi.0 + 1, insertion));
+                            }
+                        }
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let mut finder = Finder {
+        classes,
+        methods,
+        variables: std::collections::HashMap::new(),
+        edits: Vec::new(),
+    };
+    module.visit_with(&mut finder);
+    let mut edits = finder
+        .edits
+        .into_iter()
+        .map(|(lo, hi, replacement)| {
+            let lo = cm
+                .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+                .pos
+                .0 as usize;
+            let hi = cm
+                .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+                .pos
+                .0 as usize;
+            (lo, hi, replacement)
+        })
+        .collect::<Vec<_>>();
+    edits.sort_by_key(|(lo, hi, _)| (*lo, *hi));
+    let mut output = source.to_string();
+    for (lo, hi, replacement) in edits.into_iter().rev() {
+        output.replace_range(lo..hi, &replacement);
+    }
+    Ok(output)
 }
 
 fn rewrite_external_class_constructors(
@@ -1154,6 +1358,7 @@ fn build_with_link_mode(
         registry_native_libs,
         mut qualified_call_rewrites,
         class_constructor_rewrites,
+        class_method_rewrites,
         external_exports,
     ) = generate_registry_shims(registry_dir, &resolved_packages)?;
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
@@ -1167,6 +1372,11 @@ fn build_with_link_mode(
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
+    let user_source = rewrite_external_class_methods(
+        &user_source,
+        &class_constructor_rewrites,
+        &class_method_rewrites,
+    )?;
     let user_source =
         rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;
     let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
@@ -2561,6 +2771,89 @@ mod tests {
     }
 
     #[test]
+    fn registry_native_addon_class_method_builds_and_runs_end_to_end() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-native-addon-class-{}",
+            std::process::id()
+        ));
+        let registry = dir.join("modules");
+        let package = registry.join("native-box");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export declare class NativeBox { constructor(value: number); get(): number; }\n",
+        )
+        .unwrap();
+        let addon_c = dir.join("addon.c");
+        std::fs::write(
+            &addon_c,
+            r#"
+            #include <stddef.h>
+            #include <stdlib.h>
+            typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
+            typedef int napi_status;
+            typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
+            typedef struct { const char* utf8name; napi_value name; napi_callback method; napi_callback getter; napi_callback setter; napi_value value; unsigned attributes; void* data; } napi_property_descriptor;
+            typedef struct { double value; } native_box;
+            extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
+            extern napi_status napi_get_value_double(napi_env, napi_value, double*);
+            extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+            extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
+            extern napi_status napi_unwrap(napi_env, napi_value, void**);
+            extern napi_status napi_define_class(napi_env, const char*, size_t, napi_callback, void*, size_t, const napi_property_descriptor*, napi_value*);
+            static void finalize_box(napi_env env, void* data, void* hint) { (void)env; (void)hint; free(data); }
+            static napi_value box_new(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, self; double value;
+                napi_get_cb_info(env, info, &argc, &arg, &self, 0);
+                napi_get_value_double(env, arg, &value);
+                native_box* box = malloc(sizeof(*box)); box->value = value;
+                napi_wrap(env, self, box, finalize_box, 0, 0); return self;
+            }
+            static napi_value box_get(napi_env env, napi_callback_info info) {
+                size_t argc = 0; napi_value self, result; native_box* box;
+                napi_get_cb_info(env, info, &argc, 0, &self, 0);
+                napi_unwrap(env, self, (void**)&box);
+                napi_create_double(env, box->value, &result); return result;
+            }
+            __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+                napi_value constructor;
+                napi_property_descriptor properties[1] = { { "get", 0, box_get, 0, 0, 0, 0, 0 } };
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 1, properties, &constructor);
+                napi_set_named_property(env, exports, "NativeBox", constructor);
+                return exports;
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .args(["-shared", "-fPIC"])
+            .arg(&addon_c)
+            .arg("-o")
+            .arg(package.join("native.node"))
+            .status()
+            .unwrap()
+            .success());
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); }\n",
+        )
+        .unwrap();
+        build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn registry_runs_utf8_validate_prebuild_when_supplied() {
         let Ok(prebuild) = std::env::var("THAW_UTF8_VALIDATE_NODE") else {
             return;
@@ -3147,6 +3440,40 @@ mod tests {
         assert_eq!(
             rewritten,
             "const a = Database(\":memory:\"); const b = sqlite3.Database(\"db.sqlite\"); const c = new LocalBox(1);"
+        );
+    }
+
+    #[test]
+    fn rewrites_methods_on_values_created_from_external_classes() {
+        let source = "const db = new Database(\":memory:\"); db.configure(\"busyTimeout\", 1000); const local = new LocalBox(1); local.configure(2);";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("sqlite3".into(), "Database".into())],
+            &[(
+                "Database".into(),
+                "configure".into(),
+                "__thaw_configure".into(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const db = new Database(\":memory:\"); __thaw_configure(db, \"busyTimeout\", 1000); const local = new LocalBox(1); local.configure(2);"
+        );
+    }
+
+    #[test]
+    fn rewrites_zero_argument_external_class_methods() {
+        let source = "const box = new NativeBox(42); const value = box.get();";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[("NativeBox".into(), "get".into(), "__thaw_get".into())],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const box = new NativeBox(42); const value = __thaw_get(box);"
         );
     }
 }

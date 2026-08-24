@@ -14,8 +14,7 @@
 `sqlite3@5.1.7`の公式N-API v6 Linux x64 prebuildで、実際のモジュール
 初期化と`Database`/`Statement`/`Backup`クラス登録、実行ファイルへの埋め込みを
 確認済み。これに必要だった`napi_get_global`、`napi_get_property_names`、
-`napi_get_uv_event_loop`もホストへ追加した。TypeScriptからsqlite3のクラスを
-直接構築する部分は、AOTフロントエンドのclass構文対応とは別の残課題である。
+`napi_get_uv_event_loop`もホストへ追加した。
 
 さらに`.d.ts`のclass宣言について、継承、constructor、instance/static method、
 getter、property、overloadを構造化して抽出するようbridgeを拡張した。overloadは
@@ -30,7 +29,11 @@ method callbackには元instanceを`this`として渡す。自作`NativeBox`の�
 export handle取得とconstructor ABI呼び出しへloweringする。公式sqlite3を取得・
 埋め込み、named importから`new Database(":memory:")`を含むTypeScriptを実行
 ファイルへコンパイルして、registry削除後にも実instanceを構築できることを確認した。
-instance methodとcallbackの通常構文loweringは次の統合作業である。
+さらに、外部classのconstructorへ直接代入された変数を追跡し、callbackを含まない
+instance methodをtyped N-API callへ書き換える。数値を保持する自作`NativeBox`を
+`new NativeBox(42)`で構築し、通常構文の`box.get()`が`42`を返すところまでCLI、
+HIR、LLVM、N-API hostを通した実行ファイルE2Eで検証した。callback引数、getter、
+static method、aliasやpropertyを介したinstance追跡は引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
