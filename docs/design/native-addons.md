@@ -704,6 +704,7 @@ element API、property-name列挙、run-scriptもobject／value／source handle�
 Buffer-from-ArrayBuffer、Error作成、fatal-exception、callback／constructor戻り値もforeign handleを拒否する。
 基本値／文字列／BigInt／Object／Array／Buffer／view作成はresultを確保前に検証し、Symbol descriptionも
 作成Envのhandleだけを受理する。
+raw文字列／BigInt word／function nameはEnvとresultの検証後にだけcaller memoryから読み取る。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する

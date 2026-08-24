@@ -742,6 +742,8 @@ The workspace crates have narrow responsibilities:
   return values also reject handles crossing Env boundaries.
   Core value creators validate result pointers before arena allocation or data
   output writes; Symbol descriptions must belong to the creating Env.
+  Raw string, word and function-name inputs are read only after the Env and
+  result handle have been validated.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
