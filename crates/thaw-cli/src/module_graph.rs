@@ -26,6 +26,19 @@ fn export_name(name: &ModuleExportName) -> Result<String, String> {
     }
 }
 
+fn file_url(path: &Path) -> String {
+    let mut url = String::from("file://");
+    for byte in path.to_string_lossy().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
+            url.push(char::from(*byte));
+        } else {
+            use std::fmt::Write;
+            write!(url, "%{byte:02X}").unwrap();
+        }
+    }
+    url
+}
+
 fn resolve_relative(from: &Path, specifier: &str) -> Result<PathBuf, String> {
     if !specifier.starts_with('.') {
         return Err(format!(
@@ -152,6 +165,7 @@ fn source_location(path: &Path, source: &str, specifier: &str) -> String {
 struct RenameReferences<'a> {
     names: &'a HashMap<String, String>,
     namespaces: &'a HashMap<String, HashMap<String, String>>,
+    import_meta_url: &'a str,
 }
 
 impl RenameReferences<'_> {
@@ -163,6 +177,30 @@ impl RenameReferences<'_> {
 }
 
 impl VisitMut for RenameReferences<'_> {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        let Expr::MetaProp(meta) = member.obj.as_ref() else {
+            return;
+        };
+        if meta.kind != thaw_parser::ast::MetaPropKind::ImportMeta {
+            return;
+        }
+        let thaw_parser::ast::MemberProp::Ident(property) = &member.prop else {
+            return;
+        };
+        if property.sym != *"url" {
+            return;
+        }
+        *expr = Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {
+            span: member.span,
+            value: self.import_meta_url.into(),
+            raw: None,
+        }));
+    }
+
     fn visit_mut_call_expr(&mut self, call: &mut thaw_parser::ast::CallExpr) {
         call.visit_mut_children_with(self);
         if let Callee::Expr(callee) = &mut call.callee {
@@ -299,6 +337,7 @@ pub fn bundle(
         let is_entry = index == entry_index;
         let mut names = HashMap::new();
         let mut namespaces = HashMap::new();
+        let import_meta_url = file_url(&modules[index].path);
         for name in declared_names(&modules[index].module) {
             let replacement = if is_entry && matches!(name.as_str(), "main" | "handler") {
                 name.clone()
@@ -390,6 +429,7 @@ pub fn bundle(
                     statement.visit_mut_with(&mut RenameReferences {
                         names: &names,
                         namespaces: &namespaces,
+                        import_meta_url: &import_meta_url,
                     });
                     items.push(ModuleItem::Stmt(statement));
                 }
@@ -403,6 +443,7 @@ pub fn bundle(
                     export.decl.visit_mut_with(&mut RenameReferences {
                         names: &names,
                         namespaces: &namespaces,
+                        import_meta_url: &import_meta_url,
                     });
                     if let Some(original) = original {
                         public.insert(original.clone(), names[&original].clone());
@@ -495,6 +536,7 @@ pub fn bundle(
                             function.function.visit_mut_with(&mut RenameReferences {
                                 names: &names,
                                 namespaces: &namespaces,
+                                import_meta_url: &import_meta_url,
                             });
                             let mut ident = function.ident.take().unwrap_or_else(|| {
                                 thaw_parser::ast::Ident::new_no_ctxt(
@@ -520,6 +562,7 @@ pub fn bundle(
                             interface.visit_mut_with(&mut RenameReferences {
                                 names: &names,
                                 namespaces: &namespaces,
+                                import_meta_url: &import_meta_url,
                             });
                             public.insert("default".to_string(), interface.id.sym.to_string());
                             explicit_exports.insert("default".to_string());
