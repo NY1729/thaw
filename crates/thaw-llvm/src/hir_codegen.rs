@@ -10280,6 +10280,41 @@ mod tests {
     }
 
     #[test]
+    fn compiles_primitive_string_addition_with_ordered_awaits() {
+        let source = r#"
+            function text(label: string, value: string): string {
+                console.log(label);
+                return value;
+            }
+            function number(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                console.log("awaited-number");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(text("left", "value=") + number("right", 42));
+                console.log(7 + " items");
+                console.log("enabled=" + true);
+                console.log(false + " flag");
+                console.log("large=" + 1000000000000000000000);
+                console.log("async=" + (await delayed(9)));
+                let accumulated: string = "total=";
+                accumulated += number("compound", 12);
+                accumulated += true;
+                console.log(accumulated);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "primitive_string_addition"),
+            "left\nright\nvalue=42\n7 items\nenabled=true\nfalse flag\nlarge=1e+21\nawaited-number\nasync=9\ncompound\ntotal=12true\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {

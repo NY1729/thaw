@@ -340,6 +340,9 @@ The workspace crates have narrow responsibilities:
   `String(number)` use the same native conversions. Number formatting follows
   JavaScript's `NaN`, infinity, signed-zero, fixed/exponential boundary and
   shortest-round-trip rules
+- Binary `+` and `+=` concatenate when either operand is a native string,
+  converting number/boolean operands with the same JavaScript formatting and
+  preserving reference evaluation plus synchronous/awaited operand order
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
