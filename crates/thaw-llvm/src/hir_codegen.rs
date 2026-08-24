@@ -9512,6 +9512,22 @@ mod tests {
     }
 
     #[test]
+    fn compiles_bitwise_not_with_awaited_operand() {
+        let source = r#"
+            async function numberValue(): Promise<number> {
+                await sleep(1);
+                return 5;
+            }
+            async function main(): Promise<void> {
+                console.log(~5);
+                console.log(~(await numberValue()));
+                console.log(~~5);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "bitwise_not"), "-6\n-6\n5\n");
+    }
+
+    #[test]
     fn logical_operators_short_circuit_sync_and_awaited_operands() {
         let source = r#"
             function flag(label: string, value: boolean): boolean {
