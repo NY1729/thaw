@@ -513,6 +513,8 @@ JSONのstring-computed keyは`JsonGet`、number keyは`JsonIndex`へ型別にlow
 `PropAccess`、tuple elementを`TypedIndex`として個別bindingへ展開する。nested pattern、
 renaming、array hole、object/tuple restを扱い、awaited sourceもframe slotへ一度だけ保存する。
 default valueはundefined表現が必要なため、誤ったfallbackを生成せず明示的に診断する。
+destructuring assignmentも同じfixed-layout展開を使い、既存bindingへ順番に代入した後、式の
+結果として保存済みの元の右辺を返す。nested/rest patternとawaited RHSでも評価は一度だけになる。
 
 ## 12. Promise constructorとcontinuation chain
 
