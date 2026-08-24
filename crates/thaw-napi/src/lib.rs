@@ -67,6 +67,7 @@ const ASYNC_QUEUED: u8 = 1;
 const ASYNC_EXECUTING: u8 = 2;
 const ASYNC_COMPLETE_PENDING: u8 = 3;
 const ASYNC_COMPLETED: u8 = 4;
+const ASYNC_DELETED: u8 = 5;
 
 pub struct AsyncWork {
     env: usize,
@@ -378,6 +379,9 @@ pub struct Env {
     // Box keeps deferred pointers stable and allows safe repeated-call rejection.
     #[allow(clippy::vec_box)]
     deferreds: Vec<Box<Deferred>>,
+    // Box keeps async-work addresses stable for worker and completion queues.
+    #[allow(clippy::vec_box)]
+    async_works: Vec<Box<AsyncWork>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -449,6 +453,7 @@ impl Env {
             active_handle_scopes: Vec::new(),
             async_contexts: Vec::new(),
             deferreds: Vec::new(),
+            async_works: Vec::new(),
         }
     }
 
@@ -478,6 +483,21 @@ unsafe fn async_context_mut<'a>(
         return Err(NAPI_INVALID_ARG);
     }
     Ok(context_ref)
+}
+
+unsafe fn async_work_ref<'a>(
+    env: NapiEnv,
+    work: *mut AsyncWork,
+) -> Result<&'a AsyncWork, NapiStatus> {
+    let Ok(env_ref) = env_mut(env) else {
+        return Err(NAPI_INVALID_ARG);
+    };
+    env_ref
+        .async_works
+        .iter()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), work))
+        .map(Box::as_ref)
+        .ok_or(NAPI_INVALID_ARG)
 }
 
 unsafe fn open_handle_scope(
@@ -6488,10 +6508,13 @@ pub unsafe extern "C" fn napi_create_async_work(
     data: *mut c_void,
     result: *mut *mut AsyncWork,
 ) -> NapiStatus {
-    if env.is_null() || execute.is_none() || result.is_null() {
+    if execute.is_none() || result.is_null() {
         return NAPI_INVALID_ARG;
     }
-    let work = Box::new(AsyncWork {
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let mut work = Box::new(AsyncWork {
         env: env as usize,
         execute: execute.unwrap(),
         complete,
@@ -6499,18 +6522,17 @@ pub unsafe extern "C" fn napi_create_async_work(
         state: AtomicU8::new(ASYNC_CREATED),
         completion_status: AtomicI32::new(NAPI_OK),
     });
-    *result = Box::into_raw(work);
+    let work_ptr = (&mut *work) as *mut AsyncWork;
+    env_ref.async_works.push(work);
+    *result = work_ptr;
     NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
-    let Some(work_ref) = work.as_ref() else {
+    let Ok(work_ref) = async_work_ref(env, work) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || work_ref.env != env as usize {
-        return NAPI_INVALID_ARG;
-    }
     if work_ref
         .state
         .compare_exchange(
@@ -6539,12 +6561,9 @@ pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWor
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_cancel_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
-    let Some(work_ref) = work.as_ref() else {
+    let Ok(work_ref) = async_work_ref(env, work) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || work_ref.env != env as usize {
-        return NAPI_INVALID_ARG;
-    }
     let Some(pool) = async_pool() else {
         return NAPI_GENERIC_FAILURE;
     };
@@ -6575,17 +6594,20 @@ pub unsafe extern "C" fn napi_cancel_async_work(env: NapiEnv, work: *mut AsyncWo
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_delete_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
-    let Some(work_ref) = work.as_ref() else {
+    let Ok(work_ref) = async_work_ref(env, work) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || work_ref.env != env as usize {
-        return NAPI_INVALID_ARG;
-    }
     let state = work_ref.state.load(Ordering::Acquire);
     if state != ASYNC_CREATED && state != ASYNC_COMPLETED {
         return NAPI_GENERIC_FAILURE;
     }
-    drop(Box::from_raw(work));
+    if work_ref
+        .state
+        .compare_exchange(state, ASYNC_DELETED, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return NAPI_GENERIC_FAILURE;
+    }
     NAPI_OK
 }
 
@@ -10631,7 +10653,15 @@ mod tests {
             Some(probe.main_thread)
         );
         unsafe {
+            let mut other_env = Env::new();
+            assert_eq!(
+                napi_delete_async_work(&mut other_env, work),
+                NAPI_INVALID_ARG
+            );
             assert_eq!(napi_delete_async_work(&mut env, work), NAPI_OK);
+            assert_eq!(napi_delete_async_work(&mut env, work), NAPI_GENERIC_FAILURE);
+            assert_eq!(napi_queue_async_work(&mut env, work), NAPI_GENERIC_FAILURE);
+            assert_eq!(napi_cancel_async_work(&mut env, work), NAPI_GENERIC_FAILURE);
         }
 
         let worker_count = async_worker_count();
