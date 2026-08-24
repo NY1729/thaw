@@ -3359,6 +3359,33 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn lower_loose_equality(&self, mut lhs: HirExpr, mut rhs: HirExpr) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type == rhs_type {
+            return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
+        }
+        let to_number = |value: HirExpr, ty: &HirType| -> Result<HirExpr, String> {
+            match ty {
+                HirType::F64 => Ok(value),
+                HirType::Bool => Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
+                    vec![value],
+                )),
+                HirType::Str => Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                    vec![value],
+                )),
+                other => Err(format!(
+                    "abstract equality cannot convert native type {other:?}"
+                )),
+            }
+        };
+        lhs = to_number(lhs, &lhs_type)?;
+        rhs = to_number(rhs, &rhs_type)?;
+        Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
@@ -3527,16 +3554,10 @@ impl<'a> FnLowerer<'a> {
                         )),
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
-                    BinaryOp::EqEq => {
-                        HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs))
-                    }
+                    BinaryOp::EqEq => self.lower_loose_equality(lhs, rhs)?,
                     BinaryOp::NotEq => HirExpr::BinOp(
                         BinOp::EqEqEq,
-                        Box::new(HirExpr::BinOp(
-                            BinOp::EqEqEq,
-                            Box::new(lhs),
-                            Box::new(rhs),
-                        )),
+                        Box::new(self.lower_loose_equality(lhs, rhs)?),
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
                     BinaryOp::Add
@@ -6611,18 +6632,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cross_type_loose_equality() {
-        let module = thaw_parser::parse_typescript(
+    fn lowers_cross_type_primitive_loose_equality() {
+        let program = lower(
             r#"function main(): void {
                 console.log(1 == "1");
+                console.log(false != "1");
             }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("strict equality compares incompatible types"),
-            "{error}"
         );
+        assert_eq!(program.functions[0].body.len(), 2);
     }
 
     #[test]
