@@ -678,3 +678,8 @@ Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を�
 exception経路へ統合する。`node_api_symbol_for`はprocess-wide description→identity registryを持ち、
 同じEnvでは同じhandle、Envをまたいでも同じSymbol identityを割り当てる。通常の
 `napi_create_symbol`は同じdescriptionでも常に別identityのまま維持する。
+Node-API v10の`node_api_create_buffer_from_arraybuffer`はowned／external ArrayBufferの指定rangeを
+copyせずBuffer viewとして保持する。Buffer／TypedArray infoは共有pointer、backing identity、offsetを
+返し、detach後はdata=null／length=0となる。overflowを含む範囲外指定はpending RangeErrorにする。
+`node_api_create_property_key_utf8`／`latin1`／`utf16`はencodingを内部UTF-8へ正規化し、Env単位の
+intern tableから同じ文字列handleを再利用する。生成keyは通常のgeneric property APIで利用できる。
