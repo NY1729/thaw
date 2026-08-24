@@ -13920,6 +13920,68 @@ mod tests {
     }
 
     #[test]
+    fn frame_split_preserves_array_elements_before_nested_await() {
+        let source = r#"
+            interface Trace { value: string; }
+            function record(trace: Trace, label: string, value: number): number {
+                trace.value = trace.value + label;
+                return value;
+            }
+            async function delayed(trace: Trace, label: string, value: number): Promise<number> {
+                trace.value = trace.value + label;
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                const trace: Trace = { value: "" };
+                const values: number[] = [
+                    record(trace, "a", 1),
+                    await delayed(trace, "b", 2),
+                    record(trace, "c", 3),
+                    record(trace, "d", 4) + await delayed(trace, "e", 1)
+                ];
+                console.log(trace.value);
+                console.log(values.join("-"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_order_across_nested_await"),
+            "abcde\n1-2-3-5\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_preserves_object_fields_before_nested_await() {
+        let source = r#"
+            interface Trace { value: string; }
+            interface Values { first: number; second: number; third: number; }
+            function record(trace: Trace, label: string, value: number): number {
+                trace.value = trace.value + label;
+                return value;
+            }
+            async function delayed(trace: Trace, label: string, value: number): Promise<number> {
+                trace.value = trace.value + label;
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                const trace: Trace = { value: "" };
+                const values: Values = {
+                    first: record(trace, "a", 1),
+                    second: await delayed(trace, "b", 2),
+                    third: record(trace, "c", 3) + await delayed(trace, "d", 1)
+                };
+                console.log(trace.value);
+                console.log(values.first + values.second + values.third);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_order_across_nested_await"),
+            "abcd\n7\n"
+        );
+    }
+
+    #[test]
     fn frame_split_returns_from_deep_async_loop_try_and_block_scopes() {
         let source = r#"
             async function delayed(value: number): Promise<number> {

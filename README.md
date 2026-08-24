@@ -349,6 +349,9 @@ The workspace crates have narrow responsibilities:
 - Eager binary operators preserve their left operand before a direct or nested
   awaited right operand suspends, including arithmetic, comparison and nested
   parenthesized expressions
+- Array elements and fixed-object fields are evaluated once in source order
+  when a later direct or nested value awaits; completed values remain live in
+  the async frame until aggregate construction resumes
 - `Boolean(...)` applies the same JavaScript truthiness rules to native
   booleans, numbers, strings, JSON and reference values, evaluating its
   synchronous or awaited argument exactly once

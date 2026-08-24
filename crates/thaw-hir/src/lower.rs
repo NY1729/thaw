@@ -1559,7 +1559,9 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value) => collect_referenced_bindings(value, names),
-        HirExpr::Lambda(_, _, _, body) => collect_referenced_bindings(body, names),
+        HirExpr::Lambda(captures, _, _, _) => {
+            names.extend(captures.iter().map(|capture| capture.name.clone()));
+        }
         HirExpr::PromiseThen(source, callback, _, _, _, _) => {
             collect_referenced_bindings(source, names);
             collect_referenced_bindings(callback, names);
@@ -4191,9 +4193,30 @@ impl<'a> FnLowerer<'a> {
                             )
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let preserve_order = values.iter().any(contains_await);
+                    let mut bindings = Vec::new();
+                    let values = if preserve_order {
+                        values
+                            .into_iter()
+                            .enumerate()
+                            .map(|(position, value)| {
+                                let ty = self.infer_expr_type(&value)?;
+                                let name = format!(
+                                    "__thaw_array_element_{}_{}",
+                                    position, self.next_binding
+                                );
+                                self.next_binding += 1;
+                                self.scope.insert(name.clone(), ty.clone());
+                                bindings.push((name.clone(), ty, value));
+                                Ok(HirExpr::Var(name))
+                            })
+                            .collect::<Result<Vec<_>, String>>()?
+                    } else {
+                        values
+                    };
                     let value = HirExpr::ArrayLit(values);
                     self.infer_expr_type(&value)?;
-                    return Ok(value);
+                    return self.wrap_call_argument_bindings(value, &bindings);
                 }
                 let mut parts = Vec::new();
                 let mut pending = Vec::new();
@@ -4758,6 +4781,18 @@ impl<'a> FnLowerer<'a> {
                 fields.push((name, value));
             }
         }
+        let mut property_bindings = Vec::new();
+        if evaluated_spreads.is_empty() && fields.iter().any(|(_, value)| contains_await(value)) {
+            for (position, (_, value)) in fields.iter_mut().enumerate() {
+                let source = value.clone();
+                let ty = self.infer_expr_type(&source)?;
+                let name = format!("__thaw_object_field_{}_{}", position, self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                *value = HirExpr::Var(name.clone());
+                property_bindings.push((name, ty, source));
+            }
+        }
         let mut result = HirExpr::ObjectLit(fields);
         let result_type = self.infer_expr_type(&result)?;
         for index in (0..evaluated_spreads.len()).rev() {
@@ -4782,7 +4817,7 @@ impl<'a> FnLowerer<'a> {
                 vec![source.clone()],
             );
         }
-        Ok(result)
+        self.wrap_call_argument_bindings(result, &property_bindings)
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
