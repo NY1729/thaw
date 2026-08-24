@@ -10611,6 +10611,36 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_to_string_methods_and_awaited_receivers() {
+        let source = r#"
+            function objectValue(): { value: number } {
+                console.log("object-method-receiver");
+                return { value: 1 };
+            }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                console.log("awaited-method-receiver");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log((42.5).toString());
+                console.log(true.toString());
+                console.log("word".toString());
+                const numbers: number[] = [1, 2.5];
+                console.log(numbers.toString());
+                const tuple: [number, string, boolean] = [3, "x", false];
+                console.log(tuple.toString());
+                console.log(objectValue().toString());
+                console.log((await delayed(9)).toString());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_to_string_methods"),
+            "42.5\ntrue\nword\n1,2.5\n3,x,false\nobject-method-receiver\n[object Object]\nawaited-method-receiver\n9\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
