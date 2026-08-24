@@ -3158,7 +3158,10 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_math_ceil" | "__thaw_math_trunc" | "__thaw_math_sqrt"
                     | "__thaw_math_sign" | "__thaw_math_round" | "__thaw_math_exp"
                     | "__thaw_math_log" | "__thaw_math_log2" | "__thaw_math_log10"
-                    | "__thaw_math_sin" | "__thaw_math_cos" => {
+                    | "__thaw_math_sin" | "__thaw_math_cos" | "__thaw_math_tan"
+                    | "__thaw_math_asin" | "__thaw_math_acos" | "__thaw_math_atan"
+                    | "__thaw_math_sinh" | "__thaw_math_cosh" | "__thaw_math_tanh"
+                    | "__thaw_math_cbrt" => {
                         let [argument] = args.as_slice() else {
                             return Err("unary Math function expects one operand".into());
                         };
@@ -3174,7 +3177,16 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::F64);
                     }
-                    "__thaw_math_min" | "__thaw_math_max" => {
+                    "__thaw_math_atan2" => {
+                        if args.len() != 2 {
+                            return Err("Math.atan2 expects two operands".into());
+                        }
+                        for argument in args {
+                            self.expect_type(&HirType::F64, argument, "Math.atan2 operand")?;
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_math_min" | "__thaw_math_max" | "__thaw_math_hypot" => {
                         for argument in args {
                             self.expect_type(&HirType::F64, argument, "Math extrema operand")?;
                         }
@@ -5207,6 +5219,14 @@ impl<'a> FnLowerer<'a> {
                                 | "log10"
                                 | "sin"
                                 | "cos"
+                                | "tan"
+                                | "asin"
+                                | "acos"
+                                | "atan"
+                                | "sinh"
+                                | "cosh"
+                                | "tanh"
+                                | "cbrt"
                         )
                     {
                         let [argument] = call.args.as_slice() else {
@@ -5228,11 +5248,11 @@ impl<'a> FnLowerer<'a> {
                     if object.sym == *"Math"
                         && matches!(
                             property.sym.as_ref(),
-                            "pow" | "min" | "max" | "sign" | "round"
+                            "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot"
                         )
                     {
                         let expected = match property.sym.as_ref() {
-                            "pow" => Some(2),
+                            "pow" | "atan2" => Some(2),
                             "sign" | "round" => Some(1),
                             _ => None,
                         };
