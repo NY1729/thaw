@@ -12877,6 +12877,10 @@ mod tests {
                 if (present) return [3, "ok"];
                 return undefined;
             }
+            function text(present: boolean): string | undefined {
+                if (present) return "thaw";
+                return undefined;
+            }
             function index(): number {
                 console.log("index");
                 return 1;
@@ -12888,15 +12892,20 @@ mod tests {
             async function main(): Promise<void> {
                 console.log(numbers(true)?.[index()]);
                 console.log(numbers(false)?.[index()]);
+                console.log(numbers(true)?.length);
+                console.log(numbers(false)?.length);
                 console.log(pair(true)?.[0]);
                 console.log(pair(true)?.[1]);
+                console.log(pair(true)?.length);
                 console.log(pair(false)?.[0]);
+                console.log(text(true)?.length);
+                console.log(text(false)?.length);
                 console.log((await delayed())?.[0]);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "optional_array_tuple_access"),
-            "index\n4\nundefined\n3\nok\nundefined\n6\n"
+            "index\n4\nundefined\n2\nundefined\n3\nok\n2\nundefined\n4\nundefined\n6\n"
         );
     }
 
