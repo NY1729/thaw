@@ -5840,9 +5840,43 @@ impl<'a> FnLowerer<'a> {
                 }
                 if property.sym == *"concat" {
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("string concat spread is not supported".into());
+                        return Err("native concat spread is not supported".into());
                     }
-                    let mut result = self.lower_expr(&member.obj)?;
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if let HirType::Array(element) = receiver_type {
+                        let element = element.as_ref().clone();
+                        let mut parts = vec![receiver];
+                        for argument in &call.args {
+                            let value = self.lower_expr(&argument.expr)?;
+                            let actual = self.infer_expr_type(&value)?;
+                            if actual == HirType::Array(Box::new(element.clone())) {
+                                parts.push(value);
+                            } else if actual == element {
+                                parts.push(HirExpr::ArrayLit(vec![value]));
+                            } else {
+                                return Err(format!(
+                                    "array concat argument has type {actual:?}, expected {element:?} or an array of it"
+                                ));
+                            }
+                        }
+                        let mut bindings = Vec::with_capacity(parts.len());
+                        let mut ordered = Vec::with_capacity(parts.len());
+                        for (position, part) in parts.into_iter().enumerate() {
+                            let ty = self.infer_expr_type(&part)?;
+                            let name =
+                                format!("__thaw_concat_part_{}_{}", position, self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            bindings.push((name.clone(), ty, part));
+                            ordered.push(HirExpr::Var(name));
+                        }
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::ArrayConcat(ordered, element),
+                            &bindings,
+                        );
+                    }
+                    let mut result = receiver;
                     self.expect_type(&HirType::Str, &result, "string concat receiver")?;
                     for argument in &call.args {
                         let value = self.lower_expr(&argument.expr)?;
