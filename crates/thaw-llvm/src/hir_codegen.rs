@@ -12534,6 +12534,50 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_flat() {
+        let source = r#"
+            interface Item { value: number; }
+            async function delayed(): Promise<string[][]> {
+                console.log("awaited");
+                await sleep(1);
+                const first: string[] = ["a"];
+                const empty: string[] = ["x"].slice(0, 0);
+                const last: string[] = ["b", "c"];
+                const result: string[][] = [first, empty, last];
+                return result;
+            }
+            async function main(): Promise<void> {
+                const nested: number[][] = [[1, 2], [], [3]];
+                console.log(nested.flat().join(","));
+                const deep: number[][][] = [[[1], [2]], [[3]]];
+                const once: number[][] = deep.flat();
+                console.log(once.length);
+                console.log(once[1][0]);
+                console.log(deep.flat(2).join(","));
+                console.log(deep.flat(1.9).length);
+                const unchangedDepth: number[][][] = deep.flat(-1);
+                console.log(unchangedDepth.length);
+                const source: number[] = [1, 2];
+                const copied: number[] = source.flat();
+                copied[0] = 9;
+                console.log(source.join(","));
+                const item: Item = { value: 1 };
+                const objects: Item[][] = [[item]];
+                const flattened: Item[] = objects.flat();
+                flattened[0].value = 7;
+                console.log(item.value);
+                const empty: number[][] = [[0]].slice(0, 0);
+                console.log(empty.flat().length);
+                console.log((await delayed()).flat().join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_flat"),
+            "1,2,3\n3\n2\n1,2,3\n3\n2\n1,2\n7\n0\nawaited\na,b,c\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
