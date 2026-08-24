@@ -1114,6 +1114,27 @@ struct BundledModule {
     async_module: bool,
 }
 
+fn declared_runtime_dependencies(package_dir: &Path) -> Vec<String> {
+    let Ok(source) = fs::read_to_string(package_dir.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return Vec::new();
+    };
+    let mut dependencies = Vec::new();
+    for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+        let Some(entries) = manifest.get(field).and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for name in entries.keys() {
+            if !dependencies.contains(name) {
+                dependencies.push(name.clone());
+            }
+        }
+    }
+    dependencies
+}
+
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
 /// `main_relative` (its `main` field, or a default) -- into a single
 /// self-contained JS string with a small embedded module-system
@@ -1238,6 +1259,22 @@ fn bundle_commonjs_package(
                         pkg_name.clone(),
                         pkg_dir.clone(),
                     ));
+                }
+            }
+            for specifier in declared_runtime_dependencies(&pkg_dir) {
+                if requires.iter().any(|(source, _)| source == &specifier) {
+                    continue;
+                }
+                if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
+                    resolve_bare_require(node_modules_dir, &specifier)
+                {
+                    let dep_key = format!("{dep_name}/{dep_relative}");
+                    requires.push((specifier, dep_key.clone()));
+                    if !visited.contains(&dep_key) {
+                        visited.push(dep_key.clone());
+                        record_package_version(&mut dependency_versions, &dep_name, &dep_dir);
+                        worklist.push((dep_key, dep_abs, dep_name, dep_dir));
+                    }
                 }
             }
         }
@@ -4151,13 +4188,18 @@ mod tests {
     }
 
     #[test]
-    fn finite_dynamic_import_candidates_resolve_external_packages() {
+    fn runtime_dynamic_import_resolves_declared_external_packages() {
         use std::ffi::{CStr, CString};
 
         let dir = temp_registry("constant_external_dynamic_import");
         fs::write(
             dir.join("index.js"),
-            "export default async function run(first) { const dep = await import(`dep-${first ? 'a' : 'b'}`); return dep.value; }",
+            "export default async function run(name) { const dep = await import(name); return dep.value; }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.0.0","dependencies":{"dep-a":"1.0.0"},"optionalDependencies":{"dep-b":"1.0.0"}}"#,
         )
         .unwrap();
         let node_modules = temp_registry("constant_external_dynamic_modules");
@@ -4177,7 +4219,7 @@ mod tests {
         }
         let (bundle, _, file_count, versions) =
             bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 3);
+        assert_eq!(file_count, 4);
         assert_eq!(versions.get("dep-a").map(String::as_str), Some("1.0.0"));
         assert_eq!(versions.get("dep-b").map(String::as_str), Some("1.0.0"));
         let script = format!(
@@ -4190,7 +4232,7 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("runConstantExternalImport").unwrap();
-        for (args, expected) in [("[true]", "41"), ("[false]", "42")] {
+        for (args, expected) in [(r#"["dep-a"]"#, "41"), (r#"["dep-b"]"#, "42")] {
             let args = CString::new(args).unwrap();
             let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
             assert_eq!(
