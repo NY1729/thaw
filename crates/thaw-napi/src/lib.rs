@@ -4417,11 +4417,11 @@ pub unsafe extern "C" fn napi_strict_equals(
     right: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
-    if result.is_null()
-        || !value_belongs_to_environment(env, left)
-        || !value_belongs_to_environment(env, right)
-    {
-        return NAPI_INVALID_ARG;
+    if result.is_null() {
+        return record_status(env, NAPI_INVALID_ARG);
+    }
+    if !value_belongs_to_environment(env, left) || !value_belongs_to_environment(env, right) {
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *result = match (value_ref(left), value_ref(right)) {
         (Ok(Value::Undefined), Ok(Value::Undefined)) | (Ok(Value::Null), Ok(Value::Null)) => true,
@@ -6560,10 +6560,13 @@ pub unsafe extern "C" fn node_api_get_module_file_name(
     env: NapiEnv,
     result: *mut *const c_char,
 ) -> NapiStatus {
-    let (Some(env), Some(result)) = (env.as_ref(), result.as_mut()) else {
+    let Some(env_ref) = env.as_ref() else {
         return NAPI_INVALID_ARG;
     };
-    *result = env.module_file_name.as_ptr();
+    let Some(result) = result.as_mut() else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
+    *result = env_ref.module_file_name.as_ptr();
     NAPI_OK
 }
 
@@ -9076,6 +9079,22 @@ mod tests {
             assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
             assert_eq!((*info).error_code, NAPI_INVALID_ARG);
             assert_eq!(env.values.len(), values_before);
+
+            env.last_error_info.error_code = NAPI_OK;
+            assert_eq!(
+                napi_strict_equals(env_ptr, number, number, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+
+            env.last_error_info.error_code = NAPI_OK;
+            assert_eq!(
+                node_api_get_module_file_name(env_ptr, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
         }
     }
 
