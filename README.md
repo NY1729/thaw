@@ -730,6 +730,8 @@ The workspace crates have narrow responsibilities:
   freed memory.
   N-API reference handles are retained by their Env after deletion, allowing
   repeated delete/get/ref/unref calls to reject safely without use-after-free.
+  Async cleanup handles also retain stable identity after removal, making a
+  repeated remove return `napi_invalid_arg` safely.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.

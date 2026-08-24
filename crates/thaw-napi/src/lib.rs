@@ -95,6 +95,8 @@ static GLOBAL_SYMBOLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
 static THREADSAFE_FUNCTIONS: OnceLock<Mutex<Vec<Box<ThreadsafeFunction>>>> = OnceLock::new();
+#[allow(clippy::vec_box)]
+static ASYNC_CLEANUP_HANDLES: OnceLock<Mutex<Vec<Box<AsyncCleanupHookHandle>>>> = OnceLock::new();
 
 pub struct ThreadsafeFunction {
     env: usize,
@@ -132,6 +134,11 @@ fn threadsafe_ready() -> &'static Mutex<VecDeque<usize>> {
 #[allow(clippy::vec_box)]
 fn threadsafe_functions() -> &'static Mutex<Vec<Box<ThreadsafeFunction>>> {
     THREADSAFE_FUNCTIONS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[allow(clippy::vec_box)]
+fn async_cleanup_handles() -> &'static Mutex<Vec<Box<AsyncCleanupHookHandle>>> {
+    ASYNC_CLEANUP_HANDLES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 unsafe fn threadsafe_function_ref<'a>(
@@ -3832,15 +3839,20 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
     let (Ok(env_ref), Some(hook)) = (env_mut(env), hook) else {
         return NAPI_INVALID_ARG;
     };
-    let handle = Box::into_raw(Box::new(AsyncCleanupHookHandle {
+    let mut handle = Box::new(AsyncCleanupHookHandle {
         env: env as usize,
         hook,
         data: data as usize,
         state: AtomicU8::new(0),
-    }));
-    env_ref.async_cleanup_hooks.push(handle);
+    });
+    let handle_ptr = (&mut *handle) as *mut AsyncCleanupHookHandle;
+    async_cleanup_handles()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(handle);
+    env_ref.async_cleanup_hooks.push(handle_ptr);
     if let Some(result) = result.as_mut() {
-        *result = handle;
+        *result = handle_ptr;
     }
     NAPI_OK
 }
@@ -3849,7 +3861,16 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
 pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
     handle: *mut AsyncCleanupHookHandle,
 ) -> NapiStatus {
-    let Some(handle_ref) = handle.as_ref() else {
+    if handle.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let handles = async_cleanup_handles()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(handle_ref) = handles
+        .iter()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), handle))
+    else {
         return NAPI_INVALID_ARG;
     };
     match handle_ref.state.swap(2, Ordering::AcqRel) {
@@ -3864,7 +3885,6 @@ pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
         }
         _ => return NAPI_INVALID_ARG,
     }
-    drop(Box::from_raw(handle));
     NAPI_OK
 }
 
@@ -10522,6 +10542,10 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!(napi_remove_async_cleanup_hook(removed_handle), NAPI_OK);
+            assert_eq!(
+                napi_remove_async_cleanup_hook(removed_handle),
+                NAPI_INVALID_ARG
+            );
             drop(Box::from_raw(removed));
         }
         drop(env);
