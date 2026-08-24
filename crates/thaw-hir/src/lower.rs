@@ -2176,7 +2176,7 @@ impl<'a> FnLowerer<'a> {
                     return Ok(*ret);
                 };
                 match name.as_str() {
-                    "console.log" => return Ok(HirType::F64),
+                    "console.log" => return Ok(HirType::Void),
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -4183,6 +4183,27 @@ mod tests {
     fn infers_void_for_an_unannotated_function_without_value_returns() {
         let program = lower("function log() { console.log(1); }");
         assert_eq!(program.functions[0].ret, HirType::Void);
+    }
+
+    #[test]
+    fn infers_void_for_expression_bodied_console_log_arrow() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                await new Promise<void>((resolve, reject) => resolve())
+                    .finally(() => console.log("cleanup"));
+            }"#,
+        );
+        let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
+            panic!("expected awaited finally chain");
+        };
+        let HirExpr::PromiseFinally(_, callback, HirType::Void, HirType::Void) = inner.as_ref()
+        else {
+            panic!("expected void finally callback");
+        };
+        assert!(matches!(
+            callback.as_ref(),
+            HirExpr::Lambda(_, _, HirType::Void, _)
+        ));
     }
 
     #[test]
