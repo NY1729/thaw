@@ -5623,7 +5623,11 @@ impl<'a> FnLowerer<'a> {
         for index in (0..bindings.len()).rev() {
             let (name, ty, source) = &bindings[index];
             let body = if result_type == HirType::Void {
-                HirExpr::Block(vec![HirStmt::Expr(result)])
+                if matches!(&result, HirExpr::Block(_)) {
+                    result
+                } else {
+                    HirExpr::Block(vec![HirStmt::Expr(result)])
+                }
             } else {
                 result
             };
@@ -5861,11 +5865,12 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
-    fn lower_array_predicate_callback(
+    fn lower_array_callback(
         &mut self,
         expr: &Expr,
         element_type: &HirType,
         array_type: &HirType,
+        expected_return: &HirType,
     ) -> Result<HirExpr, String> {
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
@@ -5892,7 +5897,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64, array_type.clone()];
-        self.lower_promise_callback(expr, &available[..arity], Some(&HirType::Bool))
+        self.lower_promise_callback(expr, &available[..arity], Some(expected_return))
     }
 
     fn lower_array_predicate_method(
@@ -6009,6 +6014,98 @@ impl<'a> FnLowerer<'a> {
         if let Some(this_arg) = this_arg {
             let ty = self.infer_expr_type(&this_arg)?;
             let name = format!("__thaw_predicate_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            bindings.push((name, ty, this_arg));
+        }
+        self.wrap_call_argument_bindings(body, &bindings)
+    }
+
+    fn lower_array_for_each(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback: HirExpr,
+        this_arg: Option<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_for_each_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_for_each_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_type = self.infer_expr_type(&callback)?;
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        let length_name = format!("__thaw_for_each_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_for_each_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let element_name = format!("__thaw_for_each_element_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope
+            .insert(element_name.clone(), element_type.clone());
+        let HirType::Function(params, _) = &callback_type else {
+            unreachable!("array callback was validated as a function")
+        };
+        let available = [
+            HirExpr::Var(element_name.clone()),
+            HirExpr::Var(index_name.clone()),
+            HirExpr::Var(receiver_name.clone()),
+        ];
+        let callback_call = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            available[..params.len()].to_vec(),
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(HirExpr::Var(receiver_name.clone()))),
+            ),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(HirExpr::Var(length_name)),
+                ),
+                vec![
+                    HirStmt::Let(
+                        element_name,
+                        element_type.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(receiver_name.clone())),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            element_type,
+                        ),
+                    ),
+                    HirStmt::Expr(callback_call),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(None),
+        ]);
+        let mut bindings = vec![
+            (receiver_name, array_type, receiver),
+            (callback_name, callback_type, callback),
+        ];
+        if let Some(this_arg) = this_arg {
+            let ty = self.infer_expr_type(&this_arg)?;
+            let name = format!("__thaw_for_each_this_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(name.clone(), ty.clone());
             bindings.push((name, ty, this_arg));
@@ -6616,10 +6713,11 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
-                    let callback = self.lower_array_predicate_callback(
+                    let callback = self.lower_array_callback(
                         &call.args[0].expr,
                         &element_type,
                         &array_type,
+                        &HirType::Bool,
                     )?;
                     let this_arg = call
                         .args
@@ -6638,6 +6736,42 @@ impl<'a> FnLowerer<'a> {
                             "findIndex" => ArrayPredicateMode::FindIndex,
                             _ => unreachable!(),
                         },
+                    );
+                }
+                if property.sym == *"forEach" {
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.forEach()` expects a callback and optional thisArg".into(),
+                        );
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array forEach spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "`.forEach()` requires a homogeneous array, got {array_type:?}"
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let callback = self.lower_array_callback(
+                        &call.args[0].expr,
+                        &element_type,
+                        &array_type,
+                        &HirType::Void,
+                    )?;
+                    let this_arg = call
+                        .args
+                        .get(1)
+                        .map(|argument| self.lower_expr(&argument.expr))
+                        .transpose()?;
+                    return self.lower_array_for_each(
+                        receiver,
+                        array_type,
+                        element_type,
+                        callback,
+                        this_arg,
                     );
                 }
                 if property.sym == *"slice" {

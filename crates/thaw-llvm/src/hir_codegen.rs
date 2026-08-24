@@ -12092,6 +12092,45 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_for_each() {
+        let source = r#"
+            interface Item { value: number; }
+            function visit(value: number, index: number, array: number[]): void {
+                console.log(value + index + array.length);
+            }
+            function values(): number[] {
+                console.log("receiver");
+                return [1, 2];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b"];
+            }
+            async function main(): Promise<void> {
+                [1, 2, 3].forEach(visit);
+                let total: number = 0;
+                [4, 5].forEach(value => { total = total + value; });
+                console.log(total);
+                const items: Item[] = [{ value: 6 }, { value: 7 }];
+                items.forEach(item => { console.log(item.value); });
+                const empty: number[] = [];
+                empty.forEach(() => { console.log("wrong"); });
+                values().forEach((value, index) => { console.log(value + index); }, thisValue());
+                (await delayed()).forEach(value => { console.log(value); });
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_for_each"),
+            "4\n6\n8\n9\n6\n7\nreceiver\nthisArg\n1\n3\nawaited\na\nb\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
