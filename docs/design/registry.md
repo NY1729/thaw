@@ -1025,10 +1025,11 @@ attributeを明示エラーにする。dynamic importは実行時式を`requireA
 だけの連結はbundle時に畳み込む。conditional branchとtemplate interpolationの構成は
 最大64件の有限候補へ展開し、各外部packageを通常の依存graphへ載せる。非literal importを
 含むpackageはpackage.jsonのdependencies、optionalDependencies、peerDependenciesに宣言され
-実際にinstallされたpackage rootも候補mapへ収録する。user moduleの
+実際にinstallされたpackage rootも候補mapへ収録する。各依存のconditional exportsから
+exact subpathと実fileへ展開できるwildcard subpathも同じmapへ加える。user moduleの
 `import.meta.url`はsourceごとの絶対`file://` URLへ変換する。star exportは明示exportを
 優先し、異なるbindingの曖昧性をbarrel越しに伝播してimport時に診断する。未宣言packageや
-実行時に組み立てる未知のdeep subpathはまだ対象外である。user moduleの静的なrelative/absolute
+exportsに現れず実行時に組み立てる未知のdeep subpathはまだ対象外である。user moduleの静的なrelative/absolute
 `import.meta.resolve()`はsource directory基準でpathを正規化し、query/fragmentを保った
 `file://` URLへ変換する。Node互換の`import.meta.filename`/`dirname`はpercent encodeしない
 絶対filesystem pathへ変換する。bare registry package/subpathは選択済みの`bundle.js`、
