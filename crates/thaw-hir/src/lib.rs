@@ -191,6 +191,9 @@ pub enum HirExpr {
     /// Array literal containing one or more spreads. Every part is itself a
     /// homogeneous typed array and is evaluated once in source order.
     ArrayConcat(Vec<HirExpr>, HirType),
+    /// Allocates an uninitialized homogeneous array with a runtime length.
+    /// Lowering fills every slot before exposing the value.
+    ArrayAlloc(Box<HirExpr>, HirType),
     /// `array[index]`
     Index(Box<HirExpr>, Box<HirExpr>),
     /// `array[index]` with the statically resolved element type.
@@ -344,6 +347,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::PromiseAnyArray(inner, _)
             | HirExpr::PromiseAllSettledArray(inner, _)
             | HirExpr::Assign(_, inner)
+            | HirExpr::ArrayAlloc(inner, _)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
@@ -489,6 +493,7 @@ pub fn set_ffi_ownership(
             | HirExpr::PromiseAnyArray(inner, _)
             | HirExpr::PromiseAllSettledArray(inner, _)
             | HirExpr::Assign(_, inner)
+            | HirExpr::ArrayAlloc(inner, _)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
@@ -647,6 +652,7 @@ pub fn set_ffi_string_abi(
             | HirExpr::PromiseAnyArray(inner, _)
             | HirExpr::PromiseAllSettledArray(inner, _)
             | HirExpr::Assign(_, inner)
+            | HirExpr::ArrayAlloc(inner, _)
             | HirExpr::ArrayLen(inner)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)

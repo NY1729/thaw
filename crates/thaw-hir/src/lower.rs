@@ -1565,6 +1565,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::PromiseRaceArray(value, _)
         | HirExpr::PromiseAnyArray(value, _)
         | HirExpr::PromiseAllSettledArray(value, _)
+        | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
@@ -1638,6 +1639,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::PromiseAllSettledArray(value, _)
         | HirExpr::PromiseNew(value, _, _)
         | HirExpr::Assign(_, value)
+        | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)
         | HirExpr::PropAccess(value, _, _)
         | HirExpr::JsonGet(value, _)
@@ -3072,6 +3074,10 @@ impl<'a> FnLowerer<'a> {
                 .ok_or_else(|| format!("unknown variable `{name}`")),
             HirExpr::FunctionRef(_, params, ret) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
+            }
+            HirExpr::ArrayAlloc(length, element) => {
+                self.expect_type(&HirType::F64, length, "array allocation length")?;
+                Ok(HirType::Array(Box::new(element.clone())))
             }
             HirExpr::Assign(name, value) => {
                 let expected = self
@@ -5941,6 +5947,149 @@ impl<'a> FnLowerer<'a> {
         self.lower_promise_callback(expr, &available[..arity], Some(accumulator_type))
     }
 
+    fn lower_array_mapping_callback(
+        &mut self,
+        expr: &Expr,
+        element_type: &HirType,
+        array_type: &HirType,
+    ) -> Result<HirExpr, String> {
+        let arity = match expr {
+            Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Ident(ident) => {
+                let name = self.resolve_binding(ident.sym.as_ref());
+                self.scope
+                    .get(&name)
+                    .and_then(|ty| match ty {
+                        HirType::Function(params, _) => Some(params.len()),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.signatures
+                            .get(&name)
+                            .map(|signature| signature.params.len())
+                    })
+                    .ok_or_else(|| format!("unknown array mapper `{name}`"))?
+            }
+            _ => return Err("array mapper must be an arrow or function value".into()),
+        };
+        if arity > 3 {
+            return Err(format!(
+                "array mapper accepts at most three parameters, got {arity}"
+            ));
+        }
+        let available = [element_type.clone(), HirType::F64, array_type.clone()];
+        self.lower_promise_callback(expr, &available[..arity], None)
+    }
+
+    fn lower_array_map(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback: HirExpr,
+        this_arg: Option<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_map_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_map_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_type = self.infer_expr_type(&callback)?;
+        let HirType::Function(params, output_type) = &callback_type else {
+            unreachable!("array mapper was validated as a function")
+        };
+        if **output_type == HirType::Void {
+            return Err("array mapper must return a value".into());
+        }
+        let output_type = output_type.as_ref().clone();
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        let length_name = format!("__thaw_map_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_name = format!("__thaw_map_result_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_map_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let element_name = format!("__thaw_map_element_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_type = HirType::Array(Box::new(output_type.clone()));
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(result_name.clone(), result_type.clone());
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope
+            .insert(element_name.clone(), element_type.clone());
+        let available = [
+            HirExpr::Var(element_name.clone()),
+            HirExpr::Var(index_name.clone()),
+            HirExpr::Var(receiver_name.clone()),
+        ];
+        let callback_call = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            available[..params.len()].to_vec(),
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(HirExpr::Var(receiver_name.clone()))),
+            ),
+            HirStmt::Let(
+                result_name.clone(),
+                result_type,
+                HirExpr::ArrayAlloc(Box::new(HirExpr::Var(length_name.clone())), output_type),
+            ),
+            HirStmt::Let(
+                index_name.clone(),
+                HirType::F64,
+                HirExpr::Lit(HirLit::F64(0.0)),
+            ),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(HirExpr::Var(length_name)),
+                ),
+                vec![
+                    HirStmt::Let(
+                        element_name,
+                        element_type.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(receiver_name.clone())),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            element_type,
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(HirExpr::Var(result_name.clone())),
+                        Box::new(HirExpr::Var(index_name.clone())),
+                        Box::new(callback_call),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(result_name))),
+        ]);
+        let mut bindings = vec![
+            (receiver_name, array_type, receiver),
+            (callback_name, callback_type, callback),
+        ];
+        if let Some(this_arg) = this_arg {
+            let ty = self.infer_expr_type(&this_arg)?;
+            let name = format!("__thaw_map_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            bindings.push((name, ty, this_arg));
+        }
+        self.wrap_call_argument_bindings(body, &bindings)
+    }
+
     fn lower_array_reduce(
         &mut self,
         receiver: HirExpr,
@@ -7008,6 +7157,41 @@ impl<'a> FnLowerer<'a> {
                         callback,
                         initial,
                         property.sym == *"reduceRight",
+                    );
+                }
+                if property.sym == *"map" {
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.map()` expects a callback and optional thisArg".into()
+                        );
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array mapper spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "`.map()` requires a homogeneous array, got {array_type:?}"
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let callback = self.lower_array_mapping_callback(
+                        &call.args[0].expr,
+                        &element_type,
+                        &array_type,
+                    )?;
+                    let this_arg = call
+                        .args
+                        .get(1)
+                        .map(|argument| self.lower_expr(&argument.expr))
+                        .transpose()?;
+                    return self.lower_array_map(
+                        receiver,
+                        array_type,
+                        element_type,
+                        callback,
+                        this_arg,
                     );
                 }
                 if property.sym == *"forEach" {

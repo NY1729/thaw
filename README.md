@@ -469,6 +469,10 @@ The workspace crates have narrow responsibilities:
   captures, named callbacks, ordered receiver/initial-value evaluation and
   awaited receivers. Calls without an initial value seed from the appropriate
   endpoint and throw on empty arrays, matching JavaScript behavior
+- Homogeneous native arrays implement `.map()` through runtime-length,
+  arena-owned typed allocation. Mappers receive zero to three typed arguments
+  and may change the element type; named callbacks, captures, empty arrays,
+  nested aggregates, optional `thisArg` ordering and awaited receivers work
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
