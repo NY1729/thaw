@@ -715,6 +715,8 @@ The workspace crates have narrow responsibilities:
   TypedArray/DataView views while preserving external finalizer ownership.
   Async contexts validate resource names and Env ownership and are released by
   the matching `napi_async_destroy` call.
+  Object seal/freeze integrity levels apply consistently to named properties,
+  generic property keys, deletion, functions and array elements.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
