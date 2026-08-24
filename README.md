@@ -744,6 +744,8 @@ The workspace crates have narrow responsibilities:
   ranges and intern UTF-8, Latin-1 and UTF-16 optimized property keys.
   External Latin-1 and UTF-16 strings use the host's copied representation,
   report `copied=true` and immediately honor their native finalizers.
+  Experimental Node 22 SharedArrayBuffer creation and detection provide
+  non-detachable shared backing for TypedArray, DataView and Buffer views.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
