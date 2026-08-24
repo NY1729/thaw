@@ -2614,6 +2614,9 @@ pub unsafe extern "C" fn napi_create_bigint_words(
     if out.is_null() || sign_bit != 0 && sign_bit != 1 || (word_count != 0 && words.is_null()) {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let mut magnitude = if word_count == 0 {
         Vec::new()
     } else {
@@ -2625,9 +2628,6 @@ pub unsafe extern "C" fn napi_create_bigint_words(
     if magnitude.is_empty() {
         magnitude.push(0);
     }
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     let value = env.alloc(Value::BigInt {
         negative: sign_bit == 1 && magnitude != [0],
         words: magnitude,
@@ -2725,18 +2725,18 @@ pub unsafe extern "C" fn napi_create_string_utf8(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    if value.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
         std::slice::from_raw_parts(value.cast(), length)
     };
     let string = String::from_utf8_lossy(bytes).into_owned();
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     let value = env.alloc(Value::String(string));
     write_value(out, value)
 }
@@ -2748,18 +2748,18 @@ pub unsafe extern "C" fn napi_create_string_latin1(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    if value.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let string: String = bytes.iter().map(|byte| char::from(*byte)).collect();
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     let value = env.alloc(Value::String(string));
     write_value(out, value)
 }
@@ -2771,9 +2771,12 @@ pub unsafe extern "C" fn napi_create_string_utf16(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    if value.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let length = if length == NAPI_AUTO_LENGTH {
         let mut length = 0;
         while *value.add(length) != 0 {
@@ -2784,9 +2787,6 @@ pub unsafe extern "C" fn napi_create_string_utf16(
         length
     };
     let string = String::from_utf16_lossy(std::slice::from_raw_parts(value, length));
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     let value = env.alloc(Value::String(string));
     write_value(out, value)
 }
@@ -2807,18 +2807,18 @@ pub unsafe extern "C" fn node_api_create_property_key_utf8(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    if value.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let key = String::from_utf8_lossy(bytes).into_owned();
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     write_value(out, intern_property_key(env, key))
 }
 
@@ -2829,18 +2829,18 @@ pub unsafe extern "C" fn node_api_create_property_key_latin1(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    if value.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(value).to_bytes()
     } else {
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let key = bytes.iter().map(|byte| char::from(*byte)).collect();
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     write_value(out, intern_property_key(env, key))
 }
 
@@ -2851,9 +2851,12 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    if value.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let length = if length == NAPI_AUTO_LENGTH {
         let mut length = 0;
         while *value.add(length) != 0 {
@@ -2864,9 +2867,6 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
         length
     };
     let key = String::from_utf16_lossy(std::slice::from_raw_parts(value, length));
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     write_value(out, intern_property_key(env, key))
 }
 
@@ -2952,9 +2952,12 @@ pub unsafe extern "C" fn node_api_symbol_for(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if description.is_null() || out.is_null() {
+    if description.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let bytes = if length == NAPI_AUTO_LENGTH {
         CStr::from_ptr(description).to_bytes()
     } else {
@@ -2967,9 +2970,6 @@ pub unsafe extern "C" fn node_api_symbol_for(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entry(description.clone())
         .or_insert_with(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
     let value = if let Some(value) = env.symbols.get(&id).copied() {
         value
     } else {
@@ -3064,6 +3064,9 @@ pub unsafe extern "C" fn napi_create_function(
     if out.is_null() {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env) = env_for_value_output(env, out) else {
+        return NAPI_INVALID_ARG;
+    };
     let function_name = if name.is_null() {
         String::new()
     } else {
@@ -3073,9 +3076,6 @@ pub unsafe extern "C" fn napi_create_function(
             std::slice::from_raw_parts(name.cast::<u8>(), length)
         };
         String::from_utf8_lossy(bytes).into_owned()
-    };
-    let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Function(Function {
         callback,
@@ -7226,6 +7226,10 @@ mod tests {
 
     #[test]
     fn value_creation_rejects_null_outputs_before_mutating_the_environment() {
+        unsafe extern "C" fn noop_callback(_env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+            ptr::null_mut()
+        }
+
         unsafe {
             let mut env = Env::new();
             let env_ptr: NapiEnv = &mut env;
@@ -7322,6 +7326,46 @@ mod tests {
             );
             assert!(symbol.is_null());
             assert_eq!(env.values.len(), after_backing);
+
+            let mut output = ptr::null_mut();
+            let invalid_bytes = ptr::dangling::<c_char>();
+            let invalid_utf16 = ptr::dangling::<u16>();
+            let invalid_words = ptr::dangling::<u64>();
+            assert_eq!(
+                napi_create_string_utf8(ptr::null_mut(), invalid_bytes, 1, &mut output),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_string_latin1(ptr::null_mut(), invalid_bytes, 1, &mut output),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_string_utf16(ptr::null_mut(), invalid_utf16, 1, &mut output),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                node_api_create_property_key_utf8(ptr::null_mut(), invalid_bytes, 1, &mut output),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                node_api_symbol_for(ptr::null_mut(), invalid_bytes, 1, &mut output),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_bigint_words(ptr::null_mut(), 0, 1, invalid_words, &mut output),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_function(
+                    ptr::null_mut(),
+                    invalid_bytes,
+                    1,
+                    Some(noop_callback),
+                    ptr::null_mut(),
+                    &mut output
+                ),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
