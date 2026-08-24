@@ -2399,6 +2399,45 @@ impl<'a> FnLowerer<'a> {
                 Ok(value)
             }
 
+            Expr::Cond(conditional) => {
+                let test = self.lower_expr(&conditional.test)?;
+                self.expect_type(&HirType::Bool, &test, "conditional expression test")?;
+                let consequent = self.lower_expr(&conditional.cons)?;
+                let alternate = self.lower_expr(&conditional.alt)?;
+                let consequent_type = self.infer_expr_type(&consequent)?;
+                let alternate_type = self.infer_expr_type(&alternate)?;
+                if consequent_type != alternate_type {
+                    return Err(format!(
+                        "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"
+                    ));
+                }
+                let body = HirExpr::Block(vec![HirStmt::If(
+                    test,
+                    vec![HirStmt::Return(Some(consequent))],
+                    vec![HirStmt::Return(Some(alternate))],
+                )]);
+                let mut referenced = BTreeSet::new();
+                collect_referenced_bindings(&body, &mut referenced);
+                let captures = referenced
+                    .into_iter()
+                    .filter_map(|name| {
+                        self.scope
+                            .get(&name)
+                            .cloned()
+                            .map(|ty| HirParam { name, ty })
+                    })
+                    .collect();
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        captures,
+                        Vec::new(),
+                        consequent_type,
+                        Box::new(body),
+                    )),
+                    Vec::new(),
+                ))
+            }
+
             Expr::Call(call) => self.lower_call(call),
 
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
@@ -4559,6 +4598,31 @@ mod tests {
                     if matches!(object.as_ref(), HirExpr::Var(name) if name == &params[0].name)
                         && field == "x")
                     && fields[1] == ("label".into(), HirExpr::Lit(HirLit::Str("point".into())))
+        ));
+    }
+
+    #[test]
+    fn lowers_conditional_expressions_with_matching_native_types() {
+        let program = lower(
+            r#"function main(): void {
+                const chooseLeft: boolean = true;
+                const value: number = chooseLeft ? 1 : 2;
+                console.log(value);
+            }"#,
+        );
+        let HirStmt::Let(_, HirType::F64, HirExpr::Call(lambda, arguments)) =
+            &program.functions[0].body[1]
+        else {
+            panic!("expected conditional expression closure call");
+        };
+        assert!(arguments.is_empty());
+        assert!(matches!(
+            lambda.as_ref(),
+            HirExpr::Lambda(captures, params, HirType::F64, body)
+                if captures.len() == 1 && captures[0].name == "chooseLeft"
+                    && params.is_empty()
+                    && matches!(body.as_ref(), HirExpr::Block(stmts)
+                        if matches!(stmts.as_slice(), [HirStmt::If(_, _, _)]))
         ));
     }
 

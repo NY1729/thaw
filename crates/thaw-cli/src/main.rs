@@ -4432,7 +4432,7 @@ mod tests {
 
     #[test]
     fn selects_object_overloads_from_structural_property_types() {
-        let source = r#"function makeNumeric(): { value: number } { return { value: 11 }; } const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" }); box.configure({ ...numeric }); box.configure({ ...numeric, value: "override" }); box.configure({ ...{ value: 9 } }); box.configure({ ...makeNumeric() });"#;
+        let source = r#"function makeNumeric(): { value: number } { return { value: 11 }; } const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; const choose = true; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" }); box.configure({ ...numeric }); box.configure({ ...numeric, value: "override" }); box.configure({ ...{ value: 9 } }); box.configure({ ...makeNumeric() }); box.configure({ ...(choose ? makeNumeric() : numeric) });"#;
         let rewritten = rewrite_external_class_methods(
             source,
             &[("addon".into(), "NativeBox".into())],
@@ -4470,6 +4470,8 @@ mod tests {
         assert!(rewritten.contains("__configure_string(box, { ...numeric, value: \"override\" })"));
         assert!(rewritten.contains("__configure_number(box, { ...{ value: 9 } })"));
         assert!(rewritten.contains("__configure_number(box, { ...makeNumeric() })"));
+        assert!(rewritten
+            .contains("__configure_number(box, { ...(choose ? makeNumeric() : numeric) })"));
     }
 
     #[test]
