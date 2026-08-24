@@ -184,7 +184,8 @@ The workspace crates have narrow responsibilities:
   C/fast/cold LLVM calling conventions
 - QuickJS fallback for signatures which cannot use the C ABI path
 - Parser-backed CommonJS/ESM dependency discovery and bundling, including
-  literal and same-package runtime dynamic imports, lexical live named/default
+  literal and same-package runtime dynamic imports, constant-folded external
+  dynamic imports, lexical live named/default
   bindings with shadowing, live namespace/re-export bindings, synchronous
   cycles, acyclic top-level await, JSON import attributes, package `imports`,
   conditional exact/wildcard `exports`, selected Node built-in polyfills,
@@ -656,8 +657,9 @@ The workspace crates have narrow responsibilities:
   importing an ambiguous name is a source-located error. Top-level-await
   cycles are explicit errors. `import.meta.url` is replaced per source module
   with its percent-encoded absolute `file://` URL; other `import.meta`
-  properties, non-JSON attributes and runtime-computed external package
-  imports remain outside the supported subset
+  properties, non-JSON attributes and genuinely runtime-computed external
+  package imports remain outside the supported subset. Expression-free
+  templates, parentheses and string-only concatenations are folded and bundled
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit
