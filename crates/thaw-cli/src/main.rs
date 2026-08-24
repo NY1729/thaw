@@ -393,6 +393,10 @@ type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::Hi
 type ClassGetterRewrite = (String, String, String);
 /// `(class, property, helper, value_type)` for an instance setter.
 type ClassSetterRewrite = (String, String, String, thaw_hir::HirType);
+/// `(qualifier, class, property, helper)` for a static getter.
+type StaticClassGetterRewrite = (String, String, String, String);
+/// `(qualifier, class, property, helper, value_type)` for a static setter.
+type StaticClassSetterRewrite = (String, String, String, String, thaw_hir::HirType);
 /// `(qualifier, class, method, helper, argument_count, has_callback, parameter_types)`.
 type StaticClassMethodRewrite = (
     String,
@@ -585,6 +589,8 @@ type RegistryShims = (
     Vec<StaticClassMethodRewrite>,
     Vec<ClassGetterRewrite>,
     Vec<ClassSetterRewrite>,
+    Vec<StaticClassGetterRewrite>,
+    Vec<StaticClassSetterRewrite>,
     ExternalExports,
 );
 
@@ -791,6 +797,8 @@ fn generate_registry_shims(
     let mut static_class_method_rewrites = Vec::new();
     let mut class_getter_rewrites = Vec::new();
     let mut class_setter_rewrites = Vec::new();
+    let mut static_class_getter_rewrites = Vec::new();
+    let mut static_class_setter_rewrites = Vec::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -905,6 +913,71 @@ fn generate_registry_shims(
                         "declare function {symbol}(receiver: JsValue, value: {rendered_type}): {rendered_type};\n"
                     ));
                     class_setter_rewrites.push((
+                        class.name.clone(),
+                        setter.name.clone(),
+                        symbol,
+                        value_type.clone(),
+                    ));
+                }
+                for getter in class.methods.iter().filter(|method| {
+                    method.is_static
+                        && method.kind == thaw_bridge::DtsMethodKind::Getter
+                        && method.params.is_empty()
+                        && supported_class_method_return(&method.ret)
+                }) {
+                    let thaw_bridge::DtsType::Native(return_type) = &getter.ret else {
+                        continue;
+                    };
+                    let Some(return_type) = render_dynamic_type(return_type) else {
+                        continue;
+                    };
+                    let runtime_key = format!(
+                        "$staticgetter${}{}",
+                        class.name,
+                        format_args!("${}", getter.name)
+                    );
+                    let encoded = runtime_key
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    let symbol = format!("__thaw_typed_napi_{encoded}");
+                    shim.push_str(&format!("declare function {symbol}(): {return_type};\n"));
+                    static_class_getter_rewrites.push((
+                        qualifier_identifier(&pkg.name).to_string(),
+                        class.name.clone(),
+                        getter.name.clone(),
+                        symbol,
+                    ));
+                }
+                for setter in class.methods.iter().filter(|method| {
+                    method.is_static
+                        && method.kind == thaw_bridge::DtsMethodKind::Setter
+                        && method.params.len() == 1
+                        && supported_class_method_param(&method.params[0].1, 0, 1)
+                }) {
+                    let thaw_bridge::DtsType::Native(value_type) = &setter.params[0].1 else {
+                        continue;
+                    };
+                    let Some(rendered_type) = render_dynamic_type(value_type) else {
+                        continue;
+                    };
+                    let runtime_key = format!(
+                        "$staticsetter${}{}",
+                        class.name,
+                        format_args!("${}", setter.name)
+                    );
+                    let encoded = runtime_key
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    let symbol = format!("__thaw_typed_napi_{encoded}");
+                    shim.push_str(&format!(
+                        "declare function {symbol}(value: {rendered_type}): {rendered_type};\n"
+                    ));
+                    static_class_setter_rewrites.push((
+                        qualifier_identifier(&pkg.name).to_string(),
                         class.name.clone(),
                         setter.name.clone(),
                         symbol,
@@ -1051,6 +1124,8 @@ fn generate_registry_shims(
         static_class_method_rewrites,
         class_getter_rewrites,
         class_setter_rewrites,
+        static_class_getter_rewrites,
+        static_class_setter_rewrites,
         external_exports,
     ))
 }
@@ -1061,9 +1136,10 @@ fn rewrite_external_class_methods(
     classes: &[ClassConstructorRewrite],
     methods: &[ClassMethodRewrite],
 ) -> Result<String, String> {
-    rewrite_external_class_methods_with_static(source, classes, methods, &[], &[], &[])
+    rewrite_external_class_methods_with_static(source, classes, methods, &[], &[], &[], &[], &[])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_external_class_methods_with_static(
     source: &str,
     classes: &[ClassConstructorRewrite],
@@ -1071,6 +1147,8 @@ fn rewrite_external_class_methods_with_static(
     static_methods: &[StaticClassMethodRewrite],
     getters: &[ClassGetterRewrite],
     setters: &[ClassSetterRewrite],
+    static_getters: &[StaticClassGetterRewrite],
+    static_setters: &[StaticClassSetterRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -1081,7 +1159,13 @@ fn rewrite_external_class_methods_with_static(
     };
     use thaw_parser::common::Spanned;
 
-    if methods.is_empty() && static_methods.is_empty() && getters.is_empty() && setters.is_empty() {
+    if methods.is_empty()
+        && static_methods.is_empty()
+        && getters.is_empty()
+        && setters.is_empty()
+        && static_getters.is_empty()
+        && static_setters.is_empty()
+    {
         return Ok(source.to_string());
     }
 
@@ -1177,6 +1261,19 @@ fn rewrite_external_class_methods_with_static(
             Expr::Paren(parenthesized) => instance_receiver(&parenthesized.expr),
             Expr::TsAs(assertion) => instance_receiver(&assertion.expr),
             Expr::TsTypeAssertion(assertion) => instance_receiver(&assertion.expr),
+            _ => None,
+        }
+    }
+
+    fn static_class_receiver(expression: &Expr) -> Option<(Option<String>, String)> {
+        match expression {
+            Expr::Ident(class) => Some((None, class.sym.to_string())),
+            Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                (Expr::Ident(qualifier), MemberProp::Ident(class)) => {
+                    Some((Some(qualifier.sym.to_string()), class.sym.to_string()))
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1627,6 +1724,8 @@ fn rewrite_external_class_methods_with_static(
         static_methods: &'a [StaticClassMethodRewrite],
         getters: &'a [ClassGetterRewrite],
         setters: &'a [ClassSetterRewrite],
+        static_getters: &'a [StaticClassGetterRewrite],
+        static_setters: &'a [StaticClassSetterRewrite],
         variables: std::collections::HashMap<String, String>,
         value_types: std::collections::HashMap<String, thaw_hir::HirType>,
         function_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
@@ -1667,6 +1766,24 @@ fn rewrite_external_class_methods_with_static(
 
     impl Visit for Finder<'_> {
         fn visit_member_expr(&mut self, member: &thaw_parser::ast::MemberExpr) {
+            if let (Some((qualifier, class)), MemberProp::Ident(property)) =
+                (static_class_receiver(&member.obj), &member.prop)
+            {
+                if let Some((_, _, _, helper)) = self.static_getters.iter().find(
+                    |(candidate_qualifier, candidate_class, candidate_property, _)| {
+                        candidate_class == &class
+                            && candidate_property == property.sym.as_str()
+                            && qualifier
+                                .as_ref()
+                                .is_none_or(|qualifier| candidate_qualifier == qualifier)
+                    },
+                ) {
+                    let span = member.span();
+                    self.edits
+                        .push((span.lo.0, span.hi.0, format!("{helper}()")));
+                    return;
+                }
+            }
             if let (Some((receiver_key, receiver_source)), MemberProp::Ident(property)) =
                 (instance_receiver(&member.obj), &member.prop)
             {
@@ -1927,6 +2044,48 @@ fn rewrite_external_class_methods_with_static(
             let mut setter_rewritten = false;
             if assignment.op == AssignOp::Assign {
                 if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assignment.left {
+                    if let (Some((qualifier, class)), Some(property)) = (
+                        static_class_receiver(&member.obj),
+                        member_property_name(&member.prop),
+                    ) {
+                        if let Some((_, _, _, helper, _)) = self.static_setters.iter().find(
+                            |(
+                                candidate_qualifier,
+                                candidate_class,
+                                candidate_property,
+                                _,
+                                declared,
+                            )| {
+                                candidate_class == &class
+                                    && candidate_property == &property
+                                    && qualifier
+                                        .as_ref()
+                                        .is_none_or(|qualifier| candidate_qualifier == qualifier)
+                                    && source_expr_type(
+                                        &assignment.right,
+                                        &self.value_types,
+                                        self.function_types,
+                                    )
+                                    .is_none_or(|actual| {
+                                        overload_type_score(declared, &actual).is_some()
+                                    })
+                            },
+                        ) {
+                            let member_span = member.span();
+                            let right_span = assignment.right.span();
+                            let assignment_span = assignment.span();
+                            self.edits
+                                .push((member_span.lo.0, member_span.hi.0, helper.clone()));
+                            self.edits
+                                .push((member_span.hi.0, right_span.lo.0, "(".into()));
+                            self.edits.push((
+                                assignment_span.hi.0,
+                                assignment_span.hi.0,
+                                ")".into(),
+                            ));
+                            setter_rewritten = true;
+                        }
+                    }
                     if let (Some((receiver_key, receiver_source)), Some(property)) = (
                         instance_receiver(&member.obj),
                         member_property_name(&member.prop),
@@ -2059,6 +2218,8 @@ fn rewrite_external_class_methods_with_static(
         static_methods,
         getters,
         setters,
+        static_getters,
+        static_setters,
         variables: std::collections::HashMap::new(),
         value_types: std::collections::HashMap::new(),
         function_types: &function_types.types,
@@ -2518,6 +2679,8 @@ fn build_with_link_mode(
         static_class_method_rewrites,
         class_getter_rewrites,
         class_setter_rewrites,
+        static_class_getter_rewrites,
+        static_class_setter_rewrites,
         external_exports,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
@@ -2538,6 +2701,8 @@ fn build_with_link_mode(
         &static_class_method_rewrites,
         &class_getter_rewrites,
         &class_setter_rewrites,
+        &static_class_getter_rewrites,
+        &static_class_setter_rewrites,
     )?;
     let user_source =
         rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;
@@ -3943,7 +4108,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); static twice(value: number): number; get value(): number; set value(value: number); get(): number; add(delta?: number): number; sum(...values: number[]): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
+            "export declare class NativeBox { constructor(value: number); static twice(value: number): number; static get version(): number; static set version(value: number); get value(): number; set value(value: number); get(): number; add(delta?: number): number; sum(...values: number[]): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -3957,6 +4122,7 @@ mod tests {
             typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
             typedef struct { const char* utf8name; napi_value name; napi_callback method; napi_callback getter; napi_callback setter; napi_value value; unsigned attributes; void* data; } napi_property_descriptor;
             typedef struct { double value; } native_box;
+            static double box_version = 1;
             extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
@@ -3992,6 +4158,15 @@ mod tests {
                 napi_unwrap(env, self, (void**)&box);
                 napi_get_value_double(env, arg, &value); box->value = value; return arg;
             }
+            static napi_value box_get_version(napi_env env, napi_callback_info info) {
+                napi_value result; (void)info;
+                napi_create_double(env, box_version, &result); return result;
+            }
+            static napi_value box_set_version(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg; double value;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_get_value_double(env, arg, &value); box_version = value; return arg;
+            }
             static napi_value box_add(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, self, result; native_box* box; double delta = 0;
                 napi_get_cb_info(env, info, &argc, &arg, &self, 0);
@@ -4018,15 +4193,16 @@ mod tests {
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value constructor;
-                napi_property_descriptor properties[6] = {
+                napi_property_descriptor properties[7] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
                     { "value", 0, 0, box_get, box_set, 0, 0, 0 },
                     { "add", 0, box_add, 0, 0, 0, 0, 0 },
                     { "sum", 0, box_sum, 0, 0, 0, 0, 0 },
                     { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 },
-                    { "twice", 0, box_twice, 0, 0, 0, 1024, 0 }
+                    { "twice", 0, box_twice, 0, 0, 0, 1024, 0 },
+                    { "version", 0, 0, box_get_version, box_set_version, 0, 1024, 0 }
                 };
-                napi_define_class(env, "NativeBox", 9, box_new, 0, 6, properties, &constructor);
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 7, properties, &constructor);
                 napi_set_named_property(env, exports, "NativeBox", constructor);
                 return exports;
             }
@@ -4045,7 +4221,7 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { console.log(NativeBox.twice(21)); const box: JsValue = new NativeBox(42); console.log(box.value); console.log(box.value = 10); console.log(box.value); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { console.log(NativeBox.twice(21)); console.log(NativeBox.version); console.log(NativeBox.version = 3); console.log(NativeBox.version); const box: JsValue = new NativeBox(42); console.log(box.value); console.log(box.value = 10); console.log(box.value); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -4058,7 +4234,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\n42\n10\n10\n10\n10\n18\n0\n6\n10\n1\n"
+            "42\n1\n3\n3\n42\n10\n10\n10\n10\n18\n0\n6\n10\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4706,6 +4882,8 @@ mod tests {
             ],
             &[],
             &[],
+            &[],
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -4727,6 +4905,8 @@ mod tests {
                 "value".into(),
                 "__thaw_get_value".into(),
             )],
+            &[],
+            &[],
             &[],
         )
         .unwrap();
@@ -4751,11 +4931,44 @@ mod tests {
                 "__thaw_set_value".into(),
                 thaw_hir::HirType::F64,
             )],
+            &[],
+            &[],
         )
         .unwrap();
         assert_eq!(
             rewritten,
             "const box = new NativeBox(42); const assigned: number = __thaw_set_value(box, 7);"
+        );
+    }
+
+    #[test]
+    fn rewrites_named_and_namespace_static_accessors() {
+        let source = "console.log(NativeBox.version); addon.NativeBox.version = 7; console.log(addon.NativeBox.version);";
+        let rewritten = rewrite_external_class_methods_with_static(
+            source,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[(
+                "addon".into(),
+                "NativeBox".into(),
+                "version".into(),
+                "__thaw_get_version".into(),
+            )],
+            &[(
+                "addon".into(),
+                "NativeBox".into(),
+                "version".into(),
+                "__thaw_set_version".into(),
+                thaw_hir::HirType::F64,
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "console.log(__thaw_get_version()); __thaw_set_version(7); console.log(__thaw_get_version());"
         );
     }
 

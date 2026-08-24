@@ -453,8 +453,10 @@ rewritten. Typed instance getters use a dedicated N-API property-result ABI and
 the same native return conversion surface; getter access through tracked aliases
 and object properties is rewritten as well. Typed instance setters marshal the
 assigned native value through a property-result ABI, preserve the assignment
-expression's value, and use the same tracked receiver paths. Static accessors
-and private non-default event loops remain explicit gaps.
+expression's value, and use the same tracked receiver paths. Typed static
+getters and setters reuse the property-result ABI with the exported constructor
+as receiver, including named and namespace syntax. Private non-default event
+loops remain an explicit gap.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
