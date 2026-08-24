@@ -670,7 +670,9 @@ The workspace crates have narrow responsibilities:
   including exact and file-backed wildcard entries from each dependency's
   conditional `exports` map. Dependencies without an `exports` field also
   expose their installed JS/JSON deep subpaths, including extensionless and
-  directory-index forms, to runtime-computed imports.
+  directory-index forms, to runtime-computed imports. Runtime query/fragment
+  suffixes resolve through the same candidate map while retaining distinct
+  module-cache identities.
   Module specifier queries and fragments are excluded from filesystem
   resolution but retained in cache keys, so repeated imports of the same URL
   share one namespace while distinct suffixes create distinct module instances.
