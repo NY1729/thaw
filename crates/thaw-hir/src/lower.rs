@@ -1709,6 +1709,50 @@ fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, guard: &HirStmt) -
     out
 }
 
+/// Rewrites breaks that target a source switch into an assignment selecting
+/// the synthetic exit state. Breaks inside nested loops retain their loop
+/// target; nested switches have already consumed their own breaks while
+/// lowering.
+fn rewrite_switch_case_stmts(
+    mut stmts: Vec<HirStmt>,
+    selected: &str,
+    case_index: usize,
+    exit: &HirStmt,
+) -> Vec<HirStmt> {
+    if stmts.is_empty() {
+        return Vec::new();
+    }
+    let first = stmts.remove(0);
+    let rewritten = match first {
+        HirStmt::Break => exit.clone(),
+        HirStmt::If(cond, then_body, else_body) => HirStmt::If(
+            cond,
+            rewrite_switch_case_stmts(then_body, selected, case_index, exit),
+            rewrite_switch_case_stmts(else_body, selected, case_index, exit),
+        ),
+        HirStmt::Try(body, catch_name, catch_body) => HirStmt::Try(
+            rewrite_switch_case_stmts(body, selected, case_index, exit),
+            catch_name,
+            rewrite_switch_case_stmts(catch_body, selected, case_index, exit),
+        ),
+        other => other,
+    };
+    let mut out = vec![rewritten];
+    let rest = rewrite_switch_case_stmts(stmts, selected, case_index, exit);
+    if !rest.is_empty() {
+        out.push(HirStmt::If(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(selected.to_string())),
+                Box::new(HirExpr::Lit(HirLit::F64(case_index as f64))),
+            ),
+            rest,
+            Vec::new(),
+        ));
+    }
+    out
+}
+
 fn compound_op(op: AssignOp) -> Option<BinOp> {
     match op {
         AssignOp::AddAssign => Some(BinOp::Add),
@@ -2115,6 +2159,112 @@ impl<'a> FnLowerer<'a> {
                             body,
                         ),
                     ])
+                })();
+                self.bindings = saved;
+                self.scope = saved_scope;
+                lowered
+            }
+
+            Stmt::Switch(switch_stmt) => {
+                let saved = self.bindings.clone();
+                let saved_scope = self.scope.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let discriminant = self.lower_expr(&switch_stmt.discriminant)?;
+                    let discriminant_type = self.infer_expr_type(&discriminant)?;
+                    let value_name = format!("__thaw_switch_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(value_name.clone(), discriminant_type.clone());
+                    let selected_name = format!("__thaw_switch_selected_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(selected_name.clone(), HirType::F64);
+                    let none = HirExpr::Lit(HirLit::F64(-1.0));
+                    let case_count = switch_stmt.cases.len();
+                    let default_index = switch_stmt
+                        .cases
+                        .iter()
+                        .position(|case| case.test.is_none())
+                        .unwrap_or(case_count);
+                    let mut out = vec![
+                        HirStmt::Let(value_name.clone(), discriminant_type.clone(), discriminant),
+                        HirStmt::Let(selected_name.clone(), HirType::F64, none.clone()),
+                    ];
+
+                    for (index, case) in switch_stmt.cases.iter().enumerate() {
+                        let Some(test) = &case.test else {
+                            continue;
+                        };
+                        let test = self.lower_expr(test)?;
+                        self.expect_type(&discriminant_type, &test, "switch case")?;
+                        out.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(selected_name.clone())),
+                                Box::new(none.clone()),
+                            ),
+                            vec![HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::Var(value_name.clone())),
+                                    Box::new(test),
+                                ),
+                                vec![HirStmt::Expr(HirExpr::Assign(
+                                    selected_name.clone(),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                ))],
+                                Vec::new(),
+                            )],
+                            Vec::new(),
+                        ));
+                    }
+                    out.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::Var(selected_name.clone())),
+                            Box::new(none),
+                        ),
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            selected_name.clone(),
+                            Box::new(HirExpr::Lit(HirLit::F64(default_index as f64))),
+                        ))],
+                        Vec::new(),
+                    ));
+
+                    let exit = HirStmt::Expr(HirExpr::Assign(
+                        selected_name.clone(),
+                        Box::new(HirExpr::Lit(HirLit::F64(case_count as f64))),
+                    ));
+                    for (index, case) in switch_stmt.cases.iter().enumerate() {
+                        let mut body = self.lower_stmts(&case.cons)?;
+                        body = rewrite_switch_case_stmts(
+                            body,
+                            &selected_name,
+                            index,
+                            &exit,
+                        );
+                        body.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(selected_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            vec![HirStmt::Expr(HirExpr::Assign(
+                                selected_name.clone(),
+                                Box::new(HirExpr::Lit(HirLit::F64((index + 1) as f64))),
+                            ))],
+                            Vec::new(),
+                        ));
+                        out.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(selected_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            body,
+                            Vec::new(),
+                        ));
+                    }
+                    Ok(out)
                 })();
                 self.bindings = saved;
                 self.scope = saved_scope;
@@ -4642,6 +4792,39 @@ mod tests {
                 HirType::F64,
                 HirExpr::AwaitPromise(indexed, HirType::F64)
             ) if matches!(indexed.as_ref(), HirExpr::TypedIndex(_, _, HirType::Promise(inner)) if inner.as_ref() == &HirType::F64)
+        ));
+    }
+
+    #[test]
+    fn lowers_switch_to_selected_case_state_without_switch_breaks() {
+        fn contains_break(stmts: &[HirStmt]) -> bool {
+            stmts.iter().any(|stmt| match stmt {
+                HirStmt::Break => true,
+                HirStmt::If(_, then_body, else_body) => {
+                    contains_break(then_body) || contains_break(else_body)
+                }
+                HirStmt::Try(body, _, catch_body) => {
+                    contains_break(body) || contains_break(catch_body)
+                }
+                HirStmt::While(_, _) => false,
+                _ => false,
+            })
+        }
+        let program = lower(
+            r#"function main(): void {
+                switch (2) {
+                    case 1: console.log("one"); break;
+                    default: console.log("default");
+                    case 2: console.log("two"); break;
+                }
+            }"#,
+        );
+        assert!(program.functions[0].body.len() > 4);
+        assert!(!contains_break(&program.functions[0].body));
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))
+                if name.starts_with("__thaw_switch_value_")
         ));
     }
 

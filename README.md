@@ -556,7 +556,9 @@ accepts synchronous typed arrays, and routes rejection to async `try/catch`.
 `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
-on every continuing path. Switch-flow joins remain an explicit gap.
+on every continuing path. `switch` evaluates its discriminant once, short-circuits
+case tests after the first match, and preserves default placement, fallthrough,
+break, case-local bindings, and awaits in case tests/bodies.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
