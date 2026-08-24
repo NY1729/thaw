@@ -814,6 +814,7 @@ unsafe fn env_for_value_output<'a>(
     out: *mut NapiValue,
 ) -> Result<&'a mut Env, NapiStatus> {
     if out.is_null() {
+        record_status(env, NAPI_INVALID_ARG);
         Err(NAPI_INVALID_ARG)
     } else {
         env_mut(env)
@@ -826,15 +827,20 @@ unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
 
 unsafe fn value_belongs_to_environment(env: NapiEnv, value: NapiValue) -> bool {
     if value.is_null() {
+        record_status(env, NAPI_INVALID_ARG);
         return false;
     }
-    env.as_ref().is_some_and(|env| env.values.contains(&value))
+    let belongs = env.as_ref().is_some_and(|env| env.values.contains(&value))
         || HOST.with(|host| {
             host.borrow()
                 .module_envs
                 .iter()
                 .any(|module_env| module_env.values.contains(&value))
-        })
+        });
+    if !belongs {
+        record_status(env, NAPI_INVALID_ARG);
+    }
+    belongs
 }
 
 fn is_object_value(value: &Value) -> bool {
@@ -8942,6 +8948,25 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!((*other_info).error_code, NAPI_OK);
+
+            let foreign = other_env.alloc(Value::Object(HashMap::new()));
+            let mut value_type = 0;
+            assert_eq!(
+                napi_typeof(env_ptr, foreign, &mut value_type),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+
+            env.last_error_info.error_code = NAPI_OK;
+            let values_before = env.values.len();
+            assert_eq!(
+                napi_create_object(env_ptr, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+            assert_eq!(env.values.len(), values_before);
         }
     }
 
