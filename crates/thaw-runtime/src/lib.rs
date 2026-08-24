@@ -651,6 +651,105 @@ pub unsafe extern "C" fn thaw_bool_array_includes(
     (unsafe { bool_array_search(array, needle, from_index) } >= 0.0).into()
 }
 
+fn clamped_string_position(position: f64, length: usize) -> usize {
+    if position.is_nan() || position == f64::NEG_INFINITY {
+        0
+    } else if position == f64::INFINITY {
+        length
+    } else {
+        position.trunc().max(0.0).min(length as f64) as usize
+    }
+}
+
+unsafe fn utf16_strings(
+    value: *const c_char,
+    search: *const c_char,
+) -> Option<(Vec<u16>, Vec<u16>)> {
+    if value.is_null() || search.is_null() {
+        return None;
+    }
+    let value = unsafe { CStr::from_ptr(value) }
+        .to_string_lossy()
+        .encode_utf16()
+        .collect();
+    let search = unsafe { CStr::from_ptr(search) }
+        .to_string_lossy()
+        .encode_utf16()
+        .collect();
+    Some((value, search))
+}
+
+#[no_mangle]
+/// Searches strings by JavaScript UTF-16 code-unit position.
+///
+/// # Safety
+///
+/// Both pointers must reference valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_string_index_of(
+    value: *const c_char,
+    search: *const c_char,
+    position: f64,
+) -> f64 {
+    let Some((value, search)) = (unsafe { utf16_strings(value, search) }) else {
+        return -1.0;
+    };
+    let start = clamped_string_position(position, value.len());
+    if search.is_empty() {
+        return start as f64;
+    }
+    value[start..]
+        .windows(search.len())
+        .position(|window| window == search)
+        .map_or(-1.0, |index| (start + index) as f64)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// Both pointers must reference valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_string_includes(
+    value: *const c_char,
+    search: *const c_char,
+    position: f64,
+) -> u8 {
+    (unsafe { thaw_string_index_of(value, search, position) } >= 0.0).into()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// Both pointers must reference valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_string_starts_with(
+    value: *const c_char,
+    search: *const c_char,
+    position: f64,
+) -> u8 {
+    let Some((value, search)) = (unsafe { utf16_strings(value, search) }) else {
+        return 0;
+    };
+    let start = clamped_string_position(position, value.len());
+    (value.get(start..start.saturating_add(search.len())) == Some(search.as_slice())).into()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// Both pointers must reference valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_string_ends_with(
+    value: *const c_char,
+    search: *const c_char,
+    end_position: f64,
+) -> u8 {
+    let Some((value, search)) = (unsafe { utf16_strings(value, search) }) else {
+        return 0;
+    };
+    let end = clamped_string_position(end_position, value.len());
+    if search.len() > end {
+        return 0;
+    }
+    (value.get(end - search.len()..end) == Some(search.as_slice())).into()
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 

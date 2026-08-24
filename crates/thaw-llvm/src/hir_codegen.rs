@@ -586,6 +586,23 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, function_type, Some(Linkage::External));
         }
+        for name in [
+            "thaw_string_includes",
+            "thaw_string_starts_with",
+            "thaw_string_ends_with",
+        ] {
+            let function_type =
+                i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false);
+            self.module
+                .add_function(name, function_type, Some(Linkage::External));
+        }
+        let string_index_of_type =
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false);
+        self.module.add_function(
+            "thaw_string_index_of",
+            string_index_of_type,
+            Some(Linkage::External),
+        );
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -7482,6 +7499,44 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
+            "__thaw_string_index_of"
+            | "__thaw_string_includes"
+            | "__thaw_string_starts_with"
+            | "__thaw_string_ends_with" => {
+                if args.len() != 3 {
+                    return Err("string search expects three operands".to_string());
+                }
+                let mut arguments = Vec::with_capacity(3);
+                for argument in args {
+                    arguments.push(self.compile_expr(argument)?.into());
+                }
+                let runtime = name.trim_start_matches("__thaw_");
+                let runtime = format!("thaw_{runtime}");
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &arguments,
+                        "string_search",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string search returned no value".to_string())?;
+                if name != "__thaw_string_index_of" {
+                    return self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            result.into_int_value(),
+                            self.context.i8_type().const_zero(),
+                            "string_search_bool",
+                        )
+                        .map(Into::into)
+                        .map_err(|error| error.to_string());
+                }
+                return Ok(result);
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
@@ -11196,6 +11251,48 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_search"),
             "1\n-1\ntrue\ntrue\n2\ntrue\n2\nfalse\nreceiver\nneedle\nstart\nfalse\nawaited-start\n3\n"
+        );
+    }
+
+    #[test]
+    fn compiles_utf16_string_search_methods() {
+        let source = r#"
+            function text(): string {
+                console.log("receiver");
+                return "abcabc";
+            }
+            function needle(): string {
+                console.log("needle");
+                return "bc";
+            }
+            function position(): string {
+                console.log("position");
+                return "2";
+            }
+            async function delayedText(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-text");
+                return "thaw-runtime";
+            }
+            async function main(): Promise<void> {
+                const unicode: string = "😀a😀";
+                console.log(unicode.indexOf("a"));
+                console.log(unicode.indexOf("😀", 1));
+                console.log(unicode.includes("a", -20));
+                console.log(unicode.startsWith("a", 2));
+                console.log(unicode.endsWith("😀", 2));
+                console.log(unicode.endsWith("😀"));
+                console.log(unicode.indexOf("", 99));
+                console.log(unicode.startsWith("", 99));
+                console.log(unicode.endsWith("", -1));
+                console.log("123".includes(2));
+                console.log(text().indexOf(needle(), position()));
+                console.log((await delayedText()).startsWith("thaw"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_search"),
+            "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\nawaited-text\ntrue\n"
         );
     }
 
