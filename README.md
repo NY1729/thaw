@@ -372,6 +372,10 @@ The workspace crates have narrow responsibilities:
   conversion follows each value's native string form, so empty/single/multiple
   element arrays match JavaScript behavior; arguments may suspend and are
   evaluated once
+- `Math.abs`, `Math.floor`, `Math.ceil`, `Math.trunc` and `Math.sqrt` apply
+  JavaScript numeric coercion to native primitive/aggregate arguments and use
+  LLVM floating-point intrinsics, preserving `NaN`, infinities, signed zero,
+  single evaluation and awaited arguments
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

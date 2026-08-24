@@ -414,6 +414,20 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module
             .add_function("pow", pow_type, Some(Linkage::External));
+        let unary_f64_type = self
+            .context
+            .f64_type()
+            .fn_type(&[self.context.f64_type().into()], false);
+        for name in [
+            "llvm.fabs.f64",
+            "llvm.floor.f64",
+            "llvm.ceil.f64",
+            "llvm.trunc.f64",
+            "llvm.sqrt.f64",
+        ] {
+            self.module
+                .add_function(name, unary_f64_type, Some(Linkage::External));
+        }
 
         let arena_alloc_type = i8_ptr.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function(
@@ -7097,6 +7111,21 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
+            "__thaw_math_abs" => {
+                return self.compile_single_arg_call("llvm.fabs.f64", args, "Math.abs")
+            }
+            "__thaw_math_floor" => {
+                return self.compile_single_arg_call("llvm.floor.f64", args, "Math.floor")
+            }
+            "__thaw_math_ceil" => {
+                return self.compile_single_arg_call("llvm.ceil.f64", args, "Math.ceil")
+            }
+            "__thaw_math_trunc" => {
+                return self.compile_single_arg_call("llvm.trunc.f64", args, "Math.trunc")
+            }
+            "__thaw_math_sqrt" => {
+                return self.compile_single_arg_call("llvm.sqrt.f64", args, "Math.sqrt")
+            }
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10716,6 +10745,37 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "number_predicates"),
             "true\nstrict-predicate-evaluated\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n0\n7\ntrue\ntrue\nawaited-predicate\nfalse\n"
+        );
+    }
+
+    #[test]
+    fn compiles_unary_math_functions_with_native_coercion() {
+        let source = r#"
+            function text(value: string): string {
+                console.log("math-argument");
+                return value;
+            }
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited-math");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(Math.abs(text("-3.5")));
+                console.log(Math.floor(2.9));
+                console.log(Math.ceil(-2.9));
+                console.log(Math.trunc(-2.9));
+                console.log(Math.sqrt(true));
+                const one: number[] = [9];
+                console.log(Math.sqrt(one));
+                console.log(Number.isNaN(Math.sqrt(-1)));
+                console.log((1 / Math.trunc(-0.5)) < 0);
+                console.log(Math.floor(await delayed("4.8")));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "unary_math_functions"),
+            "math-argument\n3.5\n2\n-2\n-2\n1\n3\ntrue\ntrue\nawaited-math\n4\n"
         );
     }
 
