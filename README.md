@@ -616,9 +616,9 @@ The workspace crates have narrow responsibilities:
   owned error copying and exactly-once destruction
 - Metadata v2 copies owned native string results/errors into the request arena
   and invokes their configured destructors exactly once
-- Portable/packed object returns with flat scalar/string fields apply return
-  ownership to every string field, copying each into the arena and invoking
-  its configured destructor exactly once
+- Portable/packed object returns recursively rebuild nested objects and
+  `number[]` fields in the arena. Return ownership applies to every string and
+  array-data leaf, invoking its configured destructor exactly once per pointer
 
 ### Not yet compatible
 
@@ -703,10 +703,9 @@ The workspace crates have narrow responsibilities:
   from `.d.ts`; generated programs release all remaining handles at shutdown.
   Fine-grained escape-based early release remains future work
 - A fully general ABI-description format. Version 3 covers string layouts,
-  number-array and flat object-string result ownership, common LLVM calling
+  recursive object/string/number-array result ownership, common LLVM calling
   conventions and ordinary or packed aggregate returns, but explicit field
-  offsets/alignment, bitfields, other vararg types and recursively nested
-  aggregate ownership are not yet described
+  offsets/alignment, bitfields and other vararg types are not yet described
 - Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
   exports the complete Node-API v10 symbol surface used by the current headers,
   plus the implemented experimental SharedArrayBuffer/finalizer/module-file

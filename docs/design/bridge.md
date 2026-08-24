@@ -351,7 +351,7 @@ extern "C" fn thaw_dynamic_call(
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignment、
-  bitfield、number／boolean／string以外のvariadic、nested aggregate ownershipは未対応。
+  bitfield、number／boolean／string以外のvariadicは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -369,11 +369,13 @@ optional destructor. For non-null C strings, LLVM copies `strlen(ptr) + 1`
 bytes into `thaw_arena_alloc` before invoking the destructor. The copy therefore
 survives native deallocation and remains valid through return and catch/finally
 paths. Null pointers are preserved and never passed to a destructor. Ownership
-metadata supports `string`, `number[]`, and flat portable/packed object returns
-whose fields are scalars or strings; unsupported ownership combinations are
-compilation errors. Object ownership is applied independently to each string
-field, so every non-null pointer is copied and its optional destructor is
-called exactly once. A `number[]` return uses
+metadata supports `string`, `number[]`, and portable/packed object returns
+whose recursively nested fields are scalars, strings, `number[]`, or other
+supported objects; unsupported ownership combinations are compilation errors.
+Nested objects are rebuilt into arena-owned Thaw layouts. Object ownership is
+applied independently to each string and array-data leaf, so every non-null
+pointer is copied and its optional destructor is called exactly once. A
+`number[]` return uses
 `struct { double *data; int64_t len; }`; the data is copied into the arena and
 its configured destructor is invoked exactly once.
 
@@ -398,8 +400,7 @@ parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
 variadic declaration. Extra values are passed as C `double`, default-promoted
 `int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
 subject to the ordinary marshal rules. Explicit field offsets/alignment,
-bitfields, other vararg types and recursively nested aggregate ownership remain
-future extensions.
+bitfields and other vararg types remain future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
