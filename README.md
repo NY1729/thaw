@@ -513,8 +513,10 @@ compound assignments invalidate the affected fact. Computed/spread
 object-literal properties remain outside this local inference pass. `if/else`
 branches are analyzed from the same incoming state and retain
 only value, class-instance, and callback facts that agree on every outgoing
-path; an omitted `else` joins against the unchanged incoming path. Loop,
-switch, and exception-flow joins remain explicit gaps.
+path; an omitted `else` joins against the unchanged incoming path. `while` and
+classic `for` loops join the body/update result against the zero-iteration path,
+retaining only facts unchanged by a possible iteration. `do/while`, `for-in`,
+`for-of`, switch, and exception-flow joins remain explicit gaps.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back

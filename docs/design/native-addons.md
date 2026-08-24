@@ -62,7 +62,9 @@ structural object overloadを選択する。直線的な`=`代入はlocal変数�
 該当する型情報を破棄する。computed/spread object literalは引き続き残課題である。
 `if/else`は同じ入力状態から両branchを解析し、全ての出口で一致する
 value、class instance、callback情報だけを保持する。`else`省略時は未変更の入力経路と
-joinする。loop、switch、exception flowのjoinは引き続き残課題である。
+joinする。`while`とclassic `for`はbody／update後の状態を0回実行経路とjoinし、iteration
+で変化しない情報だけを保持する。`do/while`、`for-in`、`for-of`、switch、exception flowの
+joinは引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
