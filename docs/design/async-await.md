@@ -477,6 +477,9 @@ exceptionを設定して呼び出し元のtry/catchへ伝播する。
 剰余`%`と累乗`**`、および`%=`/`**=`はnumber HIRへlowerする。LLVMは剰余をnative
 浮動小数点演算、累乗を`pow`呼び出しとして生成し、operand内のawaitも通常のframe
 temporary抽出により左から右の評価順を維持する。
+bitwise/shift演算`|`/`^`/`&`/`<<`/`>>`/`>>>`と各compound assignmentはnumberを
+32-bit整数へ変換して実行する。shift countは下位5 bitへmaskし、`>>>`だけは符号なし
+32-bit結果をnumberへ戻す。awaitを含むoperandも同じtyped expression経路を通る。
 fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
 index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
 loop loweringを使う。
