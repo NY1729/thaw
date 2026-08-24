@@ -607,8 +607,10 @@ The workspace crates have narrow responsibilities:
   strict undefined comparison, logging and array lookup APIs without sentinel
   collisions. Nullish coalescing and `??=` unwrap or update the payload with
   true RHS short-circuiting, including across suspension points and typed
-  object fields. General optional-chain short-circuiting still requires native
-  `null` plus flow-sensitive unwrapping
+  object fields. Direct strict/loose comparisons with `undefined` narrow local
+  variables in the corresponding `if` branch, including negated comparisons.
+  General optional-chain short-circuiting still requires native `null` plus
+  broader control-flow unwrapping
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
