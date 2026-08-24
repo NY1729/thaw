@@ -5685,6 +5685,31 @@ impl<'a> FnLowerer<'a> {
                             &[(name, ty, value)],
                         );
                     }
+                    if object.sym == *"Object" && property.sym == *"keys" {
+                        let [argument] = call.args.as_slice() else {
+                            return Err("`Object.keys` expects exactly one argument".into());
+                        };
+                        if argument.spread.is_some() {
+                            return Err("Object.keys spread is not supported".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        let ty = self.infer_expr_type(&value)?;
+                        let HirType::Object(fields) = &ty else {
+                            return Err(format!(
+                                "`Object.keys` currently requires a fixed object, got {ty:?}"
+                            ));
+                        };
+                        let keys = HirExpr::ArrayLit(
+                            fields
+                                .iter()
+                                .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
+                                .collect(),
+                        );
+                        let name = format!("__thaw_object_keys_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        return self.wrap_call_argument_bindings(keys, &[(name, ty, value)]);
+                    }
                     if object.sym == *"Number"
                         && matches!(property.sym.as_ref(), "parseFloat" | "parseInt")
                     {
