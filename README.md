@@ -141,7 +141,9 @@ The workspace crates have narrow responsibilities:
   per parameter and return, internal/portable aggregate returns, plus
   C/fast/cold LLVM calling conventions
 - QuickJS fallback for signatures which cannot use the C ABI path
-- CommonJS dependency bundling, a limited ESM-to-CommonJS rewrite, selected
+- Parser-backed CommonJS/ESM dependency discovery and bundling, including
+  literal dynamic imports, live namespace/re-export bindings, cycles, JSON
+  modules, package `imports`, conditional exact/wildcard `exports`, selected
   Node built-in polyfills, scoped packages and package version locking
 - Relative user-module graphs (`./file`, `./file.ts`, and `./dir/index.ts`)
   with named/default imports, aliases, named re-exports, export-all,
@@ -334,7 +336,10 @@ The workspace crates have narrow responsibilities:
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
   API
-- Full ESM semantics and a parser-backed production bundler
+- Full ESM semantics: the parser-backed bundler preserves live exported and
+  namespace-imported values, but lexical named-import live bindings, import
+  assertions, top-level await and non-literal dynamic imports remain outside
+  the supported subset
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit
@@ -391,8 +396,9 @@ The dependency order for closing the major compatibility gaps is:
 3. Introduce a real promise/event-loop contract, then lower `async` functions
    to resumable state machines or LLVM coroutines.
 4. Expand HIR typing and inference without weakening native layout guarantees.
-5. Replace ad-hoc module rewriting with parser-backed module analysis and fill
-   Node resolution/global compatibility from real package tests.
+5. Continue filling Node resolution/global compatibility from real package
+   tests; dependency discovery and the current ESM/CommonJS bundle graph are
+   parser-backed.
 6. Add a versioned ABI metadata format for fast-path libraries.
 7. Implement the minimal synchronous N-API host described in
    `native-addons.md`, then expand it from observed addon requirements.
