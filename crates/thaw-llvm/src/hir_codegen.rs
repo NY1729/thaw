@@ -5007,6 +5007,9 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$method$") {
+            return self.compile_typed_napi_method(signature, args);
+        }
         let array = self
             .builder
             .build_call(
@@ -5212,6 +5215,164 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed dynamic return does not support {other:?} yet"
+            )),
+        }
+    }
+
+    fn compile_typed_napi_method(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver, method_args @ ..] = args else {
+            return Err("typed N-API method expects a receiver".into());
+        };
+        let receiver = self.compile_expr(receiver)?;
+        let array = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "napi_method_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        for (index, (argument, ty)) in method_args
+            .iter()
+            .zip(signature.params.iter().skip(1))
+            .enumerate()
+        {
+            let mut value = self.compile_expr(argument)?;
+            let push = match ty {
+                HirType::F64 => "thaw_json_array_push_number",
+                HirType::Str => "thaw_json_array_push_string",
+                HirType::Bool => {
+                    value = self
+                        .builder
+                        .build_int_z_extend(
+                            value.into_int_value(),
+                            self.context.i8_type(),
+                            &format!("napi_method_bool_{index}"),
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into();
+                    "thaw_json_array_push_bool"
+                }
+                HirType::Json => "thaw_json_array_push_json",
+                HirType::Array(element) if **element == HirType::F64 => {
+                    value = self
+                        .builder
+                        .build_call(
+                            self.module
+                                .get_function("thaw_json_from_number_array")
+                                .unwrap(),
+                            &[value.into()],
+                            "marshal_napi_method_number_array",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap();
+                    "thaw_json_array_push_json"
+                }
+                HirType::Object(_) => {
+                    value = self.compile_native_object_to_json(value.into_pointer_value(), ty)?;
+                    "thaw_json_array_push_json"
+                }
+                other => return Err(format!("N-API method argument does not support {other:?}")),
+            };
+            self.builder
+                .build_call(
+                    self.module.get_function(push).unwrap(),
+                    &[array.into(), value.into()],
+                    &format!("marshal_napi_method_arg_{index}"),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let method = signature
+            .symbol
+            .rsplit('$')
+            .next()
+            .ok_or("invalid typed N-API method symbol")?;
+        let method = self
+            .builder
+            .build_global_string_ptr(method, "napi_method_name")
+            .map_err(|error| error.to_string())?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[array.into()],
+                "napi_method_args_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_call_method_result")
+                    .unwrap(),
+                &[
+                    receiver.into(),
+                    method.as_pointer_value().into(),
+                    args_json.into(),
+                ],
+                "napi_method_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "napi_method_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "napi_method_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "napi_method_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse returned no method value".to_string())?;
+        match signature.ret {
+            HirType::Json => Ok(json),
+            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
+            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
+            HirType::Bool => self.compile_json_as_bool_value(json),
+            HirType::Array(ref element) if **element == HirType::F64 => self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_to_number_array")
+                        .unwrap(),
+                    &[json.into()],
+                    "napi_method_number_array_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
+            ref other => Err(format!(
+                "typed N-API method return does not support {other:?} yet"
             )),
         }
     }
