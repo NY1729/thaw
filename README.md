@@ -510,9 +510,10 @@ recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
 name and type. Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
-compound assignments invalidate the affected fact. Computed/spread
-object-literal properties remain outside this local inference pass and HIR
-lowering. `if/else`
+compound assignments invalidate the affected fact. String-literal computed
+object keys such as `{ ["value"]: 1 }` are supported; dynamic computed keys and
+spread properties remain outside this local inference pass and HIR lowering.
+`if/else`
 branches are analyzed from the same incoming state and retain
 only value, class-instance, and callback facts that agree on every outgoing
 path; an omitted `else` joins against the unchanged incoming path. `while` and
