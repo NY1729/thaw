@@ -5447,6 +5447,22 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                 }
+                if property.sym == *"concat" {
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("string concat spread is not supported".into());
+                    }
+                    let mut result = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &result, "string concat receiver")?;
+                    for argument in &call.args {
+                        let value = self.lower_expr(&argument.expr)?;
+                        let value = self.coerce_primitive_to_string(value)?;
+                        result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![result, value],
+                        );
+                    }
+                    return Ok(result);
+                }
                 if matches!(property.sym.as_ref(), "trim" | "trimStart" | "trimEnd") {
                     if !call.args.is_empty() {
                         return Err(format!("native `.{}()` expects no arguments", property.sym));
