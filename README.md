@@ -391,6 +391,10 @@ The workspace crates have narrow responsibilities:
   JavaScript's default comma or a coerced custom separator. Number, string,
   boolean, fixed-object and nested aggregate elements, empty arrays, receiver
   ordering and awaited receivers are supported
+- Homogeneous number, string and boolean arrays implement `.indexOf()` and
+  `.includes()` with positive/negative starting positions. Numeric searches
+  distinguish strict equality from SameValueZero (`NaN`), treat signed zeros
+  equally, preserve receiver/argument evaluation order and accept `await`
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
