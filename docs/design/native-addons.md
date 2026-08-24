@@ -650,6 +650,8 @@ property mapとdescriptor metadataはstring／Symbolの型付きkeyを共有し�
 Symbol同士および同名stringとの衝突を防ぐ。JSON変換ではJavaScriptと同様にSymbol keyを除外する。
 `napi_get_all_property_names`はstring／Symbol key、arrayの数値index、own/include-prototype mode、
 writable／enumerable／configurable filter、skip-strings／skip-symbols、number-to-string変換を扱う。
+列挙順は各prototype levelで整数indexを昇順、その他のstringを登録順、Symbolを登録順とし、削除後に
+再登録したkeyは末尾へ移動する。Object上のcanonicalな数値名もKEEP_NUMBERSではNumberとして返す。
 従来の`napi_get_property_names`はenumerable string keyを返す標準設定として同じ実装へ委譲する。
 `napi_get_prototype`は`napi_new_instance`が保持するconstructor identityからclass prototypeを返す。
 prototypeを持たないhost objectではundefinedを返し、非object入力はobject-expected errorとする。

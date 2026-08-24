@@ -356,6 +356,7 @@ pub struct Env {
     sealed_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
     property_attributes: HashMap<(usize, PropertyKey), u32>,
+    property_order: HashMap<usize, Vec<PropertyKey>>,
     symbols: HashMap<u64, NapiValue>,
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
@@ -406,6 +407,7 @@ impl Env {
             sealed_objects: HashSet::new(),
             frozen_objects: HashSet::new(),
             property_attributes: HashMap::new(),
+            property_order: HashMap::new(),
             symbols: HashMap::new(),
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
@@ -573,6 +575,27 @@ fn is_object_value(value: &Value) -> bool {
             | Value::Error(_)
             | Value::Date(_)
     )
+}
+
+fn property_array_index(key: &PropertyKey) -> Option<usize> {
+    let PropertyKey::String(name) = key else {
+        return None;
+    };
+    let index = name.parse::<u32>().ok()?;
+    (index != u32::MAX && index.to_string() == *name).then_some(index as usize)
+}
+
+fn record_property_order(env: &mut Env, owner: usize, key: &PropertyKey) {
+    let order = env.property_order.entry(owner).or_default();
+    if !order.contains(key) {
+        order.push(key.clone());
+    }
+}
+
+fn remove_property_order(env: &mut Env, owner: usize, key: &PropertyKey) {
+    if let Some(order) = env.property_order.get_mut(&owner) {
+        order.retain(|candidate| candidate != key);
+    }
 }
 
 unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &PropertyKey) -> Option<Accessor> {
@@ -2352,6 +2375,7 @@ pub unsafe extern "C" fn napi_set_named_property(
     };
     if status == NAPI_OK && !exists {
         if let Ok(env) = env_mut(env) {
+            record_property_order(env, object as usize, &name);
             env.property_attributes
                 .insert((object as usize, name), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
         }
@@ -2465,6 +2489,7 @@ unsafe fn set_property_key(
     }
     if !exists {
         if let Ok(env) = env_mut(env) {
+            record_property_order(env, object as usize, &key);
             env.property_attributes
                 .insert((object as usize, key), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
         }
@@ -2600,6 +2625,7 @@ pub unsafe extern "C" fn napi_delete_property(
     }
     if let Ok(env) = env_mut(env) {
         env.accessors.remove(&(object as usize, key.clone()));
+        remove_property_order(env, object as usize, &key);
         env.property_attributes.remove(&(object as usize, key));
     }
     *out = true;
@@ -2675,6 +2701,7 @@ pub unsafe extern "C" fn napi_define_properties(
                     data: descriptor.data,
                 },
             );
+            record_property_order(env, object as usize, &key_name);
             env.property_attributes
                 .insert((object as usize, key_name), attributes);
             continue;
@@ -3560,7 +3587,7 @@ pub unsafe extern "C" fn napi_get_property_names(
     )
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum EnumeratedPropertyKey {
     Number(usize),
     Property(PropertyKey),
@@ -3596,34 +3623,55 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     let mut visited = HashSet::new();
     while let Some(owner) = current.filter(|owner| visited.insert(*owner)) {
         let value = owner as NapiValue;
-        match value_ref(value) {
-            Ok(Value::Object(properties)) => keys.extend(
-                properties
-                    .keys()
-                    .cloned()
-                    .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
-            ),
-            Ok(Value::Function(function)) => keys.extend(
-                function
-                    .properties
-                    .keys()
-                    .cloned()
-                    .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
-            ),
-            Ok(Value::Array(values)) => keys.extend(
-                values
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, value)| value.is_some())
-                    .map(|(index, _)| (EnumeratedPropertyKey::Number(index), owner)),
-            ),
-            _ => {}
-        }
-        keys.extend(
-            accessors_for_owner(env_ptr, owner)
-                .into_iter()
-                .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
-        );
+        let mut property_keys = match value_ref(value) {
+            Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
+            Ok(Value::Function(function)) => {
+                function.properties.keys().cloned().collect::<Vec<_>>()
+            }
+            Ok(Value::Array(values)) => {
+                keys.extend(
+                    values
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, value)| value.is_some())
+                        .map(|(index, _)| (EnumeratedPropertyKey::Number(index), owner)),
+                );
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        property_keys.extend(accessors_for_owner(env_ptr, owner));
+        property_keys.sort_by(|left, right| {
+            let category = |key: &PropertyKey| match (property_array_index(key), key) {
+                (Some(index), _) => (0, index, usize::MAX),
+                (None, PropertyKey::String(_)) => (
+                    1,
+                    0,
+                    env.property_order
+                        .get(&owner)
+                        .and_then(|order| order.iter().position(|candidate| candidate == key))
+                        .unwrap_or(usize::MAX),
+                ),
+                (None, PropertyKey::Symbol(_)) => (
+                    2,
+                    0,
+                    env.property_order
+                        .get(&owner)
+                        .and_then(|order| order.iter().position(|candidate| candidate == key))
+                        .unwrap_or(usize::MAX),
+                ),
+            };
+            category(left)
+                .cmp(&category(right))
+                .then_with(|| left.cmp(right))
+        });
+        property_keys.dedup();
+        keys.extend(property_keys.into_iter().map(|key| {
+            let key = property_array_index(&key)
+                .map(EnumeratedPropertyKey::Number)
+                .unwrap_or(EnumeratedPropertyKey::Property(key));
+            (key, owner)
+        }));
         current = if key_mode == NAPI_KEY_INCLUDE_PROTOTYPES {
             prototype_for_owner(env_ptr, owner)
         } else {
@@ -3660,8 +3708,8 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                         == attribute_filter)
         }
     });
-    keys.sort_by(|(left, _), (right, _)| left.cmp(right));
-    keys.dedup_by(|(left, _), (right, _)| left == right);
+    let mut seen = HashSet::new();
+    keys.retain(|(key, _)| seen.insert(key.clone()));
     let mut values = Vec::with_capacity(keys.len());
     for (key, _) in keys {
         let value = match key {
@@ -3944,6 +3992,7 @@ pub unsafe extern "C" fn napi_delete_element(
     }
     if let Ok(env) = env_mut(env) {
         env.accessors.remove(&(object as usize, key.clone()));
+        remove_property_order(env, object as usize, &key);
         env.property_attributes.remove(&(object as usize, key));
     }
     if let Some(result) = result.as_mut() {
@@ -5855,6 +5904,81 @@ mod tests {
                 names[1].and_then(|value| value_ref(value).ok()),
                 Some(Value::Number(1.0))
             ));
+        }
+    }
+
+    #[test]
+    fn property_names_follow_javascript_key_order() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            let value = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_set_named_property(env_ptr, object, c"beta".as_ptr(), value),
+                NAPI_OK
+            );
+            assert_eq!(napi_set_element(env_ptr, object, 10, value), NAPI_OK);
+            assert_eq!(
+                napi_set_named_property(env_ptr, object, c"alpha".as_ptr(), value),
+                NAPI_OK
+            );
+            assert_eq!(napi_set_element(env_ptr, object, 2, value), NAPI_OK);
+            let mut symbol = ptr::null_mut();
+            assert_eq!(
+                napi_create_symbol(env_ptr, ptr::null_mut(), &mut symbol),
+                NAPI_OK
+            );
+            assert_eq!(napi_set_property(env_ptr, object, symbol, value), NAPI_OK);
+
+            let mut deleted = false;
+            assert_eq!(
+                napi_delete_property(
+                    env_ptr,
+                    object,
+                    env.alloc(Value::String("beta".into())),
+                    &mut deleted
+                ),
+                NAPI_OK
+            );
+            assert!(deleted);
+            assert_eq!(
+                napi_set_named_property(env_ptr, object, c"beta".as_ptr(), value),
+                NAPI_OK
+            );
+
+            let mut names_value = ptr::null_mut();
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    object,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_ALL_PROPERTIES,
+                    NAPI_KEY_KEEP_NUMBERS,
+                    &mut names_value,
+                ),
+                NAPI_OK
+            );
+            let Ok(Value::Array(names)) = value_ref(names_value) else {
+                panic!("property names were not returned as an array");
+            };
+            assert_eq!(names.len(), 5);
+            assert!(matches!(
+                value_ref(names[0].unwrap()),
+                Ok(Value::Number(2.0))
+            ));
+            assert!(matches!(
+                value_ref(names[1].unwrap()),
+                Ok(Value::Number(10.0))
+            ));
+            assert!(
+                matches!(value_ref(names[2].unwrap()), Ok(Value::String(name)) if name == "alpha")
+            );
+            assert!(
+                matches!(value_ref(names[3].unwrap()), Ok(Value::String(name)) if name == "beta")
+            );
+            assert_eq!(names[4], Some(symbol));
         }
     }
 
