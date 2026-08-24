@@ -428,6 +428,17 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, unary_f64_type, Some(Linkage::External));
         }
+        let binary_f64_type = self.context.f64_type().fn_type(
+            &[
+                self.context.f64_type().into(),
+                self.context.f64_type().into(),
+            ],
+            false,
+        );
+        for name in ["llvm.minimum.f64", "llvm.maximum.f64"] {
+            self.module
+                .add_function(name, binary_f64_type, Some(Linkage::External));
+        }
 
         let arena_alloc_type = i8_ptr.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function(
@@ -4993,6 +5004,75 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(result.into())
     }
 
+    fn compile_math_extreme(
+        &mut self,
+        args: &[HirExpr],
+        minimum: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut result = self.context.f64_type().const_float(if minimum {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        });
+        let intrinsic = self
+            .module
+            .get_function(if minimum {
+                "llvm.minimum.f64"
+            } else {
+                "llvm.maximum.f64"
+            })
+            .unwrap();
+        for argument in args {
+            let argument = self.compile_expr(argument)?.into_float_value();
+            result = self
+                .builder
+                .build_call(intrinsic, &[result.into(), argument.into()], "math_extreme")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("Math extrema intrinsic returned no value")?
+                .into_float_value();
+        }
+        Ok(result.into())
+    }
+
+    fn compile_math_sign(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("Math.sign expects one operand".to_string());
+        };
+        let value = self.compile_expr(value)?.into_float_value();
+        let zero = self.context.f64_type().const_zero();
+        let is_zero = self
+            .builder
+            .build_float_compare(FloatPredicate::OEQ, value, zero, "sign_zero")
+            .map_err(|error| error.to_string())?;
+        let is_nan = self
+            .builder
+            .build_float_compare(FloatPredicate::UNO, value, value, "sign_nan")
+            .map_err(|error| error.to_string())?;
+        let preserve = self
+            .builder
+            .build_or(is_zero, is_nan, "sign_preserve")
+            .map_err(|error| error.to_string())?;
+        let positive = self
+            .builder
+            .build_float_compare(FloatPredicate::OGT, value, zero, "sign_positive")
+            .map_err(|error| error.to_string())?;
+        let signed = self
+            .builder
+            .build_select(
+                positive,
+                self.context.f64_type().const_float(1.0),
+                self.context.f64_type().const_float(-1.0),
+                "sign_nonzero",
+            )
+            .map_err(|error| error.to_string())?
+            .into_float_value();
+        self.builder
+            .build_select(preserve, value, signed, "math_sign")
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -7197,6 +7277,17 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
             "__thaw_number_is_integer" => return self.compile_integer_predicate(args, false),
             "__thaw_number_is_safe_integer" => return self.compile_integer_predicate(args, true),
+            "__thaw_number_neg" => {
+                let [value] = args else {
+                    return Err("unary minus expects one operand".to_string());
+                };
+                let value = self.compile_expr(value)?.into_float_value();
+                return self
+                    .builder
+                    .build_float_neg(value, "number_neg")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_math_abs" => {
                 return self.compile_single_arg_call("llvm.fabs.f64", args, "Math.abs")
             }
@@ -7212,6 +7303,27 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_math_sqrt" => {
                 return self.compile_single_arg_call("llvm.sqrt.f64", args, "Math.sqrt")
             }
+            "__thaw_math_pow" => {
+                let [left, right] = args else {
+                    return Err("Math.pow expects two operands".to_string());
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("pow").unwrap(),
+                        &[left.into(), right.into()],
+                        "math_pow",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("pow returned no value".to_string());
+            }
+            "__thaw_math_min" => return self.compile_math_extreme(args, true),
+            "__thaw_math_max" => return self.compile_math_extreme(args, false),
+            "__thaw_math_sign" => return self.compile_math_sign(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10894,6 +11006,42 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "integer_predicates"),
             "true\nfalse\nfalse\nfalse\ntrue\ninteger-non-number\nfalse\ntrue\nfalse\ntrue\nfalse\nawaited-integer\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_pow_extrema_and_sign_math_functions() {
+        let source = r#"
+            function number(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited-extreme");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(Math.pow("2", "3"));
+                console.log(Math.min(number("min-left", 4), number("min-right", -2), 7));
+                console.log(Math.max(4, -2, 7));
+                console.log(Number.isNaN(Math.min(1, 0 / 0, 2)));
+                console.log(Number.isFinite(Math.min()));
+                console.log(Math.min() > 0);
+                console.log(Number.isFinite(Math.max()));
+                console.log(Math.max() < 0);
+                console.log((1 / Math.min(0, -0)) < 0);
+                console.log((1 / Math.max(-0, 0)) > 0);
+                console.log(Math.sign(-8));
+                console.log(Math.sign(9));
+                console.log((1 / Math.sign(-0)) < 0);
+                console.log(Number.isNaN(Math.sign(0 / 0)));
+                console.log(Math.max(1, await delayed("12"), 3));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "math_pow_extrema_sign"),
+            "8\nmin-left\nmin-right\n-2\n7\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\n-1\n1\ntrue\ntrue\nawaited-extreme\n12\n"
         );
     }
 
