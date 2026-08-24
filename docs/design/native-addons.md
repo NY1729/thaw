@@ -635,3 +635,6 @@ exception、get-and-clear処理へ統合する。
 保持し、通常のview／Buffer APIへ参加させる。登録finalizerはEnv破棄時に一度だけ実行する。
 `napi_adjust_external_memory`はEnv単位のsigned byte totalを追跡し、overflow時は値を変更せず
 generic failureを返す。
+`napi_detach_arraybuffer`／`napi_is_detached_arraybuffer`はowned／external backingにdetached状態を
+保持する。detach後はArrayBufferと既存TypedArray／DataViewのdataをnull、lengthを0として返し、
+新しいview作成を拒否する一方、external memoryのfinalizer所有権はEnv破棄まで維持する。
