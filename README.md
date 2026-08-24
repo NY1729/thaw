@@ -729,6 +729,9 @@ The workspace crates have narrow responsibilities:
   updates, inherited accessors and own-only enumeration remain distinct.
   Native classes can attach and verify 128-bit identity tags with
   `napi_type_tag_object` and `napi_check_object_type_tag`.
+  Arrays preserve holes separately from explicit `undefined`, including
+  `napi_has_element`/`napi_delete_element`, stable length and JSON null slots.
+  Promise detection and thread-safe-function context retrieval are supported.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
