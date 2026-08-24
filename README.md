@@ -400,6 +400,8 @@ The workspace crates have narrow responsibilities:
   a 53-bit fraction in the required half-open `[0, 1)` interval
 - Standard `Math.E`, `PI`, `LN2`, `LN10`, `LOG2E`, `LOG10E`, `SQRT1_2` and
   `SQRT2` properties lower directly to correctly rounded native constants
+- `Number.NaN`, positive/negative infinity, `MAX_VALUE`, `MIN_VALUE`, safe
+  integer bounds and `EPSILON` likewise lower to their exact IEEE-754 values
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,

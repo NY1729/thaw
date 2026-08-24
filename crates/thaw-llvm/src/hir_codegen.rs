@@ -11754,6 +11754,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_standard_number_constants() {
+        let source = r#"
+            function main(): void {
+                console.log(Number.isNaN(Number.NaN));
+                console.log(Number.isFinite(Number.POSITIVE_INFINITY));
+                console.log(Number.NEGATIVE_INFINITY < 0);
+                console.log(Number.MAX_VALUE === 1.7976931348623157e308);
+                console.log(Number.MIN_VALUE > 0);
+                console.log(Number.MIN_VALUE / 2 === 0);
+                console.log(Number.MAX_SAFE_INTEGER === 9007199254740991);
+                console.log(Number.MIN_SAFE_INTEGER === -9007199254740991);
+                console.log(1 + Number.EPSILON > 1);
+                console.log(1 + Number.EPSILON / 2 === 1);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "number_constants"),
+            "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_parse_float_and_parse_int() {
         let source = r#"
             async function delayed(): Promise<string> {
