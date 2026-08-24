@@ -133,6 +133,8 @@ The workspace crates have narrow responsibilities:
   `for`, `do/while`, and typed-array `for...of`
 - `let`/`const` object and fixed-length tuple destructuring, including nested
   patterns, holes, renaming, object/tuple rest, and awaited sources
+- `for...of` and `for await...of` accept fixed object/tuple destructuring in
+  declaration and assignment heads, preserving break/continue behavior
 - Fixed-layout object/tuple destructuring assignments update existing bindings,
   evaluate the right-hand side once, and return that original right-hand value
 - Object fields and array indexing/mutation
