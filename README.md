@@ -727,6 +727,8 @@ The workspace crates have narrow responsibilities:
   prototype through `napi_get_prototype`. Instance property access follows a
   live prototype chain instead of copying class members, so late prototype
   updates, inherited accessors and own-only enumeration remain distinct.
+  Native classes can attach and verify 128-bit identity tags with
+  `napi_type_tag_object` and `napi_check_object_type_tag`.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions

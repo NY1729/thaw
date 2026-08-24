@@ -308,6 +308,13 @@ pub struct NapiExtendedErrorInfo {
     error_code: NapiStatus,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct NapiTypeTag {
+    lower: u64,
+    upper: u64,
+}
+
 static LAST_ERROR_INFO: NapiExtendedErrorInfo = NapiExtendedErrorInfo {
     error_message: ptr::null(),
     engine_reserved: ptr::null_mut(),
@@ -332,6 +339,7 @@ pub struct Env {
     frozen_objects: HashSet<usize>,
     property_attributes: HashMap<(usize, PropertyKey), u32>,
     symbols: HashMap<u64, NapiValue>,
+    type_tags: HashMap<usize, NapiTypeTag>,
 }
 
 #[derive(Clone, Copy)]
@@ -377,6 +385,7 @@ impl Env {
             frozen_objects: HashSet::new(),
             property_attributes: HashMap::new(),
             symbols: HashMap::new(),
+            type_tags: HashMap::new(),
         }
     }
 
@@ -613,6 +622,19 @@ unsafe fn symbol_for(env: NapiEnv, id: u64) -> Option<NapiValue> {
                     .module_envs
                     .iter()
                     .find_map(|module_env| module_env.symbols.get(&id).copied())
+            })
+        })
+}
+
+unsafe fn type_tag_for(env: NapiEnv, object: NapiValue) -> Option<NapiTypeTag> {
+    env.as_ref()
+        .and_then(|env| env.type_tags.get(&(object as usize)).copied())
+        .or_else(|| {
+            HOST.with(|host| {
+                host.borrow()
+                    .module_envs
+                    .iter()
+                    .find_map(|module_env| module_env.type_tags.get(&(object as usize)).copied())
             })
         })
 }
@@ -2430,6 +2452,48 @@ pub unsafe extern "C" fn napi_define_properties(
                 .insert((object as usize, key_name), attributes);
         }
     }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_type_tag_object(
+    env: NapiEnv,
+    object: NapiValue,
+    type_tag: *const NapiTypeTag,
+) -> NapiStatus {
+    let Some(type_tag) = type_tag.as_ref().copied() else {
+        return NAPI_INVALID_ARG;
+    };
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    if type_tag_for(env, object).is_some() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    env.type_tags.insert(object as usize, type_tag);
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_check_object_type_tag(
+    env: NapiEnv,
+    object: NapiValue,
+    type_tag: *const NapiTypeTag,
+    result: *mut bool,
+) -> NapiStatus {
+    let (Some(type_tag), Some(result)) = (type_tag.as_ref(), result.as_mut()) else {
+        return NAPI_INVALID_ARG;
+    };
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    if env.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *result = type_tag_for(env, object).as_ref() == Some(type_tag);
     NAPI_OK
 }
 
@@ -5195,6 +5259,50 @@ mod tests {
             assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
             assert_eq!(napi_get_prototype(env_ptr, plain, &mut actual), NAPI_OK);
             assert!(matches!(value_ref(actual), Ok(Value::Undefined)));
+        }
+    }
+
+    #[test]
+    fn object_type_tags_are_stable_and_unique() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            let tag = NapiTypeTag {
+                lower: 0x0123_4567_89ab_cdef,
+                upper: 0xfedc_ba98_7654_3210,
+            };
+            let other = NapiTypeTag {
+                lower: tag.lower,
+                upper: tag.upper ^ 1,
+            };
+            assert_eq!(napi_type_tag_object(env_ptr, object, &tag), NAPI_OK);
+            let mut matches = false;
+            assert_eq!(
+                napi_check_object_type_tag(env_ptr, object, &tag, &mut matches),
+                NAPI_OK
+            );
+            assert!(matches);
+            assert_eq!(
+                napi_check_object_type_tag(env_ptr, object, &other, &mut matches),
+                NAPI_OK
+            );
+            assert!(!matches);
+            assert_eq!(
+                napi_type_tag_object(env_ptr, object, &other),
+                NAPI_INVALID_ARG
+            );
+
+            let number = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_type_tag_object(env_ptr, number, &tag),
+                NAPI_OBJECT_EXPECTED
+            );
+            assert_eq!(
+                napi_check_object_type_tag(env_ptr, number, &tag, &mut matches),
+                NAPI_OBJECT_EXPECTED
+            );
         }
     }
 
