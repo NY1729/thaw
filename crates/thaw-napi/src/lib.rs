@@ -33,6 +33,7 @@ type NapiThreadsafeFunctionCallJs =
 const NAPI_OK: NapiStatus = 0;
 
 const NAPI_INVALID_ARG: NapiStatus = 1;
+const NAPI_OBJECT_EXPECTED: NapiStatus = 2;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
 const NAPI_CANCELLED: NapiStatus = 11;
 const NAPI_QUEUE_FULL: NapiStatus = 15;
@@ -1729,6 +1730,60 @@ pub unsafe extern "C" fn napi_has_property(
         Ok(Value::Function(function)) => function.properties.contains_key(&key),
         _ => false,
     } || find_accessor(env, object, &key).is_some();
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_has_own_property(
+    env: NapiEnv,
+    object: NapiValue,
+    key: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(key) = property_key(key) else {
+        return NAPI_INVALID_ARG;
+    };
+    let own_value = match value_ref(object) {
+        Ok(Value::Object(values)) => values.contains_key(&key),
+        Ok(Value::Function(function)) => function.properties.contains_key(&key),
+        _ => return NAPI_OBJECT_EXPECTED,
+    };
+    let own_accessor = env_mut(env)
+        .map(|env| env.accessors.contains_key(&(object as usize, key)))
+        .unwrap_or(false);
+    *out = own_value || own_accessor;
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_delete_property(
+    env: NapiEnv,
+    object: NapiValue,
+    key: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(key) = property_key(key) else {
+        return NAPI_INVALID_ARG;
+    };
+    match object.as_mut() {
+        Some(Value::Object(values)) => {
+            values.remove(&key);
+        }
+        Some(Value::Function(function)) => {
+            function.properties.remove(&key);
+        }
+        _ => return NAPI_OBJECT_EXPECTED,
+    }
+    if let Ok(env) = env_mut(env) {
+        env.accessors.remove(&(object as usize, key));
+    }
+    *out = true;
     NAPI_OK
 }
 
@@ -3734,6 +3789,47 @@ mod tests {
             let mut signed64 = 0;
             assert_eq!(napi_get_value_int64(env_ptr, value, &mut signed64), NAPI_OK);
             assert_eq!(signed64, 9_007_199_254_740_991);
+        }
+    }
+
+    #[test]
+    fn own_properties_can_be_detected_and_deleted() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            let mut key = ptr::null_mut();
+            let mut value = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"answer".as_ptr(), 6, &mut key),
+                NAPI_OK
+            );
+            assert_eq!(napi_create_int32(env_ptr, 42, &mut value), NAPI_OK);
+            assert_eq!(napi_set_property(env_ptr, object, key, value), NAPI_OK);
+
+            let mut present = false;
+            assert_eq!(
+                napi_has_own_property(env_ptr, object, key, &mut present),
+                NAPI_OK
+            );
+            assert!(present);
+            let mut deleted = false;
+            assert_eq!(
+                napi_delete_property(env_ptr, object, key, &mut deleted),
+                NAPI_OK
+            );
+            assert!(deleted);
+            assert_eq!(
+                napi_has_own_property(env_ptr, object, key, &mut present),
+                NAPI_OK
+            );
+            assert!(!present);
+            assert_eq!(
+                napi_has_property(env_ptr, object, key, &mut present),
+                NAPI_OK
+            );
+            assert!(!present);
         }
     }
 
