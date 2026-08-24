@@ -206,10 +206,14 @@ pub enum Value {
         data: *mut u8,
         length: usize,
     },
-    ArrayBuffer(Vec<u8>),
+    ArrayBuffer {
+        bytes: Vec<u8>,
+        detached: bool,
+    },
     ExternalArrayBuffer {
         data: *mut u8,
         length: usize,
+        detached: bool,
     },
     TypedArray {
         array_type: i32,
@@ -777,7 +781,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
             };
             JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
         }
-        Value::ArrayBuffer(_)
+        Value::ArrayBuffer { .. }
         | Value::ExternalArrayBuffer { .. }
         | Value::TypedArray { .. }
         | Value::DataView { .. } => {
@@ -3044,10 +3048,16 @@ pub unsafe extern "C" fn napi_is_buffer(
     NAPI_OK
 }
 
-unsafe fn arraybuffer_parts(value: NapiValue) -> Result<(*mut u8, usize), NapiStatus> {
+unsafe fn arraybuffer_parts(value: NapiValue) -> Result<(*mut u8, usize, bool), NapiStatus> {
     match value.as_mut() {
-        Some(Value::ArrayBuffer(bytes)) => Ok((bytes.as_mut_ptr(), bytes.len())),
-        Some(Value::ExternalArrayBuffer { data, length }) => Ok((*data, *length)),
+        Some(Value::ArrayBuffer { bytes, detached }) => {
+            Ok((bytes.as_mut_ptr(), bytes.len(), *detached))
+        }
+        Some(Value::ExternalArrayBuffer {
+            data,
+            length,
+            detached,
+        }) => Ok((*data, *length, *detached)),
         _ => Err(NAPI_ARRAYBUFFER_EXPECTED),
     }
 }
@@ -3072,9 +3082,12 @@ pub unsafe extern "C" fn napi_create_arraybuffer(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env.alloc(Value::ArrayBuffer(vec![0; length]));
+    let value = env.alloc(Value::ArrayBuffer {
+        bytes: vec![0; length],
+        detached: false,
+    });
     if !data.is_null() {
-        let Some(Value::ArrayBuffer(bytes)) = value.as_mut() else {
+        let Some(Value::ArrayBuffer { bytes, .. }) = value.as_mut() else {
             unreachable!();
         };
         *data = bytes.as_mut_ptr().cast();
@@ -3100,6 +3113,7 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
     let value = env.alloc(Value::ExternalArrayBuffer {
         data: data.cast(),
         length,
+        detached: false,
     });
     if finalize.is_some() {
         env.finalizers.push(FinalizeRecord {
@@ -3142,7 +3156,7 @@ pub unsafe extern "C" fn napi_is_arraybuffer(
     }
     *out = matches!(
         value_ref(value),
-        Ok(Value::ArrayBuffer(_) | Value::ExternalArrayBuffer { .. })
+        Ok(Value::ArrayBuffer { .. } | Value::ExternalArrayBuffer { .. })
     );
     NAPI_OK
 }
@@ -3154,15 +3168,48 @@ pub unsafe extern "C" fn napi_get_arraybuffer_info(
     data: *mut *mut c_void,
     length: *mut usize,
 ) -> NapiStatus {
-    let Ok((bytes, byte_length)) = arraybuffer_parts(value) else {
+    let Ok((bytes, byte_length, detached)) = arraybuffer_parts(value) else {
         return NAPI_ARRAYBUFFER_EXPECTED;
     };
     if !data.is_null() {
-        *data = bytes.cast();
+        *data = if detached {
+            ptr::null_mut()
+        } else {
+            bytes.cast()
+        };
     }
     if !length.is_null() {
-        *length = byte_length;
+        *length = if detached { 0 } else { byte_length };
     }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_detach_arraybuffer(_env: NapiEnv, value: NapiValue) -> NapiStatus {
+    match value.as_mut() {
+        Some(Value::ArrayBuffer { detached, .. })
+        | Some(Value::ExternalArrayBuffer { detached, .. }) => {
+            *detached = true;
+            NAPI_OK
+        }
+        _ => NAPI_ARRAYBUFFER_EXPECTED,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_is_detached_arraybuffer(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *out = match value_ref(value) {
+        Ok(Value::ArrayBuffer { detached, .. })
+        | Ok(Value::ExternalArrayBuffer { detached, .. }) => *detached,
+        _ => return NAPI_ARRAYBUFFER_EXPECTED,
+    };
     NAPI_OK
 }
 
@@ -3178,9 +3225,12 @@ pub unsafe extern "C" fn napi_create_typedarray(
     let Some(element_size) = typedarray_element_size(array_type) else {
         return NAPI_INVALID_ARG;
     };
-    let Ok((_, buffer_length)) = arraybuffer_parts(array_buffer) else {
+    let Ok((_, buffer_length, detached)) = arraybuffer_parts(array_buffer) else {
         return NAPI_ARRAYBUFFER_EXPECTED;
     };
+    if detached {
+        return NAPI_INVALID_ARG;
+    }
     let Some(byte_length) = length.checked_mul(element_size) else {
         return NAPI_INVALID_ARG;
     };
@@ -3226,9 +3276,12 @@ pub unsafe extern "C" fn napi_create_dataview(
     byte_offset: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok((_, buffer_length)) = arraybuffer_parts(array_buffer) else {
+    let Ok((_, buffer_length, detached)) = arraybuffer_parts(array_buffer) else {
         return NAPI_ARRAYBUFFER_EXPECTED;
     };
+    if detached {
+        return NAPI_INVALID_ARG;
+    }
     let Some(end) = byte_offset.checked_add(length) else {
         return NAPI_INVALID_ARG;
     };
@@ -3277,14 +3330,18 @@ pub unsafe extern "C" fn napi_get_dataview_info(
         return NAPI_INVALID_ARG;
     };
     let (view_length, backing, offset) = (*view_length, *backing, *offset);
-    let Ok((bytes, _)) = arraybuffer_parts(backing) else {
+    let Ok((bytes, _, detached)) = arraybuffer_parts(backing) else {
         return NAPI_ARRAYBUFFER_EXPECTED;
     };
     if !length.is_null() {
-        *length = view_length;
+        *length = if detached { 0 } else { view_length };
     }
     if !data.is_null() {
-        *data = bytes.add(offset).cast();
+        *data = if detached {
+            ptr::null_mut()
+        } else {
+            bytes.add(offset).cast()
+        };
     }
     if !array_buffer.is_null() {
         *array_buffer = backing;
@@ -3313,17 +3370,21 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
             byte_offset: offset,
         }) => {
             let (kind, view_length, backing, offset) = (*kind, *view_length, *backing, *offset);
-            let Ok((bytes, _)) = arraybuffer_parts(backing) else {
+            let Ok((bytes, _, detached)) = arraybuffer_parts(backing) else {
                 return NAPI_ARRAYBUFFER_EXPECTED;
             };
             if !array_type.is_null() {
                 *array_type = kind;
             }
             if !length.is_null() {
-                *length = view_length;
+                *length = if detached { 0 } else { view_length };
             }
             if !data.is_null() {
-                *data = bytes.add(offset).cast();
+                *data = if detached {
+                    ptr::null_mut()
+                } else {
+                    bytes.add(offset).cast()
+                };
             }
             if !array_buffer.is_null() {
                 *array_buffer = backing;
@@ -4748,6 +4809,63 @@ mod tests {
                 NAPI_GENERIC_FAILURE
             );
             assert_eq!(env.external_memory, i64::MAX);
+        }
+    }
+
+    #[test]
+    fn detached_arraybuffers_zero_existing_views() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 16, ptr::null_mut(), &mut buffer),
+                NAPI_OK
+            );
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 1, 8, buffer, 4, &mut view),
+                NAPI_OK
+            );
+            let mut detached = true;
+            assert_eq!(
+                napi_is_detached_arraybuffer(env_ptr, buffer, &mut detached),
+                NAPI_OK
+            );
+            assert!(!detached);
+            assert_eq!(napi_detach_arraybuffer(env_ptr, buffer), NAPI_OK);
+            assert_eq!(
+                napi_is_detached_arraybuffer(env_ptr, buffer, &mut detached),
+                NAPI_OK
+            );
+            assert!(detached);
+
+            let mut data = ptr::dangling_mut::<c_void>();
+            let mut length = usize::MAX;
+            assert_eq!(
+                napi_get_arraybuffer_info(env_ptr, buffer, &mut data, &mut length),
+                NAPI_OK
+            );
+            assert!(data.is_null());
+            assert_eq!(length, 0);
+            assert_eq!(
+                napi_get_typedarray_info(
+                    env_ptr,
+                    view,
+                    ptr::null_mut(),
+                    &mut length,
+                    &mut data,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OK
+            );
+            assert!(data.is_null());
+            assert_eq!(length, 0);
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 1, 0, buffer, 0, &mut view),
+                NAPI_INVALID_ARG
+            );
         }
     }
 

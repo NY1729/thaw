@@ -711,6 +711,8 @@ The workspace crates have narrow responsibilities:
   External ArrayBuffer and Buffer values retain caller-owned memory without a
   copy, participate in views, and invoke their finalizers once at Env teardown.
   External-memory adjustments are tracked per Env with checked signed totals.
+  ArrayBuffer detachment zeroes data/length for the backing value and existing
+  TypedArray/DataView views while preserving external finalizer ownership.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
