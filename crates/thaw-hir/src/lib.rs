@@ -122,6 +122,7 @@ pub enum FfiAggregateAbi {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfiAggregateLayout {
     pub field_offsets: Vec<u64>,
+    pub field_layouts: Vec<Option<Box<FfiAggregateLayout>>>,
     pub size: u64,
     pub alignment: u32,
     pub indirect: bool,
@@ -1139,6 +1140,79 @@ pub fn set_ffi_aggregate_layout(
             "FFI aggregate layout for `{symbol}` requires a portable or packed aggregate return ABI"
         ));
     }
+    fn validate_layout(
+        symbol: &str,
+        path: &str,
+        fields: &[(Symbol, HirType)],
+        layout: &FfiAggregateLayout,
+        root: bool,
+    ) -> Result<(), String> {
+        if layout.field_offsets.len() != fields.len() || layout.field_layouts.len() != fields.len()
+        {
+            return Err(format!(
+                "FFI aggregate layout for `{symbol}` at `{path}` has {} field offsets and {} field layouts, expected {} of each",
+                layout.field_offsets.len(),
+                layout.field_layouts.len(),
+                fields.len()
+            ));
+        }
+        if layout.alignment == 0 || !layout.alignment.is_power_of_two() {
+            return Err(format!(
+                "FFI aggregate layout for `{symbol}` at `{path}` needs a non-zero power-of-two alignment"
+            ));
+        }
+        if layout.size == 0 || !layout.size.is_multiple_of(u64::from(layout.alignment)) {
+            return Err(format!(
+                "FFI aggregate layout for `{symbol}` at `{path}` needs a non-zero size divisible by its alignment"
+            ));
+        }
+        if root != layout.indirect {
+            return Err(format!(
+                "FFI aggregate layout for `{symbol}` at `{path}` requires `indirect: {root}`"
+            ));
+        }
+        let mut previous_end = 0;
+        for (index, ((name, ty), offset)) in fields.iter().zip(&layout.field_offsets).enumerate() {
+            let child = layout.field_layouts[index].as_deref();
+            let field_size = match (ty, child) {
+                (HirType::Bool, None) => 1,
+                (HirType::F64 | HirType::I64 | HirType::Str, None) => 8,
+                (HirType::Object(child_fields), Some(child_layout)) => {
+                    validate_layout(
+                        symbol,
+                        &format!("{path}.{name}"),
+                        child_fields,
+                        child_layout,
+                        false,
+                    )?;
+                    child_layout.size
+                }
+                (HirType::Object(_), None) => {
+                    return Err(format!(
+                        "FFI aggregate layout field `{path}.{name}` of `{symbol}` needs a nested field layout"
+                    ))
+                }
+                (_, Some(_)) => {
+                    return Err(format!(
+                        "FFI aggregate layout field `{path}.{name}` of `{symbol}` has a nested layout for a non-object type"
+                    ))
+                }
+                (other, None) => {
+                    return Err(format!(
+                        "FFI aggregate layout field `{path}.{name}` of `{symbol}` has unsupported explicit-layout type {other:?}"
+                    ))
+                }
+            };
+            if *offset < previous_end || offset.saturating_add(field_size) > layout.size {
+                return Err(format!(
+                    "FFI aggregate layout field `{path}.{name}` of `{symbol}` is outside or overlaps the declared size"
+                ));
+            }
+            previous_end = offset + field_size;
+        }
+        Ok(())
+    }
+
     if layout.field_offsets.len() != fields.len() {
         return Err(format!(
             "FFI aggregate layout for `{symbol}` has {} field offsets, expected {}",
@@ -1146,39 +1220,7 @@ pub fn set_ffi_aggregate_layout(
             fields.len()
         ));
     }
-    if layout.alignment == 0 || !layout.alignment.is_power_of_two() {
-        return Err(format!(
-            "FFI aggregate layout for `{symbol}` needs a non-zero power-of-two alignment"
-        ));
-    }
-    if layout.size == 0 || !layout.size.is_multiple_of(u64::from(layout.alignment)) {
-        return Err(format!(
-            "FFI aggregate layout for `{symbol}` needs a non-zero size divisible by its alignment"
-        ));
-    }
-    if !layout.indirect {
-        return Err(format!(
-            "FFI aggregate layout for `{symbol}` currently requires `indirect: true`"
-        ));
-    }
-    let mut previous_end = 0;
-    for ((name, ty), offset) in fields.iter().zip(&layout.field_offsets) {
-        let field_size = match ty {
-            HirType::Bool => 1,
-            HirType::F64 | HirType::I64 | HirType::Str => 8,
-            other => {
-                return Err(format!(
-                    "FFI aggregate layout field `{name}` of `{symbol}` has unsupported explicit-layout type {other:?}"
-                ))
-            }
-        };
-        if *offset < previous_end || offset.saturating_add(field_size) > layout.size {
-            return Err(format!(
-                "FFI aggregate layout field `{name}` of `{symbol}` is outside or overlaps the declared size"
-            ));
-        }
-        previous_end = offset + field_size;
-    }
+    validate_layout(symbol, "return", fields, &layout, true)?;
     signature.aggregate_return_layout = Some(layout);
     Ok(())
 }

@@ -1644,7 +1644,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let mut native_fields = Vec::new();
         let mut logical_indices = Vec::with_capacity(fields.len());
         let mut cursor = 0_u64;
-        for ((name, field_ty), offset) in fields.iter().zip(&layout.field_offsets) {
+        for (index, ((name, field_ty), offset)) in
+            fields.iter().zip(&layout.field_offsets).enumerate()
+        {
             if *offset > cursor {
                 let padding = u32::try_from(*offset - cursor)
                     .map_err(|_| "FFI aggregate padding exceeds LLVM's array limit".to_owned())?;
@@ -1656,11 +1658,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     field_ty,
                     FfiStringAbi::NullTerminated,
                     FfiAggregateAbi::Portable,
-                    None,
+                    layout.field_layouts[index].as_deref(),
                 )
                 .map_err(|error| format!("FFI object field `{name}`: {error}"))?,
             );
-            cursor = offset + Self::ffi_object_field_layout(field_ty, FfiAggregateAbi::Portable).0;
+            let field_size = layout.field_layouts[index].as_deref().map_or_else(
+                || Self::ffi_object_field_layout(field_ty, FfiAggregateAbi::Portable).0,
+                |layout| layout.size,
+            );
+            cursor = offset + field_size;
         }
         if layout.size > cursor {
             let padding = u32::try_from(layout.size - cursor)
@@ -10171,7 +10177,8 @@ impl<'ctx> HirCompiler<'ctx> {
                             FfiStringAbi::NullTerminated,
                             ownership,
                             aggregate_abi,
-                            None,
+                            aggregate_layout
+                                .and_then(|layout| layout.field_layouts[index].as_deref()),
                         )?,
                         _ => field,
                     };
@@ -18879,6 +18886,7 @@ mod tests {
         let source = r#"
             declare function native_aligned_record(): { active: boolean; value: number };
             declare function native_checked_aligned_record(value: number): { active: boolean; value: number };
+            declare function native_nested_aligned_record(): { meta: { active: boolean; value: number }; total: number };
 
             function main(): void {
                 const record: { active: boolean; value: number } = native_aligned_record();
@@ -18891,6 +18899,9 @@ mod tests {
                 } catch (error) {
                     console.log(error);
                 }
+                const nested = native_nested_aligned_record();
+                console.log(nested.meta.active);
+                console.log(nested.meta.value + nested.total);
             }
         "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
@@ -18910,6 +18921,7 @@ mod tests {
             "native_aligned_record",
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 0],
+                field_layouts: vec![None, None],
                 size: 16,
                 alignment: 8,
                 indirect: true,
@@ -18922,7 +18934,51 @@ mod tests {
             "native_aligned_record",
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 16],
+                field_layouts: vec![None, None],
                 size: 32,
+                alignment: 32,
+                indirect: true,
+            },
+        )
+        .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_nested_aligned_record",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+        assert!(thaw_hir::set_ffi_aggregate_layout(
+            &mut program.clone(),
+            "native_nested_aligned_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 48],
+                field_layouts: vec![None, None],
+                size: 64,
+                alignment: 32,
+                indirect: true,
+            },
+        )
+        .unwrap_err()
+        .contains("needs a nested field layout"));
+        thaw_hir::set_ffi_aggregate_layout(
+            &mut program,
+            "native_nested_aligned_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 48],
+                field_layouts: vec![
+                    Some(Box::new(thaw_hir::FfiAggregateLayout {
+                        field_offsets: vec![0, 16],
+                        field_layouts: vec![None, None],
+                        size: 32,
+                        alignment: 32,
+                        indirect: false,
+                    })),
+                    None,
+                ],
+                size: 64,
                 alignment: 32,
                 indirect: true,
             },
@@ -18948,6 +19004,7 @@ mod tests {
             "native_checked_aligned_record",
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 16],
+                field_layouts: vec![None, None],
                 size: 32,
                 alignment: 32,
                 indirect: true,
@@ -18974,10 +19031,14 @@ mod tests {
             &native_c_path,
             "typedef struct __attribute__((aligned(32))) { _Bool active; char padding[15]; double value; char tail[8]; } AlignedRecord;\n\
              typedef struct { AlignedRecord value; const char *error; } AlignedRecordResult;\n\
+             typedef struct __attribute__((aligned(32))) { AlignedRecord meta; char padding[16]; double total; char tail[8]; } NestedAlignedRecord;\n\
              AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n\
              AlignedRecordResult native_checked_aligned_record(double value) {\n\
                if (value < 0) return (AlignedRecordResult){{0, {0}, 0, {0}}, \"aligned check failed\"};\n\
                return (AlignedRecordResult){{1, {0}, value * 3, {0}}, 0};\n\
+             }\n\
+             NestedAlignedRecord native_nested_aligned_record(void) {\n\
+               return (NestedAlignedRecord){{1, {0}, 20, {0}}, {0}, 22, {0}};\n\
              }\n",
         )
         .unwrap();
@@ -19003,7 +19064,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "true\n42\n21\naligned check failed\n"
+            "true\n42\n21\naligned check failed\ntrue\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
