@@ -1338,10 +1338,20 @@ impl<'ctx> HirCompiler<'ctx> {
         sig: &FfiSignature,
     ) -> Result<FunctionValue<'ctx>, String> {
         let supports_owned_return = sig.ret == HirType::Str
-            || matches!(&sig.ret, HirType::Array(element) if **element == HirType::F64);
+            || matches!(&sig.ret, HirType::Array(element) if **element == HirType::F64)
+            || matches!(
+                &sig.ret,
+                HirType::Object(fields)
+                    if sig.aggregate_return_abi != FfiAggregateAbi::Internal
+                        && fields.iter().any(|(_, ty)| *ty == HirType::Str)
+                        && fields.iter().all(|(_, ty)| matches!(
+                            ty,
+                            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
+                        ))
+            );
         if sig.return_ownership != FfiOwnership::Borrowed && !supports_owned_return {
             return Err(format!(
-                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string and number[] returns",
+                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string, number[], and flat portable/packed object returns with string fields",
                 sig.symbol
             ));
         }
@@ -1403,8 +1413,69 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn uses_indirect_ffi_return(sig: &FfiSignature) -> bool {
+        if !matches!(sig.ret, HirType::Array(_) | HirType::Object(_)) {
+            return false;
+        }
         sig.aggregate_return_abi == FfiAggregateAbi::Packed
-            && matches!(sig.ret, HirType::Array(_) | HirType::Object(_))
+            || Self::ffi_result_storage_bytes(sig) > 16
+    }
+
+    fn ffi_result_storage_bytes(sig: &FfiSignature) -> u64 {
+        let (value_size, value_align) =
+            Self::ffi_aggregate_storage_layout(&sig.ret, sig.aggregate_return_abi);
+        if sig.error_abi == FfiErrorAbi::Direct {
+            value_size
+        } else {
+            Self::align_to(value_size, 8) + 8_u64.max(value_align)
+        }
+    }
+
+    fn ffi_aggregate_storage_layout(ty: &HirType, aggregate_abi: FfiAggregateAbi) -> (u64, u64) {
+        match ty {
+            HirType::Array(element)
+                if **element == HirType::F64 && aggregate_abi != FfiAggregateAbi::Internal =>
+            {
+                (
+                    16,
+                    if aggregate_abi == FfiAggregateAbi::Packed {
+                        1
+                    } else {
+                        8
+                    },
+                )
+            }
+            HirType::Object(fields) if aggregate_abi != FfiAggregateAbi::Internal => {
+                if aggregate_abi == FfiAggregateAbi::Packed {
+                    let size = fields
+                        .iter()
+                        .map(|(_, ty)| Self::ffi_object_field_layout(ty).0)
+                        .sum();
+                    (size, 1)
+                } else {
+                    let mut size = 0;
+                    let mut alignment = 1;
+                    for (_, ty) in fields {
+                        let (field_size, field_alignment) = Self::ffi_object_field_layout(ty);
+                        size = Self::align_to(size, field_alignment) + field_size;
+                        alignment = alignment.max(field_alignment);
+                    }
+                    (Self::align_to(size, alignment), alignment)
+                }
+            }
+            _ => (8, 8),
+        }
+    }
+
+    fn ffi_object_field_layout(ty: &HirType) -> (u64, u64) {
+        match ty {
+            HirType::Bool => (1, 1),
+            HirType::F64 | HirType::I64 => (8, 8),
+            _ => (8, 8),
+        }
+    }
+
+    fn align_to(offset: u64, alignment: u64) -> u64 {
+        offset.div_ceil(alignment) * alignment
     }
 
     fn ffi_call_return_type(
@@ -9913,11 +9984,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .unwrap()
                     .into_pointer_value();
-                for (index, (name, _)) in fields.iter().enumerate() {
-                    let field = self
+                for (index, (name, field_ty)) in fields.iter().enumerate() {
+                    let mut field = self
                         .builder
                         .build_extract_value(native, index as u32, &format!("ffi_{name}"))
                         .map_err(|error| error.to_string())?;
+                    if *field_ty == HirType::Str && *ownership != FfiOwnership::Borrowed {
+                        field = self
+                            .apply_ffi_string_ownership(
+                                field.into_pointer_value(),
+                                ownership,
+                                &format!("ffi_{name}"),
+                            )?
+                            .into();
+                    }
                     let slot = unsafe {
                         self.builder
                             .build_in_bounds_gep(
@@ -18287,13 +18367,16 @@ mod tests {
         let source = r#"
             declare function native_values(): number[];
             declare function native_point(): { x: number; y: number };
+            declare function native_vector(): { x: number; y: number; z: number };
             declare function array_destroy_count(): number;
 
             function main(): void {
                 const values: number[] = native_values();
                 const point: { x: number; y: number } = native_point();
+                const vector: { x: number; y: number; z: number } = native_vector();
                 console.log(values[0] + values[1] + values[2]);
                 console.log(point.x + point.y);
+                console.log(vector.x + vector.y + vector.z);
                 console.log(array_destroy_count());
             }
         "#;
@@ -18326,6 +18409,15 @@ mod tests {
             thaw_hir::FfiAggregateAbi::Portable,
         )
         .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_vector",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
         let context = Context::create();
         let mut compiler = HirCompiler::new(&context, "ffi_aggregate_returns");
         compiler.compile_program(&program).unwrap();
@@ -18344,11 +18436,13 @@ mod tests {
             "#include <stdint.h>\n#include <stdlib.h>\n\
              typedef struct { double *data; int64_t len; } ThawF64Array;\n\
              typedef struct { double x; double y; } Point;\n\
+             typedef struct { double x; double y; double z; } Vector;\n\
              static int destroys;\n\
              ThawF64Array native_values(void) { double *p = malloc(3 * sizeof(double)); p[0] = 2; p[1] = 3; p[2] = 5; return (ThawF64Array){p, 3}; }\n\
              void destroy_values(void *p) { ++destroys; free(p); }\n\
              double array_destroy_count(void) { return destroys; }\n\
-             Point native_point(void) { return (Point){7, 11}; }\n",
+             Point native_point(void) { return (Point){7, 11}; }\n\
+             Vector native_vector(void) { return (Vector){13, 17, 19}; }\n",
         )
         .unwrap();
         assert!(Command::new("cc")
@@ -18371,7 +18465,7 @@ mod tests {
             .success());
         let output = Command::new(&exe_path).output().unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "10\n18\n1\n");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "10\n18\n49\n1\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -18467,6 +18561,116 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "true\n42\n14\npacked check failed\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_object_return_copies_and_destroys_owned_string_fields() {
+        let source = r#"
+            declare function native_message(): { code: number; message: string };
+            declare function native_checked_message(value: number): { code: number; message: string };
+            declare function message_destroy_count(): number;
+
+            function main(): void {
+                const direct: { code: number; message: string } = native_message();
+                const checked: { code: number; message: string } = native_checked_message(2);
+                console.log(direct.code);
+                console.log(direct.message);
+                console.log(checked.message);
+                console.log(message_destroy_count());
+                try {
+                    native_checked_message(0 - 1);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        for symbol in ["native_message", "native_checked_message"] {
+            thaw_hir::set_ffi_ownership(
+                &mut program,
+                symbol,
+                thaw_hir::FfiOwnership::Owned {
+                    destroy: "destroy_message".into(),
+                },
+                thaw_hir::FfiOwnership::Borrowed,
+            )
+            .unwrap();
+            thaw_hir::set_ffi_string_abi(
+                &mut program,
+                symbol,
+                if symbol == "native_message" {
+                    vec![]
+                } else {
+                    vec![thaw_hir::FfiStringAbi::NullTerminated]
+                },
+                thaw_hir::FfiStringAbi::NullTerminated,
+                thaw_hir::FfiCallingConvention::C,
+                thaw_hir::FfiAggregateAbi::Portable,
+            )
+            .unwrap();
+        }
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_checked_message",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_owned_object_fields");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-owned-object-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdlib.h>\n#include <string.h>\n\
+             typedef struct { double code; char *message; } Message;\n\
+             typedef struct { Message value; const char *error; } MessageResult;\n\
+             static int destroys;\n\
+             static char *copy(const char *s) { size_t n = strlen(s) + 1; char *p = malloc(n); memcpy(p, s, n); return p; }\n\
+             Message native_message(void) { return (Message){1, copy(\"direct message\")}; }\n\
+             MessageResult native_checked_message(double value) {\n\
+               if (value < 0) return (MessageResult){{0, 0}, \"checked message failed\"};\n\
+               return (MessageResult){{value, copy(\"checked message\")}, 0};\n\
+             }\n\
+             void destroy_message(char *p) { ++destroys; free(p); }\n\
+             double message_destroy_count(void) { return destroys; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "1\ndirect message\nchecked message\n2\nchecked message failed\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
