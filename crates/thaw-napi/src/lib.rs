@@ -328,6 +328,7 @@ pub struct Reference {
     env: usize,
     value: NapiValue,
     count: u32,
+    deleted: bool,
 }
 
 struct AsyncContext {
@@ -409,6 +410,9 @@ pub struct Env {
     // Box keeps async-work addresses stable for worker and completion queues.
     #[allow(clippy::vec_box)]
     async_works: Vec<Box<AsyncWork>>,
+    // Box keeps reference handles stable so deleted handles can be rejected safely.
+    #[allow(clippy::vec_box)]
+    references: Vec<Box<Reference>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -481,6 +485,7 @@ impl Env {
             async_contexts: Vec::new(),
             deferreds: Vec::new(),
             async_works: Vec::new(),
+            references: Vec::new(),
         }
     }
 
@@ -489,6 +494,38 @@ impl Env {
         self.values.push(value);
         value
     }
+}
+
+fn alloc_reference(env: &mut Env, value: NapiValue, count: u32) -> *mut Reference {
+    let mut reference = Box::new(Reference {
+        env: env as *mut Env as usize,
+        value,
+        count,
+        deleted: false,
+    });
+    let reference_ptr = (&mut *reference) as *mut Reference;
+    env.references.push(reference);
+    reference_ptr
+}
+
+unsafe fn reference_mut<'a>(
+    env: NapiEnv,
+    reference: *mut Reference,
+) -> Result<&'a mut Reference, NapiStatus> {
+    let Ok(env_ref) = env_mut(env) else {
+        return Err(NAPI_INVALID_ARG);
+    };
+    let Some(reference) = env_ref
+        .references
+        .iter_mut()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), reference))
+    else {
+        return Err(NAPI_INVALID_ARG);
+    };
+    if reference.deleted || reference.env != env as usize {
+        return Err(NAPI_INVALID_ARG);
+    }
+    Ok(reference)
 }
 
 unsafe fn async_context_mut<'a>(
@@ -3611,11 +3648,7 @@ pub unsafe extern "C" fn napi_wrap(
         },
     );
     if !result.is_null() {
-        *result = Box::into_raw(Box::new(Reference {
-            env: env as *mut Env as usize,
-            value: object,
-            count: 0,
-        }));
+        *result = alloc_reference(env, object, 0);
     }
     NAPI_OK
 }
@@ -3687,11 +3720,7 @@ pub unsafe extern "C" fn napi_add_finalizer(
         hint,
     });
     if !result.is_null() {
-        *result = Box::into_raw(Box::new(Reference {
-            env: env as *mut Env as usize,
-            value: object,
-            count: 0,
-        }));
+        *result = alloc_reference(env, object, 0);
     }
     NAPI_OK
 }
@@ -5764,17 +5793,13 @@ pub unsafe extern "C" fn napi_create_reference(
     initial_count: u32,
     out: *mut *mut Reference,
 ) -> NapiStatus {
-    let Ok(_env_ref) = env_mut(env) else {
+    let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
-    *out = Box::into_raw(Box::new(Reference {
-        env: env as usize,
-        value,
-        count: initial_count,
-    }));
+    *out = alloc_reference(env_ref, value, initial_count);
     NAPI_OK
 }
 
@@ -5783,15 +5808,10 @@ pub unsafe extern "C" fn napi_delete_reference(
     env: NapiEnv,
     reference: *mut Reference,
 ) -> NapiStatus {
-    if env.is_null()
-        || reference.is_null()
-        || reference
-            .as_ref()
-            .is_none_or(|reference| reference.env != env as usize)
-    {
+    let Ok(reference) = reference_mut(env, reference) else {
         return NAPI_INVALID_ARG;
-    }
-    drop(Box::from_raw(reference));
+    };
+    reference.deleted = true;
     NAPI_OK
 }
 
@@ -5801,12 +5821,9 @@ pub unsafe extern "C" fn napi_get_reference_value(
     reference: *mut Reference,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Some(reference) = reference.as_ref() else {
+    let Ok(reference) = reference_mut(env, reference) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || reference.env != env as usize {
-        return NAPI_INVALID_ARG;
-    }
     let _ = reference.count;
     write_value(out, reference.value)
 }
@@ -5817,12 +5834,9 @@ pub unsafe extern "C" fn napi_reference_ref(
     reference: *mut Reference,
     result: *mut u32,
 ) -> NapiStatus {
-    let Some(reference) = reference.as_mut() else {
+    let Ok(reference) = reference_mut(env, reference) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || reference.env != env as usize {
-        return NAPI_INVALID_ARG;
-    }
     let Some(count) = reference.count.checked_add(1) else {
         return NAPI_GENERIC_FAILURE;
     };
@@ -5839,12 +5853,9 @@ pub unsafe extern "C" fn napi_reference_unref(
     reference: *mut Reference,
     result: *mut u32,
 ) -> NapiStatus {
-    let Some(reference) = reference.as_mut() else {
+    let Ok(reference) = reference_mut(env, reference) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || reference.env != env as usize {
-        return NAPI_INVALID_ARG;
-    }
     if reference.count == 0 {
         return NAPI_GENERIC_FAILURE;
     }
@@ -9457,6 +9468,19 @@ mod tests {
                 NAPI_INVALID_ARG
             );
             assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+            assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_get_reference_value(env_ptr, reference, &mut actual),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_reference_ref(env_ptr, reference, &mut count),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_reference_unref(env_ptr, reference, &mut count),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
