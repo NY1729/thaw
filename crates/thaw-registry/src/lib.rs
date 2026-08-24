@@ -1155,14 +1155,43 @@ fn runtime_export_specifiers(
     let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&source) else {
         return Ok(Vec::new());
     };
-    let Some(exports) = manifest
-        .get("exports")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return Ok(Vec::new());
-    };
     let mut files = Vec::new();
     let mut specifiers = Vec::new();
+    let Some(exports_value) = manifest.get("exports") else {
+        collect_relative_files(package_dir, package_dir, &mut files)?;
+        for file in files.iter().filter(|file| {
+            !file.split('/').any(|component| component == "node_modules")
+                && matches!(
+                    Path::new(file)
+                        .extension()
+                        .and_then(|extension| extension.to_str()),
+                    Some("js" | "cjs" | "mjs" | "json")
+                )
+        }) {
+            specifiers.push(format!("{package_name}/{file}"));
+            if let Some(extensionless) = file
+                .strip_suffix(".js")
+                .or_else(|| file.strip_suffix(".cjs"))
+                .or_else(|| file.strip_suffix(".mjs"))
+            {
+                specifiers.push(format!("{package_name}/{extensionless}"));
+            }
+            if let Some(directory) = file
+                .strip_suffix("/index.js")
+                .or_else(|| file.strip_suffix("/index.cjs"))
+                .or_else(|| file.strip_suffix("/index.mjs"))
+                .or_else(|| file.strip_suffix("/index.json"))
+            {
+                specifiers.push(format!("{package_name}/{directory}"));
+            }
+        }
+        specifiers.sort();
+        specifiers.dedup();
+        return Ok(specifiers);
+    };
+    let Some(exports) = exports_value.as_object() else {
+        return Ok(Vec::new());
+    };
     for (key, target) in exports {
         let Some(subpath) = key.strip_prefix("./") else {
             continue;
@@ -4444,11 +4473,15 @@ mod tests {
                 fs::create_dir_all(dependency.join("features")).unwrap();
                 fs::write(dependency.join("feature.js"), "exports.value = 43;").unwrap();
                 fs::write(dependency.join("features/math.js"), "exports.value = 44;").unwrap();
+            } else {
+                fs::create_dir_all(dependency.join("lib/tools")).unwrap();
+                fs::write(dependency.join("lib/tool.js"), "exports.value = 45;").unwrap();
+                fs::write(dependency.join("lib/tools/index.js"), "exports.value = 46;").unwrap();
             }
         }
         let (bundle, _, file_count, versions) =
             bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 6);
+        assert_eq!(file_count, 9);
         assert_eq!(versions.get("dep-a").map(String::as_str), Some("1.0.0"));
         assert_eq!(versions.get("dep-b").map(String::as_str), Some("1.0.0"));
         let script = format!(
@@ -4466,6 +4499,8 @@ mod tests {
             (r#"["dep-b"]"#, "42"),
             (r#"["dep-a/feature"]"#, "43"),
             (r#"["dep-a/features/math"]"#, "44"),
+            (r#"["dep-b/lib/tool"]"#, "45"),
+            (r#"["dep-b/lib/tools"]"#, "46"),
         ] {
             let args = CString::new(args).unwrap();
             let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
