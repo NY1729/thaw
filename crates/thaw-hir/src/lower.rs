@@ -1996,6 +1996,10 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
+            // Empty statements have no runtime effect. `debugger` only has an
+            // observable effect when a JavaScript debugger is attached; a
+            // native Thaw executable therefore treats it as a no-op.
+            Stmt::Empty(_) | Stmt::Debugger(_) => Ok(Vec::new()),
             Stmt::Return(ret) => {
                 let value = match &ret.arg {
                     Some(arg) => {
