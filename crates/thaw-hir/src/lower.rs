@@ -1682,24 +1682,49 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
 }
 
 fn collect_stmt_bindings(stmts: &[HirStmt], names: &mut BTreeSet<Symbol>) {
+    collect_stmt_bindings_with_bound(stmts, names, &BTreeSet::new());
+}
+
+fn collect_expr_bindings_with_bound(
+    expr: &HirExpr,
+    names: &mut BTreeSet<Symbol>,
+    bound: &BTreeSet<Symbol>,
+) {
+    let mut referenced = BTreeSet::new();
+    collect_referenced_bindings(expr, &mut referenced);
+    names.extend(referenced.into_iter().filter(|name| !bound.contains(name)));
+}
+
+fn collect_stmt_bindings_with_bound(
+    stmts: &[HirStmt],
+    names: &mut BTreeSet<Symbol>,
+    initial_bound: &BTreeSet<Symbol>,
+) {
+    let mut bound = initial_bound.clone();
     for stmt in stmts {
         match stmt {
-            HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
-                collect_referenced_bindings(expr, names)
+            HirStmt::Expr(expr) | HirStmt::Throw(expr) => {
+                collect_expr_bindings_with_bound(expr, names, &bound)
             }
-            HirStmt::Return(Some(expr)) => collect_referenced_bindings(expr, names),
+            HirStmt::Let(name, _, expr) => {
+                collect_expr_bindings_with_bound(expr, names, &bound);
+                bound.insert(name.clone());
+            }
+            HirStmt::Return(Some(expr)) => collect_expr_bindings_with_bound(expr, names, &bound),
             HirStmt::If(cond, then_body, else_body) => {
-                collect_referenced_bindings(cond, names);
-                collect_stmt_bindings(then_body, names);
-                collect_stmt_bindings(else_body, names);
+                collect_expr_bindings_with_bound(cond, names, &bound);
+                collect_stmt_bindings_with_bound(then_body, names, &bound);
+                collect_stmt_bindings_with_bound(else_body, names, &bound);
             }
             HirStmt::While(cond, body) => {
-                collect_referenced_bindings(cond, names);
-                collect_stmt_bindings(body, names);
+                collect_expr_bindings_with_bound(cond, names, &bound);
+                collect_stmt_bindings_with_bound(body, names, &bound);
             }
-            HirStmt::Try(body, _, catch_body) => {
-                collect_stmt_bindings(body, names);
-                collect_stmt_bindings(catch_body, names);
+            HirStmt::Try(body, catch_name, catch_body) => {
+                collect_stmt_bindings_with_bound(body, names, &bound);
+                let mut catch_bound = bound.clone();
+                catch_bound.insert(catch_name.clone());
+                collect_stmt_bindings_with_bound(catch_body, names, &catch_bound);
             }
             HirStmt::Return(None)
             | HirStmt::Break
@@ -5690,6 +5715,145 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn lower_array_sort_comparator(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        comparator: HirExpr,
+        copy: bool,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_sort_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let comparator_name = format!("__thaw_sort_comparator_{}", self.next_binding);
+        self.next_binding += 1;
+        let comparator_type = HirType::Function(
+            vec![element_type.clone(), element_type.clone()],
+            Box::new(HirType::F64),
+        );
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        self.scope
+            .insert(comparator_name.clone(), comparator_type.clone());
+
+        let array_name = format!("__thaw_sort_array_{}", self.next_binding);
+        self.next_binding += 1;
+        let length_name = format!("__thaw_sort_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let outer_name = format!("__thaw_sort_outer_{}", self.next_binding);
+        self.next_binding += 1;
+        let inner_name = format!("__thaw_sort_inner_{}", self.next_binding);
+        self.next_binding += 1;
+        let left_name = format!("__thaw_sort_left_{}", self.next_binding);
+        self.next_binding += 1;
+        let right_name = format!("__thaw_sort_right_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(array_name.clone(), array_type.clone());
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(outer_name.clone(), HirType::F64);
+        self.scope.insert(inner_name.clone(), HirType::F64);
+        self.scope.insert(left_name.clone(), element_type.clone());
+        self.scope.insert(right_name.clone(), element_type.clone());
+
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let variable = |name: &str| HirExpr::Var(name.to_string());
+        let add_one =
+            |value: HirExpr| HirExpr::BinOp(BinOp::Add, Box::new(value), Box::new(number(1.0)));
+        let working_source = if copy {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                vec![variable(&receiver_name), number(0.0), number(f64::INFINITY)],
+            )
+        } else {
+            variable(&receiver_name)
+        };
+        let inner_index = variable(&inner_name);
+        let next_index = add_one(inner_index.clone());
+        let left_value = HirExpr::TypedIndex(
+            Box::new(variable(&array_name)),
+            Box::new(inner_index.clone()),
+            element_type.clone(),
+        );
+        let right_value = HirExpr::TypedIndex(
+            Box::new(variable(&array_name)),
+            Box::new(next_index.clone()),
+            element_type.clone(),
+        );
+        let compare = HirExpr::Call(
+            Box::new(variable(&comparator_name)),
+            vec![variable(&left_name), variable(&right_name)],
+        );
+        let should_swap = HirExpr::BinOp(BinOp::Gt, Box::new(compare), Box::new(number(0.0)));
+        let inner_limit = HirExpr::BinOp(
+            BinOp::Sub,
+            Box::new(variable(&length_name)),
+            Box::new(variable(&outer_name)),
+        );
+        let inner_condition = HirExpr::BinOp(
+            BinOp::Lt,
+            Box::new(add_one(variable(&inner_name))),
+            Box::new(inner_limit),
+        );
+        let outer_condition = HirExpr::BinOp(
+            BinOp::Lt,
+            Box::new(variable(&outer_name)),
+            Box::new(variable(&length_name)),
+        );
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(array_name.clone(), array_type.clone(), working_source),
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(variable(&array_name))),
+            ),
+            HirStmt::Let(outer_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::While(
+                outer_condition,
+                vec![
+                    HirStmt::Let(inner_name.clone(), HirType::F64, number(0.0)),
+                    HirStmt::While(
+                        inner_condition,
+                        vec![
+                            HirStmt::Let(left_name.clone(), element_type.clone(), left_value),
+                            HirStmt::Let(right_name.clone(), element_type.clone(), right_value),
+                            HirStmt::If(
+                                should_swap,
+                                vec![
+                                    HirStmt::Expr(HirExpr::IndexAssign(
+                                        Box::new(variable(&array_name)),
+                                        Box::new(variable(&inner_name)),
+                                        Box::new(variable(&right_name)),
+                                    )),
+                                    HirStmt::Expr(HirExpr::IndexAssign(
+                                        Box::new(variable(&array_name)),
+                                        Box::new(add_one(variable(&inner_name))),
+                                        Box::new(variable(&left_name)),
+                                    )),
+                                ],
+                                Vec::new(),
+                            ),
+                            HirStmt::Expr(HirExpr::Assign(
+                                inner_name.clone(),
+                                Box::new(add_one(variable(&inner_name))),
+                            )),
+                        ],
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        outer_name.clone(),
+                        Box::new(add_one(variable(&outer_name))),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(variable(&array_name))),
+        ]);
+        self.wrap_call_argument_bindings(
+            body,
+            &[
+                (receiver_name, array_type, receiver),
+                (comparator_name, comparator_type, comparator),
+            ],
+        )
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
@@ -6218,11 +6382,14 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if matches!(property.sym.as_ref(), "sort" | "toSorted") {
-                    if !call.args.is_empty() {
+                    if call.args.len() > 1 {
                         return Err(format!(
-                            "native `.{}()` comparators are not implemented yet",
+                            "native `.{}()` expects zero or one comparator",
                             property.sym
                         ));
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array sort comparator spread is not supported".into());
                     }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
@@ -6232,7 +6399,8 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     };
-                    let prefix = match element.as_ref() {
+                    let element_type = element.as_ref().clone();
+                    let prefix = match &element_type {
                         HirType::F64 => "number",
                         HirType::Str => "string",
                         HirType::Bool => "bool",
@@ -6243,6 +6411,20 @@ impl<'a> FnLowerer<'a> {
                             ))
                         }
                     };
+                    if let Some(argument) = call.args.first() {
+                        let comparator = self.lower_promise_callback(
+                            &argument.expr,
+                            &[element_type.clone(), element_type.clone()],
+                            Some(&HirType::F64),
+                        )?;
+                        return self.lower_array_sort_comparator(
+                            receiver,
+                            receiver_type,
+                            element_type,
+                            comparator,
+                            property.sym == *"toSorted",
+                        );
+                    }
                     let suffix = if property.sym == *"sort" {
                         "sort"
                     } else {
