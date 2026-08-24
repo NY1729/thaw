@@ -1367,8 +1367,12 @@ fn wrap_as_commonjs_module(js_source: &str, fallback_names: &[String]) -> String
          if (typeof globalThis.__dirname === 'undefined') {{ globalThis.__dirname = '/thaw_modules/package'; }}\n\
          if (typeof globalThis.__filename === 'undefined') {{ globalThis.__filename = '/thaw_modules/package/index.js'; }}\n\
          {js_source}\n\
-         if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
-         {bind_default_exports}"
+         var __thaw_bind_module_exports = function() {{\n\
+         \x20\x20if (typeof module.exports === 'object' && module.exports !== null) {{ for (var k in module.exports) {{ globalThis[k] = module.exports[k]; }} }}\n\
+         {bind_default_exports}\
+         }};\n\
+         if (globalThis.__thaw_module_ready && typeof globalThis.__thaw_module_ready.then === 'function') {{ globalThis.__thaw_module_ready.then(__thaw_bind_module_exports); }}\n\
+         else {{ __thaw_bind_module_exports(); }}"
     )
 }
 
