@@ -4666,6 +4666,22 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             MemberProp::Ident(prop) => {
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Math") {
+                    let value = match prop.sym.as_ref() {
+                        "E" => std::f64::consts::E,
+                        "PI" => std::f64::consts::PI,
+                        "LN2" => std::f64::consts::LN_2,
+                        "LN10" => std::f64::consts::LN_10,
+                        "LOG2E" => std::f64::consts::LOG2_E,
+                        "LOG10E" => std::f64::consts::LOG10_E,
+                        "SQRT1_2" => std::f64::consts::FRAC_1_SQRT_2,
+                        "SQRT2" => std::f64::consts::SQRT_2,
+                        _ => {
+                            return Err(format!("unsupported Math property `{}`", prop.sym));
+                        }
+                    };
+                    return Ok(HirExpr::Lit(HirLit::F64(value)));
+                }
                 let obj = self.lower_expr(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 match &obj_ty {
