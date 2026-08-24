@@ -246,6 +246,11 @@ pub enum Value {
         data: *mut u8,
         length: usize,
     },
+    BufferView {
+        array_buffer: NapiValue,
+        byte_offset: usize,
+        length: usize,
+    },
     ArrayBuffer {
         bytes: Vec<u8>,
         detached: bool,
@@ -351,6 +356,7 @@ pub struct Env {
     property_attributes: HashMap<(usize, PropertyKey), u32>,
     symbols: HashMap<u64, NapiValue>,
     type_tags: HashMap<usize, NapiTypeTag>,
+    property_keys: HashMap<String, NapiValue>,
 }
 
 #[derive(Clone, Copy)]
@@ -398,6 +404,7 @@ impl Env {
             property_attributes: HashMap::new(),
             symbols: HashMap::new(),
             type_tags: HashMap::new(),
+            property_keys: HashMap::new(),
         }
     }
 
@@ -543,6 +550,7 @@ fn is_object_value(value: &Value) -> bool {
             | Value::Array(_)
             | Value::Buffer(_)
             | Value::ExternalBuffer { .. }
+            | Value::BufferView { .. }
             | Value::ArrayBuffer { .. }
             | Value::ExternalArrayBuffer { .. }
             | Value::TypedArray { .. }
@@ -1016,6 +1024,20 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
                 &[]
             } else {
                 std::slice::from_raw_parts(*data, *length)
+            };
+            JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
+        }
+        Value::BufferView {
+            array_buffer,
+            byte_offset,
+            length,
+        } => {
+            let (data, _, detached) = arraybuffer_parts(*array_buffer)
+                .map_err(|_| "invalid Buffer backing ArrayBuffer")?;
+            let bytes = if detached || *length == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(data.add(*byte_offset), *length)
             };
             JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
         }
@@ -1919,6 +1941,85 @@ pub unsafe extern "C" fn napi_create_string_utf16(
     };
     let value = env.alloc(Value::String(string));
     write_value(out, value)
+}
+
+fn intern_property_key(env: &mut Env, key: String) -> NapiValue {
+    if let Some(value) = env.property_keys.get(&key).copied() {
+        return value;
+    }
+    let value = env.alloc(Value::String(key.clone()));
+    env.property_keys.insert(key, value);
+    value
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_create_property_key_utf8(
+    env: NapiEnv,
+    value: *const c_char,
+    length: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if value.is_null() || out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let bytes = if length == NAPI_AUTO_LENGTH {
+        CStr::from_ptr(value).to_bytes()
+    } else {
+        std::slice::from_raw_parts(value.cast::<u8>(), length)
+    };
+    let key = String::from_utf8_lossy(bytes).into_owned();
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    write_value(out, intern_property_key(env, key))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_create_property_key_latin1(
+    env: NapiEnv,
+    value: *const c_char,
+    length: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if value.is_null() || out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let bytes = if length == NAPI_AUTO_LENGTH {
+        CStr::from_ptr(value).to_bytes()
+    } else {
+        std::slice::from_raw_parts(value.cast::<u8>(), length)
+    };
+    let key = bytes.iter().map(|byte| char::from(*byte)).collect();
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    write_value(out, intern_property_key(env, key))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_create_property_key_utf16(
+    env: NapiEnv,
+    value: *const u16,
+    length: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if value.is_null() || out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let length = if length == NAPI_AUTO_LENGTH {
+        let mut length = 0;
+        while *value.add(length) != 0 {
+            length += 1;
+        }
+        length
+    } else {
+        length
+    };
+    let key = String::from_utf16_lossy(std::slice::from_raw_parts(value, length));
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    write_value(out, intern_property_key(env, key))
 }
 
 #[no_mangle]
@@ -3806,6 +3907,44 @@ pub unsafe extern "C" fn napi_create_external_buffer(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_create_buffer_from_arraybuffer(
+    env: NapiEnv,
+    array_buffer: NapiValue,
+    byte_offset: usize,
+    byte_length: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok((_, buffer_length, detached)) = arraybuffer_parts(array_buffer) else {
+        return NAPI_ARRAYBUFFER_EXPECTED;
+    };
+    if detached {
+        return NAPI_INVALID_ARG;
+    }
+    let in_bounds = byte_offset
+        .checked_add(byte_length)
+        .is_some_and(|end| end <= buffer_length);
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if !in_bounds {
+        let error = env.alloc(Value::Error(
+            "Buffer range exceeds ArrayBuffer bounds".into(),
+        ));
+        env.exception = Some(error);
+        return NAPI_PENDING_EXCEPTION;
+    }
+    let value = env.alloc(Value::BufferView {
+        array_buffer,
+        byte_offset,
+        length: byte_length,
+    });
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_buffer_info(
     _env: NapiEnv,
     value: NapiValue,
@@ -3834,6 +3973,27 @@ pub unsafe extern "C" fn napi_get_buffer_info(
             }
             NAPI_OK
         }
+        Some(Value::BufferView {
+            array_buffer,
+            byte_offset,
+            length: view_length,
+        }) => {
+            let (bytes, _, detached) = match arraybuffer_parts(*array_buffer) {
+                Ok(parts) => parts,
+                Err(status) => return status,
+            };
+            if !data.is_null() {
+                *data = if detached {
+                    ptr::null_mut()
+                } else {
+                    bytes.add(*byte_offset).cast()
+                };
+            }
+            if !length.is_null() {
+                *length = if detached { 0 } else { *view_length };
+            }
+            NAPI_OK
+        }
         _ => NAPI_INVALID_ARG,
     }
 }
@@ -3849,7 +4009,7 @@ pub unsafe extern "C" fn napi_is_buffer(
     }
     *out = matches!(
         value_ref(value),
-        Ok(Value::Buffer(_) | Value::ExternalBuffer { .. })
+        Ok(Value::Buffer(_) | Value::ExternalBuffer { .. } | Value::BufferView { .. })
     );
     NAPI_OK
 }
@@ -4069,7 +4229,10 @@ pub unsafe extern "C" fn napi_is_typedarray(
     }
     *out = matches!(
         value_ref(value),
-        Ok(Value::TypedArray { .. } | Value::Buffer(_) | Value::ExternalBuffer { .. })
+        Ok(Value::TypedArray { .. }
+            | Value::Buffer(_)
+            | Value::ExternalBuffer { .. }
+            | Value::BufferView { .. })
     );
     NAPI_OK
 }
@@ -4237,6 +4400,36 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
             }
             if !byte_offset.is_null() {
                 *byte_offset = 0;
+            }
+            NAPI_OK
+        }
+        Some(Value::BufferView {
+            array_buffer: backing,
+            byte_offset: offset,
+            length: view_length,
+        }) => {
+            let (bytes, _, detached) = match arraybuffer_parts(*backing) {
+                Ok(parts) => parts,
+                Err(status) => return status,
+            };
+            if !array_type.is_null() {
+                *array_type = 1;
+            }
+            if !length.is_null() {
+                *length = if detached { 0 } else { *view_length };
+            }
+            if !data.is_null() {
+                *data = if detached {
+                    ptr::null_mut()
+                } else {
+                    bytes.add(*offset).cast()
+                };
+            }
+            if !array_buffer.is_null() {
+                *array_buffer = *backing;
+            }
+            if !byte_offset.is_null() {
+                *byte_offset = *offset;
             }
             NAPI_OK
         }
@@ -5676,6 +5869,57 @@ mod tests {
     }
 
     #[test]
+    fn optimized_property_keys_share_identity_across_encodings() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let latin1 = [0xe9_u8, 0];
+            let utf8 = [0xc3_u8, 0xa9, 0];
+            let utf16 = [0x00e9_u16, 0];
+            let mut latin1_key = ptr::null_mut();
+            let mut utf8_key = ptr::null_mut();
+            let mut utf16_key = ptr::null_mut();
+            assert_eq!(
+                node_api_create_property_key_latin1(
+                    env_ptr,
+                    latin1.as_ptr().cast(),
+                    NAPI_AUTO_LENGTH,
+                    &mut latin1_key,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                node_api_create_property_key_utf8(env_ptr, utf8.as_ptr().cast(), 2, &mut utf8_key,),
+                NAPI_OK
+            );
+            assert_eq!(
+                node_api_create_property_key_utf16(
+                    env_ptr,
+                    utf16.as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    &mut utf16_key,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(latin1_key, utf8_key);
+            assert_eq!(utf8_key, utf16_key);
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            let value = env.alloc(Value::Number(42.0));
+            assert_eq!(
+                napi_set_property(env_ptr, object, latin1_key, value),
+                NAPI_OK
+            );
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_get_property(env_ptr, object, utf16_key, &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, value);
+        }
+    }
+
+    #[test]
     fn integer_creation_roundtrips_through_napi_number_accessors() {
         unsafe {
             let mut env = Env::new();
@@ -5902,6 +6146,66 @@ mod tests {
                 napi_create_typedarray(env_ptr, 8, 5, buffer, 0, &mut view),
                 NAPI_INVALID_ARG
             );
+        }
+    }
+
+    #[test]
+    fn buffers_can_view_arraybuffer_ranges_without_copying() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut data = ptr::null_mut();
+            let mut array_buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 8, &mut data, &mut array_buffer),
+                NAPI_OK
+            );
+            *(data as *mut u8).add(2) = 7;
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                node_api_create_buffer_from_arraybuffer(env_ptr, array_buffer, 2, 3, &mut buffer,),
+                NAPI_OK
+            );
+            let mut view_data = ptr::null_mut();
+            let mut length = 0;
+            assert_eq!(
+                napi_get_buffer_info(env_ptr, buffer, &mut view_data, &mut length),
+                NAPI_OK
+            );
+            assert_eq!(view_data, (data as *mut u8).add(2).cast());
+            assert_eq!(length, 3);
+            *(view_data as *mut u8).add(1) = 9;
+            assert_eq!(*(data as *mut u8).add(3), 9);
+
+            let mut kind = -1;
+            let mut backing = ptr::null_mut();
+            let mut offset = 0;
+            assert_eq!(
+                napi_get_typedarray_info(
+                    env_ptr,
+                    buffer,
+                    &mut kind,
+                    &mut length,
+                    &mut view_data,
+                    &mut backing,
+                    &mut offset,
+                ),
+                NAPI_OK
+            );
+            assert_eq!((kind, length, backing, offset), (1, 3, array_buffer, 2));
+
+            assert_eq!(
+                node_api_create_buffer_from_arraybuffer(env_ptr, array_buffer, 7, 2, &mut buffer,),
+                NAPI_PENDING_EXCEPTION
+            );
+            assert!(env.exception.take().is_some());
+            assert_eq!(napi_detach_arraybuffer(env_ptr, array_buffer), NAPI_OK);
+            assert_eq!(
+                napi_get_buffer_info(env_ptr, buffer, &mut view_data, &mut length),
+                NAPI_OK
+            );
+            assert!(view_data.is_null());
+            assert_eq!(length, 0);
         }
     }
 
