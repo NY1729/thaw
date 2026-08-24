@@ -2716,25 +2716,31 @@ pub unsafe extern "C" fn napi_delete_property(
     key: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() {
         return NAPI_INVALID_ARG;
     }
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
-    if env
-        .as_ref()
-        .is_some_and(|env| env.sealed_objects.contains(&(object as usize)))
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let own = own_property_value(env, object, &key).is_some()
+        || accessor_for_owner(env, object as usize, &key).is_some();
+    if own
+        && env
+            .as_ref()
+            .is_some_and(|env| env.sealed_objects.contains(&(object as usize)))
     {
-        *out = false;
+        if let Some(out) = out.as_mut() {
+            *out = false;
+        }
         return NAPI_OK;
     }
-    if env.as_ref().is_some_and(|env| {
-        env.property_attributes
-            .get(&(object as usize, key.clone()))
-            .is_some_and(|attributes| attributes & NAPI_CONFIGURABLE == 0)
-    }) {
-        *out = false;
+    if own && property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0 {
+        if let Some(out) = out.as_mut() {
+            *out = false;
+        }
         return NAPI_OK;
     }
     if let Ok(env) = env_mut(env) {
@@ -2746,7 +2752,9 @@ pub unsafe extern "C" fn napi_delete_property(
         remove_property_order(env, object as usize, &key);
         env.property_attributes.remove(&(object as usize, key));
     }
-    *out = true;
+    if let Some(out) = out.as_mut() {
+        *out = true;
+    }
     NAPI_OK
 }
 
@@ -4195,39 +4203,32 @@ pub unsafe extern "C" fn napi_delete_element(
         return NAPI_INVALID_ARG;
     }
     let key = PropertyKey::String(index.to_string());
-    if env
-        .as_ref()
-        .is_some_and(|env| env.sealed_objects.contains(&(object as usize)))
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let own = own_property_value(env, object, &key).is_some()
+        || accessor_for_owner(env, object as usize, &key).is_some();
+    if own
+        && env
+            .as_ref()
+            .is_some_and(|env| env.sealed_objects.contains(&(object as usize)))
     {
         if let Some(result) = result.as_mut() {
             *result = false;
         }
         return NAPI_OK;
     }
-    if property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0
-        && (find_data_property_owner(env, object, &key) == Some(object as usize)
-            || accessor_for_owner(env, object as usize, &key).is_some())
-    {
+    if own && property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0 {
         if let Some(result) = result.as_mut() {
             *result = false;
         }
         return NAPI_OK;
-    }
-    match object.as_mut() {
-        Some(Value::Array(values)) => {
-            if let Some(value) = values.get_mut(index as usize) {
-                *value = None;
-            }
-        }
-        Some(Value::Object(values)) => {
-            values.remove(&key);
-        }
-        Some(Value::Function(function)) => {
-            function.properties.remove(&key);
-        }
-        _ => return NAPI_OBJECT_EXPECTED,
     }
     if let Ok(env) = env_mut(env) {
+        let status = remove_own_property(env, object, &key);
+        if status != NAPI_OK {
+            return status;
+        }
         env.accessors.remove(&(object as usize, key.clone()));
         remove_property_order(env, object as usize, &key);
         env.property_attributes.remove(&(object as usize, key));
@@ -7601,6 +7602,50 @@ mod tests {
                 NAPI_OK
             );
             assert!(!deleted);
+        }
+    }
+
+    #[test]
+    fn delete_property_allows_ignored_results_and_inherited_keys() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut prototype = ptr::null_mut();
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut prototype), NAPI_OK);
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            env.prototypes.insert(object as usize, prototype as usize);
+            let key = env.alloc(Value::String("inherited".into()));
+            let value = env.alloc(Value::Number(1.0));
+            assert_eq!(napi_set_property(env_ptr, prototype, key, value), NAPI_OK);
+            assert_eq!(napi_object_seal(env_ptr, object), NAPI_OK);
+            assert_eq!(
+                napi_delete_property(env_ptr, object, key, ptr::null_mut()),
+                NAPI_OK
+            );
+            let mut present = false;
+            assert_eq!(
+                napi_has_property(env_ptr, object, key, &mut present),
+                NAPI_OK
+            );
+            assert!(
+                present,
+                "deleting an inherited key must not affect its owner"
+            );
+
+            let own = env.alloc(Value::String("own".into()));
+            let mut plain = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
+            assert_eq!(napi_set_property(env_ptr, plain, own, value), NAPI_OK);
+            assert_eq!(
+                napi_delete_property(env_ptr, plain, own, ptr::null_mut()),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_has_own_property(env_ptr, plain, own, &mut present),
+                NAPI_OK
+            );
+            assert!(!present);
         }
     }
 
