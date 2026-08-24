@@ -451,8 +451,9 @@ The workspace crates have narrow responsibilities:
 - Homogeneous native arrays implement stable default `.sort()` and ES2023
   `.toSorted()`: numbers use their JavaScript string keys, strings compare
   UTF-16 code units, booleans order `false` before `true`, fixed objects retain
-  source order, and `toSorted` returns an arena-owned shallow copy. Comparator
-  callbacks remain an explicit unsupported form
+  source order, and `toSorted` returns an arena-owned shallow copy. A typed
+  synchronous comparator may be a contextually typed arrow (including
+  captures) or named function; stable HIR sorting propagates callback errors
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
