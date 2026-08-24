@@ -425,7 +425,8 @@ The workspace crates have narrow responsibilities:
   boolean, fixed-object and nested aggregate elements, empty arrays, receiver
   ordering and awaited receivers are supported
 - Homogeneous number, string, boolean and fixed-object arrays implement
-  `.indexOf()` and `.includes()` with positive/negative starting positions.
+  `.indexOf()`, `.lastIndexOf()` and `.includes()` with positive/negative and
+  infinite starting positions.
   Numeric searches distinguish strict equality from SameValueZero (`NaN`),
   treat signed zeros equally, while objects use reference identity; every
   receiver/argument is evaluated once in order and may suspend with `await`
