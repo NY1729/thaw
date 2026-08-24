@@ -728,6 +728,8 @@ The workspace crates have narrow responsibilities:
   Thread-safe-function handles retain stable process-lifetime identity after
   finalization, so subsequent calls return `napi_closing` instead of touching
   freed memory.
+  N-API reference handles are retained by their Env after deletion, allowing
+  repeated delete/get/ref/unref calls to reject safely without use-after-free.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
