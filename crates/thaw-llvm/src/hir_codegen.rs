@@ -12361,6 +12361,71 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_with() {
+        let source = r#"
+            interface Item { value: number; }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function index(): number {
+                console.log("index");
+                return 1;
+            }
+            function value(): number {
+                console.log("value");
+                return 9;
+            }
+            async function delayedReceiver(): Promise<string[]> {
+                console.log("awaited receiver");
+                await sleep(1);
+                return ["a", "b"];
+            }
+            async function delayedIndex(): Promise<number> {
+                console.log("awaited index");
+                await sleep(1);
+                return -1;
+            }
+            async function delayedValue(): Promise<string> {
+                console.log("awaited value");
+                await sleep(1);
+                return "z";
+            }
+            async function main(): Promise<void> {
+                const source: number[] = [1, 2, 3];
+                console.log(source.with(1, 9).join(","));
+                console.log(source.join(","));
+                console.log(source.with(-1.9, 8).join(","));
+                console.log(source.with(0 / 0, 7).join(","));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 2 };
+                const replacement: Item = { value: 3 };
+                const items: Item[] = [first, second];
+                const copied: Item[] = items.with(1, replacement);
+                copied[0].value = 5;
+                console.log(items[0].value + copied[1].value);
+                console.log(receiver().with(index(), value()).join(","));
+                console.log((await delayedReceiver()).with(await delayedIndex(), await delayedValue()).join(","));
+                try {
+                    source.with(3, 0);
+                } catch (error) {
+                    console.log(error);
+                }
+                const empty: number[] = [];
+                try {
+                    empty.with(0, 1);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_with"),
+            "1,9,3\n1,2,3\n1,2,8\n7,2,3\n8\nreceiver\nindex\nvalue\n1,9,3\nawaited receiver\nawaited index\nawaited value\na,z\nInvalid index for Array.prototype.with\nInvalid index for Array.prototype.with\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
