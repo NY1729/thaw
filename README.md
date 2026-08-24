@@ -131,6 +131,8 @@ The workspace crates have narrow responsibilities:
   `+`/`-`/`!`/`~`/`typeof`/`void`, strict equality/inequality, same-type `==`/`!=`, and
   ordered comparisons, `if`, `while`, classic
   `for`, `do/while`, and typed-array `for...of`
+- `let`/`const` object and fixed-length tuple destructuring, including nested
+  patterns, holes, renaming, object/tuple rest, and awaited sources
 - Object fields and array indexing/mutation
 - Fixed-shape object fields can also use static string-computed reads,
   assignments, compound assignments, and updates; JSON accepts string keys

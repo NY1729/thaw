@@ -509,6 +509,10 @@ loop loweringを使う。
 fixed-shape objectの`obj["field"]`は静的string keyを通常の`PropAccess`/`PropAssign`へ
 解決し、read、単純/compound assignment、prefix/postfix updateでdot accessと同じABIを使う。
 JSONのstring-computed keyは`JsonGet`、number keyは`JsonIndex`へ型別にlowerする。
+`let`/`const` destructuringは右辺を内部localへ一度だけ保存し、fixed object fieldを
+`PropAccess`、tuple elementを`TypedIndex`として個別bindingへ展開する。nested pattern、
+renaming、array hole、object/tuple restを扱い、awaited sourceもframe slotへ一度だけ保存する。
+default valueはundefined表現が必要なため、誤ったfallbackを生成せず明示的に診断する。
 
 ## 12. Promise constructorとcontinuation chain
 

@@ -9732,6 +9732,44 @@ mod tests {
     }
 
     #[test]
+    fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
+        let source = r#"
+            async function source(): Promise<{
+                x: number; label: string; nested: { flag: boolean }; extra: number
+            }> {
+                await sleep(1);
+                console.log("source");
+                return { x: 1, label: "ok", nested: { flag: true }, extra: 4 };
+            }
+            function tupleSource(): [number, string, { value: number }, number, number] {
+                console.log("tuple");
+                return [2, "skip", { value: 3 }, 4, 5];
+            }
+            async function main(): Promise<void> {
+                const { x: renamed, nested: { flag }, ...rest } = await source();
+                console.log(renamed);
+                console.log(flag);
+                console.log(rest.label);
+                console.log(rest.extra);
+                const [first, , pair, ...tail]:
+                    [number, string, { value: number }, number, number] = tupleSource();
+                console.log(first);
+                console.log(pair.value);
+                console.log(tail[0]);
+                console.log(tail[1]);
+                const [head, ...numbers] = [6, 7, 8];
+                console.log(head);
+                console.log(numbers[0]);
+                console.log(numbers[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "nested_destructuring"),
+            "source\n1\ntrue\nok\n4\ntuple\n2\n3\n4\n5\n6\n7\n8\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
