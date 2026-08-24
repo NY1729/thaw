@@ -734,6 +734,8 @@ The workspace crates have narrow responsibilities:
   repeated remove return `napi_invalid_arg` safely.
   Wrap, finalizer and object type-tag APIs reject objects owned by another Env
   before reading or mutating identity metadata.
+  Named, generic and descriptor-based property APIs similarly require the
+  object, key and assigned value handles to belong to the calling Env.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
