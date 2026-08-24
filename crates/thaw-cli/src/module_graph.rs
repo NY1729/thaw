@@ -291,6 +291,8 @@ pub fn bundle(
     )?;
 
     let mut exports: Vec<HashMap<String, String>> = vec![HashMap::new(); modules.len()];
+    let mut namespace_exports: Vec<HashMap<String, HashMap<String, String>>> =
+        vec![HashMap::new(); modules.len()];
     let mut bundled_items = Vec::new();
     for index in 0..modules.len() {
         let is_entry = index == entry_index;
@@ -345,6 +347,14 @@ pub fn bundle(
                             continue;
                         }
                     };
+                    if let Some(namespace) = modules[index]
+                        .dependencies
+                        .get(specifier)
+                        .and_then(|dependency| namespace_exports[*dependency].get(&requested))
+                    {
+                        namespaces.insert(local, namespace.clone());
+                        continue;
+                    }
                     let target = dependency_exports.get(&requested).ok_or_else(|| {
                         format!(
                             "{}: `{specifier}` has no export named `{requested}`",
@@ -357,6 +367,7 @@ pub fn bundle(
         }
 
         let mut public = HashMap::new();
+        let mut public_namespaces = HashMap::new();
         let mut items = Vec::new();
         for item in modules[index].module.body.clone() {
             match item {
@@ -398,24 +409,47 @@ pub fn bundle(
                         None
                     };
                     for specifier in export.specifiers {
-                        let thaw_parser::ast::ExportSpecifier::Named(named) = specifier else {
-                            return Err(
-                                "namespace/default export specifiers are not supported yet"
-                                    .to_string(),
-                            );
-                        };
-                        let original = export_name(&named.orig)?;
-                        let exported = named
-                            .exported
-                            .as_ref()
-                            .map(export_name)
-                            .transpose()?
-                            .unwrap_or_else(|| original.clone());
-                        let target = source_exports
-                            .and_then(|source| source.get(&original))
-                            .or_else(|| names.get(&original))
-                            .ok_or_else(|| format!("cannot export unknown name `{original}`"))?;
-                        public.insert(exported, target.clone());
+                        match specifier {
+                            thaw_parser::ast::ExportSpecifier::Named(named) => {
+                                let original = export_name(&named.orig)?;
+                                let exported = named
+                                    .exported
+                                    .as_ref()
+                                    .map(export_name)
+                                    .transpose()?
+                                    .unwrap_or_else(|| original.clone());
+                                if source_exports.is_none() {
+                                    if let Some(namespace) = namespaces.get(&original) {
+                                        public_namespaces.insert(exported, namespace.clone());
+                                        continue;
+                                    }
+                                }
+                                let target = source_exports
+                                    .and_then(|source| source.get(&original))
+                                    .or_else(|| names.get(&original))
+                                    .ok_or_else(|| {
+                                        format!("cannot export unknown name `{original}`")
+                                    })?;
+                                public.insert(exported, target.clone());
+                            }
+                            thaw_parser::ast::ExportSpecifier::Namespace(namespace) => {
+                                let exported = export_name(&namespace.name)?;
+                                let source = source_exports.ok_or_else(|| {
+                                    "namespace exports require a source module".to_string()
+                                })?;
+                                public_namespaces.insert(exported, source.clone());
+                            }
+                            thaw_parser::ast::ExportSpecifier::Default(default) => {
+                                let exported = default.exported.sym.to_string();
+                                let source = source_exports.ok_or_else(|| {
+                                    "default re-exports require a source module".to_string()
+                                })?;
+                                let target = source.get("default").ok_or_else(|| {
+                                    "re-export source has no default export".to_string()
+                                })?;
+                                public.insert(exported, target.clone());
+                            }
+                        }
                     }
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(mut export)) => {
@@ -480,6 +514,7 @@ pub fn bundle(
             }
         }
         exports[index] = public;
+        namespace_exports[index] = public_namespaces;
         bundled_items.extend(items);
     }
 
