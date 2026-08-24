@@ -481,6 +481,9 @@ bitwise/shift演算`|`/`^`/`&`/`<<`/`>>`/`>>>`と各compound assignmentはnumber
 32-bit整数へ変換して実行する。shift countは下位5 bitへmaskし、`>>>`だけは符号なし
 32-bit結果をnumberへ戻す。単項`~`は`-1`とのXORへlowerする。awaitを含むoperandも
 同じtyped expression経路を通る。
+`==`/`!=`は両operandのnative型が同じ場合に限り、既存の厳密等価比較へ正規化する。
+number/booleanは値、stringは内容、array/objectは参照identityを比較する。型をまたぐ
+JavaScript coercionは行わず、異なる型のoperandは明示的なコンパイルエラーにする。
 fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
 index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
 loop loweringを使う。

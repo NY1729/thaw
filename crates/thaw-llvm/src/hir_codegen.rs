@@ -9528,6 +9528,27 @@ mod tests {
     }
 
     #[test]
+    fn compiles_same_type_loose_equality_with_awaits() {
+        let source = r#"
+            async function numberValue(): Promise<number> {
+                await sleep(1);
+                return 2;
+            }
+            async function main(): Promise<void> {
+                console.log(1 == 1);
+                console.log("a" != "b");
+                console.log(true == false);
+                console.log((await numberValue()) == 2);
+                console.log((await numberValue()) != 3);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "loose_equality"),
+            "true\ntrue\nfalse\ntrue\ntrue\n"
+        );
+    }
+
+    #[test]
     fn logical_operators_short_circuit_sync_and_awaited_operands() {
         let source = r#"
             function flag(label: string, value: boolean): boolean {
