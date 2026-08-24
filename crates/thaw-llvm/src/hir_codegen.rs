@@ -12867,6 +12867,40 @@ mod tests {
     }
 
     #[test]
+    fn compiles_optional_array_and_tuple_access() {
+        let source = r#"
+            function numbers(present: boolean): number[] | undefined {
+                if (present) return [2, 4];
+                return undefined;
+            }
+            function pair(present: boolean): [number, string] | undefined {
+                if (present) return [3, "ok"];
+                return undefined;
+            }
+            function index(): number {
+                console.log("index");
+                return 1;
+            }
+            async function delayed(): Promise<number[] | undefined> {
+                await sleep(1);
+                return [6];
+            }
+            async function main(): Promise<void> {
+                console.log(numbers(true)?.[index()]);
+                console.log(numbers(false)?.[index()]);
+                console.log(pair(true)?.[0]);
+                console.log(pair(true)?.[1]);
+                console.log(pair(false)?.[0]);
+                console.log((await delayed())?.[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_array_tuple_access"),
+            "index\n4\nundefined\n3\nok\nundefined\n6\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_for_each() {
         let source = r#"
             interface Item { value: number; }

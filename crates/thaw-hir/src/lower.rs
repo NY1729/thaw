@@ -5476,41 +5476,77 @@ impl<'a> FnLowerer<'a> {
             // same runtime behavior as ordinary member access.
             return self.lower_member_read(member);
         };
-        let HirType::Object(fields) = payload.as_ref() else {
-            return Err(format!(
-                "optional member access is not yet supported on {payload:?}"
-            ));
+        let name = format!("__thaw_optional_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), object_type.clone());
+        let bound = HirExpr::Var(name.clone());
+        let unwrapped = HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone());
+        let (access, field_type) = match payload.as_ref() {
+            HirType::Object(fields) => {
+                let field = match &member.prop {
+                    MemberProp::Ident(field) => field.sym.to_string(),
+                    MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                        Expr::Lit(Lit::Str(field)) => field.value.to_string_lossy().into_owned(),
+                        _ => {
+                            return Err(
+                                "optional computed object keys must be string literals".into()
+                            )
+                        }
+                    },
+                    _ => return Err("unsupported optional object member".into()),
+                };
+                let field_type = fields
+                    .iter()
+                    .find(|(name, _)| name == &field)
+                    .map(|(_, ty)| ty.clone())
+                    .ok_or_else(|| format!("object has no field `{field}`"))?;
+                (
+                    HirExpr::PropAccess(Box::new(unwrapped), payload.as_ref().clone(), field),
+                    field_type,
+                )
+            }
+            HirType::Array(element) => {
+                let MemberProp::Computed(computed) = &member.prop else {
+                    return Err("optional array access requires a computed index".into());
+                };
+                let index = self.lower_expr(&computed.expr)?;
+                self.expect_type(&HirType::F64, &index, "optional array index")?;
+                (
+                    HirExpr::TypedIndex(Box::new(unwrapped), Box::new(index), *element.clone()),
+                    *element.clone(),
+                )
+            }
+            HirType::Tuple(elements) => {
+                let MemberProp::Computed(computed) = &member.prop else {
+                    return Err("optional tuple access requires a computed index".into());
+                };
+                let Expr::Lit(Lit::Num(index)) = computed.expr.as_ref() else {
+                    return Err("optional tuple index must be a numeric literal".into());
+                };
+                let index = index.value as usize;
+                let element = elements
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("tuple index {index} is out of bounds"))?;
+                (
+                    HirExpr::TypedIndex(
+                        Box::new(unwrapped),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        element.clone(),
+                    ),
+                    element,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "optional member access is not yet supported on {other:?}"
+                ))
+            }
         };
-        let field = match &member.prop {
-            MemberProp::Ident(field) => field.sym.to_string(),
-            MemberProp::Computed(computed) => match computed.expr.as_ref() {
-                Expr::Lit(Lit::Str(field)) => field.value.to_string_lossy().into_owned(),
-                _ => return Err("optional computed object keys must be string literals".into()),
-            },
-            _ => return Err("unsupported optional object member".into()),
-        };
-        let field_type = fields
-            .iter()
-            .find(|(name, _)| name == &field)
-            .map(|(_, ty)| ty.clone())
-            .ok_or_else(|| format!("object has no field `{field}`"))?;
         let (result_payload, present_value) = match &field_type {
             HirType::Optional(inner) => (inner.as_ref().clone(), None),
             other => (other.clone(), Some(other.clone())),
         };
-
-        let name = format!("__thaw_optional_object_{}", self.next_binding);
-        self.next_binding += 1;
-        self.scope.insert(name.clone(), object_type.clone());
-        let bound = HirExpr::Var(name.clone());
-        let access = HirExpr::PropAccess(
-            Box::new(HirExpr::OptionalValue(
-                Box::new(bound.clone()),
-                payload.as_ref().clone(),
-            )),
-            payload.as_ref().clone(),
-            field,
-        );
         let present_value = match present_value {
             Some(payload) => HirExpr::OptionalSome(Box::new(access), payload),
             None => access,
