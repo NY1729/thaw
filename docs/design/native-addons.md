@@ -57,8 +57,10 @@ parameterはsourceで観測した実引数個数だけを展開するため、�
 複数回収集により前方call chainも解決する。parameter依存／競合するreturnと、現在の
 native表現を越えるrest要素型は引き続き残課題である。
 object literalはfield名と再帰的に推論した型を保持し、property readと同一arityの
-structural object overloadを選択する。computed/spread propertyとmutationを考慮した
-flow解析は引き続き残課題である。
+structural object overloadを選択する。直線的な`=`代入はlocal変数とnested propertyの
+型を更新し、静的文字列のcomputed propertyも扱う。未知またはcompound assignmentは
+該当する型情報を破棄する。branch joinとcomputed/spread object literalは引き続き
+残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
