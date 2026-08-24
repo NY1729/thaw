@@ -122,7 +122,7 @@ The workspace crates have narrow responsibilities:
 ### Implemented
 
 - Typed top-level functions, calls, forward references and recursion
-- `number`, `string`, `boolean`, `void`, `Json`, number arrays and fixed-shape
+- `number`, `string`, `boolean`, `null`, `void`, `Json`, number arrays and fixed-shape
   objects; function types may be parenthesized where TypeScript grammar
   requires it (including `FunctionType | undefined`)
 - `interface`, interface inheritance and generic interface instantiation
@@ -625,7 +625,8 @@ The workspace crates have narrow responsibilities:
   the tagged runtime state and provides the same branch narrowing. Optional
   chaining now short-circuits tagged
   fixed-object fields, array/tuple elements, native `.length`, function-value
-  calls and receiver-bound methods. Native `null` and dynamically computed
+  calls and receiver-bound methods. Standalone native `null` has distinct
+  display, `typeof` and equality semantics; `T | null` and dynamically computed
   method names still require broader optional-chain lowering
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four

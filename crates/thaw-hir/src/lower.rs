@@ -1151,6 +1151,7 @@ fn lower_ts_type(
             TsKeywordTypeKind::TsStringKeyword => Ok(HirType::Str),
             TsKeywordTypeKind::TsBooleanKeyword => Ok(HirType::Bool),
             TsKeywordTypeKind::TsUndefinedKeyword => Ok(HirType::Undefined),
+            TsKeywordTypeKind::TsNullKeyword => Ok(HirType::Null),
             TsKeywordTypeKind::TsVoidKeyword => Ok(HirType::Void),
             other => Err(format!(
                 "unsupported type keyword {other:?} (supports number/string/boolean/void)"
@@ -1981,6 +1982,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
     match ty {
         HirType::F64 | HirType::I64 => Some("number"),
         HirType::Undefined => Some("undefined"),
+        HirType::Null => Some("object"),
         HirType::Str => Some("string"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
@@ -3283,6 +3285,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined) => Ok(HirType::Undefined),
+            HirExpr::Lit(HirLit::Null) => Ok(HirType::Null),
             HirExpr::Var(name) => self
                 .scope
                 .get(name)
@@ -4145,6 +4148,21 @@ impl<'a> FnLowerer<'a> {
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
+        if matches!(
+            (&lhs_type, &rhs_type),
+            (HirType::Null, HirType::Undefined) | (HirType::Undefined, HirType::Null)
+        ) {
+            let lhs_name = format!("__thaw_loose_nullish_left_{}", self.next_binding);
+            self.next_binding += 1;
+            let rhs_name = format!("__thaw_loose_nullish_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(lhs_name.clone(), lhs_type.clone());
+            self.scope.insert(rhs_name.clone(), rhs_type.clone());
+            return self.wrap_call_argument_bindings(
+                HirExpr::Lit(HirLit::Bool(true)),
+                &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)],
+            );
+        }
         lhs = self.coerce_primitive_to_number(lhs)?;
         rhs = self.coerce_primitive_to_number(rhs)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
@@ -4236,6 +4254,7 @@ impl<'a> FnLowerer<'a> {
                 s.value.to_string_lossy().into_owned(),
             ))),
             Expr::Lit(Lit::Bool(b)) => Ok(HirExpr::Lit(HirLit::Bool(b.value))),
+            Expr::Lit(Lit::Null(_)) => Ok(HirExpr::Lit(HirLit::Null)),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
                 if !self.scope.contains_key(&name) && !self.signatures.contains_key(&name) {
