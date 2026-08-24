@@ -1512,6 +1512,7 @@ enum ArrayPredicateMode {
     Some,
     Every,
     FindIndex,
+    FindLastIndex,
 }
 
 fn target_to_read_expr(target: &Target) -> HirExpr {
@@ -5942,7 +5943,9 @@ impl<'a> FnLowerer<'a> {
         );
         let stop_condition = if matches!(
             mode,
-            ArrayPredicateMode::Some | ArrayPredicateMode::FindIndex
+            ArrayPredicateMode::Some
+                | ArrayPredicateMode::FindIndex
+                | ArrayPredicateMode::FindLastIndex
         ) {
             callback_call
         } else {
@@ -5955,14 +5958,19 @@ impl<'a> FnLowerer<'a> {
         let stop_result = match mode {
             ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(true)),
             ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(false)),
-            ArrayPredicateMode::FindIndex => HirExpr::Var(index_name.clone()),
+            ArrayPredicateMode::FindIndex | ArrayPredicateMode::FindLastIndex => {
+                HirExpr::Var(index_name.clone())
+            }
         };
         let final_result = match mode {
             ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(false)),
             ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(true)),
-            ArrayPredicateMode::FindIndex => HirExpr::Lit(HirLit::F64(-1.0)),
+            ArrayPredicateMode::FindIndex | ArrayPredicateMode::FindLastIndex => {
+                HirExpr::Lit(HirLit::F64(-1.0))
+            }
         };
         let one = || HirExpr::Lit(HirLit::F64(1.0));
+        let reverse = matches!(mode, ArrayPredicateMode::FindLastIndex);
         let body = HirExpr::Block(vec![
             HirStmt::Let(
                 length_name.clone(),
@@ -5972,13 +5980,25 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Let(
                 index_name.clone(),
                 HirType::F64,
-                HirExpr::Lit(HirLit::F64(0.0)),
+                if reverse {
+                    HirExpr::BinOp(
+                        BinOp::Sub,
+                        Box::new(HirExpr::Var(length_name.clone())),
+                        Box::new(one()),
+                    )
+                } else {
+                    HirExpr::Lit(HirLit::F64(0.0))
+                },
             ),
             HirStmt::While(
                 HirExpr::BinOp(
-                    BinOp::Lt,
+                    if reverse { BinOp::GtEq } else { BinOp::Lt },
                     Box::new(HirExpr::Var(index_name.clone())),
-                    Box::new(HirExpr::Var(length_name)),
+                    Box::new(if reverse {
+                        HirExpr::Lit(HirLit::F64(0.0))
+                    } else {
+                        HirExpr::Var(length_name)
+                    }),
                 ),
                 vec![
                     HirStmt::Let(
@@ -5998,7 +6018,7 @@ impl<'a> FnLowerer<'a> {
                     HirStmt::Expr(HirExpr::Assign(
                         index_name.clone(),
                         Box::new(HirExpr::BinOp(
-                            BinOp::Add,
+                            if reverse { BinOp::Sub } else { BinOp::Add },
                             Box::new(HirExpr::Var(index_name)),
                             Box::new(one()),
                         )),
@@ -6694,7 +6714,10 @@ impl<'a> FnLowerer<'a> {
                         vec![receiver],
                     ));
                 }
-                if matches!(property.sym.as_ref(), "some" | "every" | "findIndex") {
+                if matches!(
+                    property.sym.as_ref(),
+                    "some" | "every" | "findIndex" | "findLastIndex"
+                ) {
                     if !(1..=2).contains(&call.args.len()) {
                         return Err(format!(
                             "native `.{}()` expects a predicate and optional thisArg",
@@ -6734,6 +6757,7 @@ impl<'a> FnLowerer<'a> {
                             "some" => ArrayPredicateMode::Some,
                             "every" => ArrayPredicateMode::Every,
                             "findIndex" => ArrayPredicateMode::FindIndex,
+                            "findLastIndex" => ArrayPredicateMode::FindLastIndex,
                             _ => unreachable!(),
                         },
                     );
