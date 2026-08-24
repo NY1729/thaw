@@ -5811,12 +5811,6 @@ impl<'a> FnLowerer<'a> {
         };
         let (result_payload, present_value) = match &field_type {
             HirType::Optional(inner) => (inner.as_ref().clone(), None),
-            HirType::Nullable(_) => {
-                return Err(
-                    "optional chaining over an already-nullable field requires a three-way nullish union"
-                        .into(),
-                )
-            }
             other => (other.clone(), Some(other.clone())),
         };
         let present_value = match present_value {
@@ -10436,12 +10430,6 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     let (result_payload, present) = match &return_type {
                         HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
-                        HirType::Nullable(_) => {
-                            return Err(
-                                "optional method returning a nullable requires a three-way nullish union"
-                                    .into(),
-                            )
-                        }
                         output => (
                             output.clone(),
                             HirExpr::OptionalSome(Box::new(invoked), output.clone()),
@@ -10522,12 +10510,6 @@ impl<'a> FnLowerer<'a> {
         } else {
             let (result_payload, present) = match return_type.as_ref() {
                 HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
-                HirType::Nullable(_) => {
-                    return Err(
-                        "optional call returning a nullable requires a three-way nullish union"
-                            .into(),
-                    )
-                }
                 output => (
                     output.clone(),
                     HirExpr::OptionalSome(Box::new(invoked), output.clone()),

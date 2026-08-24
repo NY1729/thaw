@@ -10171,6 +10171,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
             }
+            HirType::Optional(inner) => {
+                self.compile_console_tagged(payload.into_struct_value(), inner, "undefined")?;
+            }
+            HirType::Nullable(inner) => {
+                self.compile_console_tagged(payload.into_struct_value(), inner, "null")?;
+            }
             HirType::Object(_) => {
                 let object = self
                     .builder
@@ -11425,7 +11431,12 @@ mod tests {
     fn compiles_native_nullable_values() {
         let source = r#"
             interface Box { value: number | null; label: string; }
-            interface Item { value: number; run: (value: number) => number; }
+            interface Item {
+                value: number;
+                maybe: number | null;
+                run: (value: number) => number;
+                runMaybe: (present: boolean) => number | null;
+            }
             function maybe(present: boolean): number | null {
                 if (present) return 4;
                 return null;
@@ -11437,7 +11448,9 @@ mod tests {
             function maybeItem(present: boolean): Item | null {
                 if (present) return {
                     value: 5,
-                    run: (value: number) => value * 2
+                    maybe: null,
+                    run: (value: number) => value * 2,
+                    runMaybe: (present: boolean) => maybe(present)
                 };
                 return null;
             }
@@ -11447,6 +11460,10 @@ mod tests {
             }
             function maybeCallback(present: boolean): ((value: number) => number) | null {
                 if (present) return (value: number) => value + 1;
+                return null;
+            }
+            function maybeNullableCallback(present: boolean): (() => number | null) | null {
+                if (present) return () => maybe(false);
                 return null;
             }
             function narrowed(value: number | null): number {
@@ -11485,12 +11502,18 @@ mod tests {
                 console.log(box.label);
                 console.log(maybeItem(true)?.value);
                 console.log(maybeItem(false)?.value);
+                console.log(maybeItem(true)?.maybe);
+                console.log(maybeItem(false)?.maybe);
                 console.log(maybeItem(true)?.run(3));
                 console.log(maybeItem(false)?.run(fallback()));
+                console.log(maybeItem(true)?.runMaybe(false));
+                console.log(maybeItem(false)?.runMaybe(true));
                 console.log(maybeText(true)?.length);
                 console.log(maybeText(false)?.toUpperCase());
                 console.log(maybeCallback(true)?.(7));
                 console.log(maybeCallback(false)?.(fallback()));
+                console.log(maybeNullableCallback(true)?.());
+                console.log(maybeNullableCallback(false)?.());
                 console.log(narrowed(3));
                 console.log(narrowed(null));
                 console.log(guarded(4));
@@ -11501,7 +11524,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "native_nullable"),
-            "4\nnull\n4\nfallback\n9\ntrue\nfalse\ntrue\nfalse\nnumber\nobject\nnull\n6\nfallback\n9\n9\nnull\nbox\n5\nundefined\n6\nundefined\n4\nundefined\n8\nundefined\n5\n0\n8\n1\nok\nnull\n"
+            "4\nnull\n4\nfallback\n9\ntrue\nfalse\ntrue\nfalse\nnumber\nobject\nnull\n6\nfallback\n9\n9\nnull\nbox\n5\nundefined\nnull\nundefined\n6\nundefined\nnull\nundefined\n4\nundefined\n8\nundefined\nnull\nundefined\n5\n0\n8\n1\nok\nnull\n"
         );
     }
 
