@@ -618,3 +618,5 @@ Number表現へ統合し、対応するgetterとの境界値往復をhost test�
 操作し、prototype探索を行う`napi_has_property`とはown-property判定を分離する。
 `napi_create_date`、`napi_is_date`、`napi_get_date_value`はmillisecond timestampを専用Valueで
 保持し、`napi_typeof`ではJavaScriptと同じobjectを返す。非Date getterは`napi_date_expected`を返す。
+`napi_create_bigint_int64`／`uint64`と対応getterは符号とmagnitudeを専用Valueで保持し、変換後の
+low 64 bitとlossless flagをN-API規約どおり返す。`napi_typeof`は`napi_bigint`を返す。

@@ -43,6 +43,7 @@ const NAPI_NUMBER_EXPECTED: NapiStatus = 6;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
 const NAPI_BOOLEAN_EXPECTED: NapiStatus = 7;
 const NAPI_DATE_EXPECTED: NapiStatus = 18;
+const NAPI_BIGINT_EXPECTED: NapiStatus = 17;
 const NAPI_AUTO_LENGTH: usize = usize::MAX;
 
 const ASYNC_CREATED: u8 = 0;
@@ -192,6 +193,7 @@ pub enum Value {
     Bool(bool),
     Number(f64),
     Date(f64),
+    BigInt { negative: bool, words: Vec<u64> },
     String(String),
     Object(HashMap<String, NapiValue>),
     Array(Vec<NapiValue>),
@@ -743,6 +745,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
         Value::External(_) => return Err("cannot JSON-encode an external value".into()),
+        Value::BigInt { .. } => return Err("cannot JSON-encode a BigInt".into()),
         Value::Promise(state) => match &*state.borrow() {
             PromiseState::Pending => return Err("native addon returned a pending Promise".into()),
             PromiseState::Resolved(value) => json_from_value(*value)?,
@@ -1413,6 +1416,92 @@ pub unsafe extern "C" fn napi_get_date_value(
         }
         _ => NAPI_DATE_EXPECTED,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_bigint_int64(
+    env: NapiEnv,
+    value: i64,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let magnitude = value.unsigned_abs();
+    let value = env.alloc(Value::BigInt {
+        negative: value.is_negative(),
+        words: vec![magnitude],
+    });
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_bigint_uint64(
+    env: NapiEnv,
+    value: u64,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::BigInt {
+        negative: false,
+        words: vec![value],
+    });
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_bigint_int64(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut i64,
+    lossless: *mut bool,
+) -> NapiStatus {
+    if out.is_null() || lossless.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Value::BigInt { negative, words } = (match value_ref(value) {
+        Ok(value) => value,
+        Err(_) => return NAPI_INVALID_ARG,
+    }) else {
+        return NAPI_BIGINT_EXPECTED;
+    };
+    let low = words.first().copied().unwrap_or(0);
+    *out = if *negative {
+        low.wrapping_neg() as i64
+    } else {
+        low as i64
+    };
+    *lossless = words.len() <= 1
+        && if *negative {
+            low <= (i64::MAX as u64) + 1
+        } else {
+            low <= i64::MAX as u64
+        };
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_bigint_uint64(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut u64,
+    lossless: *mut bool,
+) -> NapiStatus {
+    if out.is_null() || lossless.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Value::BigInt { negative, words } = (match value_ref(value) {
+        Ok(value) => value,
+        Err(_) => return NAPI_INVALID_ARG,
+    }) else {
+        return NAPI_BIGINT_EXPECTED;
+    };
+    let low = words.first().copied().unwrap_or(0);
+    *out = if *negative { low.wrapping_neg() } else { low };
+    *lossless = !*negative && words.len() <= 1;
+    NAPI_OK
 }
 
 #[no_mangle]
@@ -2645,6 +2734,7 @@ pub unsafe extern "C" fn napi_typeof(_env: NapiEnv, value: NapiValue, out: *mut 
         Ok(Value::String(_)) => 4,
         Ok(Value::Symbol(_)) => 5,
         Ok(Value::Function(_)) => 7,
+        Ok(Value::BigInt { .. }) => 9,
         Ok(_) => 6,
         Err(_) => return NAPI_INVALID_ARG,
     };
@@ -3869,6 +3959,54 @@ mod tests {
                 napi_get_date_value(env_ptr, number, &mut milliseconds),
                 NAPI_DATE_EXPECTED
             );
+        }
+    }
+
+    #[test]
+    fn bigint_64_bit_conversions_report_losslessness() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut value = ptr::null_mut();
+            assert_eq!(
+                napi_create_bigint_int64(env_ptr, i64::MIN, &mut value),
+                NAPI_OK
+            );
+            let mut signed = 0;
+            let mut lossless = false;
+            assert_eq!(
+                napi_get_value_bigint_int64(env_ptr, value, &mut signed, &mut lossless),
+                NAPI_OK
+            );
+            assert_eq!(signed, i64::MIN);
+            assert!(lossless);
+            let mut unsigned = 0;
+            assert_eq!(
+                napi_get_value_bigint_uint64(env_ptr, value, &mut unsigned, &mut lossless),
+                NAPI_OK
+            );
+            assert_eq!(unsigned, 1_u64 << 63);
+            assert!(!lossless);
+
+            assert_eq!(
+                napi_create_bigint_uint64(env_ptr, u64::MAX, &mut value),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_value_bigint_uint64(env_ptr, value, &mut unsigned, &mut lossless),
+                NAPI_OK
+            );
+            assert_eq!(unsigned, u64::MAX);
+            assert!(lossless);
+            assert_eq!(
+                napi_get_value_bigint_int64(env_ptr, value, &mut signed, &mut lossless),
+                NAPI_OK
+            );
+            assert_eq!(signed, -1);
+            assert!(!lossless);
+            let mut value_type = -1;
+            assert_eq!(napi_typeof(env_ptr, value, &mut value_type), NAPI_OK);
+            assert_eq!(value_type, 9);
         }
     }
 
