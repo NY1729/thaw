@@ -516,7 +516,10 @@ only value, class-instance, and callback facts that agree on every outgoing
 path; an omitted `else` joins against the unchanged incoming path. `while` and
 classic `for` loops join the body/update result against the zero-iteration path,
 retaining only facts unchanged by a possible iteration. `do/while`, `for-in`,
-`for-of`, switch, and exception-flow joins remain explicit gaps.
+and `for-of` remain unavailable in HIR lowering. `try/catch` conservatively
+joins normal exit with a catch entry that retains only facts unchanged by the
+try block; `finally` then applies to the merged state and can establish facts
+on every continuing path. Switch-flow joins remain an explicit gap.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back

@@ -947,7 +947,7 @@ fn rewrite_external_class_methods(
     use thaw_parser::ast::{
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Expr,
         FnDecl, ForStmt, FunctionBody, IfStmt, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread,
-        ReturnStmt, SimpleAssignTarget, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
+        ReturnStmt, SimpleAssignTarget, TryStmt, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
         WhileStmt,
     };
     use thaw_parser::common::Spanned;
@@ -1433,6 +1433,40 @@ fn rewrite_external_class_methods(
                 update.visit_with(self);
             }
             self.join_current_flow_with(&zero_iterations);
+        }
+
+        fn visit_try_stmt(&mut self, statement: &TryStmt) {
+            let incoming = self.flow_state();
+            statement.block.visit_with(self);
+            let try_exit = self.flow_state();
+
+            if let Some(handler) = &statement.handler {
+                // A throw may occur after any prefix of the try block. Facts
+                // that differ between entry and normal exit are therefore not
+                // safe assumptions at catch entry.
+                let mut catch_entry = try_exit.clone();
+                catch_entry
+                    .variables
+                    .retain(|name, class| incoming.variables.get(name) == Some(class));
+                catch_entry
+                    .value_types
+                    .retain(|name, ty| incoming.value_types.get(name) == Some(ty));
+                catch_entry
+                    .callbacks
+                    .retain(|name| incoming.callbacks.contains(name));
+                self.restore_flow_state(catch_entry);
+                handler.body.visit_with(self);
+                let catch_exit = self.flow_state();
+
+                self.restore_flow_state(try_exit);
+                self.join_current_flow_with(&catch_exit);
+            }
+
+            // `finally` executes on every path that leaves the construct, so
+            // assignments made there can establish new facts after the join.
+            if let Some(finalizer) = &statement.finalizer {
+                finalizer.visit_with(self);
+            }
         }
 
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
@@ -4528,5 +4562,48 @@ mod tests {
         assert!(rewritten.contains("__set_number(box, index)"));
         assert!(rewritten.contains("loopValue = \"loop\"; __set_string(box, loopValue)"));
         assert!(rewritten.contains("} __set_unknown(box, loopValue)"));
+    }
+
+    #[test]
+    fn joins_try_catch_paths_and_applies_finally_to_every_exit() {
+        let source = r#"const box = new NativeBox(1); let stable = 1; try { stable = 2; } catch (error) { stable = 3; } box.set(stable); let conflict = 1; try { conflict = "try"; box.set(conflict); } catch (error) { conflict = 2; box.set(conflict); } box.set(conflict); let catchInput = 1; try { catchInput = "changed"; throw "fail"; } catch (error) { box.set(catchInput); } let finalized = 1; try { finalized = "try"; } catch (error) { finalized = true; } finally { finalized = 7; box.set(finalized); } box.set(finalized);"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_unknown".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Bool],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("__set_number(box, stable)"));
+        assert!(rewritten.contains("conflict = \"try\"; __set_string(box, conflict)"));
+        assert!(rewritten.contains("conflict = 2; __set_number(box, conflict)"));
+        assert!(rewritten.contains("} __set_unknown(box, conflict)"));
+        assert!(rewritten.contains("catch (error) { __set_unknown(box, catchInput)"));
+        assert!(rewritten.contains("finalized = 7; __set_number(box, finalized)"));
+        assert!(rewritten.ends_with("__set_number(box, finalized);"));
     }
 }
