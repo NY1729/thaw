@@ -1118,6 +1118,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
     args: *const c_char,
     callback: Option<ThawNativeCallback>,
     context: *mut c_void,
+    discard_result: u8,
 ) -> ThawResult {
     let result = (|| -> Result<String, String> {
         let env = module_env_for_handle(receiver)?;
@@ -1188,7 +1189,7 @@ pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
         let value = (function.callback)(env, &mut info);
         take_env_exception(env)?;
         let value = wait_for_promise(value)?;
-        if value.is_null() {
+        if discard_result != 0 || value.is_null() {
             Ok("null".to_string())
         } else {
             serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
