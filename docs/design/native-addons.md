@@ -620,3 +620,5 @@ Number表現へ統合し、対応するgetterとの境界値往復をhost test�
 保持し、`napi_typeof`ではJavaScriptと同じobjectを返す。非Date getterは`napi_date_expected`を返す。
 `napi_create_bigint_int64`／`uint64`と対応getterは符号とmagnitudeを専用Valueで保持し、変換後の
 low 64 bitとlossless flagをN-API規約どおり返す。`napi_typeof`は`napi_bigint`を返す。
+`napi_create_bigint_words`／`napi_get_value_bigint_words`はlittle-endian `u64` word列、sign bit、
+必要word数の照会、呼び出し側capacityまでのcopyを扱い、上位zero wordとnegative zeroを正規化する。
