@@ -9668,6 +9668,43 @@ mod tests {
     }
 
     #[test]
+    fn compound_assignments_evaluate_references_once_and_before_rhs() {
+        let source = r#"
+            function arraySource(values: number[]): number[] {
+                console.log("array"); return values;
+            }
+            function index(): number { console.log("index"); return 0; }
+            function rhs(): number { console.log("rhs"); return 5; }
+            function objectSource(point: { value: number }): { value: number } {
+                console.log("object"); return point;
+            }
+            async function asyncArray(values: number[]): Promise<number[]> {
+                await sleep(1); console.log("async-array"); return values;
+            }
+            async function asyncIndex(): Promise<number> {
+                await sleep(1); console.log("async-index"); return 0;
+            }
+            async function asyncRhs(): Promise<number> {
+                await sleep(1); console.log("async-rhs"); return 2;
+            }
+            async function main(): Promise<void> {
+                let values = [10];
+                console.log(arraySource(values)[index()] += rhs());
+                console.log(values[0]);
+                let point = { value: 3 };
+                console.log(objectSource(point).value *= rhs());
+                console.log(point.value);
+                console.log((await asyncArray(values))[await asyncIndex()] *= await asyncRhs());
+                console.log(values[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "compound_assignment_order"),
+            "array\nindex\nrhs\n15\n15\nobject\nrhs\n15\n15\nasync-array\nasync-index\nasync-rhs\n30\n30\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
