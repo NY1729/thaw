@@ -477,6 +477,10 @@ The workspace crates have narrow responsibilities:
   typed zero-to-three-argument predicates and arena capacity trimming. Named
   callbacks, captures, empty arrays, every native element layout, optional
   `thisArg` ordering and awaited receivers are supported
+- ES2023 `.with(index, value)` returns an arena-owned shallow copy of a
+  homogeneous array, applies JavaScript integer and negative-index rules,
+  preserves the source, evaluates receiver/index/value once in order and
+  throws for out-of-range or empty-array writes; awaited operands are supported
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
