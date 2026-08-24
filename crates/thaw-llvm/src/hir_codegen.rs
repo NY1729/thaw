@@ -79,11 +79,33 @@ const PENDING_EXCEPTION_SYMBOL: &str = "__thaw_pending_exception";
 const ARRAY_HEADER_BYTES: u64 = 8;
 /// Phase 1 arrays only ever hold `f64` elements (see module doc).
 const ARRAY_ELEM_BYTES: u64 = 8;
-/// Phase 2 objects only ever hold `f64` fields (see module doc); no header
-/// (field count/order is static, part of the type, not a runtime value).
+/// Minimum storage/alignment unit for native object fields. Tagged optional
+/// fields occupy two units; field count/order/layout remain static type data.
 const OBJECT_FIELD_BYTES: u64 = 8;
 const ASYNC_FRAME_BYTES: u64 = 24;
 const ASYNC_SLOT_BYTES: u64 = 16;
+
+fn object_field_storage_bytes(ty: &HirType) -> u64 {
+    if matches!(ty, HirType::Optional(_)) {
+        ASYNC_SLOT_BYTES
+    } else {
+        OBJECT_FIELD_BYTES
+    }
+}
+
+fn object_field_offset(fields: &[(String, HirType)], index: usize) -> u64 {
+    fields[..index]
+        .iter()
+        .map(|(_, ty)| object_field_storage_bytes(ty))
+        .sum()
+}
+
+fn object_storage_bytes(fields: &[(String, HirType)]) -> u64 {
+    fields
+        .iter()
+        .map(|(_, ty)| object_field_storage_bytes(ty))
+        .sum()
+}
 const ASYNC_COMPLETION_OFFSET: u64 = 0;
 const ASYNC_STATE_OFFSET: u64 = 8;
 const ASYNC_WAITING_OFFSET: u64 = 16;
@@ -4936,8 +4958,8 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
-    /// Allocates `[f64 field0]...[f64 fieldN-1]` from the arena, in the
-    /// order `fields` lists them (thaw-hir's lowering already reordered
+    /// Allocates native fields from the arena in the order `fields` lists
+    /// them (thaw-hir's lowering already reordered
     /// the literal to match its declared type, so this order is always the
     /// declared one, not whatever order the user happened to write). No
     /// length header: field count/order is static, part of the type, so
@@ -4951,7 +4973,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|(_, expr)| self.compile_expr(expr))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let size = OBJECT_FIELD_BYTES * field_vals.len() as u64;
+        let field_sizes = field_vals
+            .iter()
+            .map(|value| {
+                if value.is_struct_value() {
+                    ASYNC_SLOT_BYTES
+                } else {
+                    OBJECT_FIELD_BYTES
+                }
+            })
+            .collect::<Vec<_>>();
+        let size = field_sizes.iter().sum::<u64>();
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size.max(1), false);
         let align_val = i64_type.const_int(OBJECT_FIELD_BYTES, false);
@@ -4967,8 +4999,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_arena_alloc did not return a value")?
             .into_pointer_value();
 
+        let mut byte_offset = 0;
         for (i, val) in field_vals.into_iter().enumerate() {
-            let offset = i64_type.const_int(OBJECT_FIELD_BYTES * i as u64, false);
+            let offset = i64_type.const_int(byte_offset, false);
             let field_ptr = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "field_ptr")
@@ -4977,6 +5010,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(field_ptr, val)
                 .map_err(|e| e.to_string())?;
+            byte_offset += field_sizes[i];
         }
 
         Ok(base_ptr.into())
@@ -5021,7 +5055,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let offset = self
             .context
             .i64_type()
-            .const_int(OBJECT_FIELD_BYTES * index as u64, false);
+            .const_int(object_field_offset(fields, index), false);
 
         unsafe {
             self.builder
@@ -7236,7 +7270,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let offset = self
                 .context
                 .i64_type()
-                .const_int(OBJECT_FIELD_BYTES * index as u64, false);
+                .const_int(object_field_offset(fields, index), false);
             let pointer = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "marshal_field")
@@ -7315,7 +7349,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     self.context
                         .i64_type()
-                        .const_int(OBJECT_FIELD_BYTES * fields.len() as u64, false)
+                        .const_int(object_storage_bytes(fields), false)
                         .into(),
                     self.context.i64_type().const_int(8, false).into(),
                 ],
@@ -7366,7 +7400,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let offset = self
                 .context
                 .i64_type()
-                .const_int(OBJECT_FIELD_BYTES * index as u64, false);
+                .const_int(object_field_offset(fields, index), false);
             let pointer = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "result_field")
@@ -9670,7 +9704,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         arena_alloc,
                         &[
                             i64_type
-                                .const_int(OBJECT_FIELD_BYTES * fields.len() as u64, false)
+                                .const_int(object_storage_bytes(fields), false)
                                 .into(),
                             i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
                         ],
@@ -9691,7 +9725,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .build_in_bounds_gep(
                                 self.context.i8_type(),
                                 result,
-                                &[i64_type.const_int(OBJECT_FIELD_BYTES * index as u64, false)],
+                                &[i64_type.const_int(object_field_offset(fields, index), false)],
                                 "ffi_object_field",
                             )
                             .map_err(|error| error.to_string())?
@@ -9781,7 +9815,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         let field_llvm_ty = self
                             .basic_type(field_ty)
                             .map_err(|e| format!("FFI object field `{field_name}`: {e}"))?;
-                        let offset = i64_type.const_int(OBJECT_FIELD_BYTES * i as u64, false);
+                        let offset = i64_type.const_int(object_field_offset(fields, i), false);
                         let field_ptr = unsafe {
                             self.builder
                                 .build_in_bounds_gep(
@@ -11458,6 +11492,59 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "nested_destructuring"),
             "source\n1\ntrue\nok\n4\ntuple\n2\n3\n4\n5\n6\n7\n8\n"
+        );
+    }
+
+    #[test]
+    fn compiles_destructuring_defaults_for_optionals() {
+        let source = r#"
+            interface Options {
+                count: number | undefined;
+                label: string | undefined;
+            }
+            function fallback(): number {
+                console.log("fallback");
+                return 7;
+            }
+            async function delayedFallback(): Promise<number> {
+                console.log("delayed fallback");
+                await sleep(1);
+                return 9;
+            }
+            async function main(): Promise<void> {
+                const missing: Options = { count: undefined, label: undefined };
+                const present: Options = { count: 3, label: "ok" };
+                const { count = fallback(), label = "default" } = missing;
+                console.log(count);
+                console.log(label);
+                const { count: kept = fallback(), label: keptLabel = "wrong" } = present;
+                console.log(kept);
+                console.log(keptLabel);
+
+                const tuple: [number | undefined, number | undefined] = [undefined, 4];
+                const [first = fallback(), second = fallback()] = tuple;
+                console.log(first);
+                console.log(second);
+
+                let assigned = 0;
+                let other = 0;
+                [assigned = fallback(), other = fallback()] = tuple;
+                console.log(assigned);
+                console.log(other);
+                ({ count: assigned = fallback() } = present);
+                console.log(assigned);
+
+                const asyncMissing: [number | undefined] = [undefined];
+                const asyncPresent: [number | undefined] = [6];
+                const [delayed = await delayedFallback()] = asyncMissing;
+                const [notDelayed = await delayedFallback()] = asyncPresent;
+                console.log(delayed);
+                console.log(notDelayed);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "destructuring_defaults"),
+            "fallback\n7\ndefault\n3\nok\nfallback\n7\n4\nfallback\n7\n4\n3\ndelayed fallback\n9\n6\n"
         );
     }
 
