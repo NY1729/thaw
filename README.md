@@ -705,6 +705,8 @@ The workspace crates have narrow responsibilities:
   Signed and unsigned 64-bit BigInt creation/extraction preserves low bits and
   reports whether conversion was lossless. Arbitrary-precision little-endian
   word arrays support sign, size queries and capacity-limited extraction.
+  Scalar, string, Date, BigInt, collection, Buffer, ArrayBuffer and view
+  extractors reject handles originating from a different Env.
   ArrayBuffer and all N-API TypedArray element kinds retain shared backing
   storage, byte offsets, alignment and bounds; Buffer remains a Uint8Array view.
   DataView uses the same backing storage with unaligned, byte-bounded views.
