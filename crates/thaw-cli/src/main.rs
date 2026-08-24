@@ -946,8 +946,9 @@ fn rewrite_external_class_methods(
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Expr,
-        FnDecl, FunctionBody, IfStmt, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread,
+        FnDecl, ForStmt, FunctionBody, IfStmt, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread,
         ReturnStmt, SimpleAssignTarget, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
+        WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -1362,31 +1363,76 @@ fn rewrite_external_class_methods(
         callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
     }
+
+    #[derive(Clone)]
+    struct FlowState {
+        variables: std::collections::HashMap<String, String>,
+        value_types: std::collections::HashMap<String, thaw_hir::HirType>,
+        callbacks: std::collections::HashSet<String>,
+    }
+
+    impl Finder<'_> {
+        fn flow_state(&self) -> FlowState {
+            FlowState {
+                variables: self.variables.clone(),
+                value_types: self.value_types.clone(),
+                callbacks: self.callbacks.clone(),
+            }
+        }
+
+        fn restore_flow_state(&mut self, state: FlowState) {
+            self.variables = state.variables;
+            self.value_types = state.value_types;
+            self.callbacks = state.callbacks;
+        }
+
+        fn join_current_flow_with(&mut self, other: &FlowState) {
+            self.variables
+                .retain(|name, class| other.variables.get(name) == Some(class));
+            self.value_types
+                .retain(|name, ty| other.value_types.get(name) == Some(ty));
+            self.callbacks.retain(|name| other.callbacks.contains(name));
+        }
+    }
+
     impl Visit for Finder<'_> {
         fn visit_if_stmt(&mut self, statement: &IfStmt) {
             statement.test.visit_with(self);
-            let base_variables = self.variables.clone();
-            let base_value_types = self.value_types.clone();
-            let base_callbacks = self.callbacks.clone();
+            let base = self.flow_state();
 
             statement.cons.visit_with(self);
-            let mut joined_variables = self.variables.clone();
-            let mut joined_value_types = self.value_types.clone();
-            let mut joined_callbacks = self.callbacks.clone();
+            let consequent = self.flow_state();
 
-            self.variables = base_variables;
-            self.value_types = base_value_types;
-            self.callbacks = base_callbacks;
+            self.restore_flow_state(base);
             if let Some(alternate) = &statement.alt {
                 alternate.visit_with(self);
             }
 
-            joined_variables.retain(|name, class| self.variables.get(name) == Some(class));
-            joined_value_types.retain(|name, ty| self.value_types.get(name) == Some(ty));
-            joined_callbacks.retain(|name| self.callbacks.contains(name));
-            self.variables = joined_variables;
-            self.value_types = joined_value_types;
-            self.callbacks = joined_callbacks;
+            let alternate = self.flow_state();
+            self.restore_flow_state(consequent);
+            self.join_current_flow_with(&alternate);
+        }
+
+        fn visit_while_stmt(&mut self, statement: &WhileStmt) {
+            statement.test.visit_with(self);
+            let zero_iterations = self.flow_state();
+            statement.body.visit_with(self);
+            self.join_current_flow_with(&zero_iterations);
+        }
+
+        fn visit_for_stmt(&mut self, statement: &ForStmt) {
+            if let Some(initializer) = &statement.init {
+                initializer.visit_with(self);
+            }
+            if let Some(test) = &statement.test {
+                test.visit_with(self);
+            }
+            let zero_iterations = self.flow_state();
+            statement.body.visit_with(self);
+            if let Some(update) = &statement.update {
+                update.visit_with(self);
+            }
+            self.join_current_flow_with(&zero_iterations);
         }
 
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
@@ -4439,5 +4485,48 @@ mod tests {
         assert!(rewritten.contains("conflict = 2; __set_number(box, conflict)"));
         assert!(rewritten.contains("} __set_unknown(box, conflict)"));
         assert!(rewritten.contains("} __set_unknown(box, oneSided)"));
+    }
+
+    #[test]
+    fn joins_while_and_for_types_against_the_zero_iteration_path() {
+        let source = r#"const box = new NativeBox(1); const flag = true; let stable = 1; while (flag) { stable = 2; box.set(stable); break; } box.set(stable); let changed = 1; while (flag) { changed = "text"; box.set(changed); break; } box.set(changed); let loopValue = 1; for (let index = 0; index < 1; index = index + 1) { box.set(index); loopValue = "loop"; box.set(loopValue); } box.set(loopValue);"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_unknown".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Bool],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("stable = 2; __set_number(box, stable)"));
+        assert!(rewritten.contains("} __set_number(box, stable)"));
+        assert!(rewritten.contains("changed = \"text\"; __set_string(box, changed)"));
+        assert!(rewritten.contains("} __set_unknown(box, changed)"));
+        assert!(rewritten.contains("__set_number(box, index)"));
+        assert!(rewritten.contains("loopValue = \"loop\"; __set_string(box, loopValue)"));
+        assert!(rewritten.contains("} __set_unknown(box, loopValue)"));
     }
 }
