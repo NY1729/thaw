@@ -1994,6 +1994,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
 /// object literals against their declared shape.
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
+    narrowings: HashMap<Symbol, HirType>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -2025,6 +2026,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Self {
         Self {
             scope: HashMap::new(),
+            narrowings: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
             signatures,
@@ -2145,6 +2147,57 @@ impl<'a> FnLowerer<'a> {
         result
     }
 
+    fn lower_body_with_optional_narrowing(
+        &mut self,
+        stmt: &Stmt,
+        narrowing: Option<&(Symbol, HirType)>,
+    ) -> Result<Vec<HirStmt>, String> {
+        let saved = self.narrowings.clone();
+        if let Some((name, payload)) = narrowing {
+            self.narrowings.insert(name.clone(), payload.clone());
+        }
+        let lowered = self.lower_body(stmt);
+        self.narrowings = saved;
+        lowered
+    }
+
+    /// Returns the optional binding tested by an undefined comparison and
+    /// whether its payload is present in the true branch.
+    fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool)> {
+        if let Expr::Paren(paren) = expr {
+            return self.optional_undefined_narrowing(&paren.expr);
+        }
+        if let Expr::Unary(unary) = expr {
+            if unary.op == swc_ecma_ast::UnaryOp::Bang {
+                return self
+                    .optional_undefined_narrowing(&unary.arg)
+                    .map(|(name, payload, present)| (name, payload, !present));
+            }
+            return None;
+        }
+        let Expr::Bin(binary) = expr else {
+            return None;
+        };
+        let present_when_true = match binary.op {
+            BinaryOp::NotEqEq | BinaryOp::NotEq => true,
+            BinaryOp::EqEqEq | BinaryOp::EqEq => false,
+            _ => return None,
+        };
+        let ident = match (binary.left.as_ref(), binary.right.as_ref()) {
+            (Expr::Ident(value), Expr::Ident(undefined)) if undefined.sym == *"undefined" => value,
+            (Expr::Ident(undefined), Expr::Ident(value)) if undefined.sym == *"undefined" => value,
+            _ => return None,
+        };
+        if self.scope.contains_key("undefined") {
+            return None;
+        }
+        let name = self.resolve_binding(ident.sym.as_ref());
+        let HirType::Optional(payload) = self.scope.get(&name)? else {
+            return None;
+        };
+        Some((name, payload.as_ref().clone(), present_when_true))
+    }
+
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
             // Empty statements have no runtime effect. `debugger` only has an
@@ -2177,11 +2230,23 @@ impl<'a> FnLowerer<'a> {
             Stmt::Decl(Decl::Var(var_decl)) => self.lower_var_decl(var_decl),
 
             Stmt::If(if_stmt) => {
+                let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
                 let cond = self.lower_expr(&if_stmt.test)?;
                 self.expect_type(&HirType::Bool, &cond, "if condition")?;
-                let then_branch = self.lower_body(&if_stmt.cons)?;
+                let then_narrowing = narrowing
+                    .as_ref()
+                    .filter(|(_, _, present)| *present)
+                    .map(|(name, payload, _)| (name.clone(), payload.clone()));
+                let else_narrowing = narrowing
+                    .as_ref()
+                    .filter(|(_, _, present)| !*present)
+                    .map(|(name, payload, _)| (name.clone(), payload.clone()));
+                let then_branch = self
+                    .lower_body_with_optional_narrowing(&if_stmt.cons, then_narrowing.as_ref())?;
                 let else_branch = match &if_stmt.alt {
-                    Some(alt) => self.lower_body(alt)?,
+                    Some(alt) => {
+                        self.lower_body_with_optional_narrowing(alt, else_narrowing.as_ref())?
+                    }
                     None => Vec::new(),
                 };
                 Ok(vec![HirStmt::If(cond, then_branch, else_branch)])
@@ -4077,7 +4142,13 @@ impl<'a> FnLowerer<'a> {
                         _ => {}
                     }
                 }
-                Ok(HirExpr::Var(name))
+                match self.narrowings.get(&name) {
+                    Some(payload) => Ok(HirExpr::OptionalValue(
+                        Box::new(HirExpr::Var(name)),
+                        payload.clone(),
+                    )),
+                    None => Ok(HirExpr::Var(name)),
+                }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
 
