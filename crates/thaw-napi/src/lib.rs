@@ -2789,8 +2789,8 @@ pub unsafe extern "C" fn napi_wrap(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    if !matches!(object.as_ref(), Some(Value::Object(_) | Value::Function(_))) {
-        return NAPI_INVALID_ARG;
+    if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
     }
     if env.wraps.contains_key(&(object as usize)) {
         return NAPI_GENERIC_FAILURE;
@@ -2824,6 +2824,9 @@ pub unsafe extern "C" fn napi_unwrap(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
     let Some(wrap) = env.wraps.get(&(object as usize)) else {
         return NAPI_INVALID_ARG;
     };
@@ -2840,6 +2843,9 @@ pub unsafe extern "C" fn napi_remove_wrap(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
     let Some(wrap) = env.wraps.remove(&(object as usize)) else {
         return NAPI_INVALID_ARG;
     };
@@ -2858,8 +2864,10 @@ pub unsafe extern "C" fn napi_add_finalizer(
     hint: *mut c_void,
     result: *mut *mut Reference,
 ) -> NapiStatus {
-    if !matches!(object.as_ref(), Some(Value::Object(_) | Value::Function(_))) || finalize.is_none()
-    {
+    if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    if finalize.is_none() {
         return NAPI_INVALID_ARG;
     }
     let Ok(env) = env_mut(env) else {
@@ -6669,6 +6677,65 @@ mod tests {
                 NAPI_PENDING_EXCEPTION
             );
             assert!(env.exception.take().is_some());
+        }
+    }
+
+    #[test]
+    fn native_wraps_accept_all_javascript_object_kinds() {
+        unsafe extern "C" fn noop_finalize(_env: NapiEnv, _data: *mut c_void, _hint: *mut c_void) {}
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let array = env.alloc(Value::Array(Vec::new()));
+            let buffer = env.alloc(Value::Buffer(vec![1]));
+            let promise = env.alloc(Value::Promise(Rc::new(RefCell::new(PromiseState::Pending))));
+            let mut payloads = [11_u32, 22, 33];
+            for (object, payload) in [array, buffer, promise]
+                .into_iter()
+                .zip(payloads.iter_mut())
+            {
+                let data = (payload as *mut u32).cast();
+                assert_eq!(
+                    napi_wrap(
+                        env_ptr,
+                        object,
+                        data,
+                        None,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    ),
+                    NAPI_OK
+                );
+                let mut actual = ptr::null_mut();
+                assert_eq!(napi_unwrap(env_ptr, object, &mut actual), NAPI_OK);
+                assert_eq!(actual, data);
+                assert_eq!(napi_remove_wrap(env_ptr, object, &mut actual), NAPI_OK);
+                assert_eq!(actual, data);
+                assert_eq!(
+                    napi_add_finalizer(
+                        env_ptr,
+                        object,
+                        ptr::null_mut(),
+                        Some(noop_finalize),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    ),
+                    NAPI_OK
+                );
+            }
+
+            let primitive = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_wrap(
+                    env_ptr,
+                    primitive,
+                    ptr::null_mut(),
+                    None,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OBJECT_EXPECTED
+            );
         }
     }
 

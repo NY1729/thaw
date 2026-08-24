@@ -684,6 +684,8 @@ Function／Promise／Error／Dateを含む既存objectは同一handleのまま�
 coercion APIは空文字列、Infinity、2／8／16進文字列、負のzero、BigIntの任意精度decimal文字列、
 hole／null／undefined／nested Arrayのjoin規則を扱う。SymbolのToStringとBigInt／SymbolのToNumberは
 TypeErrorをpending exceptionへ設定する。
+`napi_wrap`／`napi_unwrap`／`napi_remove_wrap`／`napi_add_finalizer`はclass instanceだけでなく、
+Array／Buffer／ArrayBuffer／view／Function／Promise／Error／Dateを含む全JavaScript Objectを受理する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
 exception経路へ統合する。`node_api_symbol_for`はprocess-wide description→identity registryを持ち、
 同じEnvでは同じhandle、Envをまたいでも同じSymbol identityを割り当てる。通常の
