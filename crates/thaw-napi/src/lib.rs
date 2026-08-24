@@ -1749,11 +1749,11 @@ pub unsafe extern "C" fn napi_create_date(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_date(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || out.is_null() || value.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(value_ref(value), Ok(Value::Date(_)));
@@ -3932,8 +3932,8 @@ pub unsafe extern "C" fn napi_get_uv_event_loop(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_typeof(_env: NapiEnv, value: NapiValue, out: *mut i32) -> NapiStatus {
-    if out.is_null() {
+pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i32) -> NapiStatus {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = match value_ref(value) {
@@ -3944,6 +3944,7 @@ pub unsafe extern "C" fn napi_typeof(_env: NapiEnv, value: NapiValue, out: *mut 
         Ok(Value::String(_)) => 4,
         Ok(Value::Symbol { .. }) => 5,
         Ok(Value::Function(_)) => 7,
+        Ok(Value::External(_)) => 8,
         Ok(Value::BigInt { .. }) => 9,
         Ok(_) => 6,
         Err(_) => return NAPI_INVALID_ARG,
@@ -3953,11 +3954,11 @@ pub unsafe extern "C" fn napi_typeof(_env: NapiEnv, value: NapiValue, out: *mut 
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_array(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(value_ref(value), Ok(Value::Array(_)));
@@ -3966,10 +3967,13 @@ pub unsafe extern "C" fn napi_is_array(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_promise(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
+    if env.is_null() || value.is_null() {
+        return NAPI_INVALID_ARG;
+    }
     let Some(result) = result.as_mut() else {
         return NAPI_INVALID_ARG;
     };
@@ -4320,11 +4324,11 @@ pub unsafe extern "C" fn napi_get_buffer_info(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_buffer(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(
@@ -4437,10 +4441,13 @@ pub unsafe extern "C" fn node_api_create_sharedarraybuffer(
 
 #[no_mangle]
 pub unsafe extern "C" fn node_api_is_sharedarraybuffer(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
+    if env.is_null() || value.is_null() {
+        return NAPI_INVALID_ARG;
+    }
     let Some(result) = result.as_mut() else {
         return NAPI_INVALID_ARG;
     };
@@ -4470,11 +4477,11 @@ pub unsafe extern "C" fn napi_adjust_external_memory(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_arraybuffer(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(
@@ -4521,11 +4528,11 @@ pub unsafe extern "C" fn napi_detach_arraybuffer(_env: NapiEnv, value: NapiValue
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_detached_arraybuffer(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = match value_ref(value) {
@@ -4577,11 +4584,11 @@ pub unsafe extern "C" fn napi_create_typedarray(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_typedarray(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(
@@ -4627,11 +4634,11 @@ pub unsafe extern "C" fn napi_create_dataview(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_dataview(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(value_ref(value), Ok(Value::DataView { .. }));
@@ -4976,11 +4983,11 @@ pub unsafe extern "C" fn node_api_create_syntax_error(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_error(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(value_ref(value), Ok(Value::Error(_)));
@@ -6736,6 +6743,39 @@ mod tests {
                 ),
                 NAPI_OBJECT_EXPECTED
             );
+        }
+    }
+
+    #[test]
+    fn typeof_distinguishes_externals_and_predicates_validate_handles() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let external = env.alloc(Value::External(ptr::null_mut()));
+            let mut value_type = -1;
+            assert_eq!(napi_typeof(env_ptr, external, &mut value_type), NAPI_OK);
+            assert_eq!(value_type, 8);
+            assert_eq!(
+                napi_typeof(ptr::null_mut(), external, &mut value_type),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_typeof(env_ptr, ptr::null_mut(), &mut value_type),
+                NAPI_INVALID_ARG
+            );
+
+            let mut result = false;
+            assert_eq!(
+                napi_is_array(env_ptr, ptr::null_mut(), &mut result),
+                NAPI_INVALID_ARG
+            );
+            let array = env.alloc(Value::Array(Vec::new()));
+            assert_eq!(
+                napi_is_array(ptr::null_mut(), array, &mut result),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_is_array(env_ptr, array, &mut result), NAPI_OK);
+            assert!(result);
         }
     }
 
