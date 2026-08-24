@@ -1390,11 +1390,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into(),
             );
             indirect_params.extend(param_types);
-            self.context.void_type().fn_type(&indirect_params, false)
+            self.context
+                .void_type()
+                .fn_type(&indirect_params, sig.variadic.is_some())
         } else if let Some(return_type) = return_type {
-            return_type.fn_type(&param_types, false)
+            return_type.fn_type(&param_types, sig.variadic.is_some())
         } else {
-            self.context.void_type().fn_type(&param_types, false)
+            self.context
+                .void_type()
+                .fn_type(&param_types, sig.variadic.is_some())
         };
 
         let function = self
@@ -10114,6 +10118,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 _ => compiled_args.push(value.into()),
             }
         }
+        if let Some(variadic) = &sig.variadic {
+            for arg in &args[sig.params.len()..] {
+                let value = self.compile_expr(arg)?;
+                match variadic {
+                    HirType::F64 => compiled_args.push(value.into()),
+                    other => {
+                        return Err(format!(
+                            "FFI function `{}` has unsupported variadic element type {other:?}",
+                            sig.symbol
+                        ))
+                    }
+                }
+            }
+        }
 
         let indirect_return = if Self::uses_indirect_ffi_return(sig) {
             let return_type = self
@@ -18096,6 +18114,69 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "5\n");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ffi_variadic_number_rest_calls_real_c_varargs() {
+        let source = r#"
+            declare function native_sum(count: number, ...values: number[]): number;
+
+            function main(): void {
+                console.log(native_sum(0));
+                console.log(native_sum(3, 2, 3, 5));
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        assert_eq!(program.extern_functions[0].params, vec![HirType::F64]);
+        assert_eq!(program.extern_functions[0].variadic, Some(HirType::F64));
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_variadic");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-variadic-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdarg.h>\n\
+             double native_sum(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) sum += va_arg(args, double);\n\
+               va_end(args); return sum;\n\
+             }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n10\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
