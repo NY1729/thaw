@@ -9722,79 +9722,89 @@ impl<'a> FnLowerer<'a> {
         // synthetic `object.method` global symbol (the latter is reserved for
         // builtins such as `console.log` and `JSON.parse`).
         if let Expr::Member(member) = callee_expr.as_ref() {
-            if let (Expr::Ident(object), MemberProp::Ident(property)) =
-                (member.obj.as_ref(), &member.prop)
-            {
-                let object_name = self.resolve_binding(object.sym.as_ref());
-                let requested_property = property.sym.as_str();
-                let resolved_property = match (requested_property, call.args.len()) {
-                    ("listen", 2) => "__listenWithCallback",
-                    ("close", 1) => "__closeWithCallback",
-                    ("on", 2)
-                        if matches!(
-                            call.args.first().map(|arg| arg.expr.as_ref()),
-                            Some(Expr::Lit(Lit::Str(event))) if event.value == *"error"
-                        ) =>
-                    {
-                        "__onError"
-                    }
-                    _ => requested_property,
-                };
-                let object_ty = self
-                    .narrowings
-                    .get(&object_name)
-                    .cloned()
-                    .or_else(|| self.nullable_narrowings.get(&object_name).cloned())
-                    .or_else(|| self.scope.get(&object_name).cloned());
-                let callable = object_ty.as_ref().and_then(|ty| match ty {
-                    HirType::Object(fields) => fields
-                        .iter()
-                        .find(|(name, _)| name == resolved_property)
-                        .and_then(|(_, ty)| match ty {
-                            HirType::Function(params, ret) => {
-                                Some((params.clone(), ret.as_ref().clone()))
-                            }
-                            _ => None,
-                        }),
+            if let Expr::Ident(object) = member.obj.as_ref() {
+                let property = match &member.prop {
+                    MemberProp::Ident(property) => Some(property.sym.to_string()),
+                    MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                        Expr::Lit(Lit::Str(property)) => {
+                            Some(property.value.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    },
                     _ => None,
-                });
-                if let Some((params, _)) = callable {
-                    if params.len() != call.args.len() {
-                        return Err(format!(
-                            "method `{}.{}` expects {} argument(s), got {}",
-                            object.sym,
-                            property.sym,
-                            params.len(),
-                            call.args.len()
-                        ));
-                    }
-                    let object_expr = self.lower_expr(&member.obj)?;
-                    let callee = HirExpr::PropAccess(
-                        Box::new(object_expr),
-                        object_ty.unwrap(),
-                        resolved_property.to_string(),
-                    );
-                    let args = call
-                        .args
-                        .iter()
-                        .zip(&params)
-                        .enumerate()
-                        .map(|(index, (arg, expected))| {
-                            if arg.spread.is_some() {
-                                return Err("spread arguments are not supported".to_string());
-                            }
-                            let value = self.lower_expr(&arg.expr)?;
-                            self.coerce_to_declared(expected, value).map_err(|error| {
-                                format!(
-                                    "argument {} of `{}.{}` is invalid: {error}",
-                                    index + 1,
-                                    object.sym,
-                                    property.sym
-                                )
+                };
+                if let Some(property) = property {
+                    let object_name = self.resolve_binding(object.sym.as_ref());
+                    let requested_property = property.as_str();
+                    let resolved_property = match (requested_property, call.args.len()) {
+                        ("listen", 2) => "__listenWithCallback",
+                        ("close", 1) => "__closeWithCallback",
+                        ("on", 2)
+                            if matches!(
+                                call.args.first().map(|arg| arg.expr.as_ref()),
+                                Some(Expr::Lit(Lit::Str(event))) if event.value == *"error"
+                            ) =>
+                        {
+                            "__onError"
+                        }
+                        _ => requested_property,
+                    };
+                    let object_ty = self
+                        .narrowings
+                        .get(&object_name)
+                        .cloned()
+                        .or_else(|| self.nullable_narrowings.get(&object_name).cloned())
+                        .or_else(|| self.scope.get(&object_name).cloned());
+                    let callable = object_ty.as_ref().and_then(|ty| match ty {
+                        HirType::Object(fields) => fields
+                            .iter()
+                            .find(|(name, _)| name == resolved_property)
+                            .and_then(|(_, ty)| match ty {
+                                HirType::Function(params, ret) => {
+                                    Some((params.clone(), ret.as_ref().clone()))
+                                }
+                                _ => None,
+                            }),
+                        _ => None,
+                    });
+                    if let Some((params, _)) = callable {
+                        if params.len() != call.args.len() {
+                            return Err(format!(
+                                "method `{}.{}` expects {} argument(s), got {}",
+                                object.sym,
+                                property,
+                                params.len(),
+                                call.args.len()
+                            ));
+                        }
+                        let object_expr = self.lower_expr(&member.obj)?;
+                        let callee = HirExpr::PropAccess(
+                            Box::new(object_expr),
+                            object_ty.unwrap(),
+                            resolved_property.to_string(),
+                        );
+                        let args = call
+                            .args
+                            .iter()
+                            .zip(&params)
+                            .enumerate()
+                            .map(|(index, (arg, expected))| {
+                                if arg.spread.is_some() {
+                                    return Err("spread arguments are not supported".to_string());
+                                }
+                                let value = self.lower_expr(&arg.expr)?;
+                                self.coerce_to_declared(expected, value).map_err(|error| {
+                                    format!(
+                                        "argument {} of `{}.{}` is invalid: {error}",
+                                        index + 1,
+                                        object.sym,
+                                        property
+                                    )
+                                })
                             })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    return Ok(HirExpr::Call(Box::new(callee), args));
+                            .collect::<Result<Vec<_>, _>>()?;
+                        return Ok(HirExpr::Call(Box::new(callee), args));
+                    }
                 }
             }
         }
