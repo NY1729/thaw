@@ -734,12 +734,12 @@ fn classify_ts_type(
                 };
                 match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
                     DtsType::Native(ty) => params.push(ty),
-                    DtsType::Unsupported(reason) => {
-                        return DtsType::Unsupported(format!(
-                            "callback parameter `{}`: {reason}",
-                            param.id.sym
-                        ))
-                    }
+                    // Callback values cross the JavaScript/N-API boundary as
+                    // dynamic JSON. In real Node declarations the error slot
+                    // is normally `Error | null` and result slots are often
+                    // `any`; neither has a native AOT layout, but both have a
+                    // faithful dynamic representation at this boundary.
+                    DtsType::Unsupported(_) => params.push(HirType::Json),
                 }
             }
             match classify_ts_type(&function.type_ann.type_ann, interfaces, generic_interfaces) {
@@ -2724,6 +2724,18 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().all(|method| method.overloaded));
+        let close = database
+            .methods
+            .iter()
+            .find(|method| method.name == "close")
+            .unwrap();
+        assert_eq!(
+            close.params[0].1,
+            DtsType::Native(HirType::Function(
+                vec![HirType::Json],
+                Box::new(HirType::Void)
+            ))
+        );
         assert!(database
             .methods
             .iter()

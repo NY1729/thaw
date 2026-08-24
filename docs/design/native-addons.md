@@ -34,11 +34,13 @@ instance methodをtyped N-API callへ書き換える。数値を保持する自�
 `new NativeBox(42)`で構築し、通常構文の`box.get()`が`42`を返すところまでCLI、
 HIR、LLVM、N-API hostを通した実行ファイルE2Eで検証した。getter、static method、
 aliasやpropertyを介したinstance追跡は引き続き残課題である。
-既存の`(Json, Json) => Json` callback ABIについてはinstance methodにも接続した。
+callback ABIについてはinstance methodにも接続し、0〜2個の動的引数と`Json`／`void`
+戻り値を扱う。`.d.ts`の`Error | null`や`any`はこの境界で`Json`へ正規化する。
 receiverと同じ永続`napi_env`内にcallback functionを作り、`this`を維持してmethodを
 呼ぶ。自作addonの`box.getLater(callback)`を通常構文から実行し、callback結果と
-method戻り値の双方を検証した。任意のerror-first callback signatureとoverload解決は
-次の拡張対象である。
+method戻り値の双方を検証した。sqlite3の`close`ではmethod開始まで確認できたが、
+完了通知はaddonが直接使うlibuv loopを現在の終了時drainが駆動しないため未達である。
+直接libuv loop統合とoverload解決は次の拡張対象である。
 
 ## 1. 何が難しいのか（おさらい）
 

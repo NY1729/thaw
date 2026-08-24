@@ -318,6 +318,7 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
         thaw_hir::HirType::F64 => Some("number".into()),
         thaw_hir::HirType::Str => Some("string".into()),
         thaw_hir::HirType::Bool => Some("boolean".into()),
+        thaw_hir::HirType::Void => Some("void".into()),
         thaw_hir::HirType::Json => Some("Json".into()),
         thaw_hir::HirType::JsValue => Some("JsValue".into()),
         thaw_hir::HirType::Array(element) => {
@@ -650,8 +651,9 @@ fn generate_registry_shims(
                                     ty,
                                     thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
                                         if index + 1 == candidate.params.len()
-                                            && params == &[thaw_hir::HirType::Json, thaw_hir::HirType::Json]
-                                            && **ret == thaw_hir::HirType::Json
+                                            && params.len() <= 2
+                                            && params.iter().all(|param| *param == thaw_hir::HirType::Json)
+                                            && matches!(**ret, thaw_hir::HirType::Json | thaw_hir::HirType::Void)
                                 )
                             })
                         })
@@ -663,6 +665,7 @@ fn generate_registry_shims(
                                         | thaw_hir::HirType::Str
                                         | thaw_hir::HirType::Bool
                                         | thaw_hir::HirType::Json
+                                        | thaw_hir::HirType::Void
                                         | thaw_hir::HirType::Object(_)
                                 )
                             ) || matches!(
@@ -688,10 +691,26 @@ fn generate_registry_shims(
                     let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
                         continue;
                     };
-                    let Some(return_type) = render_dynamic_type(return_type) else {
+                    let Some(return_type) = (if *return_type == thaw_hir::HirType::Void {
+                        Some("Json".to_string())
+                    } else {
+                        render_dynamic_type(return_type)
+                    }) else {
                         continue;
                     };
-                    let runtime_key = format!("$method${}${}", class.name, method.name);
+                    let runtime_key = format!(
+                        "{}{}${}",
+                        if matches!(
+                            overload.ret,
+                            thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)
+                        ) {
+                            "$methodvoid$"
+                        } else {
+                            "$method$"
+                        },
+                        class.name,
+                        method.name
+                    );
                     let encoded = runtime_key
                         .as_bytes()
                         .iter()
@@ -2796,7 +2815,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); get(): number; getLater(callback: (error: Json, result: Json) => Json): number; }\n",
+            "export declare class NativeBox { constructor(value: number); get(): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -2867,7 +2886,7 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); const callback = (error: Json, result: Json): Json => { console.log(Number(result)); return result; }; console.log(box.getLater(callback)); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
