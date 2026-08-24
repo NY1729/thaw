@@ -5073,6 +5073,74 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_math_round(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("Math.round expects one operand".to_string());
+        };
+        let value = self.compile_expr(value)?.into_float_value();
+        let f64_type = self.context.f64_type();
+        let zero = f64_type.const_zero();
+        let floor = self
+            .builder
+            .build_call(
+                self.module.get_function("llvm.floor.f64").unwrap(),
+                &[value.into()],
+                "round_floor",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("floor returned no value")?
+            .into_float_value();
+        let fraction = self
+            .builder
+            .build_float_sub(value, floor, "round_fraction")
+            .map_err(|error| error.to_string())?;
+        let round_up = self
+            .builder
+            .build_float_compare(
+                FloatPredicate::OGE,
+                fraction,
+                f64_type.const_float(0.5),
+                "round_up",
+            )
+            .map_err(|error| error.to_string())?;
+        let ceiling = self
+            .builder
+            .build_float_add(floor, f64_type.const_float(1.0), "round_ceiling")
+            .map_err(|error| error.to_string())?;
+        let rounded = self
+            .builder
+            .build_select(round_up, ceiling, floor, "round_nearest")
+            .map_err(|error| error.to_string())?
+            .into_float_value();
+        let negative = self
+            .builder
+            .build_float_compare(FloatPredicate::OLT, value, zero, "round_negative")
+            .map_err(|error| error.to_string())?;
+        let at_least_half = self
+            .builder
+            .build_float_compare(
+                FloatPredicate::OGE,
+                value,
+                f64_type.const_float(-0.5),
+                "round_at_least_negative_half",
+            )
+            .map_err(|error| error.to_string())?;
+        let negative_zero_range = self
+            .builder
+            .build_and(negative, at_least_half, "round_negative_zero_range")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_select(
+                negative_zero_range,
+                f64_type.const_float(-0.0),
+                rounded,
+                "math_round",
+            )
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -7324,6 +7392,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_math_min" => return self.compile_math_extreme(args, true),
             "__thaw_math_max" => return self.compile_math_extreme(args, false),
             "__thaw_math_sign" => return self.compile_math_sign(args),
+            "__thaw_math_round" => return self.compile_math_round(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -11042,6 +11111,33 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "math_pow_extrema_sign"),
             "8\nmin-left\nmin-right\n-2\n7\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\n-1\n1\ntrue\ntrue\nawaited-extreme\n12\n"
+        );
+    }
+
+    #[test]
+    fn compiles_javascript_math_round_semantics() {
+        let source = r#"
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-round");
+                return "4.6";
+            }
+            async function main(): Promise<void> {
+                console.log(Math.round(1.4));
+                console.log(Math.round(1.5));
+                console.log(Math.round(-1.5));
+                console.log(Math.round(-1.6));
+                console.log((1 / Math.round(-0.1)) < 0);
+                console.log((1 / Math.round(-0.5)) < 0);
+                console.log((1 / Math.round(-0)) < 0);
+                console.log(Number.isNaN(Math.round(0 / 0)));
+                console.log(Number.isFinite(Math.round(Number("Infinity"))));
+                console.log(Math.round(await delayed()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "math_round"),
+            "1\n2\n-1\n-2\ntrue\ntrue\ntrue\ntrue\nfalse\nawaited-round\n5\n"
         );
     }
 
