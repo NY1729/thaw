@@ -977,6 +977,44 @@ pub unsafe extern "C" fn thaw_napi_call_method_result(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_get_property_result(
+    receiver: u64,
+    property: *const c_char,
+) -> ThawResult {
+    let result = (|| -> Result<String, String> {
+        let env = module_env_for_handle(receiver)?;
+        let property_name = text(property)?;
+        let property_name_c =
+            CString::new(property_name.clone()).map_err(|_| "property contains NUL")?;
+        let mut value = ptr::null_mut();
+        let status = napi_get_named_property(
+            env,
+            receiver as NapiValue,
+            property_name_c.as_ptr(),
+            &mut value,
+        );
+        take_env_exception(env)?;
+        if status != NAPI_OK || value.is_null() {
+            return Err(format!(
+                "failed to get native property `{property_name}`: status {status}"
+            ));
+        }
+        let value = wait_for_promise(value)?;
+        serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: ptr::null_mut(),
+        },
+        Err(error) => ThawResult {
+            value: ptr::null_mut(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let Some(info) = info.as_ref() else {
         return ptr::null_mut();

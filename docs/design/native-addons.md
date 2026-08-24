@@ -38,7 +38,10 @@ nested object propertyとproperty代入も追跡し、分岐で一致するfact�
 parentの上書きは全descendantの追跡を破棄する。static methodはclass export自体を
 N-API receiverにし、instance methodと同じarity、overload、callback、native value
 marshal規則でnamed・namespace callを書き換える。自作addonの`NativeBox.twice(21)`を
-実行ファイルE2Eで検証した。getterは引き続き残課題である。
+実行ファイルE2Eで検証した。instance getterは専用のN-API property-result ABIで
+property値をJson化し、methodと同じnative return変換を行う。tracked alias・object
+property経由のgetterも書き換え、`box.value`を実行ファイルE2Eで検証した。
+setterは引き続き残課題である。
 callback ABIについてはinstance methodにも接続し、0〜2個の動的引数と`Json`／`void`
 戻り値を扱う。`.d.ts`の`Error | null`や`any`はこの境界で`Json`へ正規化する。
 receiverと同じ永続`napi_env`内にcallback functionを作り、`this`を維持してmethodを
