@@ -484,6 +484,8 @@ constructorとcontinuationはarrow、関数変数、top-level named functionを�
 
 `.finally(callback)`はfulfilled/rejectedの両方でcallbackを実行し、通常完了なら元のsettlementを
 維持する。callbackのthrow/rejectは出力を置き換え、Promiseを返した場合は完了まで待機する。
+finallyの派生Promiseを直接awaitする場合もframe suspension pointとして抽出し、元のrejectを
+最寄りのasync `try/catch`へ渡す。
 `resolve(nativePromise)`とcontinuationが返すPromiseは`thaw_promise_adopt`でflattenし、自己解決は
 `Chaining cycle detected for promise`としてrejectする。QuickJS fallbackの戻り値はすべてrealmの
 `Promise.resolve`へ通すため、任意の外部thenable、throwする`then` accessor、複数回settleも
