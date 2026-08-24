@@ -427,6 +427,9 @@ The workspace crates have narrow responsibilities:
 - Homogeneous arrays implement in-place `.copyWithin()` with memmove-safe
   overlap, JavaScript negative/clamped indices, optional end, left-to-right
   coercion and awaited index expressions
+- Homogeneous native arrays implement in-place `.fill()` for numbers, strings,
+  booleans and fixed objects, with negative/clamped bounds, shallow reference
+  assignment and left-to-right awaited argument evaluation
 - Homogeneous arrays implement arena-owned shallow `.slice()` copies with
   omitted/negative/clamped indices, empty ranges, unchanged source arrays,
   shared object elements, ordered coercion and awaited bounds
