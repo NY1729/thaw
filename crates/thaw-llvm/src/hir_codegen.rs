@@ -1218,6 +1218,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // ever dereferences it.
             HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::JsValue => Ok(self.context.i64_type().into()),
+            HirType::Null => Ok(self.context.bool_type().into()),
             HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Optional(payload) => {
@@ -4305,6 +4306,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(self.context.bool_type().const_int(*b as u64, false).into())
             }
             HirExpr::Lit(HirLit::Undefined) => Ok(self.context.bool_type().const_zero().into()),
+            HirExpr::Lit(HirLit::Null) => Ok(self.context.bool_type().const_int(1, false).into()),
             HirExpr::Lit(HirLit::Str(s)) => {
                 let global = self
                     .builder
@@ -7517,6 +7519,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Str(_)) => Some(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined) => Some(HirType::Undefined),
+            HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
             HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
             HirExpr::Assign(_, value) => self.expr_hir_type(value),
             HirExpr::OptionalSome(_, payload) | HirExpr::OptionalNone(payload) => {
@@ -9959,6 +9962,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     "puts_undefined_value",
                 )
                 .map_err(|error| error.to_string())?;
+        } else if hir_type == Some(HirType::Null) {
+            let null = self
+                .builder
+                .build_global_string_ptr("null", "null_value")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("puts").unwrap(),
+                    &[null.as_pointer_value().into()],
+                    "puts_null_value",
+                )
+                .map_err(|error| error.to_string())?;
         } else {
             match value {
                 BasicValueEnum::PointerValue(ptr) => {
@@ -11342,6 +11357,30 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "typed_typeof"),
             "evaluated\nnumber\nstring\nboolean\nfunction\nobject\nobject\nobject\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_null_literals() {
+        let source = r#"
+            function getNull(): null {
+                console.log("get null");
+                return null;
+            }
+            function main(): void {
+                const value: null = null;
+                console.log(value);
+                console.log(typeof value);
+                console.log(null === null);
+                console.log(null === undefined);
+                console.log(null !== undefined);
+                console.log(getNull() == undefined);
+                console.log(getNull() != undefined);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_null"),
+            "null\nobject\ntrue\nfalse\ntrue\nget null\ntrue\nget null\nfalse\n"
         );
     }
 

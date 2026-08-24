@@ -20,6 +20,7 @@ pub enum HirType {
     I64,
     Bool,
     Undefined,
+    Null,
     Void,
     Str,
     Json,
@@ -45,6 +46,7 @@ pub enum HirLit {
     Str(String),
     Bool(bool),
     Undefined,
+    Null,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
