@@ -395,6 +395,11 @@ The workspace crates have narrow responsibilities:
   `.includes()` with positive/negative starting positions. Numeric searches
   distinguish strict equality from SameValueZero (`NaN`), treat signed zeros
   equally, preserve receiver/argument evaluation order and accept `await`
+- Native strings implement `.indexOf()`, `.includes()`, `.startsWith()` and
+  `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
+  byte offsets. Search values and positions are coerced left-to-right, clamped
+  positions and empty searches follow JavaScript behavior, and receivers may
+  suspend with `await`
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited

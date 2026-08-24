@@ -3128,6 +3128,22 @@ impl<'a> FnLowerer<'a> {
                             HirType::F64
                         });
                     }
+                    "__thaw_string_index_of"
+                    | "__thaw_string_includes"
+                    | "__thaw_string_starts_with"
+                    | "__thaw_string_ends_with" => {
+                        if args.len() != 3 {
+                            return Err("string search expects three operands".into());
+                        }
+                        self.expect_type(&HirType::Str, &args[0], "string search receiver")?;
+                        self.expect_type(&HirType::Str, &args[1], "string search needle")?;
+                        self.expect_type(&HirType::F64, &args[2], "string search position")?;
+                        return Ok(if name == "__thaw_string_index_of" {
+                            HirType::F64
+                        } else {
+                            HirType::Bool
+                        });
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
@@ -5308,7 +5324,10 @@ impl<'a> FnLowerer<'a> {
                         )),
                     };
                 }
-                if matches!(property.sym.as_ref(), "indexOf" | "includes") {
+                if matches!(
+                    property.sym.as_ref(),
+                    "indexOf" | "includes" | "startsWith" | "endsWith"
+                ) {
                     if !(1..=2).contains(&call.args.len()) {
                         return Err(format!(
                             "native `.{}` expects one or two arguments",
@@ -5316,10 +5335,39 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array search spread is not supported".into());
+                        return Err("native search spread is not supported".into());
                     }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if receiver_type == HirType::Str {
+                        let needle = self.lower_expr(&call.args[0].expr)?;
+                        let needle = self.coerce_primitive_to_string(needle)?;
+                        let position = if let Some(argument) = call.args.get(1) {
+                            let value = self.lower_expr(&argument.expr)?;
+                            self.coerce_primitive_to_number(value)?
+                        } else if property.sym == *"endsWith" {
+                            HirExpr::Lit(HirLit::F64(f64::INFINITY))
+                        } else {
+                            HirExpr::Lit(HirLit::F64(0.0))
+                        };
+                        let suffix = match property.sym.as_ref() {
+                            "indexOf" => "index_of",
+                            "includes" => "includes",
+                            "startsWith" => "starts_with",
+                            "endsWith" => "ends_with",
+                            _ => unreachable!(),
+                        };
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                            vec![receiver, needle, position],
+                        ));
+                    }
+                    if matches!(property.sym.as_ref(), "startsWith" | "endsWith") {
+                        return Err(format!(
+                            "`.{}` requires a string receiver, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    }
                     let HirType::Array(element) = receiver_type.clone() else {
                         return Err(format!(
                             "`.{}` requires a homogeneous array receiver, got {receiver_type:?}",
