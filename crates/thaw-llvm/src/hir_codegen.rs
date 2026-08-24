@@ -9846,6 +9846,42 @@ mod tests {
     }
 
     #[test]
+    fn compiles_function_arrow_and_promise_callback_parameter_destructuring() {
+        let source = r#"
+            function describe(
+                { x, nested: { flag }, ...rest }:
+                    { x: number; nested: { flag: boolean }; label: string; extra: number },
+                [first, ...tail]: [number, number, number]
+            ): number {
+                console.log(x); console.log(flag);
+                console.log(rest.label); console.log(rest.extra);
+                console.log(first); console.log(tail[0]); console.log(tail[1]);
+                return x + first;
+            }
+            async function objectValue(): Promise<{ value: number; label: string }> {
+                await sleep(1); return { value: 8, label: "eight" };
+            }
+            function arrowValue(): number {
+                const pick = ({ value }: { value: number }): number => value + 1;
+                return pick({ value: 6 });
+            }
+            async function main(): Promise<void> {
+                console.log(describe(
+                    { x: 1, nested: { flag: true }, label: "ok", extra: 4 },
+                    [2, 3, 5]
+                ));
+                console.log(arrowValue());
+                const chained: number = await objectValue().then(({ value }) => value + 2);
+                console.log(chained);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "parameter_destructuring"),
+            "1\ntrue\nok\n4\n2\n3\n5\n3\n7\n10\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {

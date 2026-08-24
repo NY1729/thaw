@@ -137,6 +137,8 @@ The workspace crates have narrow responsibilities:
   declaration and assignment heads, preserving break/continue behavior
 - Fixed-layout object/tuple destructuring assignments update existing bindings,
   evaluate the right-hand side once, and return that original right-hand value
+- Function, typed arrow, and contextually typed Promise callback parameters
+  accept nested fixed-layout object/tuple destructuring and rest patterns
 - Object fields and array indexing/mutation
 - Fixed-shape object fields can also use static string-computed reads,
   assignments, compound assignments, and updates; JSON accepts string keys
