@@ -4204,6 +4204,52 @@ pub unsafe extern "C" fn napi_get_prototype(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_set_prototype(
+    env: NapiEnv,
+    object: NapiValue,
+    prototype: NapiValue,
+) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, prototype) {
+        return NAPI_INVALID_ARG;
+    }
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    if !matches!(value_ref(prototype), Ok(value) if is_object_value(value) || matches!(value, Value::Null))
+    {
+        return NAPI_OBJECT_EXPECTED;
+    }
+
+    let object_id = object as usize;
+    let prototype_id = prototype as usize;
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if env.prototypes.get(&object_id).copied() == Some(prototype_id) {
+        return NAPI_OK;
+    }
+    if env.sealed_objects.contains(&object_id) {
+        return NAPI_GENERIC_FAILURE;
+    }
+
+    if !matches!(value_ref(prototype), Ok(Value::Null)) {
+        let mut ancestor = Some(prototype_id);
+        let mut visited = HashSet::new();
+        while let Some(current) = ancestor {
+            if current == object_id {
+                return NAPI_GENERIC_FAILURE;
+            }
+            if !visited.insert(current) {
+                break;
+            }
+            ancestor = env.prototypes.get(&current).copied();
+        }
+    }
+    env.prototypes.insert(object_id, prototype_id);
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_strict_equals(
     env: NapiEnv,
     left: NapiValue,
@@ -8159,6 +8205,51 @@ mod tests {
             assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
             assert_eq!(napi_get_prototype(env_ptr, plain, &mut actual), NAPI_OK);
             assert!(matches!(value_ref(actual), Ok(Value::Undefined)));
+        }
+    }
+
+    #[test]
+    fn experimental_set_prototype_enforces_object_graph_rules() {
+        unsafe {
+            let mut env = Env::new();
+            let mut other_env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            let mut prototype = ptr::null_mut();
+            let mut child = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            assert_eq!(napi_create_object(env_ptr, &mut prototype), NAPI_OK);
+            assert_eq!(napi_create_object(env_ptr, &mut child), NAPI_OK);
+
+            assert_eq!(node_api_set_prototype(env_ptr, object, prototype), NAPI_OK);
+            let mut actual = ptr::null_mut();
+            assert_eq!(napi_get_prototype(env_ptr, object, &mut actual), NAPI_OK);
+            assert_eq!(actual, prototype);
+            assert_eq!(node_api_set_prototype(env_ptr, child, object), NAPI_OK);
+            assert_eq!(
+                node_api_set_prototype(env_ptr, prototype, child),
+                NAPI_GENERIC_FAILURE
+            );
+
+            let number = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                node_api_set_prototype(env_ptr, object, number),
+                NAPI_OBJECT_EXPECTED
+            );
+            let foreign = other_env.alloc(Value::Object(HashMap::new()));
+            assert_eq!(
+                node_api_set_prototype(env_ptr, object, foreign),
+                NAPI_INVALID_ARG
+            );
+
+            let null = env.alloc(Value::Null);
+            assert_eq!(node_api_set_prototype(env_ptr, object, null), NAPI_OK);
+            assert_eq!(napi_object_seal(env_ptr, object), NAPI_OK);
+            assert_eq!(node_api_set_prototype(env_ptr, object, null), NAPI_OK);
+            assert_eq!(
+                node_api_set_prototype(env_ptr, object, prototype),
+                NAPI_GENERIC_FAILURE
+            );
         }
     }
 
