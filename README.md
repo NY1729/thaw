@@ -376,6 +376,10 @@ The workspace crates have narrow responsibilities:
   JavaScript numeric coercion to native primitive/aggregate arguments and use
   LLVM floating-point intrinsics, preserving `NaN`, infinities, signed zero,
   single evaluation and awaited arguments
+- `Math.pow`, variadic `Math.min`/`Math.max`, and `Math.sign` use the same
+  left-to-right numeric coercion. Empty extrema return signed infinity, `NaN`
+  propagates, zero ties retain JavaScript's sign ordering, and unary negation
+  preserves negative zero
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited

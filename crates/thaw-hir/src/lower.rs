@@ -3097,12 +3097,28 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "number predicate")?;
                         return Ok(HirType::Bool);
                     }
-                    "__thaw_math_abs" | "__thaw_math_floor" | "__thaw_math_ceil"
-                    | "__thaw_math_trunc" | "__thaw_math_sqrt" => {
+                    "__thaw_number_neg" | "__thaw_math_abs" | "__thaw_math_floor"
+                    | "__thaw_math_ceil" | "__thaw_math_trunc" | "__thaw_math_sqrt"
+                    | "__thaw_math_sign" => {
                         let [argument] = args.as_slice() else {
                             return Err("unary Math function expects one operand".into());
                         };
                         self.expect_type(&HirType::F64, argument, "Math operand")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_math_pow" => {
+                        if args.len() != 2 {
+                            return Err("Math.pow expects two operands".into());
+                        }
+                        for argument in args {
+                            self.expect_type(&HirType::F64, argument, "Math.pow operand")?;
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_math_min" | "__thaw_math_max" => {
+                        for argument in args {
+                            self.expect_type(&HirType::F64, argument, "Math extrema operand")?;
+                        }
                         return Ok(HirType::F64);
                     }
                     "fetch" => return Ok(HirType::Str),
@@ -3683,10 +3699,9 @@ impl<'a> FnLowerer<'a> {
                 let lowered = match unary.op {
                     UnaryOp::Minus => {
                         self.expect_type(&HirType::F64, &value, "unary minus")?;
-                        HirExpr::BinOp(
-                            BinOp::Sub,
-                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                            Box::new(value),
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_number_neg".to_string())),
+                            vec![value],
                         )
                     }
                     UnaryOp::Plus => {
@@ -5099,6 +5114,34 @@ impl<'a> FnLowerer<'a> {
                             vec![value],
                         ));
                     }
+                    if object.sym == *"Math"
+                        && matches!(property.sym.as_ref(), "pow" | "min" | "max" | "sign")
+                    {
+                        let expected = match property.sym.as_ref() {
+                            "pow" => Some(2),
+                            "sign" => Some(1),
+                            _ => None,
+                        };
+                        if expected.is_some_and(|expected| call.args.len() != expected) {
+                            return Err(format!(
+                                "`Math.{}` expects {} argument(s)",
+                                property.sym,
+                                expected.unwrap()
+                            ));
+                        }
+                        let mut arguments = Vec::with_capacity(call.args.len());
+                        for argument in &call.args {
+                            if argument.spread.is_some() {
+                                return Err("Math function spread is not supported".into());
+                            }
+                            let value = self.lower_expr(&argument.expr)?;
+                            arguments.push(self.coerce_primitive_to_number(value)?);
+                        }
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var(format!("__thaw_math_{}", property.sym))),
+                            arguments,
+                        ));
+                    }
                     if object.sym == *"Number"
                         && matches!(
                             property.sym.as_ref(),
@@ -6357,7 +6400,7 @@ mod tests {
             assert_eq!(arguments.len(), 1);
             assert!(matches!(
                 arguments[0],
-                HirExpr::BinOp(..) | HirExpr::Lit(..)
+                HirExpr::Call(..) | HirExpr::BinOp(..) | HirExpr::Lit(..)
             ));
         }
     }
