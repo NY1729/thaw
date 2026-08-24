@@ -103,6 +103,14 @@ pub extern "C" fn thaw_json_array_new() -> *mut Value {
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
+    (!value.is_null() && matches!(unsafe { &*value }, Value::Array(_))).into()
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
     if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
         items.push(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number));

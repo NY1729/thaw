@@ -694,6 +694,11 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_json_is_array",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for (name, value_type) in [
             ("thaw_json_array_push_number", f64_type.into()),
             ("thaw_json_array_push_string", i8_ptr.into()),
@@ -7835,6 +7840,34 @@ impl<'ctx> HirCompiler<'ctx> {
             "JSON.stringify" => {
                 return self.compile_single_arg_call("thaw_json_stringify", args, "JSON.stringify")
             }
+            "__thaw_json_is_array" => {
+                let [value] = args else {
+                    return Err("Array.isArray expects one operand".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_is_array").unwrap(),
+                        &[value.into()],
+                        "json_is_array",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_array returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result,
+                        self.context.i8_type().const_zero(),
+                        "array_is_array",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
             "getDynamicValue" => return self.compile_get_dynamic_value(args),
@@ -11552,6 +11585,37 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_copy_within"),
             "4,5,3,4,5\n1,1,2,3,4\n1,2,3,2,3\naab\nreceiver\ntarget\nstart\nawaited-end\n1-1-2-3-4\n"
+        );
+    }
+
+    #[test]
+    fn compiles_array_is_array_for_native_and_json_values() {
+        let source = r#"
+            function scalar(): number {
+                console.log("scalar-evaluated");
+                return 1;
+            }
+            async function delayed(): Promise<number[]> {
+                await sleep(1);
+                console.log("awaited-array");
+                return [1, 2];
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, 2];
+                const tuple: [number, string] = [1, "x"];
+                console.log(Array.isArray(numbers));
+                console.log(Array.isArray(tuple));
+                console.log(Array.isArray({ x: 1 }));
+                console.log(Array.isArray("text"));
+                console.log(Array.isArray(JSON.parse("[1,2]")));
+                console.log(Array.isArray(JSON.parse("{\"x\":1}")));
+                console.log(Array.isArray(scalar()));
+                console.log(Array.isArray(await delayed()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_is_array"),
+            "true\ntrue\nfalse\nfalse\ntrue\nfalse\nscalar-evaluated\nfalse\nawaited-array\ntrue\n"
         );
     }
 
