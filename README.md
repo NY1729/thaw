@@ -142,6 +142,8 @@ The workspace crates have narrow responsibilities:
 - Object fields and array indexing/mutation
 - Fixed-shape object fields can also use static string-computed reads,
   assignments, compound assignments, and updates; JSON accepts string keys
+- Optional member, computed-member, and function calls are accepted for native
+  types whose static layout excludes `null`/`undefined`
 - Prefix and postfix `++`/`--` return the correct expression value and evaluate
   computed array and numeric object-field targets once, including awaited
   indexes and object expressions
@@ -362,6 +364,9 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
+- Nullish optional-chain short-circuiting still requires native
+  `null`/`undefined` representations; optional chains currently normalize only
+  for statically non-null native values
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows

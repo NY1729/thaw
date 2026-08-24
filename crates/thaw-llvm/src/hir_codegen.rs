@@ -9882,6 +9882,35 @@ mod tests {
     }
 
     #[test]
+    fn compiles_optional_chains_for_non_null_native_types() {
+        let source = r#"
+            function invoke(callback: (value: number) => number): number {
+                return callback?.(2);
+            }
+            async function boxValue(): Promise<{ value: number }> {
+                await sleep(1); return { value: 4 };
+            }
+            function callbackValue(): number {
+                const add = (value: number): number => value + 1;
+                return invoke(add);
+            }
+            async function main(): Promise<void> {
+                const box = { value: 1 };
+                console.log(box?.value);
+                console.log(box?.["value"]);
+                console.log(callbackValue());
+                console.log((await boxValue())?.value);
+                const data: Json = JSON.parse("{\"name\":\"thaw\"}");
+                console.log(String(data?.name));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "non_null_optional_chains"),
+            "1\n1\n3\n4\nthaw\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
