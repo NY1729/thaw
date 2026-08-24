@@ -47,11 +47,13 @@ constructor等の先行async workをdrainし、各complete境界で例外を回�
 実引数個数と末尾callbackの有無で選択するよう拡張した。inline callbackに加えて、
 local変数へ代入したarrow/functionも追跡する。同じ引数個数を持つ非callback overloadも、
 number、string、boolean、number array、objectのliteralと、それらを代入したlocal変数を
-使って選択する。末尾optional parameterは必須prefixから完全signatureまでの各arityを
-個別に生成し、実行ファイルE2Eで0引数・1引数の双方を検証した。number型のrest
+使って選択する。算術、文字列連結、比較、条件式、template、括弧／type assertion、
+primitive変換call、`.length`の結果もlocal変数を通して追跡する。末尾optional parameterは
+必須prefixから完全signatureまでの各arityを個別に生成し、実行ファイルE2Eで0引数・1引数
+の双方を検証した。number型のrest
 parameterはsourceで観測した実引数個数だけを展開するため、固定の最大arityを設けない。
-同じE2Eで0要素・3要素をN-API methodへ渡して検証した。より複雑な式の型推論と、現在の
-native表現を越えるrest要素型は引き続き残課題である。
+同じE2Eで0要素・3要素をN-API methodへ渡して検証した。user functionの戻り値や任意の
+property型の推論と、現在のnative表現を越えるrest要素型は引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 

@@ -494,12 +494,15 @@ internal symbol. Calls select an overload by exact argument count and whether
 the final argument is an inline or locally-bound callback. Non-callback
 overloads with the same arity are also selected from number, string, boolean,
 number-array, and object literals or local variables initialized from those
-values. Trailing optional method parameters generate every callable arity from
-the required prefix through the complete signature. Number-typed rest
+values. The local inference also follows arithmetic, string concatenation,
+comparisons, conditional expressions, templates, parentheses/type assertions,
+primitive conversion calls, and `.length`. Trailing optional method parameters
+generate every callable arity from the required prefix through the complete
+signature. Number-typed rest
 parameters are expanded only for the argument counts observed at compiled call
-sites, so they do not impose an arbitrary maximum arity. Richer expression
-inference and rest element types beyond the currently native-representable
-surface remain explicit gaps.
+sites, so they do not impose an arbitrary maximum arity. User-function return
+inference, arbitrary property types, and rest element types beyond the currently
+native-representable surface remain explicit gaps.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
