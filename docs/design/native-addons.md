@@ -638,3 +638,5 @@ generic failureを返す。
 `napi_detach_arraybuffer`／`napi_is_detached_arraybuffer`はowned／external backingにdetached状態を
 保持する。detach後はArrayBufferと既存TypedArray／DataViewのdataをnull、lengthを0として返し、
 新しいview作成を拒否する一方、external memoryのfinalizer所有権はEnv破棄まで維持する。
+`napi_async_init`はresource nameと所有Envを保持するcontextを作り、`napi_async_destroy`は同じ
+Envからの破棄だけを受理してcontextを一度解放する。callback scope／make_callbackへ渡せる。
