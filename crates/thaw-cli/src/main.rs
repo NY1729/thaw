@@ -3157,11 +3157,11 @@ mod tests {
         assert_eq!(native.libc, "glibc");
         assert!(native.source.contains("TryGhost/node-sqlite3/releases"));
 
-        // Keep this fixture focused on constructor integration rather than
-        // sqlite3's much broader callback-heavy declaration surface.
+        // Keep this fixture focused on construction and one error-first
+        // callback method rather than sqlite3's full overloaded surface.
         std::fs::write(
             registry.join("sqlite3/package.d.ts"),
-            "export declare class Database { constructor(filename: string); }\n",
+            "export declare class Database { constructor(filename: string); close(callback: (error: Error | null) => void): void; }\n",
         )
         .unwrap();
         let source = dir.join("main.ts");
@@ -3171,6 +3171,8 @@ mod tests {
             "import { Database } from \"sqlite3\";\n\
              function main(): void {\n\
                  const database: JsValue = new Database(\":memory:\");\n\
+                 const onClose = (error: Json): void => { console.log(\"sqlite3-closed\"); };\n\
+                 database.close(onClose);\n\
                  console.log(\"sqlite3-constructed\");\n\
              }\n",
         )
@@ -3194,7 +3196,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "sqlite3-constructed\n"
+            "sqlite3-constructed\nsqlite3-closed\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
