@@ -708,6 +708,9 @@ offsetは0になり、backing identityは維持する。
 非writable・非enumerable・configurableなown propertyとして公開する。`napi_define_class`の`prototype`は
 非writable・非enumerable・非configurableとし、prototype側の`constructor` backlinkはclass identityを
 保持するwritable・非enumerable・configurable propertyにする。
+Error／TypeError／RangeError／SyntaxError生成は`message`をwritable・非enumerable・configurableなown
+property、optional `code`を通常のown propertyとして保持する。`name`は継承metadataとして参照でき、
+own `name`でshadow可能である。ToStringは現在のname／messageから`Name: message`を構成する。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending

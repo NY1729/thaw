@@ -358,6 +358,7 @@ pub struct Env {
     property_attributes: HashMap<(usize, PropertyKey), u32>,
     property_order: HashMap<usize, Vec<PropertyKey>>,
     host_properties: HashMap<usize, HashMap<PropertyKey, NapiValue>>,
+    error_names: HashMap<usize, String>,
     symbols: HashMap<u64, NapiValue>,
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
@@ -410,6 +411,7 @@ impl Env {
             property_attributes: HashMap::new(),
             property_order: HashMap::new(),
             host_properties: HashMap::new(),
+            error_names: HashMap::new(),
             symbols: HashMap::new(),
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
@@ -657,6 +659,20 @@ unsafe fn property_order_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey
         .unwrap_or(usize::MAX)
 }
 
+unsafe fn error_name_for_owner(env: NapiEnv, owner: usize) -> Option<String> {
+    env.as_ref()
+        .and_then(|env| env.error_names.get(&owner).cloned())
+        .or_else(|| {
+            HOST.with(|host| {
+                let host = host.borrow();
+                host.module_envs
+                    .iter()
+                    .chain(host.pending_call_envs.iter())
+                    .find_map(|candidate| candidate.error_names.get(&owner).cloned())
+            })
+        })
+}
+
 unsafe fn typedarray_index_parts(object: NapiValue, key: &PropertyKey) -> Option<(i32, *mut u8)> {
     let index = property_array_index(key)?;
     let Value::TypedArray {
@@ -815,6 +831,10 @@ unsafe fn intrinsic_property_value(
     let PropertyKey::String(name) = key else {
         return None;
     };
+    if matches!(value_ref(object), Ok(Value::Error(_))) && name == "name" {
+        let name = error_name_for_owner(env, object as usize).unwrap_or_else(|| "Error".into());
+        return env_mut(env).ok().map(|env| env.alloc(Value::String(name)));
+    }
     let env = env_mut(env).ok()?;
     match value_ref(object).ok()? {
         Value::Array(values) if name == "length" => {
@@ -1276,12 +1296,12 @@ unsafe fn find_property_value(
     let mut current = Some(object);
     let mut visited = HashSet::new();
     while let Some(value) = current.filter(|value| visited.insert(*value as usize)) {
-        if let Some(property) = intrinsic_property_value(env, value, key) {
-            return Some(property);
-        }
         let property = own_property_value(env, value, key);
         if property.is_some() {
             return property;
+        }
+        if let Some(property) = intrinsic_property_value(env, value, key) {
+            return Some(property);
         }
         if accessor_for_owner(env, value as usize, key).is_some() {
             return None;
@@ -3962,7 +3982,11 @@ fn bigint_to_decimal(negative: bool, words: &[u64]) -> String {
     result
 }
 
-unsafe fn javascript_string(value: NapiValue, arrays: &mut HashSet<usize>) -> Result<String, ()> {
+unsafe fn javascript_string(
+    env: NapiEnv,
+    value: NapiValue,
+    arrays: &mut HashSet<usize>,
+) -> Result<String, ()> {
     Ok(match value_ref(value).map_err(|_| ())? {
         Value::Undefined => "undefined".into(),
         Value::Null => "null".into(),
@@ -3978,7 +4002,20 @@ unsafe fn javascript_string(value: NapiValue, arrays: &mut HashSet<usize>) -> Re
         Value::Number(value) => value.to_string(),
         Value::BigInt { negative, words } => bigint_to_decimal(*negative, words),
         Value::String(value) => value.clone(),
-        Value::Error(value) => format!("Error: {value}"),
+        Value::Error(message) => {
+            let name_key = PropertyKey::String("name".into());
+            let name = find_property_value(env, value, &name_key)
+                .and_then(|name| match value_ref(name) {
+                    Ok(Value::String(name)) => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "Error".into());
+            match (name.is_empty(), message.is_empty()) {
+                (true, _) => message.clone(),
+                (_, true) => name,
+                _ => format!("{name}: {message}"),
+            }
+        }
         Value::Symbol { .. } => return Err(()),
         Value::Array(values) => {
             if !arrays.insert(value as usize) {
@@ -3989,7 +4026,7 @@ unsafe fn javascript_string(value: NapiValue, arrays: &mut HashSet<usize>) -> Re
                 .map(|item| {
                     match item.and_then(|item| value_ref(item).ok().map(|value| (item, value))) {
                         None | Some((_, Value::Undefined | Value::Null)) => Ok(String::new()),
-                        Some((item, _)) => javascript_string(item, arrays),
+                        Some((item, _)) => javascript_string(env, item, arrays),
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -4025,7 +4062,7 @@ pub unsafe extern "C" fn napi_coerce_to_number(
         Ok(Value::BigInt { .. } | Value::Symbol { .. }) => {
             return coercion_type_error(env, "value cannot be converted to a number");
         }
-        Ok(Value::Array(_)) => match javascript_string(value, &mut HashSet::new()) {
+        Ok(Value::Array(_)) => match javascript_string(env, value, &mut HashSet::new()) {
             Ok(value) => javascript_number_from_string(&value),
             Err(()) => return coercion_type_error(env, "value cannot be converted to a number"),
         },
@@ -4041,7 +4078,7 @@ pub unsafe extern "C" fn napi_coerce_to_string(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let string = match javascript_string(value, &mut HashSet::new()) {
+    let string = match javascript_string(env, value, &mut HashSet::new()) {
         Ok(string) => string,
         Err(()) => return coercion_type_error(env, "a Symbol cannot be converted to a string"),
     };
@@ -4175,14 +4212,15 @@ pub unsafe extern "C" fn napi_get_value_string_utf16(
 #[no_mangle]
 pub unsafe extern "C" fn napi_throw_error(
     env: NapiEnv,
-    _code: *const c_char,
+    code: *const c_char,
     message: *const c_char,
 ) -> NapiStatus {
     let message = text(message).unwrap_or_else(|_| "native addon error".into());
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let error = env.alloc(Value::Error(message));
+    let code = (!code.is_null()).then(|| env.alloc(Value::String(text(code).unwrap_or_default())));
+    let error = alloc_error(env, "Error", message, code);
     env.exception = Some(error);
     NAPI_OK
 }
@@ -4192,7 +4230,7 @@ pub unsafe extern "C" fn napi_throw_type_error(
     code: *const c_char,
     message: *const c_char,
 ) -> NapiStatus {
-    napi_throw_error(env, code, message)
+    throw_error_kind(env, "TypeError", code, message)
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_throw_range_error(
@@ -4200,7 +4238,7 @@ pub unsafe extern "C" fn napi_throw_range_error(
     code: *const c_char,
     message: *const c_char,
 ) -> NapiStatus {
-    napi_throw_error(env, code, message)
+    throw_error_kind(env, "RangeError", code, message)
 }
 
 #[no_mangle]
@@ -4209,7 +4247,23 @@ pub unsafe extern "C" fn node_api_throw_syntax_error(
     code: *const c_char,
     message: *const c_char,
 ) -> NapiStatus {
-    napi_throw_error(env, code, message)
+    throw_error_kind(env, "SyntaxError", code, message)
+}
+
+unsafe fn throw_error_kind(
+    env: NapiEnv,
+    name: &str,
+    code: *const c_char,
+    message: *const c_char,
+) -> NapiStatus {
+    let message = text(message).unwrap_or_else(|_| "native addon error".into());
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let code = (!code.is_null()).then(|| env.alloc(Value::String(text(code).unwrap_or_default())));
+    let error = alloc_error(env, name, message, code);
+    env.exception = Some(error);
+    NAPI_OK
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_exception_pending(env: NapiEnv, out: *mut bool) -> NapiStatus {
@@ -5549,22 +5603,63 @@ pub unsafe extern "C" fn napi_make_callback(
 
 const NAPI_PENDING_EXCEPTION: NapiStatus = 10;
 
-#[no_mangle]
-pub unsafe extern "C" fn napi_create_error(
+fn alloc_error(env: &mut Env, name: &str, message: String, code: Option<NapiValue>) -> NapiValue {
+    let value = env.alloc(Value::Error(message.clone()));
+    let message_value = env.alloc(Value::String(message));
+    let owner = value as usize;
+    env.error_names.insert(owner, name.into());
+    let properties = env.host_properties.entry(owner).or_default();
+    properties.insert(PropertyKey::String("message".into()), message_value);
+    if let Some(code) = code {
+        properties.insert(PropertyKey::String("code".into()), code);
+    }
+    let message_key = PropertyKey::String("message".into());
+    record_property_order(env, owner, &message_key);
+    env.property_attributes
+        .insert((owner, message_key), NAPI_WRITABLE | NAPI_CONFIGURABLE);
+    if code.is_some() {
+        let code_key = PropertyKey::String("code".into());
+        record_property_order(env, owner, &code_key);
+        env.property_attributes
+            .insert((owner, code_key), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+    }
+    value
+}
+
+unsafe fn create_error_kind(
     env: NapiEnv,
-    _code: NapiValue,
+    name: &str,
+    code: NapiValue,
     message: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
     let message = match value_ref(message) {
         Ok(Value::String(message)) => message.clone(),
         _ => return NAPI_STRING_EXPECTED,
     };
+    if !code.is_null() && !matches!(value_ref(code), Ok(Value::String(_))) {
+        return NAPI_STRING_EXPECTED;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env.alloc(Value::Error(message));
-    write_value(out, value)
+    write_value(
+        out,
+        alloc_error(env, name, message, (!code.is_null()).then_some(code)),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_error(
+    env: NapiEnv,
+    code: NapiValue,
+    message: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    create_error_kind(env, "Error", code, message, out)
 }
 
 #[no_mangle]
@@ -5574,7 +5669,7 @@ pub unsafe extern "C" fn napi_create_type_error(
     message: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    napi_create_error(env, code, message, out)
+    create_error_kind(env, "TypeError", code, message, out)
 }
 
 #[no_mangle]
@@ -5584,7 +5679,7 @@ pub unsafe extern "C" fn napi_create_range_error(
     message: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    napi_create_error(env, code, message, out)
+    create_error_kind(env, "RangeError", code, message, out)
 }
 
 #[no_mangle]
@@ -5594,7 +5689,7 @@ pub unsafe extern "C" fn node_api_create_syntax_error(
     message: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    napi_create_error(env, code, message, out)
+    create_error_kind(env, "SyntaxError", code, message, out)
 }
 
 #[no_mangle]
@@ -8565,6 +8660,71 @@ mod tests {
             );
             assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
             assert!(pending);
+        }
+    }
+
+    #[test]
+    fn error_values_expose_name_message_code_and_stringification() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let message = env.alloc(Value::String("failed".into()));
+            let code = env.alloc(Value::String("E_TEST".into()));
+            let mut error = ptr::null_mut();
+            assert_eq!(
+                napi_create_type_error(env_ptr, code, message, &mut error),
+                NAPI_OK
+            );
+            for (name, expected) in [
+                (c"name", "TypeError"),
+                (c"message", "failed"),
+                (c"code", "E_TEST"),
+            ] {
+                let mut actual = ptr::null_mut();
+                assert_eq!(
+                    napi_get_named_property(env_ptr, error, name.as_ptr(), &mut actual),
+                    NAPI_OK
+                );
+                assert!(matches!(value_ref(actual), Ok(Value::String(value)) if value == expected));
+            }
+            let name_key = env.alloc(Value::String("name".into()));
+            let message_key = env.alloc(Value::String("message".into()));
+            let mut own = true;
+            assert_eq!(
+                napi_has_own_property(env_ptr, error, name_key, &mut own),
+                NAPI_OK
+            );
+            assert!(!own);
+            assert_eq!(
+                napi_has_own_property(env_ptr, error, message_key, &mut own),
+                NAPI_OK
+            );
+            assert!(own);
+
+            let mut string = ptr::null_mut();
+            assert_eq!(napi_coerce_to_string(env_ptr, error, &mut string), NAPI_OK);
+            assert!(
+                matches!(value_ref(string), Ok(Value::String(value)) if value == "TypeError: failed")
+            );
+            let custom_name = env.alloc(Value::String("CustomError".into()));
+            assert_eq!(
+                napi_set_named_property(env_ptr, error, c"name".as_ptr(), custom_name),
+                NAPI_OK
+            );
+            assert_eq!(napi_coerce_to_string(env_ptr, error, &mut string), NAPI_OK);
+            assert!(
+                matches!(value_ref(string), Ok(Value::String(value)) if value == "CustomError: failed")
+            );
+
+            assert_eq!(
+                napi_create_error(env_ptr, code, message, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            let number = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_create_error(env_ptr, number, message, &mut error),
+                NAPI_STRING_EXPECTED
+            );
         }
     }
 
