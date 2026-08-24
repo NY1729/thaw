@@ -364,6 +364,9 @@ The workspace crates have narrow responsibilities:
 - Heterogeneous typed tuples use the same comma-join conversion recursively,
   selecting each slot by its static type and evaluating the tuple source once;
   nested tuples, arrays and objects compose without a dynamic value box
+- Zero-argument `.toString()` is available on native numbers, booleans,
+  strings, fixed objects, typed arrays and heterogeneous tuples, including
+  receivers produced by side-effecting calls or `await`
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

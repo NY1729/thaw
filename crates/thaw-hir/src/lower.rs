@@ -5042,6 +5042,13 @@ impl<'a> FnLowerer<'a> {
 
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
+                if property.sym == *"toString" {
+                    if !call.args.is_empty() {
+                        return Err("native `.toString()` does not accept arguments yet".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    return self.coerce_primitive_to_string(receiver);
+                }
                 if property.sym == *"finally" {
                     let source = self.lower_expr(&member.obj)?;
                     let HirType::Promise(input) = self.infer_expr_type(&source)? else {
