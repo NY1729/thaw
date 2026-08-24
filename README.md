@@ -427,6 +427,9 @@ The workspace crates have narrow responsibilities:
 - Homogeneous arrays implement arena-owned shallow `.slice()` copies with
   omitted/negative/clamped indices, empty ranges, unchanged source arrays,
   shared object elements, ordered coercion and awaited bounds
+- ES2023 `.toReversed()` returns an arena-owned reversed shallow copy without
+  mutating its homogeneous source array; object sharing, empty and awaited
+  receivers follow the same native array rules
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays

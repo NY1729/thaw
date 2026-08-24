@@ -614,6 +614,11 @@ impl<'ctx> HirCompiler<'ctx> {
             array_slice_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_array_to_reversed",
+            array_reverse_type,
+            Some(Linkage::External),
+        );
         for (name, needle_type, return_type) in [
             (
                 "thaw_number_array_index_of",
@@ -7612,6 +7617,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array slice returned no value".to_string());
             }
+            "__thaw_array_to_reversed" => {
+                return self.compile_single_arg_call(
+                    "thaw_array_to_reversed",
+                    args,
+                    "array toReversed",
+                )
+            }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
             | "__thaw_string_array_index_of"
@@ -11650,6 +11662,34 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_slice"),
             "1,2,3,4,5\n2,3,4\n3,4\n0\n1,2,3,4,5\nbc\n9\nreceiver\nstart\nawaited-end\n2-3\n"
+        );
+    }
+
+    #[test]
+    fn compiles_non_mutating_array_to_reversed() {
+        let source = r#"
+            async function delayed(): Promise<string[]> {
+                await sleep(1);
+                console.log("awaited-array");
+                return ["a", "b", "c"];
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, 2, 3];
+                const reversed: number[] = numbers.toReversed();
+                console.log(reversed.join(","));
+                console.log(numbers.join(","));
+                const objects: { value: number }[] = [{ value: 1 }, { value: 2 }];
+                const objectCopy: { value: number }[] = objects.toReversed();
+                objectCopy[0].value = 9;
+                console.log(objects[1].value);
+                const empty: number[] = [];
+                console.log(empty.toReversed().length);
+                console.log((await delayed()).toReversed().join(""));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_to_reversed"),
+            "3,2,1\n1,2,3\n9\n0\nawaited-array\ncba\n"
         );
     }
 
