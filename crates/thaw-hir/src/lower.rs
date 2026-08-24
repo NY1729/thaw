@@ -6387,6 +6387,223 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    fn lower_array_to_spliced(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        arguments: Vec<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_to_spliced_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        let mut bindings = vec![(receiver_name.clone(), array_type.clone(), receiver)];
+        let mut argument_names = Vec::with_capacity(arguments.len());
+        for (index, argument) in arguments.into_iter().enumerate() {
+            let ty = if index < 2 {
+                HirType::F64
+            } else {
+                element_type.clone()
+            };
+            let name = format!("__thaw_to_spliced_argument_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            argument_names.push(name.clone());
+            bindings.push((name, ty, argument));
+        }
+        let length_name = format!("__thaw_to_spliced_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let start_name = format!("__thaw_to_spliced_start_{}", self.next_binding);
+        self.next_binding += 1;
+        let delete_name = format!("__thaw_to_spliced_delete_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_length_name = format!("__thaw_to_spliced_result_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_name = format!("__thaw_to_spliced_result_{}", self.next_binding);
+        self.next_binding += 1;
+        let source_index_name = format!("__thaw_to_spliced_source_{}", self.next_binding);
+        self.next_binding += 1;
+        let destination_index_name = format!("__thaw_to_spliced_destination_{}", self.next_binding);
+        self.next_binding += 1;
+        for name in [
+            &length_name,
+            &start_name,
+            &delete_name,
+            &result_length_name,
+            &source_index_name,
+            &destination_index_name,
+        ] {
+            self.scope.insert(name.clone(), HirType::F64);
+        }
+        self.scope.insert(result_name.clone(), array_type.clone());
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let var = |name: &str| HirExpr::Var(name.into());
+        let assign =
+            |name: &str, value| HirStmt::Expr(HirExpr::Assign(name.into(), Box::new(value)));
+        let add = |left, right| HirExpr::BinOp(BinOp::Add, Box::new(left), Box::new(right));
+        let sub = |left, right| HirExpr::BinOp(BinOp::Sub, Box::new(left), Box::new(right));
+        let increment = |name: &str| assign(name, add(var(name), number(1.0)));
+        let trunc = |value| {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                vec![value],
+            )
+        };
+        let initial_start = argument_names
+            .first()
+            .map(|name| var(name))
+            .unwrap_or_else(|| number(0.0));
+        let mut statements = vec![
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
+            ),
+            HirStmt::Let(start_name.clone(), HirType::F64, initial_start),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(var(&start_name)),
+                    Box::new(var(&start_name)),
+                ),
+                Vec::new(),
+                vec![assign(&start_name, number(0.0))],
+            ),
+            assign(&start_name, trunc(var(&start_name))),
+            HirStmt::If(
+                HirExpr::BinOp(BinOp::Lt, Box::new(var(&start_name)), Box::new(number(0.0))),
+                vec![
+                    assign(&start_name, add(var(&length_name), var(&start_name))),
+                    HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(var(&start_name)),
+                            Box::new(number(0.0)),
+                        ),
+                        vec![assign(&start_name, number(0.0))],
+                        Vec::new(),
+                    ),
+                ],
+                vec![HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::Gt,
+                        Box::new(var(&start_name)),
+                        Box::new(var(&length_name)),
+                    ),
+                    vec![assign(&start_name, var(&length_name))],
+                    Vec::new(),
+                )],
+            ),
+        ];
+        let initial_delete = match argument_names.len() {
+            0 => number(0.0),
+            1 => sub(var(&length_name), var(&start_name)),
+            _ => var(&argument_names[1]),
+        };
+        statements.extend([
+            HirStmt::Let(delete_name.clone(), HirType::F64, initial_delete),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(var(&delete_name)),
+                    Box::new(var(&delete_name)),
+                ),
+                Vec::new(),
+                vec![assign(&delete_name, number(0.0))],
+            ),
+            assign(&delete_name, trunc(var(&delete_name))),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&delete_name)),
+                    Box::new(number(0.0)),
+                ),
+                vec![assign(&delete_name, number(0.0))],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Gt,
+                    Box::new(var(&delete_name)),
+                    Box::new(sub(var(&length_name), var(&start_name))),
+                ),
+                vec![assign(
+                    &delete_name,
+                    sub(var(&length_name), var(&start_name)),
+                )],
+                Vec::new(),
+            ),
+            HirStmt::Let(
+                result_length_name.clone(),
+                HirType::F64,
+                add(
+                    sub(var(&length_name), var(&delete_name)),
+                    number(argument_names.len().saturating_sub(2) as f64),
+                ),
+            ),
+            HirStmt::Let(
+                result_name.clone(),
+                array_type.clone(),
+                HirExpr::ArrayAlloc(Box::new(var(&result_length_name)), element_type.clone()),
+            ),
+            HirStmt::Let(source_index_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(destination_index_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&source_index_name)),
+                    Box::new(var(&start_name)),
+                ),
+                vec![
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(var(&result_name)),
+                        Box::new(var(&destination_index_name)),
+                        Box::new(HirExpr::TypedIndex(
+                            Box::new(var(&receiver_name)),
+                            Box::new(var(&source_index_name)),
+                            element_type.clone(),
+                        )),
+                    )),
+                    increment(&source_index_name),
+                    increment(&destination_index_name),
+                ],
+            ),
+        ]);
+        for item_name in argument_names.iter().skip(2) {
+            statements.push(HirStmt::Expr(HirExpr::IndexAssign(
+                Box::new(var(&result_name)),
+                Box::new(var(&destination_index_name)),
+                Box::new(var(item_name)),
+            )));
+            statements.push(increment(&destination_index_name));
+        }
+        statements.extend([
+            assign(&source_index_name, add(var(&start_name), var(&delete_name))),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&source_index_name)),
+                    Box::new(var(&length_name)),
+                ),
+                vec![
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(var(&result_name)),
+                        Box::new(var(&destination_index_name)),
+                        Box::new(HirExpr::TypedIndex(
+                            Box::new(var(&receiver_name)),
+                            Box::new(var(&source_index_name)),
+                            element_type,
+                        )),
+                    )),
+                    increment(&source_index_name),
+                    increment(&destination_index_name),
+                ],
+            ),
+            HirStmt::Return(Some(var(&result_name))),
+        ]);
+        self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings)
+    }
+
     fn lower_array_reduce(
         &mut self,
         receiver: HirExpr,
@@ -7454,6 +7671,36 @@ impl<'a> FnLowerer<'a> {
                         callback,
                         initial,
                         property.sym == *"reduceRight",
+                    );
+                }
+                if property.sym == *"toSpliced" {
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array toSpliced spread arguments are not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "`.toSpliced()` requires a homogeneous array, got {array_type:?}"
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let mut arguments = Vec::with_capacity(call.args.len());
+                    for (index, argument) in call.args.iter().enumerate() {
+                        let value = self.lower_expr(&argument.expr)?;
+                        let expected = if index < 2 {
+                            &HirType::F64
+                        } else {
+                            &element_type
+                        };
+                        self.expect_type(expected, &value, "array toSpliced argument")?;
+                        arguments.push(value);
+                    }
+                    return self.lower_array_to_spliced(
+                        receiver,
+                        array_type,
+                        element_type,
+                        arguments,
                     );
                 }
                 if property.sym == *"with" {

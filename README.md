@@ -481,6 +481,10 @@ The workspace crates have narrow responsibilities:
   homogeneous array, applies JavaScript integer and negative-index rules,
   preserves the source, evaluates receiver/index/value once in order and
   throws for out-of-range or empty-array writes; awaited operands are supported
+- ES2023 `.toSpliced()` returns an arena-owned shallow copy and supports every
+  argument form from a no-op copy through delete-to-end and variadic insertion.
+  Start/delete values use JavaScript truncation and clamping, source and
+  inserted values are evaluated once in order, and awaited operands work
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
