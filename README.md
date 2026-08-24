@@ -547,7 +547,9 @@ the same loop form while preserving its mandatory first iteration and
 condition-before-continue behavior, including async bodies. `for-in` and
 `for await...of` remain unavailable in HIR lowering. Ordinary `for...of`
 supports typed arrays, evaluates its iterable once, and preserves
-break/continue across synchronous and async bodies. `try/catch` conservatively
+break/continue across synchronous and async bodies. Its loop head may declare
+an identifier or assign each element to an existing same-typed variable.
+`try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
 on every continuing path. Switch-flow joins remain an explicit gap.
