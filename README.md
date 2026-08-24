@@ -396,6 +396,8 @@ The workspace crates have narrow responsibilities:
 - `Math.fround`, `clz32` and `imul` implement float32 rounding and exact
   ECMAScript ToUint32/wrapping multiplication semantics, including negative
   zero, non-finite inputs, signed 32-bit results, coercion order and `await`
+- `Math.random()` advances an atomic process-local xorshift state and produces
+  a 53-bit fraction in the required half-open `[0, 1)` interval
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,

@@ -436,6 +436,12 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         self.module
             .add_function("thaw_math_imul", pow_type, Some(Linkage::External));
+        let math_random_type = self.context.f64_type().fn_type(&[], false);
+        self.module.add_function(
+            "thaw_math_random",
+            math_random_type,
+            Some(Linkage::External),
+        );
         for name in [
             "llvm.fabs.f64",
             "llvm.floor.f64",
@@ -7633,6 +7639,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     &format!("Math.{operation}"),
                 );
             }
+            "__thaw_math_random" => {
+                if !args.is_empty() {
+                    return Err("Math.random expects no operands".to_string());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_math_random").unwrap(),
+                        &[],
+                        "math_random",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Math.random returned no value".to_string());
+            }
             "__thaw_math_pow" => {
                 let [left, right] = args else {
                     return Err("Math.pow expects two operands".to_string());
@@ -11689,6 +11711,25 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "integer_single_precision_math"),
             "true\ntrue\ntrue\nfalse\n32\n31\n0\n28\n32\n-5\n-2\n7\nleft\nright\n12\nawaited-clz32\n27\n"
+        );
+    }
+
+    #[test]
+    fn compiles_stateful_math_random() {
+        let source = r#"
+            function main(): void {
+                const first: number = Math.random();
+                const second: number = Math.random();
+                console.log(first >= 0);
+                console.log(first < 1);
+                console.log(second >= 0);
+                console.log(second < 1);
+                console.log(first !== second);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "math_random"),
+            "true\ntrue\ntrue\ntrue\ntrue\n"
         );
     }
 

@@ -3176,6 +3176,12 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "Math operand")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_math_random" => {
+                        if !args.is_empty() {
+                            return Err("Math.random expects no operands".into());
+                        }
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_math_pow" => {
                         if args.len() != 2 {
                             return Err("Math.pow expects two operands".into());
@@ -5222,6 +5228,15 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"Math" && property.sym == *"random" {
+                        if !call.args.is_empty() {
+                            return Err("`Math.random` expects no arguments".into());
+                        }
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_math_random".to_string())),
+                            Vec::new(),
+                        ));
+                    }
                     if object.sym == *"Math"
                         && matches!(
                             property.sym.as_ref(),
