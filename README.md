@@ -376,6 +376,10 @@ The workspace crates have narrow responsibilities:
   JavaScript numeric coercion to native primitive/aggregate arguments and use
   LLVM floating-point intrinsics, preserving `NaN`, infinities, signed zero,
   single evaluation and awaited arguments
+- `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
+  they reject non-number values, fractions, `NaN` and infinities, preserve
+  signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
+  number expressions
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
