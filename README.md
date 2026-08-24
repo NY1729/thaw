@@ -147,7 +147,8 @@ The workspace crates have narrow responsibilities:
 - Optional member, computed-member, and function calls are accepted for native
   types whose static layout excludes `null`/`undefined`; tagged optional fixed
   objects additionally short-circuit named and static string-computed field
-  reads and flatten already-optional fields
+  reads and flatten already-optional fields, while tagged optional arrays and
+  tuples short-circuit computed element reads
 - String-literal `in` checks use fixed object shapes while still evaluating
   both operands once in source order
 - Comma/sequence expressions evaluate every operand from left to right and
@@ -616,8 +617,8 @@ The workspace crates have narrow responsibilities:
   terminating guard clauses and subsequent assignments update the narrowed
   state. Logical `&&`/`||` propagate safe narrowing into their short-circuited
   RHS and the implied `if` branch. Optional chaining now short-circuits tagged
-  fixed-object field reads; arrays, strings, method/function calls and native
-  `null` still require broader optional-chain lowering
+  fixed-object fields and array/tuple elements; strings, method/function calls
+  and native `null` still require broader optional-chain lowering
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
