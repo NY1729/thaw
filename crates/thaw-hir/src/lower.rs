@@ -2895,9 +2895,7 @@ impl<'a> FnLowerer<'a> {
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),
             )),
-            other => Err(format!(
-                "cannot infer the type of {other:?} (needs an explicit type annotation)"
-            )),
+            HirExpr::Block(stmts) => self.infer_return_type(stmts),
         }
     }
 
@@ -3875,10 +3873,6 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
-        // Phase 1/2 always yield the *new* value (prefix semantics), even
-        // for postfix `i++`/`i--`. This only matters when the expression's
-        // value is used, which doesn't happen in the
-        // `for (...; ...; i++)` / bare `i++;` forms this is meant to support.
         let target = match update.arg.as_ref() {
             Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
             Expr::Member(member) => match &member.prop {
@@ -3893,8 +3887,42 @@ impl<'a> FnLowerer<'a> {
             UpdateOp::MinusMinus => BinOp::Sub,
         };
         let one = HirExpr::Lit(HirLit::F64(1.0));
-        let value = HirExpr::BinOp(op, Box::new(target_to_read_expr(&target)), Box::new(one));
-        Ok(build_assign(target, value))
+        let current = target_to_read_expr(&target);
+        self.expect_type(&HirType::F64, &current, "update operand")?;
+        if update.prefix {
+            let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
+            return Ok(build_assign(target, value));
+        }
+
+        let mut bindings = Vec::new();
+        let target = match target {
+            Target::Var(name) => Target::Var(name),
+            Target::Index(array, index) => {
+                let array_name = format!("__thaw_update_array_{}", self.next_binding);
+                self.next_binding += 1;
+                let array_type = HirType::Array(Box::new(HirType::F64));
+                self.scope.insert(array_name.clone(), array_type.clone());
+                bindings.push((array_name.clone(), array_type, array));
+
+                let index_name = format!("__thaw_update_index_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(index_name.clone(), HirType::F64);
+                bindings.push((index_name.clone(), HirType::F64, index));
+                Target::Index(HirExpr::Var(array_name), HirExpr::Var(index_name))
+            }
+            Target::Prop(_, _, _) => unreachable!("property updates are rejected above"),
+        };
+        let old_name = format!("__thaw_update_old_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(old_name.clone(), HirType::F64);
+        bindings.push((old_name.clone(), HirType::F64, target_to_read_expr(&target)));
+        let old = HirExpr::Var(old_name);
+        let updated = HirExpr::BinOp(op, Box::new(old.clone()), Box::new(one));
+        let result = HirExpr::Block(vec![
+            HirStmt::Expr(build_assign(target, updated)),
+            HirStmt::Return(Some(old)),
+        ]);
+        self.wrap_call_argument_bindings(result, &bindings)
     }
 
     fn wrap_call_argument_bindings(
@@ -3908,18 +3936,29 @@ impl<'a> FnLowerer<'a> {
         let result_type = self.infer_expr_type(&result)?;
         for index in (0..bindings.len()).rev() {
             let (name, ty, source) = &bindings[index];
-            let captures = bindings[..index]
-                .iter()
-                .map(|(name, ty, _)| HirParam {
-                    name: name.clone(),
-                    ty: ty.clone(),
-                })
-                .collect();
             let body = if result_type == HirType::Void {
                 HirExpr::Block(vec![HirStmt::Expr(result)])
             } else {
                 result
             };
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&body, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter(|referenced| referenced != name)
+                .filter(|referenced| {
+                    bindings
+                        .iter()
+                        .position(|(binding, _, _)| binding == referenced)
+                        .is_none_or(|position| position < index)
+                })
+                .filter_map(|referenced| {
+                    self.scope.get(&referenced).cloned().map(|ty| HirParam {
+                        name: referenced,
+                        ty,
+                    })
+                })
+                .collect();
             result = HirExpr::Call(
                 Box::new(HirExpr::Lambda(
                     captures,
@@ -5195,6 +5234,33 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_prefix_and_postfix_update_values() {
+        let program = lower(
+            r#"function main(): void {
+                let value = 1;
+                const old = value++;
+                const current = ++value;
+                let values = [4];
+                const element = values[0]--;
+            }"#,
+        );
+        let main = &program.functions[0];
+        assert!(matches!(
+            &main.body[1],
+            HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
+        ));
+        assert!(matches!(
+            &main.body[2],
+            HirStmt::Let(_, HirType::F64, HirExpr::Assign(_, value))
+                if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+        ));
+        assert!(matches!(
+            &main.body[4],
+            HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
+        ));
+    }
+
+    #[test]
     fn lowers_same_type_loose_equality() {
         let program = lower(
             r#"function main(): void {
@@ -5357,11 +5423,11 @@ mod tests {
         };
         assert!(matches!(
             then_body.as_slice(),
-            [HirStmt::Expr(HirExpr::Assign(name, _)), HirStmt::Continue] if name == "i"
+            [HirStmt::Expr(HirExpr::Call(_, _)), HirStmt::Continue]
         ));
         assert!(matches!(
             body.last(),
-            Some(HirStmt::Expr(HirExpr::Assign(name, _))) if name == "i"
+            Some(HirStmt::Expr(HirExpr::Call(_, _)))
         ));
     }
 
