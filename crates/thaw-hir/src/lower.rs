@@ -3252,6 +3252,23 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
+                    "__thaw_number_array_sort"
+                    | "__thaw_string_array_sort"
+                    | "__thaw_bool_array_sort"
+                    | "__thaw_object_array_sort"
+                    | "__thaw_number_array_to_sorted"
+                    | "__thaw_string_array_to_sorted"
+                    | "__thaw_bool_array_to_sorted"
+                    | "__thaw_object_array_to_sorted" => {
+                        let [array] = args.as_slice() else {
+                            return Err("array sort expects one operand".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        if !matches!(ty, HirType::Array(_)) {
+                            return Err("array sort requires a homogeneous array".into());
+                        }
+                        return Ok(ty);
+                    }
                     "__thaw_number_array_index_of"
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"
@@ -6197,6 +6214,42 @@ impl<'a> FnLowerer<'a> {
                     }
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_array_to_reversed".to_string())),
+                        vec![receiver],
+                    ));
+                }
+                if matches!(property.sym.as_ref(), "sort" | "toSorted") {
+                    if !call.args.is_empty() {
+                        return Err(format!(
+                            "native `.{}()` comparators are not implemented yet",
+                            property.sym
+                        ));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &receiver_type else {
+                        return Err(format!(
+                            "`.{}()` requires a homogeneous array, got {receiver_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let prefix = match element.as_ref() {
+                        HirType::F64 => "number",
+                        HirType::Str => "string",
+                        HirType::Bool => "bool",
+                        HirType::Object(_) => "object",
+                        other => {
+                            return Err(format!(
+                                "array sort does not support element type {other:?}"
+                            ))
+                        }
+                    };
+                    let suffix = if property.sym == *"sort" {
+                        "sort"
+                    } else {
+                        "to_sorted"
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_{prefix}_array_{suffix}"))),
                         vec![receiver],
                     ));
                 }

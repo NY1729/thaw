@@ -604,6 +604,93 @@ pub unsafe extern "C" fn thaw_array_to_reversed(array: *const u8) -> *mut u8 {
     unsafe { thaw_array_reverse(output) }
 }
 
+unsafe fn native_array_slots(array: *mut u8) -> Option<&'static mut [u64]> {
+    let length = unsafe { native_array_length(array) }?;
+    Some(unsafe { std::slice::from_raw_parts_mut(array.add(8).cast::<u64>(), length) })
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw number array.
+pub unsafe extern "C" fn thaw_number_array_sort(array: *mut u8) -> *mut u8 {
+    let Some(slots) = (unsafe { native_array_slots(array) }) else {
+        return std::ptr::null_mut();
+    };
+    slots.sort_by(|left, right| {
+        javascript_number_string(f64::from_bits(*left))
+            .encode_utf16()
+            .cmp(javascript_number_string(f64::from_bits(*right)).encode_utf16())
+    });
+    array
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw C-string pointer array.
+pub unsafe extern "C" fn thaw_string_array_sort(array: *mut u8) -> *mut u8 {
+    let Some(slots) = (unsafe { native_array_slots(array) }) else {
+        return std::ptr::null_mut();
+    };
+    slots.sort_by(|left, right| {
+        let string = |value: u64| {
+            let pointer = value as usize as *const c_char;
+            if pointer.is_null() {
+                Vec::new()
+            } else {
+                unsafe { CStr::from_ptr(pointer) }
+                    .to_string_lossy()
+                    .encode_utf16()
+                    .collect::<Vec<_>>()
+            }
+        };
+        string(*left).cmp(&string(*right))
+    });
+    array
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw boolean array.
+pub unsafe extern "C" fn thaw_bool_array_sort(array: *mut u8) -> *mut u8 {
+    let Some(slots) = (unsafe { native_array_slots(array) }) else {
+        return std::ptr::null_mut();
+    };
+    slots.sort_by_key(|slot| *slot != 0);
+    array
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw fixed-object pointer array.
+pub unsafe extern "C" fn thaw_object_array_sort(array: *mut u8) -> *mut u8 {
+    if (unsafe { native_array_length(array) }).is_none() {
+        return std::ptr::null_mut();
+    }
+    // Every fixed object converts to the same default sort key,
+    // "[object Object]". Stable sorting therefore preserves source order.
+    array
+}
+
+macro_rules! array_to_sorted {
+    ($name:ident, $sort:ident) => {
+        #[no_mangle]
+        /// # Safety
+        /// `array` must point to a readable Thaw array of the matching type.
+        pub unsafe extern "C" fn $name(array: *const u8) -> *mut u8 {
+            let output = unsafe { thaw_array_slice(array, 0.0, f64::INFINITY) };
+            if output.is_null() {
+                return output;
+            }
+            unsafe { $sort(output) }
+        }
+    };
+}
+
+array_to_sorted!(thaw_number_array_to_sorted, thaw_number_array_sort);
+array_to_sorted!(thaw_string_array_to_sorted, thaw_string_array_sort);
+array_to_sorted!(thaw_bool_array_to_sorted, thaw_bool_array_sort);
+array_to_sorted!(thaw_object_array_to_sorted, thaw_object_array_sort);
+
 #[no_mangle]
 /// # Safety
 ///
