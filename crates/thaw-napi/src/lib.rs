@@ -46,6 +46,10 @@ const NAPI_DATE_EXPECTED: NapiStatus = 18;
 const NAPI_ARRAYBUFFER_EXPECTED: NapiStatus = 19;
 const NAPI_BIGINT_EXPECTED: NapiStatus = 17;
 const NAPI_AUTO_LENGTH: usize = usize::MAX;
+const NAPI_WRITABLE: u32 = 1;
+const NAPI_ENUMERABLE: u32 = 2;
+const NAPI_CONFIGURABLE: u32 = 4;
+const NAPI_DEFAULT_PROPERTY_ATTRIBUTES: u32 = NAPI_WRITABLE | NAPI_ENUMERABLE | NAPI_CONFIGURABLE;
 
 const ASYNC_CREATED: u8 = 0;
 const ASYNC_QUEUED: u8 = 1;
@@ -296,6 +300,7 @@ pub struct Env {
     external_memory: i64,
     sealed_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
+    property_attributes: HashMap<(usize, String), u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -338,6 +343,7 @@ impl Env {
             external_memory: 0,
             sealed_objects: HashSet::new(),
             frozen_objects: HashSet::new(),
+            property_attributes: HashMap::new(),
         }
     }
 
@@ -1887,34 +1893,45 @@ pub unsafe extern "C" fn napi_set_named_property(
             NAPI_OK
         };
     }
-    let (frozen, sealed) = env
+    let (frozen, sealed, writable) = env
         .as_ref()
         .map(|env| {
             (
                 env.frozen_objects.contains(&(object as usize)),
                 env.sealed_objects.contains(&(object as usize)),
+                env.property_attributes
+                    .get(&(object as usize, name.clone()))
+                    .map(|attributes| attributes & NAPI_WRITABLE != 0)
+                    .unwrap_or(true),
             )
         })
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, true));
     let exists = match value_ref(object) {
         Ok(Value::Object(values)) => values.contains_key(&name),
         Ok(Value::Function(function)) => function.properties.contains_key(&name),
         _ => return NAPI_INVALID_ARG,
     };
-    if frozen || (sealed && !exists) {
+    if frozen || (exists && !writable) || (sealed && !exists) {
         return NAPI_GENERIC_FAILURE;
     }
-    match object.as_mut() {
+    let status = match object.as_mut() {
         Some(Value::Object(values)) => {
-            values.insert(name, value);
+            values.insert(name.clone(), value);
             NAPI_OK
         }
         Some(Value::Function(function)) => {
-            function.properties.insert(name, value);
+            function.properties.insert(name.clone(), value);
             NAPI_OK
         }
         _ => NAPI_INVALID_ARG,
+    };
+    if status == NAPI_OK && !exists {
+        if let Ok(env) = env_mut(env) {
+            env.property_attributes
+                .insert((object as usize, name), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+        }
     }
+    status
 }
 
 #[no_mangle]
@@ -2064,6 +2081,14 @@ pub unsafe extern "C" fn napi_delete_property(
         *out = false;
         return NAPI_OK;
     }
+    if env.as_ref().is_some_and(|env| {
+        env.property_attributes
+            .get(&(object as usize, key.clone()))
+            .is_some_and(|attributes| attributes & NAPI_CONFIGURABLE == 0)
+    }) {
+        *out = false;
+        return NAPI_OK;
+    }
     match object.as_mut() {
         Some(Value::Object(values)) => {
             values.remove(&key);
@@ -2074,7 +2099,8 @@ pub unsafe extern "C" fn napi_delete_property(
         _ => return NAPI_OBJECT_EXPECTED,
     }
     if let Ok(env) = env_mut(env) {
-        env.accessors.remove(&(object as usize, key));
+        env.accessors.remove(&(object as usize, key.clone()));
+        env.property_attributes.remove(&(object as usize, key));
     }
     *out = true;
     NAPI_OK
@@ -2132,21 +2158,27 @@ pub unsafe extern "C" fn napi_define_properties(
         let Ok(key) = key else {
             return NAPI_INVALID_ARG;
         };
+        let Ok(key_name) = property_key(key) else {
+            return NAPI_INVALID_ARG;
+        };
+        let attributes = descriptor.attributes & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
         if descriptor.getter.is_some() || descriptor.setter.is_some() {
-            let Ok(key_name) = property_key(key) else {
-                return NAPI_INVALID_ARG;
-            };
             let Ok(env) = env_mut(env) else {
                 return NAPI_INVALID_ARG;
             };
+            if env.sealed_objects.contains(&(object as usize)) {
+                return NAPI_GENERIC_FAILURE;
+            }
             env.accessors.insert(
-                (object as usize, key_name),
+                (object as usize, key_name.clone()),
                 Accessor {
                     getter: descriptor.getter,
                     setter: descriptor.setter,
                     data: descriptor.data,
                 },
             );
+            env.property_attributes
+                .insert((object as usize, key_name), attributes);
             continue;
         }
         let value = if let Some(method) = descriptor.method {
@@ -2169,6 +2201,10 @@ pub unsafe extern "C" fn napi_define_properties(
         let status = napi_set_property(env, object, key, value);
         if status != NAPI_OK {
             return status;
+        }
+        if let Ok(env) = env_mut(env) {
+            env.property_attributes
+                .insert((object as usize, key_name), attributes);
         }
     }
     NAPI_OK
@@ -2866,6 +2902,25 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
+    let mut names = match value_ref(object) {
+        Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
+        Ok(Value::Function(function)) => function.properties.keys().cloned().collect(),
+        Ok(Value::Array(values)) => (0..values.len()).map(|index| index.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    names.extend(
+        env.accessors
+            .keys()
+            .filter(|(owner, _)| *owner == object as usize)
+            .map(|(_, name)| name.clone()),
+    );
+    names.sort();
+    names.dedup();
+    for name in names {
+        *env.property_attributes
+            .entry((object as usize, name))
+            .or_insert(NAPI_DEFAULT_PROPERTY_ATTRIBUTES) &= !NAPI_CONFIGURABLE;
+    }
     env.sealed_objects.insert(object as usize);
     NAPI_OK
 }
@@ -2875,10 +2930,18 @@ pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> 
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
+    let status = napi_object_seal(env, object);
+    if status != NAPI_OK {
+        return status;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    env.sealed_objects.insert(object as usize);
+    for ((owner, _), attributes) in &mut env.property_attributes {
+        if *owner == object as usize {
+            *attributes &= !NAPI_WRITABLE;
+        }
+    }
     env.frozen_objects.insert(object as usize);
     NAPI_OK
 }
@@ -5077,6 +5140,37 @@ mod tests {
                 napi_set_element(env_ptr, array, 0, value),
                 NAPI_GENERIC_FAILURE
             );
+
+            let mut described = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut described), NAPI_OK);
+            let descriptor = NapiPropertyDescriptor {
+                utf8name: c"fixed".as_ptr(),
+                name: ptr::null_mut(),
+                method: None,
+                getter: None,
+                setter: None,
+                value,
+                attributes: 0,
+                data: ptr::null_mut(),
+            };
+            assert_eq!(
+                napi_define_properties(env_ptr, described, 1, &descriptor),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_set_named_property(env_ptr, described, c"fixed".as_ptr(), value),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"fixed".as_ptr(), 5, &mut existing),
+                NAPI_OK
+            );
+            deleted = true;
+            assert_eq!(
+                napi_delete_property(env_ptr, described, existing, &mut deleted),
+                NAPI_OK
+            );
+            assert!(!deleted);
         }
     }
 
