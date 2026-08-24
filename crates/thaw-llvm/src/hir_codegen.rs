@@ -12041,6 +12041,52 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_some_and_every() {
+        let source = r#"
+            interface Item { value: number; }
+            function isSecond(value: number, index: number, array: number[]): boolean {
+                console.log(value);
+                return value === 2 && index === 1 && array.length === 3;
+            }
+            function belowFour(value: number, index: number, array: number[]): boolean {
+                console.log(value);
+                return value < 4 && index < array.length;
+            }
+            function values(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function thisValue(): number {
+                console.log("thisArg");
+                return 1;
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "", "c"];
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3].some(isSecond));
+                console.log([1, 2, 5, 3].every(belowFour));
+                const threshold: number = 0;
+                console.log([1, 2, 3].every(value => value > threshold));
+                const empty: number[] = [];
+                console.log(empty.some(() => true));
+                console.log(empty.every(() => false));
+                console.log([true, false].some(value => value === false));
+                const item: Item = { value: 2 };
+                console.log([item].every(value => value.value === 2));
+                console.log(values().some(value => value === 3, thisValue()));
+                console.log((await delayed()).every((value, index) => value.length === index));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_some_every"),
+            "1\n2\ntrue\n1\n2\n5\nfalse\ntrue\nfalse\ntrue\ntrue\ntrue\nreceiver\nthisArg\ntrue\nawaited\nfalse\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
