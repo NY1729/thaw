@@ -3176,6 +3176,48 @@ impl<'a> FnLowerer<'a> {
             )),
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
 
+            Expr::Seq(sequence) => {
+                let mut values = sequence
+                    .exprs
+                    .iter()
+                    .map(|expr| self.lower_expr(expr))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let last = values
+                    .pop()
+                    .ok_or("sequence expression must contain at least one value")?;
+                let result_type = self.infer_expr_type(&last)?;
+                let mut statements = values
+                    .into_iter()
+                    .map(HirStmt::Expr)
+                    .collect::<Vec<_>>();
+                if result_type == HirType::Void {
+                    statements.push(HirStmt::Expr(last));
+                } else {
+                    statements.push(HirStmt::Return(Some(last)));
+                }
+                let body = HirExpr::Block(statements);
+                let mut referenced = BTreeSet::new();
+                collect_referenced_bindings(&body, &mut referenced);
+                let captures = referenced
+                    .into_iter()
+                    .filter_map(|name| {
+                        self.scope
+                            .get(&name)
+                            .cloned()
+                            .map(|ty| HirParam { name, ty })
+                    })
+                    .collect();
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        captures,
+                        Vec::new(),
+                        result_type,
+                        Box::new(body),
+                    )),
+                    Vec::new(),
+                ))
+            }
+
             Expr::Bin(bin) => {
                 let lhs = self.lower_expr(&bin.left)?;
                 let rhs = self.lower_expr(&bin.right)?;
@@ -5882,8 +5924,13 @@ mod tests {
                 console.log(~5);
             }"#,
         );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
         assert!(matches!(
-            &program.functions[0].body[0],
+            &main.body[0],
             HirStmt::Expr(HirExpr::Call(_, args))
                 if matches!(&args[0], HirExpr::BinOp(BinOp::BitXor, _, rhs)
                     if matches!(rhs.as_ref(), HirExpr::Lit(HirLit::F64(value)) if *value == -1.0))
@@ -6176,6 +6223,28 @@ mod tests {
             HirStmt::Expr(HirExpr::Call(_, args))
                 if matches!(&args[0], HirExpr::Call(_, _))
         )));
+    }
+
+    #[test]
+    fn lowers_sequence_expressions_to_ordered_closures() {
+        let program = lower(
+            r#"function effect(value: number): number { return value; }
+            function main(): void {
+                const result = (effect(1), effect(2), 3);
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[0],
+            HirStmt::Let(_, HirType::F64, HirExpr::Call(lambda, args))
+                if args.is_empty()
+                    && matches!(lambda.as_ref(), HirExpr::Lambda(_, _, HirType::F64, body)
+                        if matches!(body.as_ref(), HirExpr::Block(statements) if statements.len() == 3))
+        ));
     }
 
     #[test]
