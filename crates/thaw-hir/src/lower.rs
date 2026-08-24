@@ -2989,6 +2989,14 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Lit(HirLit::Bool(false))),
                         )
                     }
+                    UnaryOp::Tilde => {
+                        self.expect_type(&HirType::F64, &value, "bitwise not")?;
+                        HirExpr::BinOp(
+                            BinOp::BitXor,
+                            Box::new(value),
+                            Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                        )
+                    }
                     other => return Err(format!("unsupported unary operator {other:?}")),
                 };
                 self.infer_expr_type(&lowered)?;
@@ -4974,6 +4982,21 @@ mod tests {
                     if matches!(value.as_ref(), HirExpr::BinOp(op, _, _) if *op == expected)
             ));
         }
+    }
+
+    #[test]
+    fn lowers_bitwise_not() {
+        let program = lower(
+            r#"function main(): void {
+                console.log(~5);
+            }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::BinOp(BinOp::BitXor, _, rhs)
+                    if matches!(rhs.as_ref(), HirExpr::Lit(HirLit::F64(value)) if *value == -1.0))
+        ));
     }
 
     #[test]
