@@ -3298,7 +3298,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     "__thaw_string_trim"
                     | "__thaw_string_trim_start"
-                    | "__thaw_string_trim_end" => {
+                    | "__thaw_string_trim_end"
+                    | "__thaw_string_to_lower_case"
+                    | "__thaw_string_to_upper_case" => {
                         let [argument] = args.as_slice() else {
                             return Err("string trim expects one operand".into());
                         };
@@ -6101,6 +6103,22 @@ impl<'a> FnLowerer<'a> {
                         "trimStart" => "trim_start",
                         "trimEnd" => "trim_end",
                         _ => unreachable!(),
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                        vec![receiver],
+                    ));
+                }
+                if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase") {
+                    if !call.args.is_empty() {
+                        return Err(format!("native `.{}()` expects no arguments", property.sym));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "string case receiver")?;
+                    let suffix = if property.sym == *"toLowerCase" {
+                        "to_lower_case"
+                    } else {
+                        "to_upper_case"
                     };
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
