@@ -90,6 +90,39 @@ fn resolve_import_meta(
     ))
 }
 
+fn constant_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Lit(thaw_parser::ast::Lit::Str(value)) => {
+            Some(value.value.to_string_lossy().into_owned())
+        }
+        Expr::Tpl(template) if template.quasis.len() == template.exprs.len() + 1 => {
+            let mut value = String::new();
+            for (index, quasi) in template.quasis.iter().enumerate() {
+                value.push_str(
+                    &quasi
+                        .cooked
+                        .as_ref()
+                        .map(|part| part.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| quasi.raw.to_string()),
+                );
+                if let Some(expr) = template.exprs.get(index) {
+                    value.push_str(&constant_string(expr)?);
+                }
+            }
+            Some(value)
+        }
+        Expr::Paren(parenthesized) => constant_string(&parenthesized.expr),
+        Expr::Bin(binary) if binary.op == thaw_parser::ast::BinaryOp::Add => Some(format!(
+            "{}{}",
+            constant_string(&binary.left)?,
+            constant_string(&binary.right)?
+        )),
+        Expr::TsAs(assertion) => constant_string(&assertion.expr),
+        Expr::TsTypeAssertion(assertion) => constant_string(&assertion.expr),
+        _ => None,
+    }
+}
+
 fn resolve_relative(from: &Path, specifier: &str) -> Result<PathBuf, String> {
     if !specifier.starts_with('.') {
         return Err(format!(
@@ -241,9 +274,7 @@ impl VisitMut for RenameReferences<'_> {
                     && matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(property)
                         if property.sym == *"resolve")));
             if is_resolve && call.args.len() == 1 && call.args[0].spread.is_none() {
-                if let Expr::Lit(thaw_parser::ast::Lit::Str(specifier)) = call.args[0].expr.as_ref()
-                {
-                    let specifier = specifier.value.to_string_lossy();
+                if let Some(specifier) = constant_string(&call.args[0].expr) {
                     if let Some(resolved) =
                         resolve_import_meta(self.module_path, &specifier, self.external_resolutions)
                     {
