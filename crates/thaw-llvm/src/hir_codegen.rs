@@ -697,6 +697,11 @@ impl<'ctx> HirCompiler<'ctx> {
             string_index_of_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_string_last_index_of",
+            string_index_of_type,
+            Some(Linkage::External),
+        );
         let string_transform_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         for name in [
             "thaw_string_trim",
@@ -7750,6 +7755,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(result);
             }
             "__thaw_string_index_of"
+            | "__thaw_string_last_index_of"
             | "__thaw_string_includes"
             | "__thaw_string_starts_with"
             | "__thaw_string_ends_with" => {
@@ -7773,7 +7779,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("string search returned no value".to_string())?;
-                if name != "__thaw_string_index_of" {
+                if !matches!(
+                    name.as_str(),
+                    "__thaw_string_index_of" | "__thaw_string_last_index_of"
+                ) {
                     return self
                         .builder
                         .build_int_compare(
@@ -11983,6 +11992,11 @@ mod tests {
                 console.log("awaited-text");
                 return "thaw-runtime";
             }
+            async function delayedNeedle(): Promise<string> {
+                console.log("awaited-needle");
+                await sleep(1);
+                return "bc";
+            }
             async function main(): Promise<void> {
                 const unicode: string = "😀a😀";
                 console.log(unicode.indexOf("a"));
@@ -11996,12 +12010,18 @@ mod tests {
                 console.log(unicode.endsWith("", -1));
                 console.log("123".includes(2));
                 console.log(text().indexOf(needle(), position()));
+                console.log(unicode.lastIndexOf("😀"));
+                console.log(unicode.lastIndexOf("😀", 2));
+                console.log(unicode.lastIndexOf("😀", -1));
+                console.log(unicode.lastIndexOf("", 99));
+                console.log(unicode.lastIndexOf("", 0 / 0));
+                console.log(text().lastIndexOf(await delayedNeedle(), "99"));
                 console.log((await delayedText()).startsWith("thaw"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "string_search"),
-            "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\nawaited-text\ntrue\n"
+            "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n0\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
         );
     }
 
