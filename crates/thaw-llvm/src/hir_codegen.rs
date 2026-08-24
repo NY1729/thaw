@@ -10080,6 +10080,50 @@ mod tests {
     }
 
     #[test]
+    fn logical_operators_preserve_native_operands_and_truthiness() {
+        let source = r#"
+            function numberValue(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            function stringValue(label: string, value: string): string {
+                console.log(label);
+                return value;
+            }
+            function arrayValue(): number[] {
+                console.log("array-rhs");
+                return [9];
+            }
+            function objectValue(): { value: number } {
+                console.log("object-rhs");
+                return { value: 9 };
+            }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                console.log("awaited-rhs");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(0 || numberValue("number-rhs", 5));
+                console.log(3 || numberValue("wrong-number-rhs", 8));
+                console.log((0 / 0) || 7);
+                console.log("" || stringValue("string-rhs", "fallback"));
+                console.log("kept" || stringValue("wrong-string-rhs", "fallback"));
+                const empty: number[] = [];
+                console.log((empty || arrayValue()).length);
+                const object: { value: number } = { value: 3 };
+                console.log((object && objectValue()).value);
+                console.log(0 && (await delayed(10)));
+                console.log(1 && (await delayed(11)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_logical_truthiness"),
+            "number-rhs\n5\n3\n7\nstring-rhs\nfallback\nkept\n0\nobject-rhs\n9\n0\nawaited-rhs\n11\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
