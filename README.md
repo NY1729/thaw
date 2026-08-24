@@ -707,6 +707,7 @@ The workspace crates have narrow responsibilities:
   word arrays support sign, size queries and capacity-limited extraction.
   ArrayBuffer and all N-API TypedArray element kinds retain shared backing
   storage, byte offsets, alignment and bounds; Buffer remains a Uint8Array view.
+  DataView uses the same backing storage with unaligned, byte-bounded views.
   Own-property checks and property deletion are supported for objects and functions
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design
