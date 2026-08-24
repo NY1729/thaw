@@ -1526,7 +1526,8 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
                 ));
             }
         }
-        if !json || !source.ends_with(".json") {
+        let source_path = source.split(['?', '#']).next().unwrap_or(source);
+        if !json || !source_path.ends_with(".json") {
             return Err(format!(
                 "only JSON modules accept `type: json` import attributes (`{source}`)"
             ));
@@ -1538,6 +1539,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         specs: Vec<String>,
         commonjs_exports: Vec<String>,
         has_nonliteral_dynamic_import: bool,
+        attribute_error: Option<String>,
     }
 
     struct TopLevelAwait {
@@ -1609,6 +1611,43 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             _ => None,
         }
     }
+
+    fn dynamic_import_attributes(call: &CallExpr) -> Result<Option<&ObjectLit>, String> {
+        if call.args.len() == 1 {
+            return Ok(None);
+        }
+        if call.args.len() != 2 || call.args[1].spread.is_some() {
+            return Err("dynamic import accepts one options object".to_string());
+        }
+        let Expr::Object(options) = call.args[1].expr.as_ref() else {
+            return Err("dynamic import options must be an object literal".to_string());
+        };
+        let mut attributes = None;
+        for property in &options.props {
+            let PropOrSpread::Prop(property) = property else {
+                return Err("spread dynamic import options are not supported".to_string());
+            };
+            let Prop::KeyValue(property) = property.as_ref() else {
+                return Err("dynamic import options must be key/value properties".to_string());
+            };
+            let key = match &property.key {
+                PropName::Ident(identifier) => identifier.sym.as_ref(),
+                PropName::Str(value) => value.value.as_str().unwrap_or(""),
+                _ => "",
+            };
+            if !matches!(key, "with" | "assert") {
+                return Err(format!("unsupported dynamic import option `{key}`"));
+            }
+            if attributes.is_some() {
+                return Err("dynamic import has duplicate attribute options".to_string());
+            }
+            let Expr::Object(object) = property.value.as_ref() else {
+                return Err("dynamic import attributes must be an object literal".to_string());
+            };
+            attributes = Some(object);
+        }
+        Ok(attributes)
+    }
     impl Visit for TopLevelAwait {
         fn visit_await_expr(&mut self, _: &AwaitExpr) {
             self.found = true;
@@ -1627,7 +1666,23 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             if ((is_require && call.args.len() == 1) || (is_import && !call.args.is_empty()))
                 && call.args[0].spread.is_none()
             {
-                if let Some(specifiers) = static_module_specifiers(&call.args[0].expr) {
+                let specifiers = static_module_specifiers(&call.args[0].expr);
+                if is_import && self.attribute_error.is_none() {
+                    self.attribute_error = match dynamic_import_attributes(call) {
+                        Ok(Some(attributes)) => match &specifiers {
+                            Some(specifiers) => specifiers.iter().find_map(|specifier| {
+                                validate_attributes(specifier, Some(attributes)).err()
+                            }),
+                            None => Some(
+                                "attributed dynamic imports require a finite static specifier set"
+                                    .to_string(),
+                            ),
+                        },
+                        Ok(None) => None,
+                        Err(error) => Some(error),
+                    };
+                }
+                if let Some(specifiers) = specifiers {
                     self.specs.extend(specifiers);
                 } else if is_import {
                     self.has_nonliteral_dynamic_import = true;
@@ -1686,12 +1741,13 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         specs: Vec::new(),
         commonjs_exports: Vec::new(),
         has_nonliteral_dynamic_import: false,
+        attribute_error: None,
     };
     module.visit_with(&mut calls);
     let mut top_level_await = TopLevelAwait { found: false };
     module.visit_with(&mut top_level_await);
     let mut static_esm_specs = Vec::new();
-    let mut attribute_error = None;
+    let mut attribute_error = calls.attribute_error.take();
     for item in &module.body {
         let (source, attributes) = match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(decl)) => {
@@ -4215,6 +4271,39 @@ mod tests {
             .attribute_error
             .as_deref()
             .is_some_and(|error| error.contains("unsupported import attribute")));
+
+        let dynamic =
+            analyze_module("const data = import('./data.json', { with: { type: 'json' } });");
+        assert!(dynamic.attribute_error.is_none());
+        assert_eq!(dynamic.specs, vec!["./data.json"]);
+        let legacy_dynamic =
+            analyze_module("const data = import('./data.json', { assert: { type: 'json' } });");
+        assert!(legacy_dynamic.attribute_error.is_none());
+        let wrong_dynamic =
+            analyze_module("const data = import('./data.js', { with: { type: 'json' } });");
+        assert!(wrong_dynamic
+            .attribute_error
+            .as_deref()
+            .is_some_and(|error| error.contains("only JSON modules")));
+        let unknown_dynamic =
+            analyze_module("const data = import('./data.json', { integrity: 'sha256-test' });");
+        assert!(unknown_dynamic
+            .attribute_error
+            .as_deref()
+            .is_some_and(|error| error.contains("unsupported dynamic import option")));
+        let runtime_attributed =
+            analyze_module("const data = import(name, { with: { type: 'json' } });");
+        assert!(runtime_attributed
+            .attribute_error
+            .as_deref()
+            .is_some_and(|error| error.contains("finite static specifier set")));
+
+        let rewritten = rewrite_dynamic_imports(
+            "const data = import('./data.json', { with: { type: 'json' } });",
+        )
+        .unwrap();
+        assert!(rewritten.contains("requireAsync(String('./data.json'))"));
+        assert!(!rewritten.contains("type: 'json'"));
     }
 
     #[test]
