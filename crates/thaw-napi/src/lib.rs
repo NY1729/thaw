@@ -3835,20 +3835,24 @@ pub unsafe extern "C" fn napi_get_array_length(
 #[no_mangle]
 pub unsafe extern "C" fn napi_set_element(
     env: NapiEnv,
-    array: NapiValue,
+    object: NapiValue,
     index: u32,
     value: NapiValue,
 ) -> NapiStatus {
+    let key = PropertyKey::String(index.to_string());
+    if matches!(value_ref(object), Ok(Value::Object(_) | Value::Function(_))) {
+        return set_property_key(env, object, key, value);
+    }
     let (frozen, sealed) = env
         .as_ref()
         .map(|env| {
             (
-                env.frozen_objects.contains(&(array as usize)),
-                env.sealed_objects.contains(&(array as usize)),
+                env.frozen_objects.contains(&(object as usize)),
+                env.sealed_objects.contains(&(object as usize)),
             )
         })
         .unwrap_or((false, false));
-    let exists = match value_ref(array) {
+    let exists = match value_ref(object) {
         Ok(Value::Array(values)) => values.get(index as usize).is_some_and(Option::is_some),
         _ => return NAPI_INVALID_ARG,
     };
@@ -3858,7 +3862,7 @@ pub unsafe extern "C" fn napi_set_element(
     if env.is_null() {
         return NAPI_INVALID_ARG;
     }
-    match array.as_mut() {
+    match object.as_mut() {
         Some(Value::Array(values)) => {
             while values.len() <= index as usize {
                 values.push(None);
@@ -3872,59 +3876,112 @@ pub unsafe extern "C" fn napi_set_element(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_has_element(
-    _env: NapiEnv,
-    array: NapiValue,
+    env: NapiEnv,
+    object: NapiValue,
     index: u32,
     result: *mut bool,
 ) -> NapiStatus {
     let Some(result) = result.as_mut() else {
         return NAPI_INVALID_ARG;
     };
-    let Ok(Value::Array(values)) = value_ref(array) else {
-        return NAPI_INVALID_ARG;
+    let key = PropertyKey::String(index.to_string());
+    *result = match value_ref(object) {
+        Ok(Value::Array(values)) => values.get(index as usize).is_some_and(Option::is_some),
+        Ok(Value::Object(_) | Value::Function(_)) => {
+            find_property_value(env, object, &key).is_some()
+                || find_accessor(env, object, &key).is_some()
+        }
+        _ => return NAPI_OBJECT_EXPECTED,
     };
-    *result = values.get(index as usize).is_some_and(Option::is_some);
     NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_delete_element(
     env: NapiEnv,
-    array: NapiValue,
+    object: NapiValue,
     index: u32,
     result: *mut bool,
 ) -> NapiStatus {
-    let Some(result) = result.as_mut() else {
+    if env.is_null() {
         return NAPI_INVALID_ARG;
-    };
+    }
+    let key = PropertyKey::String(index.to_string());
     if env
         .as_ref()
-        .is_some_and(|env| env.sealed_objects.contains(&(array as usize)))
+        .is_some_and(|env| env.sealed_objects.contains(&(object as usize)))
     {
-        *result = false;
+        if let Some(result) = result.as_mut() {
+            *result = false;
+        }
         return NAPI_OK;
     }
-    let Some(Value::Array(values)) = array.as_mut() else {
-        return NAPI_INVALID_ARG;
-    };
-    if let Some(value) = values.get_mut(index as usize) {
-        *value = None;
+    if property_attributes_for(env, object as usize, &key) & NAPI_CONFIGURABLE == 0
+        && (find_data_property_owner(env, object, &key) == Some(object as usize)
+            || accessor_for_owner(env, object as usize, &key).is_some())
+    {
+        if let Some(result) = result.as_mut() {
+            *result = false;
+        }
+        return NAPI_OK;
     }
-    *result = true;
+    match object.as_mut() {
+        Some(Value::Array(values)) => {
+            if let Some(value) = values.get_mut(index as usize) {
+                *value = None;
+            }
+        }
+        Some(Value::Object(values)) => {
+            values.remove(&key);
+        }
+        Some(Value::Function(function)) => {
+            function.properties.remove(&key);
+        }
+        _ => return NAPI_OBJECT_EXPECTED,
+    }
+    if let Ok(env) = env_mut(env) {
+        env.accessors.remove(&(object as usize, key.clone()));
+        env.property_attributes.remove(&(object as usize, key));
+    }
+    if let Some(result) = result.as_mut() {
+        *result = true;
+    }
     NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_element(
     env: NapiEnv,
-    array: NapiValue,
+    object: NapiValue,
     index: u32,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let value = match value_ref(array) {
+    let key = PropertyKey::String(index.to_string());
+    let value = match value_ref(object) {
         Ok(Value::Array(values)) => values.get(index as usize).copied().flatten(),
-        _ => None,
+        Ok(Value::Object(_) | Value::Function(_)) => find_property_value(env, object, &key),
+        _ => return NAPI_OBJECT_EXPECTED,
     };
+    if value.is_none() {
+        if let Some(accessor) = find_accessor(env, object, &key) {
+            if let Some(getter) = accessor.getter {
+                let mut info = CallbackInfo {
+                    args: Vec::new(),
+                    this_arg: object,
+                    new_target: ptr::null_mut(),
+                    data: accessor.data,
+                };
+                let value = getter(env, &mut info);
+                if env_mut(env)
+                    .map(|env| env.exception.is_some())
+                    .unwrap_or(false)
+                {
+                    return NAPI_PENDING_EXCEPTION;
+                }
+                return write_value(out, value);
+            }
+        }
+    }
     match value {
         Some(value) => write_value(out, value),
         None => napi_get_undefined(env, out),
@@ -5900,6 +5957,30 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!(actual, inherited);
+            let inherited_element = env.alloc(Value::Number(13.0));
+            assert_eq!(
+                napi_set_element(env_ptr, expected, 5, inherited_element),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_has_element(env_ptr, instance, 5, &mut present),
+                NAPI_OK
+            );
+            assert!(present);
+            assert_eq!(napi_get_element(env_ptr, instance, 5, &mut actual), NAPI_OK);
+            assert_eq!(actual, inherited_element);
+            assert_eq!(
+                napi_delete_element(env_ptr, instance, 5, ptr::null_mut()),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_has_element(env_ptr, instance, 5, &mut present),
+                NAPI_OK
+            );
+            assert!(
+                present,
+                "deleting an inherited element must not alter its prototype"
+            );
 
             let locked = env.alloc(Value::Number(11.0));
             let locked_descriptor = NapiPropertyDescriptor {
@@ -6980,6 +7061,53 @@ mod tests {
             assert_eq!(napi_is_promise(env_ptr, array, &mut present), NAPI_OK);
             assert!(!present);
             assert_eq!(napi_resolve_deferred(env_ptr, deferred, value), NAPI_OK);
+        }
+    }
+
+    #[test]
+    fn element_apis_operate_on_objects_and_descriptors() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            let value = env.alloc(Value::Number(42.0));
+            assert_eq!(napi_set_element(env_ptr, object, 7, value), NAPI_OK);
+            let mut present = false;
+            assert_eq!(napi_has_element(env_ptr, object, 7, &mut present), NAPI_OK);
+            assert!(present);
+            let mut actual = ptr::null_mut();
+            assert_eq!(napi_get_element(env_ptr, object, 7, &mut actual), NAPI_OK);
+            assert_eq!(actual, value);
+            assert_eq!(
+                napi_delete_element(env_ptr, object, 7, ptr::null_mut()),
+                NAPI_OK
+            );
+            assert_eq!(napi_has_element(env_ptr, object, 7, &mut present), NAPI_OK);
+            assert!(!present);
+
+            let descriptor = NapiPropertyDescriptor {
+                utf8name: c"8".as_ptr(),
+                name: ptr::null_mut(),
+                method: None,
+                getter: None,
+                setter: None,
+                value,
+                attributes: 0,
+                data: ptr::null_mut(),
+            };
+            assert_eq!(
+                napi_define_properties(env_ptr, object, 1, &descriptor),
+                NAPI_OK
+            );
+            let mut deleted = true;
+            assert_eq!(
+                napi_delete_element(env_ptr, object, 8, &mut deleted),
+                NAPI_OK
+            );
+            assert!(!deleted);
+            assert_eq!(napi_has_element(env_ptr, object, 8, &mut present), NAPI_OK);
+            assert!(present);
         }
     }
 
