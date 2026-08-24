@@ -12204,6 +12204,24 @@ mod tests {
     }
 
     #[test]
+    fn compiles_empty_and_debugger_statements_as_no_ops() {
+        let source = r#"
+            function main(): void {
+                ;;;
+                debugger;
+                let value: number = 0;
+                while (value < 2) {
+                    ;
+                    value = value + 1;
+                    debugger;
+                }
+                console.log(value);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "empty_debugger_statements"), "2\n");
+    }
+
+    #[test]
     fn compiles_labeled_loop_control_and_block_breaks() {
         let source = r#"
             function main(): void {
