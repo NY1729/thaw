@@ -12621,6 +12621,49 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_from_native_arrays() {
+        let source = r#"
+            interface Item { value: number; }
+            function project(value: number, index: number): number {
+                return value * 2 + index;
+            }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b"];
+            }
+            async function main(): Promise<void> {
+                const source: number[] = [1, 2, 3];
+                const copied: number[] = Array.from(source);
+                copied[0] = 9;
+                console.log(source.join(","));
+                console.log(Array.from(source, project).join(","));
+                console.log(Array.from<number, string>(source, value => String(value) + "!").join("|"));
+                const item: Item = { value: 1 };
+                const objects: Item[] = Array.from(Array.of(item));
+                objects[0].value = 7;
+                console.log(item.value);
+                const emptySource: boolean[] = Array.of<boolean>();
+                console.log(Array.from<boolean>(emptySource).length);
+                console.log(Array.from(receiver(), (value, index) => value + index, thisValue()).join(","));
+                console.log(Array.from(await delayed(), value => value + value).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_from"),
+            "1,2,3\n2,5,8\n1!|2!|3!\n7\n0\nreceiver\nthisArg\n1,3\nawaited\naa,bb\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {

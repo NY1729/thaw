@@ -5992,6 +5992,39 @@ impl<'a> FnLowerer<'a> {
         self.lower_promise_callback(expr, &available[..arity], None)
     }
 
+    fn lower_array_from_callback(
+        &mut self,
+        expr: &Expr,
+        element_type: &HirType,
+    ) -> Result<HirExpr, String> {
+        let arity = match expr {
+            Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Ident(ident) => {
+                let name = self.resolve_binding(ident.sym.as_ref());
+                self.scope
+                    .get(&name)
+                    .and_then(|ty| match ty {
+                        HirType::Function(params, _) => Some(params.len()),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.signatures
+                            .get(&name)
+                            .map(|signature| signature.params.len())
+                    })
+                    .ok_or_else(|| format!("unknown Array.from mapper `{name}`"))?
+            }
+            _ => return Err("Array.from mapper must be an arrow or function value".into()),
+        };
+        if arity > 2 {
+            return Err(format!(
+                "Array.from mapper accepts at most two parameters, got {arity}"
+            ));
+        }
+        let available = [element_type.clone(), HirType::F64];
+        self.lower_promise_callback(expr, &available[..arity], None)
+    }
+
     fn lower_array_map(
         &mut self,
         receiver: HirExpr,
@@ -7210,6 +7243,84 @@ impl<'a> FnLowerer<'a> {
                             1 => parts.pop().unwrap(),
                             _ => HirExpr::ArrayConcat(parts, element_type),
                         });
+                    }
+                    if object.sym == *"Array" && property.sym == *"from" {
+                        if !(1..=3).contains(&call.args.len()) {
+                            return Err(
+                                "native `Array.from` expects a source, optional mapper and optional thisArg"
+                                    .into(),
+                            );
+                        }
+                        if call.args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err("Array.from spread arguments are not supported".into());
+                        }
+                        let explicit_types = call
+                            .type_args
+                            .as_ref()
+                            .map(|type_args| {
+                                type_args
+                                    .params
+                                    .iter()
+                                    .map(|ty| {
+                                        lower_ts_type(ty, self.interfaces, self.generic_interfaces)
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()
+                            })
+                            .transpose()?
+                            .unwrap_or_default();
+                        if explicit_types.len() > 2 {
+                            return Err("`Array.from` expects at most two type arguments".into());
+                        }
+                        let source = self.lower_expr(&call.args[0].expr)?;
+                        let source_type = self.infer_expr_type(&source)?;
+                        let HirType::Array(element) = &source_type else {
+                            return Err(format!(
+                                "native `Array.from` currently requires a homogeneous array, got {source_type:?}"
+                            ));
+                        };
+                        let element_type = element.as_ref().clone();
+                        if let Some(expected) = explicit_types.first() {
+                            if expected != &element_type {
+                                return Err(format!(
+                                    "`Array.from` source element has type {element_type:?}, expected {expected:?}"
+                                ));
+                            }
+                        }
+                        let Some(mapper_argument) = call.args.get(1) else {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                vec![
+                                    source,
+                                    HirExpr::Lit(HirLit::F64(0.0)),
+                                    HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                                ],
+                            ));
+                        };
+                        let callback =
+                            self.lower_array_from_callback(&mapper_argument.expr, &element_type)?;
+                        if let Some(expected) = explicit_types.get(1).or(explicit_types.first()) {
+                            let HirType::Function(_, output) = self.infer_expr_type(&callback)?
+                            else {
+                                unreachable!("Array.from mapper is a function")
+                            };
+                            if output.as_ref() != expected {
+                                return Err(format!(
+                                    "`Array.from` mapper returns {output:?}, expected {expected:?}"
+                                ));
+                            }
+                        }
+                        let this_arg = call
+                            .args
+                            .get(2)
+                            .map(|argument| self.lower_expr(&argument.expr))
+                            .transpose()?;
+                        return self.lower_array_map(
+                            source,
+                            source_type,
+                            element_type,
+                            callback,
+                            this_arg,
+                        );
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
                         let [argument] = call.args.as_slice() else {
