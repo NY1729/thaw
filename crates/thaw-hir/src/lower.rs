@@ -31,7 +31,7 @@ use swc_ecma_ast::{
     Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
     ObjectLit as SwcObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement,
-    UpdateOp, VarDecl, VarDeclOrExpr,
+    UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 
 use crate::{
@@ -2865,12 +2865,73 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
 
             Expr::Bin(bin) => {
-                let op = lower_bin_op(bin.op)?;
                 let lhs = self.lower_expr(&bin.left)?;
                 let rhs = self.lower_expr(&bin.right)?;
-                let value = HirExpr::BinOp(op, Box::new(lhs), Box::new(rhs));
+                let value = match bin.op {
+                    BinaryOp::LtEq => HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Gt,
+                            Box::new(lhs),
+                            Box::new(rhs),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    ),
+                    BinaryOp::GtEq => HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(lhs),
+                            Box::new(rhs),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    ),
+                    BinaryOp::NotEqEq => HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(lhs),
+                            Box::new(rhs),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    ),
+                    other => HirExpr::BinOp(
+                        lower_bin_op(other)?,
+                        Box::new(lhs),
+                        Box::new(rhs),
+                    ),
+                };
                 self.infer_expr_type(&value)?;
                 Ok(value)
+            }
+
+            Expr::Unary(unary) => {
+                let value = self.lower_expr(&unary.arg)?;
+                let lowered = match unary.op {
+                    UnaryOp::Minus => {
+                        self.expect_type(&HirType::F64, &value, "unary minus")?;
+                        HirExpr::BinOp(
+                            BinOp::Sub,
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            Box::new(value),
+                        )
+                    }
+                    UnaryOp::Plus => {
+                        self.expect_type(&HirType::F64, &value, "unary plus")?;
+                        value
+                    }
+                    UnaryOp::Bang => {
+                        self.expect_type(&HirType::Bool, &value, "logical not")?;
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(value),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                        )
+                    }
+                    other => return Err(format!("unsupported unary operator {other:?}")),
+                };
+                self.infer_expr_type(&lowered)?;
+                Ok(lowered)
             }
 
             Expr::Cond(conditional) => {
@@ -4762,6 +4823,31 @@ mod tests {
             error.contains("expects 1 argument"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn lowers_typed_unary_and_extended_comparison_operators() {
+        let program = lower(
+            r#"function main(): void {
+                console.log(-1);
+                console.log(+2);
+                console.log(!false);
+                console.log(1 <= 2);
+                console.log(2 >= 2);
+                console.log("a" !== "b");
+            }"#,
+        );
+        assert_eq!(program.functions[0].body.len(), 6);
+        for statement in &program.functions[0].body {
+            let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
+                panic!("expected console call");
+            };
+            assert_eq!(arguments.len(), 1);
+            assert!(matches!(
+                arguments[0],
+                HirExpr::BinOp(..) | HirExpr::Lit(..)
+            ));
+        }
     }
 
     #[test]
