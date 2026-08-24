@@ -12049,6 +12049,43 @@ mod tests {
     }
 
     #[test]
+    fn compiles_object_entries_for_fixed_objects() {
+        let source = r#"
+            interface Config { first: number; second: string; enabled: boolean; }
+            function config(): Config {
+                console.log("receiver");
+                return { first: 1, second: "two", enabled: true };
+            }
+            async function delayed(): Promise<{ left: number; right: number }> {
+                console.log("awaited");
+                await sleep(1);
+                return { left: 3, right: 4 };
+            }
+            async function main(): Promise<void> {
+                const mixed: [[string, number], [string, string], [string, boolean]] = Object.entries(config());
+                console.log(mixed[0][0]);
+                console.log(mixed[0][1]);
+                console.log(mixed[1][0]);
+                console.log(mixed[1][1]);
+                console.log(mixed[2][0]);
+                console.log(mixed[2][1]);
+                const numeric: [string, number][] = Object.entries({ left: 1, right: 2 });
+                console.log(numeric[1][0]);
+                console.log(numeric[1][1]);
+                const awaited: [string, number][] = Object.entries(await delayed());
+                console.log(awaited[0][0]);
+                console.log(awaited[0][1]);
+                const empty: {} = {};
+                console.log(Object.entries(empty).length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_entries"),
+            "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\n"
+        );
+    }
+
+    #[test]
     fn compiles_utf16_string_search_methods() {
         let source = r#"
             function text(): string {
