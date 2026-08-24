@@ -440,11 +440,29 @@ The official Linux x64 prebuild from `bcrypt@6.0.0` is also verified against
 the host with real synchronous hashing and callback-based asynchronous salt
 generation (`THAW_BCRYPT_NODE=/path/to/bcrypt.glibc.node cargo test -p
 thaw-napi runs_bcrypt_prebuild_when_supplied`).
+An opt-in CLI integration test performs `registry add bcrypt@6.0.0`, embeds the
+selected prebuild, deletes the registry, and runs synchronous plus callback-
+based asynchronous salt generation, hashing, comparison, and error delivery
+from the standalone executable
+(`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
+registry_add_fetches_and_runs_bcrypt_when_enabled -- --nocapture`).
 The official Linux x64 prebuild from `@serialport/bindings-cpp@12.0.1`
 verifies a real `node-addon-api` class export (`Poller`). Its direct libuv
 references are resolved by exposing the system `libuv.so.1`, matching the
 symbols Node normally provides (`THAW_SERIALPORT_NODE=/path/to/node.napi.glibc.node
 cargo test -p thaw-napi loads_serialport_class_prebuild_when_supplied`).
+Packages using `prebuild-install` may keep binaries in GitHub Releases instead
+of the npm tarball. For packages declaring `binary.napi_versions` and an HTTPS
+GitHub repository, `registry add` selects the newest supported N-API version,
+downloads the target asset without running install scripts, safely unpacks its
+`.node` file, and records the source URL and binary SHA-256. `sqlite3@5.1.7` is
+verified through this path: its official N-API v6 Linux x64 prebuild initializes
+the real `Database`, `Statement`, and `Backup` classes, and an opt-in CLI E2E
+embeds it into an executable that starts after the registry is removed
+(`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
+registry_add_fetches_and_loads_sqlite3_when_enabled -- --nocapture`). Typed
+construction and method calls from its class-heavy `.d.ts` still require class
+support in the AOT frontend.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
