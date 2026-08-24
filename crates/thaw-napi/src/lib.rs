@@ -4075,6 +4075,9 @@ pub unsafe extern "C" fn napi_new_instance(
     {
         return NAPI_PENDING_EXCEPTION;
     }
+    if !returned.is_null() && !value_belongs_to_environment(env, returned) {
+        return NAPI_INVALID_ARG;
+    }
     *result = if matches!(returned.as_ref(), Some(value) if is_object_value(value)) {
         returned
     } else {
@@ -5288,7 +5291,7 @@ pub unsafe extern "C" fn node_api_create_buffer_from_arraybuffer(
     byte_length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if out.is_null() {
+    if out.is_null() || !value_belongs_to_environment(env, array_buffer) {
         return NAPI_INVALID_ARG;
     }
     let Ok((_, buffer_length, detached)) = arraybuffer_parts(array_buffer) else {
@@ -6003,6 +6006,9 @@ pub unsafe extern "C" fn napi_call_function(
     {
         return NAPI_PENDING_EXCEPTION;
     }
+    if !result.is_null() && !value_belongs_to_environment(env, result) {
+        return NAPI_INVALID_ARG;
+    }
     if out.is_null() {
         NAPI_OK
     } else if result.is_null() {
@@ -6060,7 +6066,10 @@ unsafe fn create_error_kind(
     message: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if out.is_null() {
+    if out.is_null()
+        || !value_belongs_to_environment(env, message)
+        || (!code.is_null() && !value_belongs_to_environment(env, code))
+    {
         return NAPI_INVALID_ARG;
     }
     let message = match value_ref(message) {
@@ -6177,12 +6186,12 @@ pub unsafe extern "C" fn napi_fatal_error(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_fatal_exception(env: NapiEnv, error: NapiValue) -> NapiStatus {
+    if !value_belongs_to_environment(env, error) {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    if error.is_null() {
-        return NAPI_INVALID_ARG;
-    }
     let message = match value_ref(error) {
         Ok(Value::Error(message) | Value::String(message)) => message.clone(),
         _ => "unhandled N-API callback exception".into(),
@@ -7531,6 +7540,13 @@ mod tests {
 
     #[test]
     fn property_apis_reject_foreign_objects_keys_and_values() {
+        unsafe extern "C" fn return_callback_data(
+            _env: NapiEnv,
+            info: NapiCallbackInfo,
+        ) -> NapiValue {
+            info.as_ref().unwrap().data as NapiValue
+        }
+
         unsafe {
             let mut env = Env::new();
             let env_ptr: NapiEnv = &mut env;
@@ -7541,6 +7557,10 @@ mod tests {
             let foreign_object = foreign_env.alloc(Value::Object(HashMap::new()));
             let foreign_key = foreign_env.alloc(Value::String("foreign".into()));
             let foreign_value = foreign_env.alloc(Value::Number(2.0));
+            let foreign_array_buffer = foreign_env.alloc(Value::ArrayBuffer {
+                bytes: vec![0; 4],
+                detached: false,
+            });
             let mut value_out = ptr::null_mut();
             let mut present = false;
 
@@ -7638,6 +7658,45 @@ mod tests {
             );
             assert_eq!(
                 napi_run_script(env_ptr, foreign_key, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                node_api_create_buffer_from_arraybuffer(
+                    env_ptr,
+                    foreign_array_buffer,
+                    0,
+                    1,
+                    &mut value_out
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_error(env_ptr, ptr::null_mut(), foreign_key, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_fatal_exception(env_ptr, foreign_value),
+                NAPI_INVALID_ARG
+            );
+
+            let mut function = ptr::null_mut();
+            assert_eq!(
+                napi_create_function(
+                    env_ptr,
+                    c"foreignResult".as_ptr(),
+                    13,
+                    Some(return_callback_data),
+                    foreign_value.cast(),
+                    &mut function
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_call_function(env_ptr, object, function, 0, ptr::null(), &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_new_instance(env_ptr, function, 0, ptr::null(), &mut value_out),
                 NAPI_INVALID_ARG
             );
         }
