@@ -3035,6 +3035,15 @@ impl<'a> FnLowerer<'a> {
                 };
                 match name.as_str() {
                     "console.log" => return Ok(HirType::Void),
+                    "__thaw_string_concat" => {
+                        if args.len() != 2 {
+                            return Err("string concatenation expects two operands".into());
+                        }
+                        for argument in args {
+                            self.expect_type(&HirType::Str, argument, "string concatenation")?;
+                        }
+                        return Ok(HirType::Str);
+                    }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -3357,6 +3366,36 @@ impl<'a> FnLowerer<'a> {
                     )),
                     Vec::new(),
                 ))
+            }
+
+            Expr::Tpl(template) => {
+                let mut parts = Vec::with_capacity(template.quasis.len() + template.exprs.len());
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    let text = quasi
+                        .cooked
+                        .as_ref()
+                        .map(|cooked| cooked.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| quasi.raw.to_string());
+                    if !text.is_empty() {
+                        parts.push(HirExpr::Lit(HirLit::Str(text)));
+                    }
+                    if let Some(expression) = template.exprs.get(index) {
+                        let value = self.lower_expr(expression)?;
+                        self.expect_type(&HirType::Str, &value, "template interpolation")?;
+                        parts.push(value);
+                    }
+                }
+                let mut parts = parts.into_iter();
+                let Some(mut result) = parts.next() else {
+                    return Ok(HirExpr::Lit(HirLit::Str(String::new())));
+                };
+                for part in parts {
+                    result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                        vec![result, part],
+                    );
+                }
+                Ok(result)
             }
 
             Expr::Bin(bin) => {
