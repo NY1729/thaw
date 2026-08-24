@@ -52,8 +52,9 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
-    FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi,
-    HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
+    FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiRegisterClass,
+    FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt,
+    HirType,
 };
 
 #[derive(Clone)]
@@ -1463,10 +1464,10 @@ impl<'ctx> HirCompiler<'ctx> {
         if !matches!(sig.ret, HirType::Array(_) | HirType::Object(_)) {
             return false;
         }
-        sig.aggregate_return_layout
-            .as_ref()
-            .is_some_and(|layout| layout.indirect)
-            || sig.aggregate_return_abi == FfiAggregateAbi::Packed
+        if let Some(layout) = &sig.aggregate_return_layout {
+            return layout.indirect;
+        }
+        sig.aggregate_return_abi == FfiAggregateAbi::Packed
             || Self::ffi_result_storage_bytes(sig) > 16
     }
 
@@ -1578,15 +1579,38 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
             (FfiErrorAbi::Direct, HirType::Void) => Ok(None),
-            (FfiErrorAbi::Direct, ret) => self
-                .ffi_return_type(
+            (FfiErrorAbi::Direct, ret) => {
+                if let Some(layout) = sig
+                    .aggregate_return_layout
+                    .as_ref()
+                    .filter(|layout| !layout.register_classes.is_empty())
+                {
+                    return Ok(Some(self.ffi_register_return_type(layout).into()));
+                }
+                self.ffi_return_type(
                     ret,
                     sig.return_string_abi,
                     sig.aggregate_return_abi,
                     sig.aggregate_return_layout.as_ref(),
                 )
-                .map(Some),
+                .map(Some)
+            }
         }
+    }
+
+    fn ffi_register_return_type(
+        &self,
+        layout: &FfiAggregateLayout,
+    ) -> inkwell::types::StructType<'ctx> {
+        let fields = layout
+            .register_classes
+            .iter()
+            .map(|class| match class {
+                FfiRegisterClass::Integer => self.context.i64_type().into(),
+                FfiRegisterClass::Sse => self.context.f64_type().into(),
+            })
+            .collect::<Vec<BasicTypeEnum<'ctx>>>();
+        self.context.struct_type(&fields, false)
     }
 
     fn ffi_return_type(
@@ -1705,15 +1729,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 native_index: native_fields.len() as u32,
                 bitfield: None,
             });
-            native_fields.push(
+            let native_field = if *field_ty == HirType::Bool {
+                self.context.i8_type().into()
+            } else {
                 self.ffi_return_type(
                     field_ty,
                     FfiStringAbi::NullTerminated,
                     FfiAggregateAbi::Portable,
                     layout.field_layouts[index].as_deref(),
                 )
-                .map_err(|error| format!("FFI object field `{name}`: {error}"))?,
-            );
+                .map_err(|error| format!("FFI object field `{name}`: {error}"))?
+            };
+            native_fields.push(native_field);
             let field_size = layout.field_layouts[index].as_deref().map_or_else(
                 || Self::ffi_object_field_layout(field_ty, FfiAggregateAbi::Portable).0,
                 |layout| layout.size,
@@ -10293,6 +10320,18 @@ impl<'ctx> HirCompiler<'ctx> {
                             }
                             _ => unreachable!("HIR validates bitfield field types"),
                         };
+                    } else if explicit_field.is_some() && *field_ty == HirType::Bool {
+                        let native_bool = field.into_int_value();
+                        field = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                native_bool,
+                                native_bool.get_type().const_zero(),
+                                &format!("ffi_{name}_bool"),
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into();
                     }
                     field = match field_ty {
                         HirType::Str if *ownership != FfiOwnership::Borrowed => self
@@ -10332,6 +10371,54 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             _ => Ok(value),
         }
+    }
+
+    fn unpack_ffi_register_return(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        sig: &FfiSignature,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let layout = sig
+            .aggregate_return_layout
+            .as_ref()
+            .expect("register return has an explicit layout");
+        let native_type = self.ffi_return_type(
+            &sig.ret,
+            sig.return_string_abi,
+            sig.aggregate_return_abi,
+            Some(layout),
+        )?;
+        let slot = self
+            .builder
+            .build_alloca(native_type, "ffi_register_result_storage")
+            .map_err(|error| error.to_string())?;
+        slot.as_instruction_value()
+            .expect("alloca is an instruction")
+            .set_alignment(layout.alignment)
+            .map_err(|error| error.to_string())?;
+        let registers = value.into_struct_value();
+        for (index, _) in layout.register_classes.iter().enumerate() {
+            let register = self
+                .builder
+                .build_extract_value(registers, index as u32, "ffi_result_register")
+                .map_err(|error| error.to_string())?;
+            let target = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        slot,
+                        &[self.context.i64_type().const_int((index * 8) as u64, false)],
+                        "ffi_result_register_slot",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(target, register)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder
+            .build_load(native_type, slot, "ffi_register_result_value")
+            .map_err(|error| error.to_string())
     }
 
     /// `HirExpr::FfiCall` -- an ambient `declare function` call (see
@@ -10487,7 +10574,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_call(function, &compiled_args, "ffi_calltmp")
             .map_err(|e| e.to_string())?;
         call_site.set_call_convention(Self::ffi_calling_convention(sig.calling_convention));
-        let returned = if let Some((slot, return_type)) = indirect_return {
+        let mut returned = if let Some((slot, return_type)) = indirect_return {
             Some(
                 self.builder
                     .build_load(return_type, slot, "ffi_indirect_result_value")
@@ -10496,6 +10583,16 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             call_site.try_as_basic_value().basic()
         };
+        if sig.error_abi == FfiErrorAbi::Direct
+            && sig
+                .aggregate_return_layout
+                .as_ref()
+                .is_some_and(|layout| !layout.register_classes.is_empty())
+        {
+            returned = returned
+                .map(|value| self.unpack_ffi_register_return(value, sig))
+                .transpose()?;
+        }
         if sig.ret == HirType::Void {
             if sig.error_abi == FfiErrorAbi::Direct {
                 return Ok(None);
@@ -19020,6 +19117,8 @@ mod tests {
             declare function native_checked_aligned_record(value: number): { active: boolean; value: number };
             declare function native_nested_aligned_record(): { meta: { active: boolean; value: number }; total: number };
             declare function native_bit_record(): { active: boolean; ready: boolean; count: number; delta: number; value: number };
+            declare function native_register_record(): { active: boolean; value: number };
+            declare function native_checked_register_record(value: number): { active: boolean; value: number };
 
             function main(): void {
                 const record: { active: boolean; value: number } = native_aligned_record();
@@ -19041,6 +19140,16 @@ mod tests {
                 console.log(bits.count);
                 console.log(bits.delta);
                 console.log(bits.value);
+                const register = native_register_record();
+                console.log(register.active);
+                console.log(register.value);
+                const checkedRegister = native_checked_register_record(9);
+                console.log(checkedRegister.value);
+                try {
+                    native_checked_register_record(0 - 1);
+                } catch (error) {
+                    console.log(error);
+                }
             }
         "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
@@ -19062,6 +19171,7 @@ mod tests {
                 field_offsets: vec![0, 0],
                 field_layouts: vec![None, None],
                 field_bitfields: vec![None, None],
+                register_classes: vec![],
                 size: 16,
                 alignment: 8,
                 indirect: true,
@@ -19076,12 +19186,53 @@ mod tests {
                 field_offsets: vec![0, 16],
                 field_layouts: vec![None, None],
                 field_bitfields: vec![None, None],
+                register_classes: vec![],
                 size: 32,
                 alignment: 32,
                 indirect: true,
             },
         )
         .unwrap();
+        for symbol in ["native_register_record", "native_checked_register_record"] {
+            if symbol == "native_checked_register_record" {
+                thaw_hir::set_ffi_error_abi(
+                    &mut program,
+                    symbol,
+                    thaw_hir::FfiErrorAbi::ThawResult,
+                )
+                .unwrap();
+            }
+            thaw_hir::set_ffi_string_abi(
+                &mut program,
+                symbol,
+                if symbol == "native_register_record" {
+                    vec![]
+                } else {
+                    vec![thaw_hir::FfiStringAbi::NullTerminated]
+                },
+                thaw_hir::FfiStringAbi::NullTerminated,
+                thaw_hir::FfiCallingConvention::C,
+                thaw_hir::FfiAggregateAbi::Portable,
+            )
+            .unwrap();
+            thaw_hir::set_ffi_aggregate_layout(
+                &mut program,
+                symbol,
+                thaw_hir::FfiAggregateLayout {
+                    field_offsets: vec![0, 8],
+                    field_layouts: vec![None, None],
+                    field_bitfields: vec![None, None],
+                    register_classes: vec![
+                        thaw_hir::FfiRegisterClass::Integer,
+                        thaw_hir::FfiRegisterClass::Sse,
+                    ],
+                    size: 16,
+                    alignment: 8,
+                    indirect: false,
+                },
+            )
+            .unwrap();
+        }
         thaw_hir::set_ffi_string_abi(
             &mut program,
             "native_bit_record",
@@ -19125,6 +19276,7 @@ mod tests {
                     }),
                     None,
                 ],
+                register_classes: vec![],
                 size: 32,
                 alignment: 32,
                 indirect: true,
@@ -19165,6 +19317,7 @@ mod tests {
                     }),
                     None,
                 ],
+                register_classes: vec![],
                 size: 32,
                 alignment: 32,
                 indirect: true,
@@ -19187,6 +19340,7 @@ mod tests {
                 field_offsets: vec![0, 48],
                 field_layouts: vec![None, None],
                 field_bitfields: vec![None, None],
+                register_classes: vec![],
                 size: 64,
                 alignment: 32,
                 indirect: true,
@@ -19204,6 +19358,7 @@ mod tests {
                         field_offsets: vec![0, 16],
                         field_layouts: vec![None, None],
                         field_bitfields: vec![None, None],
+                        register_classes: vec![],
                         size: 32,
                         alignment: 32,
                         indirect: false,
@@ -19211,6 +19366,7 @@ mod tests {
                     None,
                 ],
                 field_bitfields: vec![None, None],
+                register_classes: vec![],
                 size: 64,
                 alignment: 32,
                 indirect: true,
@@ -19239,6 +19395,7 @@ mod tests {
                 field_offsets: vec![0, 16],
                 field_layouts: vec![None, None],
                 field_bitfields: vec![None, None],
+                register_classes: vec![],
                 size: 32,
                 alignment: 32,
                 indirect: true,
@@ -19249,7 +19406,8 @@ mod tests {
         let mut compiler = HirCompiler::new(&context, "ffi_explicit_aggregate_layout");
         compiler.compile_program(&program).unwrap();
         let ir = compiler.module.print_to_string().to_string();
-        assert!(ir.contains("alloca <{ i1, [15 x i8], double, [8 x i8] }>, align 32"));
+        assert!(ir.contains("alloca <{ i8, [15 x i8], double, [8 x i8] }>, align 32"));
+        assert!(ir.contains("declare { i64, double } @native_register_record()"));
 
         let dir = std::env::temp_dir().join(format!(
             "thaw-hir-codegen-test-ffi-explicit-layout-{}",
@@ -19268,6 +19426,8 @@ mod tests {
              typedef struct { AlignedRecord value; const char *error; } AlignedRecordResult;\n\
              typedef struct __attribute__((aligned(32))) { AlignedRecord meta; char padding[16]; double total; char tail[8]; } NestedAlignedRecord;\n\
              typedef struct __attribute__((aligned(32))) { unsigned active:1; unsigned ready:1; unsigned count:5; signed delta:6; double value; } BitRecord;\n\
+             typedef struct { _Bool active; double value; } RegisterRecord;\n\
+             typedef struct { RegisterRecord value; const char *error; } RegisterRecordResult;\n\
              _Static_assert(sizeof(BitRecord) == 32, \"unexpected BitRecord size\");\n\
              _Static_assert(offsetof(BitRecord, value) == 8, \"unexpected BitRecord value offset\");\n\
              AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n\
@@ -19278,7 +19438,12 @@ mod tests {
              NestedAlignedRecord native_nested_aligned_record(void) {\n\
                return (NestedAlignedRecord){{1, {0}, 20, {0}}, {0}, 22, {0}};\n\
              }\n\
-             BitRecord native_bit_record(void) { return (BitRecord){1, 0, 17, -7, 42}; }\n",
+             BitRecord native_bit_record(void) { return (BitRecord){1, 0, 17, -7, 42}; }\n\
+             RegisterRecord native_register_record(void) { return (RegisterRecord){1, 55}; }\n\
+             RegisterRecordResult native_checked_register_record(double value) {\n\
+               if (value < 0) return (RegisterRecordResult){{0, 0}, \"register check failed\"};\n\
+               return (RegisterRecordResult){{1, value * 2}, 0};\n\
+             }\n",
         )
         .unwrap();
         assert!(Command::new("cc")
@@ -19303,7 +19468,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "true\n42\n21\naligned check failed\ntrue\n42\ntrue\nfalse\n17\n-7\n42\n"
+            "true\n42\n21\naligned check failed\ntrue\n42\ntrue\nfalse\n17\n-7\n42\ntrue\n55\n18\nregister check failed\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

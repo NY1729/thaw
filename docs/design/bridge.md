@@ -407,6 +407,11 @@ offset; LLVM loads that storage once, shifts/masks each field, sign-extends
 signed fields, and converts integer fields to TypeScript numbers. LLVM represents the
 value as a packed structure with byte-array
 padding at the declared offsets and gives the storage the requested alignment.
+For aggregates of at most 16 bytes, root `indirect: false` requires one
+`registerClasses` entry per eight-byte unit. `integer` maps to an integer
+register and `sse` to a floating-point register. Codegen stores each returned
+register into its declared eight-byte unit and reloads the explicit memory
+layout before marshalling.
 The implementation accepts direct and `thaw-result` portable/packed object
 returns whose fields are `boolean`, `number`, `bigint`/`i64`, or `string`.
 For `thaw-result`, LLVM also derives the outer value/error structure padding
@@ -421,8 +426,8 @@ Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
 parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
 variadic declaration. Extra values are passed as C `double`, default-promoted
 `int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
-subject to the ordinary marshal rules. Explicit register-class returns and
-other vararg types remain future extensions.
+subject to the ordinary marshal rules. Other vararg types remain future
+extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`

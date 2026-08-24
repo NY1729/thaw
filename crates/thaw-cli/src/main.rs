@@ -2582,6 +2582,30 @@ fn parse_ffi_aggregate_layout(
         })
         .transpose()?
         .unwrap_or_else(|| vec![None; field_offsets.len()]);
+    let register_classes = object
+        .get("registerClasses")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "FFI metadata for `{symbol}` in `{}` requires `registerClasses` to be an array",
+                        path.display()
+                    )
+                })?
+                .iter()
+                .map(|value| match value.as_str() {
+                    Some("integer") => Ok(thaw_hir::FfiRegisterClass::Integer),
+                    Some("sse") => Ok(thaw_hir::FfiRegisterClass::Sse),
+                    _ => Err(format!(
+                        "FFI metadata for `{symbol}` in `{}` has an unknown register class",
+                        path.display()
+                    )),
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let size = object
         .get("size")
         .and_then(|value| value.as_u64())
@@ -2620,6 +2644,7 @@ fn parse_ffi_aggregate_layout(
         field_offsets,
         field_layouts,
         field_bitfields,
+        register_classes,
         size,
         alignment,
         indirect,
@@ -4398,7 +4423,7 @@ mod tests {
         let path = dir.join("ffi.json");
         std::fs::write(
             &path,
-            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"bitWidth":5,"storageBytes":1,"signed":true},null],"size":32,"alignment":32,"indirect":true}}}}"#,
+            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"bitWidth":5,"storageBytes":1,"signed":true},null],"size":32,"alignment":32,"indirect":true}},"register":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,8],"size":16,"alignment":8,"indirect":false,"registerClasses":["integer","sse"]}}}}"#,
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
@@ -4412,6 +4437,7 @@ mod tests {
                         field_offsets: vec![0],
                         field_layouts: vec![None],
                         field_bitfields: vec![None],
+                        register_classes: vec![],
                         size: 8,
                         alignment: 8,
                         indirect: false,
@@ -4426,10 +4452,22 @@ mod tests {
                     }),
                     None,
                 ],
+                register_classes: vec![],
                 size: 32,
                 alignment: 32,
                 indirect: true,
             })
+        );
+        assert_eq!(
+            metadata["register"]
+                .aggregate_return_layout
+                .as_ref()
+                .unwrap()
+                .register_classes,
+            vec![
+                thaw_hir::FfiRegisterClass::Integer,
+                thaw_hir::FfiRegisterClass::Sse,
+            ]
         );
         let _ = std::fs::remove_dir_all(dir);
     }
