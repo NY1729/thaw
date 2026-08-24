@@ -540,8 +540,10 @@ branches are analyzed from the same incoming state and retain
 only value, class-instance, and callback facts that agree on every outgoing
 path; an omitted `else` joins against the unchanged incoming path. `while` and
 classic `for` loops join the body/update result against the zero-iteration path,
-retaining only facts unchanged by a possible iteration. `do/while`, `for-in`,
-and `for-of` remain unavailable in HIR lowering. `try/catch` conservatively
+retaining only facts unchanged by a possible iteration. `do/while` lowers to
+the same loop form while preserving its mandatory first iteration and
+condition-before-continue behavior, including async bodies. `for-in` and
+`for-of` remain unavailable in HIR lowering. `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
 on every continuing path. Switch-flow joins remain an explicit gap.
