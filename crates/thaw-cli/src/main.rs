@@ -387,7 +387,50 @@ fn typed_dynamic_declaration(
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
 type ClassConstructorRewrite = (String, String);
-type ClassMethodRewrite = (String, String, String);
+/// `(class, method, helper, argument_count, has_callback)`.
+type ClassMethodRewrite = (String, String, String, usize, bool);
+
+fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: usize) -> bool {
+    matches!(
+        ty,
+        thaw_bridge::DtsType::Native(
+            thaw_hir::HirType::F64
+                | thaw_hir::HirType::Str
+                | thaw_hir::HirType::Bool
+                | thaw_hir::HirType::Json
+                | thaw_hir::HirType::Object(_)
+        )
+    ) || matches!(
+        ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+            if **element == thaw_hir::HirType::F64
+    ) || matches!(
+        ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
+            if index + 1 == len
+                && params.len() <= 2
+                && params.iter().all(|param| *param == thaw_hir::HirType::Json)
+                && matches!(**ret, thaw_hir::HirType::Json | thaw_hir::HirType::Void)
+    )
+}
+
+fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
+    matches!(
+        ty,
+        thaw_bridge::DtsType::Native(
+            thaw_hir::HirType::F64
+                | thaw_hir::HirType::Str
+                | thaw_hir::HirType::Bool
+                | thaw_hir::HirType::Json
+                | thaw_hir::HirType::Void
+                | thaw_hir::HirType::Object(_)
+        )
+    ) || matches!(
+        ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
+            if **element == thaw_hir::HirType::F64
+    )
+}
 type ExternalExports = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
 type RegistryShims = (
     String,
@@ -624,7 +667,7 @@ fn generate_registry_shims(
                     {
                         continue;
                     }
-                    let Some(overload) = class
+                    let overloads = class
                         .methods
                         .iter()
                         .filter(|candidate| {
@@ -634,93 +677,68 @@ fn generate_registry_shims(
                         })
                         .filter(|candidate| {
                             candidate.params.iter().enumerate().all(|(index, (_, ty))| {
-                                matches!(
-                                    ty,
-                                    thaw_bridge::DtsType::Native(
-                                        thaw_hir::HirType::F64
-                                            | thaw_hir::HirType::Str
-                                            | thaw_hir::HirType::Bool
-                                            | thaw_hir::HirType::Json
-                                            | thaw_hir::HirType::Object(_)
-                                    )
-                                ) || matches!(
-                                    ty,
-                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-                                        if **element == thaw_hir::HirType::F64
-                                ) || matches!(
-                                    ty,
-                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
-                                        if index + 1 == candidate.params.len()
-                                            && params.len() <= 2
-                                            && params.iter().all(|param| *param == thaw_hir::HirType::Json)
-                                            && matches!(**ret, thaw_hir::HirType::Json | thaw_hir::HirType::Void)
-                                )
-                            })
+                                supported_class_method_param(ty, index, candidate.params.len())
+                            }) && supported_class_method_return(&candidate.ret)
                         })
-                        .filter(|candidate| {
-                            matches!(
-                                &candidate.ret,
-                                thaw_bridge::DtsType::Native(
-                                    thaw_hir::HirType::F64
-                                        | thaw_hir::HirType::Str
-                                        | thaw_hir::HirType::Bool
-                                        | thaw_hir::HirType::Json
-                                        | thaw_hir::HirType::Void
-                                        | thaw_hir::HirType::Object(_)
-                                )
-                            ) || matches!(
-                                &candidate.ret,
-                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-                                    if **element == thaw_hir::HirType::F64
-                            )
-                        })
-                        .min_by_key(|candidate| candidate.params.len())
-                    else {
-                        continue;
-                    };
-                    let params = std::iter::once("receiver: JsValue".to_string())
-                        .chain(overload.params.iter().map(|(name, ty)| match ty {
-                            thaw_bridge::DtsType::Native(native) => format!(
-                                "{name}: {}",
-                                render_dynamic_type(native).expect("filtered above")
-                            ),
-                            thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-                        }))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
-                        continue;
-                    };
-                    let Some(return_type) = (if *return_type == thaw_hir::HirType::Void {
-                        Some("Json".to_string())
-                    } else {
-                        render_dynamic_type(return_type)
-                    }) else {
-                        continue;
-                    };
-                    let runtime_key = format!(
-                        "{}{}${}",
-                        if matches!(
-                            overload.ret,
-                            thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)
-                        ) {
-                            "$methodvoid$"
+                        .collect::<Vec<_>>();
+                    for (overload_index, overload) in overloads.into_iter().enumerate() {
+                        let params = std::iter::once("receiver: JsValue".to_string())
+                            .chain(overload.params.iter().map(|(name, ty)| match ty {
+                                thaw_bridge::DtsType::Native(native) => format!(
+                                    "{name}: {}",
+                                    render_dynamic_type(native).expect("filtered above")
+                                ),
+                                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                            }))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
+                            continue;
+                        };
+                        let Some(return_type) = (if *return_type == thaw_hir::HirType::Void {
+                            Some("Json".to_string())
                         } else {
-                            "$method$"
-                        },
-                        class.name,
-                        method.name
-                    );
-                    let encoded = runtime_key
-                        .as_bytes()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>();
-                    let symbol = format!("__thaw_typed_napi_{encoded}");
-                    shim.push_str(&format!(
-                        "declare function {symbol}({params}): {return_type};\n"
-                    ));
-                    class_method_rewrites.push((class.name.clone(), method.name.clone(), symbol));
+                            render_dynamic_type(return_type)
+                        }) else {
+                            continue;
+                        };
+                        let has_callback = matches!(
+                            overload.params.last(),
+                            Some((
+                                _,
+                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(_, _))
+                            ))
+                        );
+                        let runtime_key = format!(
+                            "{}{}${}$overload{overload_index}",
+                            if matches!(
+                                overload.ret,
+                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)
+                            ) {
+                                "$methodvoid$"
+                            } else {
+                                "$method$"
+                            },
+                            class.name,
+                            method.name
+                        );
+                        let encoded = runtime_key
+                            .as_bytes()
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>();
+                        let symbol = format!("__thaw_typed_napi_{encoded}");
+                        shim.push_str(&format!(
+                            "declare function {symbol}({params}): {return_type};\n"
+                        ));
+                        class_method_rewrites.push((
+                            class.name.clone(),
+                            method.name.clone(),
+                            symbol,
+                            overload.params.len(),
+                            has_callback,
+                        ));
+                    }
                 }
             }
         }
@@ -892,6 +910,7 @@ fn rewrite_external_class_methods(
         classes: &'a [ClassConstructorRewrite],
         methods: &'a [ClassMethodRewrite],
         variables: std::collections::HashMap<String, String>,
+        callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
     }
     impl Visit for Finder<'_> {
@@ -901,6 +920,9 @@ fn rewrite_external_class_methods(
                 if let Some(class) = constructed_class(initializer, self.classes) {
                     self.variables
                         .insert(binding.id.sym.to_string(), class.to_string());
+                }
+                if matches!(initializer.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
+                    self.callbacks.insert(binding.id.sym.to_string());
                 }
             }
             declaration.visit_children_with(self);
@@ -913,10 +935,22 @@ fn rewrite_external_class_methods(
                         (member.obj.as_ref(), &member.prop)
                     {
                         if let Some(class) = self.variables.get(receiver.sym.as_str()) {
-                            if let Some((_, _, helper)) = self.methods.iter().find(
-                                |(candidate_class, candidate_method, _)| {
+                            let has_callback = call.args.last().is_some_and(|argument| {
+                                matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
+                                    || matches!(argument.expr.as_ref(), Expr::Ident(identifier) if self.callbacks.contains(identifier.sym.as_str()))
+                            });
+                            if let Some((_, _, helper, _, _)) = self.methods.iter().find(
+                                |(
+                                    candidate_class,
+                                    candidate_method,
+                                    _,
+                                    argument_count,
+                                    candidate_callback,
+                                )| {
                                     candidate_class == class
                                         && candidate_method == method.sym.as_str()
+                                        && *argument_count == call.args.len()
+                                        && *candidate_callback == has_callback
                                 },
                             ) {
                                 let span = member.span();
@@ -941,6 +975,7 @@ fn rewrite_external_class_methods(
         classes,
         methods,
         variables: std::collections::HashMap::new(),
+        callbacks: std::collections::HashSet::new(),
         edits: Vec::new(),
     };
     module.visit_with(&mut finder);
@@ -3503,6 +3538,8 @@ mod tests {
                 "Database".into(),
                 "configure".into(),
                 "__thaw_configure".into(),
+                2,
+                false,
             )],
         )
         .unwrap();
@@ -3518,12 +3555,48 @@ mod tests {
         let rewritten = rewrite_external_class_methods(
             source,
             &[("addon".into(), "NativeBox".into())],
-            &[("NativeBox".into(), "get".into(), "__thaw_get".into())],
+            &[(
+                "NativeBox".into(),
+                "get".into(),
+                "__thaw_get".into(),
+                0,
+                false,
+            )],
         )
         .unwrap();
         assert_eq!(
             rewritten,
             "const box = new NativeBox(42); const value = __thaw_get(box);"
+        );
+    }
+
+    #[test]
+    fn selects_external_method_overloads_by_arity_and_callback_shape() {
+        let source = "const db = new Database(\":memory:\"); const done = (error: Json): void => {}; db.run(\"select 1\"); db.run(\"select 1\", done);";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("sqlite3".into(), "Database".into())],
+            &[
+                (
+                    "Database".into(),
+                    "run".into(),
+                    "__run_sync".into(),
+                    1,
+                    false,
+                ),
+                (
+                    "Database".into(),
+                    "run".into(),
+                    "__run_callback".into(),
+                    2,
+                    true,
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const db = new Database(\":memory:\"); const done = (error: Json): void => {}; __run_sync(db, \"select 1\"); __run_callback(db, \"select 1\", done);"
         );
     }
 }
