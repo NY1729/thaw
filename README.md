@@ -659,7 +659,9 @@ The workspace crates have narrow responsibilities:
   with its percent-encoded absolute `file://` URL; other `import.meta`
   properties, non-JSON attributes and genuinely runtime-computed external
   package imports remain outside the supported subset. Expression-free
-  templates, parentheses and string-only concatenations are folded and bundled
+  templates, parentheses and string-only concatenations are folded and bundled;
+  conditional branches and template interpolations composed from those values
+  produce a bounded finite candidate set (up to 64 external specifiers)
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit

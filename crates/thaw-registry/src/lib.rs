@@ -1440,21 +1440,67 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         found: bool,
     }
 
-    fn static_module_specifier(expr: &Expr) -> Option<String> {
+    const MAX_STATIC_SPECIFIER_CANDIDATES: usize = 64;
+
+    fn combine_specifier_parts(left: Vec<String>, right: Vec<String>) -> Option<Vec<String>> {
+        if left.len().saturating_mul(right.len()) > MAX_STATIC_SPECIFIER_CANDIDATES {
+            return None;
+        }
+        let mut combined = Vec::new();
+        for left in left {
+            for right in &right {
+                let value = format!("{left}{right}");
+                if !combined.contains(&value) {
+                    combined.push(value);
+                }
+            }
+        }
+        Some(combined)
+    }
+
+    fn static_module_specifiers(expr: &Expr) -> Option<Vec<String>> {
         match expr {
-            Expr::Lit(Lit::Str(specifier)) => Some(specifier.value.to_string_lossy().into_owned()),
+            Expr::Lit(Lit::Str(specifier)) => {
+                Some(vec![specifier.value.to_string_lossy().into_owned()])
+            }
             Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
                 template.quasis[0]
                     .cooked
                     .as_ref()
                     .map(|value| value.to_string_lossy().into_owned())
                     .or_else(|| Some(template.quasis[0].raw.to_string()))
+                    .map(|value| vec![value])
             }
-            Expr::Paren(parenthesized) => static_module_specifier(&parenthesized.expr),
+            Expr::Tpl(template) if template.quasis.len() == template.exprs.len() + 1 => {
+                let mut values = vec![String::new()];
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    let text = quasi
+                        .cooked
+                        .as_ref()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| quasi.raw.to_string());
+                    values = combine_specifier_parts(values, vec![text])?;
+                    if let Some(expr) = template.exprs.get(index) {
+                        values = combine_specifier_parts(values, static_module_specifiers(expr)?)?;
+                    }
+                }
+                Some(values)
+            }
+            Expr::Paren(parenthesized) => static_module_specifiers(&parenthesized.expr),
             Expr::Bin(binary) if binary.op == thaw_parser::ast::BinaryOp::Add => {
-                let left = static_module_specifier(&binary.left)?;
-                let right = static_module_specifier(&binary.right)?;
-                Some(format!("{left}{right}"))
+                combine_specifier_parts(
+                    static_module_specifiers(&binary.left)?,
+                    static_module_specifiers(&binary.right)?,
+                )
+            }
+            Expr::Cond(conditional) => {
+                let mut values = static_module_specifiers(&conditional.cons)?;
+                for value in static_module_specifiers(&conditional.alt)? {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                }
+                (values.len() <= MAX_STATIC_SPECIFIER_CANDIDATES).then_some(values)
             }
             _ => None,
         }
@@ -1477,8 +1523,8 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             if ((is_require && call.args.len() == 1) || (is_import && !call.args.is_empty()))
                 && call.args[0].spread.is_none()
             {
-                if let Some(specifier) = static_module_specifier(&call.args[0].expr) {
-                    self.specs.push(specifier);
+                if let Some(specifiers) = static_module_specifiers(&call.args[0].expr) {
+                    self.specs.extend(specifiers);
                 } else if is_import {
                     self.has_nonliteral_dynamic_import = true;
                 }
@@ -3151,6 +3197,15 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_import_candidate_expansion_is_bounded() {
+        let analysis = analyze_module(
+            "import((a ? 'a' : 'b') + (b ? 'a' : 'b') + (c ? 'a' : 'b') + (d ? 'a' : 'b') + (e ? 'a' : 'b') + (f ? 'a' : 'b') + (g ? 'a' : 'b'));",
+        );
+        assert!(analysis.has_nonliteral_dynamic_import);
+        assert!(analysis.specs.is_empty());
+    }
+
+    #[test]
     fn parser_identifies_commonjs_export_assignments() {
         let analysis = analyze_module(
             r#"
@@ -4096,28 +4151,35 @@ mod tests {
     }
 
     #[test]
-    fn constant_folded_dynamic_import_resolves_external_package() {
+    fn finite_dynamic_import_candidates_resolve_external_packages() {
         use std::ffi::{CStr, CString};
 
         let dir = temp_registry("constant_external_dynamic_import");
         fs::write(
             dir.join("index.js"),
-            "export default async function run() { const dep = await import((`dep-` + 'pkg')); return dep.value; }",
+            "export default async function run(first) { const dep = await import(`dep-${first ? 'a' : 'b'}`); return dep.value; }",
         )
         .unwrap();
         let node_modules = temp_registry("constant_external_dynamic_modules");
-        let dependency = node_modules.join("dep-pkg");
-        fs::create_dir_all(&dependency).unwrap();
-        fs::write(
-            dependency.join("package.json"),
-            r#"{"name":"dep-pkg","version":"1.0.0","main":"index.js"}"#,
-        )
-        .unwrap();
-        fs::write(dependency.join("index.js"), "exports.value = 42;").unwrap();
+        for (name, value) in [("dep-a", 41), ("dep-b", 42)] {
+            let dependency = node_modules.join(name);
+            fs::create_dir_all(&dependency).unwrap();
+            fs::write(
+                dependency.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0","main":"index.js"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                dependency.join("index.js"),
+                format!("exports.value = {value};"),
+            )
+            .unwrap();
+        }
         let (bundle, _, file_count, versions) =
             bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
-        assert_eq!(versions.get("dep-pkg").map(String::as_str), Some("1.0.0"));
+        assert_eq!(file_count, 3);
+        assert_eq!(versions.get("dep-a").map(String::as_str), Some("1.0.0"));
+        assert_eq!(versions.get("dep-b").map(String::as_str), Some("1.0.0"));
         let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
@@ -4128,9 +4190,14 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("runConstantExternalImport").unwrap();
-        let args = CString::new("[]").unwrap();
-        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+        for (args, expected) in [("[true]", "41"), ("[false]", "42")] {
+            let args = CString::new(args).unwrap();
+            let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+            assert_eq!(
+                unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+                expected
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&node_modules);
     }
