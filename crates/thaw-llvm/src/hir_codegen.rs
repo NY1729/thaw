@@ -124,6 +124,7 @@ pub struct HirCompiler<'ctx> {
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
+    function_return_types: HashMap<String, HirType>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
     /// call target the innermost entry; an empty stack propagates by returning
     /// from the current function with the pending exception left intact.
@@ -146,6 +147,7 @@ impl<'ctx> HirCompiler<'ctx> {
             builder: context.create_builder(),
             variables: HashMap::new(),
             variable_hir_types: HashMap::new(),
+            function_return_types: HashMap::new(),
             catch_stack: Vec::new(),
             loop_stack: Vec::new(),
             frame_async_functions: HashMap::new(),
@@ -159,6 +161,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.declare_runtime_builtins();
         self.declare_exception_state();
         self.discover_frame_async_functions(program);
+        self.function_return_types = program
+            .functions
+            .iter()
+            .map(|function| (function.name.clone(), function.ret.clone()))
+            .collect();
 
         for sig in &program.extern_functions {
             self.declare_extern_function(sig)?;
@@ -405,6 +412,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let strlen_type = i64_type.fn_type(&[i8_ptr.into()], false);
         self.module
             .add_function("strlen", strlen_type, Some(Linkage::External));
+        let strcmp_type = i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("strcmp", strcmp_type, Some(Linkage::External));
         let memcpy_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false);
         self.module
             .add_function("memcpy", memcpy_type, Some(Linkage::External));
@@ -6388,14 +6398,83 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(phi.as_basic_value())
     }
 
+    fn expr_is_string(&self, expr: &HirExpr) -> bool {
+        match expr {
+            HirExpr::Lit(HirLit::Str(_)) | HirExpr::EnvVar(_) | HirExpr::JsonAsString(_) => true,
+            HirExpr::Var(name) => self.variable_hir_types.get(name) == Some(&HirType::Str),
+            HirExpr::TypedIndex(_, _, element) => element == &HirType::Str,
+            HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
+                .iter()
+                .any(|(name, ty)| name == field && ty == &HirType::Str),
+            HirExpr::Assign(_, value) => self.expr_is_string(value),
+            HirExpr::Call(callee, _) => match callee.as_ref() {
+                HirExpr::Var(name) => self.function_return_types.get(name) == Some(&HirType::Str),
+                HirExpr::Lambda(_, _, ret, _) => ret == &HirType::Str,
+                _ => false,
+            },
+            HirExpr::DynamicCall(signature, _) => signature.ret == HirType::Str,
+            _ => false,
+        }
+    }
+
     fn compile_binop(
         &mut self,
         op: BinOp,
         lhs: &HirExpr,
         rhs: &HirExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let lhs_val = self.compile_expr(lhs)?.into_float_value();
-        let rhs_val = self.compile_expr(rhs)?.into_float_value();
+        let lhs_value = self.compile_expr(lhs)?;
+        let rhs_value = self.compile_expr(rhs)?;
+
+        if op == BinOp::EqEqEq {
+            let string_operands = self.expr_is_string(lhs) && self.expr_is_string(rhs);
+            return match (lhs_value, rhs_value) {
+                (BasicValueEnum::FloatValue(lhs), BasicValueEnum::FloatValue(rhs)) => self
+                    .builder
+                    .build_float_compare(FloatPredicate::OEQ, lhs, rhs, "eqtmp")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string()),
+                (BasicValueEnum::IntValue(lhs), BasicValueEnum::IntValue(rhs)) => self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, lhs, rhs, "eqtmp")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string()),
+                (BasicValueEnum::PointerValue(lhs), BasicValueEnum::PointerValue(rhs)) => {
+                    if string_operands {
+                        let compared = self
+                            .builder
+                            .build_call(
+                                self.module.get_function("strcmp").unwrap(),
+                                &[lhs.into(), rhs.into()],
+                                "strcmp",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or("strcmp returned no value")?
+                            .into_int_value();
+                        return self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                compared,
+                                self.context.i32_type().const_zero(),
+                                "string_eq",
+                            )
+                            .map(Into::into)
+                            .map_err(|error| error.to_string());
+                    }
+                    self.builder
+                        .build_int_compare(IntPredicate::EQ, lhs, rhs, "eqtmp")
+                        .map(Into::into)
+                        .map_err(|error| error.to_string())
+                }
+                _ => Err("strict equality operands have incompatible LLVM layouts".into()),
+            };
+        }
+
+        let lhs_val = lhs_value.into_float_value();
+        let rhs_val = rhs_value.into_float_value();
 
         match op {
             BinOp::Add => self
@@ -6428,11 +6507,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_float_compare(FloatPredicate::OGT, lhs_val, rhs_val, "gttmp")
                 .map(Into::into)
                 .map_err(|e| e.to_string()),
-            BinOp::EqEqEq => self
-                .builder
-                .build_float_compare(FloatPredicate::OEQ, lhs_val, rhs_val, "eqtmp")
-                .map(Into::into)
-                .map_err(|e| e.to_string()),
+            BinOp::EqEqEq => unreachable!(),
         }
     }
 
@@ -8926,6 +9001,27 @@ mod tests {
     }
 
     #[test]
+    fn strict_equality_supports_strings_booleans_and_object_identity() {
+        let source = r#"
+            interface Box { value: number; }
+            function label(): string { return "same"; }
+            function main(): void {
+                const text = "same";
+                console.log(text === label());
+                console.log(true === false);
+                const box: Box = { value: 1 };
+                const alias: Box = box;
+                console.log(box === alias);
+                console.log(box === { value: 1 });
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "typed_strict_equality"),
+            "true\nfalse\ntrue\nfalse\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
@@ -10850,11 +10946,9 @@ mod tests {
         let source = r#"
             async function main(): Promise<void> {
                 const values: string[] = ["first", "skip", "last"];
-                let index = 0;
                 for (const value of values) {
                     await sleep(1);
-                    index++;
-                    if (index === 2) continue;
+                    if (value === "skip") continue;
                     console.log(value);
                 }
                 console.log("done");
