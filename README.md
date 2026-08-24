@@ -491,9 +491,11 @@ the next call. The official sqlite3 E2E now constructs a real `Database`, calls
 Full TypeScript-style overloaded method selection remains outside that path.
 Registry class shims now retain every supported overload under a distinct
 internal symbol. Calls select an overload by exact argument count and whether
-the final argument is an inline or locally-bound callback. Type-based selection
-between non-callback overloads with the same arity and optional/rest parameters
-remain explicit gaps.
+the final argument is an inline or locally-bound callback. Non-callback
+overloads with the same arity are also selected from number, string, boolean,
+number-array, and object literals or local variables initialized from those
+values. Richer expression inference and optional/rest parameters remain
+explicit gaps.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
