@@ -123,6 +123,9 @@ pub enum FfiAggregateAbi {
 pub struct FfiSignature {
     pub symbol: Symbol,
     pub params: Vec<HirType>,
+    /// Element type of a trailing C varargs sequence. Currently lowering
+    /// accepts only a TypeScript `...values: number[]` declaration.
+    pub variadic: Option<HirType>,
     pub ret: HirType,
     pub error_abi: FfiErrorAbi,
     pub return_ownership: FfiOwnership,

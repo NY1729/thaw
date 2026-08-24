@@ -68,6 +68,7 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
 #[derive(Clone)]
 struct FnSignature {
     params: Vec<HirType>,
+    variadic: Option<HirType>,
     ret: HirType,
     is_async: bool,
     /// A function declared with no body (`declare function foo(...): T;`,
@@ -218,9 +219,36 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 };
+                let variadic = if is_extern {
+                    func.params.last().and_then(|param| match &param.pat {
+                        Pat::Rest(rest) => Some(rest),
+                        _ => None,
+                    }).map(|rest| {
+                        let annotation = rest.type_ann.as_ref().ok_or_else(|| {
+                            format!("ambient variadic function `{name}` needs a rest parameter type annotation")
+                        })?;
+                        let ty = resolve_ts_type_with_substitution(
+                            &annotation.type_ann,
+                            &type_substitution,
+                            &interfaces,
+                            &generic_interfaces,
+                            &mut Vec::new(),
+                        )?;
+                        match ty {
+                            HirType::Array(element) if *element == HirType::F64 => Ok(*element),
+                            other => Err(format!(
+                                "ambient variadic function `{name}` currently requires a number[] rest parameter, found {other:?}"
+                            )),
+                        }
+                    }).transpose()?
+                } else {
+                    None
+                };
+                let fixed_param_count = func.params.len() - usize::from(variadic.is_some());
                 let params = func
                     .params
                     .iter()
+                    .take(fixed_param_count)
                     .map(|p| {
                         lower_param(
                             &p.pat,
@@ -248,6 +276,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                     name,
                     FnSignature {
                         params,
+                        variadic,
                         ret,
                         is_async: func.is_async,
                         is_extern,
@@ -363,6 +392,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         .map(|(name, sig)| FfiSignature {
             symbol: name.clone(),
             params: sig.params.clone(),
+            variadic: sig.variadic.clone(),
             ret: sig.ret.clone(),
             error_abi: FfiErrorAbi::Direct,
             return_ownership: FfiOwnership::Borrowed,
@@ -10485,9 +10515,16 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some(params) = &param_types {
-            if lowered_arguments.len() != params.len() {
+            let variadic = signature.as_ref().and_then(|sig| sig.variadic.as_ref());
+            let wrong_count = if variadic.is_some() {
+                lowered_arguments.len() < params.len()
+            } else {
+                lowered_arguments.len() != params.len()
+            };
+            if wrong_count {
                 return Err(format!(
-                    "function `{callee_name}` expects {} argument(s), got {}",
+                    "function `{callee_name}` expects {}{} argument(s), got {}",
+                    if variadic.is_some() { "at least " } else { "" },
                     params.len(),
                     lowered_arguments.len()
                 ));
@@ -10497,8 +10534,12 @@ impl<'a> FnLowerer<'a> {
         let args = lowered_arguments
             .into_iter()
             .enumerate()
-            .map(
-                |(i, value)| match param_types.as_ref().and_then(|p| p.get(i)) {
+            .map(|(i, value)| {
+                match param_types
+                    .as_ref()
+                    .and_then(|p| p.get(i))
+                    .or_else(|| signature.as_ref().and_then(|sig| sig.variadic.as_ref()))
+                {
                     Some(_)
                         if signature
                             .as_ref()
@@ -10510,8 +10551,8 @@ impl<'a> FnLowerer<'a> {
                         format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                     }),
                     None => Ok(value),
-                },
-            )
+                }
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let generic_types = if let Some(signature) = signature
@@ -10575,6 +10616,7 @@ impl<'a> FnLowerer<'a> {
             let ffi_signature = FfiSignature {
                 symbol: callee_name,
                 params: sig.params,
+                variadic: sig.variadic,
                 ret: sig.ret,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -12941,6 +12983,7 @@ mod tests {
             vec![crate::FfiSignature {
                 symbol: "native_add".into(),
                 params: vec![HirType::F64, HirType::F64],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: crate::FfiErrorAbi::Direct,
                 return_ownership: crate::FfiOwnership::Borrowed,
@@ -12961,6 +13004,7 @@ mod tests {
                     crate::FfiSignature {
                         symbol: "native_add".into(),
                         params: vec![HirType::F64, HirType::F64],
+                        variadic: None,
                         ret: HirType::F64,
                         error_abi: crate::FfiErrorAbi::Direct,
                         return_ownership: crate::FfiOwnership::Borrowed,
@@ -12976,6 +13020,34 @@ mod tests {
                     ],
                 )],
             ))
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_ambient_variadic_element_types() {
+        let module = thaw_parser::parse_typescript(
+            r#"declare function native_join(...values: string[]): string;
+               function main(): void { console.log(native_join("a", "b")); }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("requires a number[] rest parameter"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn variadic_ambient_calls_still_require_every_fixed_argument() {
+        let module = thaw_parser::parse_typescript(
+            r#"declare function native_sum(count: number, ...values: number[]): number;
+               function main(): void { console.log(native_sum()); }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("expects at least 1 argument(s), got 0"),
+            "{error}"
         );
     }
 
