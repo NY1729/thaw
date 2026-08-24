@@ -807,11 +807,147 @@ unsafe fn write_typedarray_index(
     Some(status)
 }
 
+unsafe fn intrinsic_property_value(
+    env: NapiEnv,
+    object: NapiValue,
+    key: &PropertyKey,
+) -> Option<NapiValue> {
+    let PropertyKey::String(name) = key else {
+        return None;
+    };
+    let env = env_mut(env).ok()?;
+    match value_ref(object).ok()? {
+        Value::Array(values) if name == "length" => {
+            Some(env.alloc(Value::Number(values.len() as f64)))
+        }
+        Value::Buffer(bytes) if name == "length" => {
+            Some(env.alloc(Value::Number(bytes.len() as f64)))
+        }
+        Value::ExternalBuffer { length, .. } if name == "length" => {
+            Some(env.alloc(Value::Number(*length as f64)))
+        }
+        Value::BufferView {
+            array_buffer,
+            length,
+            ..
+        } if name == "length" => {
+            let detached = arraybuffer_parts(*array_buffer)
+                .map(|(_, _, detached)| detached)
+                .unwrap_or(true);
+            Some(env.alloc(Value::Number(if detached { 0.0 } else { *length as f64 })))
+        }
+        Value::ArrayBuffer { bytes, detached } if name == "byteLength" => {
+            Some(env.alloc(Value::Number(if *detached {
+                0.0
+            } else {
+                bytes.len() as f64
+            })))
+        }
+        Value::ExternalArrayBuffer {
+            length, detached, ..
+        } if name == "byteLength" => {
+            Some(env.alloc(Value::Number(if *detached { 0.0 } else { *length as f64 })))
+        }
+        Value::SharedArrayBuffer(bytes) if name == "byteLength" => {
+            Some(env.alloc(Value::Number(bytes.len() as f64)))
+        }
+        Value::TypedArray {
+            array_type,
+            length,
+            array_buffer,
+            byte_offset,
+        } => {
+            let detached = arraybuffer_parts(*array_buffer)
+                .map(|(_, _, detached)| detached)
+                .unwrap_or(true);
+            match name.as_str() {
+                "length" => {
+                    Some(env.alloc(Value::Number(if detached { 0.0 } else { *length as f64 })))
+                }
+                "byteLength" => Some(env.alloc(Value::Number(if detached {
+                    0.0
+                } else {
+                    (*length * typedarray_element_size(*array_type)?) as f64
+                }))),
+                "byteOffset" => Some(env.alloc(Value::Number(if detached {
+                    0.0
+                } else {
+                    *byte_offset as f64
+                }))),
+                "buffer" => Some(*array_buffer),
+                _ => None,
+            }
+        }
+        Value::DataView {
+            length,
+            array_buffer,
+            byte_offset,
+        } => {
+            let detached = arraybuffer_parts(*array_buffer)
+                .map(|(_, _, detached)| detached)
+                .unwrap_or(true);
+            match name.as_str() {
+                "byteLength" => {
+                    Some(env.alloc(Value::Number(if detached { 0.0 } else { *length as f64 })))
+                }
+                "byteOffset" => Some(env.alloc(Value::Number(if detached {
+                    0.0
+                } else {
+                    *byte_offset as f64
+                }))),
+                "buffer" => Some(*array_buffer),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+unsafe fn intrinsic_property_keys(object: NapiValue) -> &'static [&'static str] {
+    match value_ref(object) {
+        Ok(
+            Value::Array(_)
+            | Value::Buffer(_)
+            | Value::ExternalBuffer { .. }
+            | Value::BufferView { .. },
+        ) => &["length"],
+        Ok(
+            Value::ArrayBuffer { .. }
+            | Value::ExternalArrayBuffer { .. }
+            | Value::SharedArrayBuffer(_),
+        ) => &["byteLength"],
+        Ok(Value::TypedArray { .. }) => &["length", "byteLength", "byteOffset", "buffer"],
+        Ok(Value::DataView { .. }) => &["byteLength", "byteOffset", "buffer"],
+        _ => &[],
+    }
+}
+
+unsafe fn intrinsic_property_attributes(object: NapiValue, key: &PropertyKey) -> Option<u32> {
+    let PropertyKey::String(name) = key else {
+        return None;
+    };
+    if !intrinsic_property_keys(object).contains(&name.as_str()) {
+        return None;
+    }
+    Some(
+        if matches!(value_ref(object), Ok(Value::Array(_))) && name == "length" {
+            NAPI_WRITABLE
+        } else {
+            0
+        },
+    )
+}
+
 unsafe fn own_property_value(
     env: NapiEnv,
     owner: NapiValue,
     key: &PropertyKey,
 ) -> Option<NapiValue> {
+    if matches!(value_ref(owner), Ok(Value::Array(_))) {
+        if let Some(value) = intrinsic_property_value(env, owner, key) {
+            return Some(value);
+        }
+    }
     match value_ref(owner) {
         Ok(Value::Object(properties)) => properties.get(key).copied(),
         Ok(Value::Function(function)) => function.properties.get(key).copied(),
@@ -863,6 +999,33 @@ unsafe fn set_own_property(
     key: &PropertyKey,
     value: NapiValue,
 ) -> NapiStatus {
+    if intrinsic_property_attributes(object, key).is_some() {
+        if matches!(value_ref(object), Ok(Value::Array(_)))
+            && matches!(key, PropertyKey::String(name) if name == "length")
+        {
+            let number = match value_ref(value).and_then(number_for_typedarray) {
+                Ok(number)
+                    if number.is_finite()
+                        && number >= 0.0
+                        && number <= u32::MAX as f64
+                        && number.fract() == 0.0 =>
+                {
+                    number as usize
+                }
+                _ => {
+                    let error = env.alloc(Value::Error("invalid array length".into()));
+                    env.exception = Some(error);
+                    return NAPI_PENDING_EXCEPTION;
+                }
+            };
+            let Some(Value::Array(values)) = object.as_mut() else {
+                unreachable!();
+            };
+            values.resize(number, None);
+            return NAPI_OK;
+        }
+        return NAPI_GENERIC_FAILURE;
+    }
     match object.as_mut() {
         Some(Value::Object(properties)) => {
             properties.insert(key.clone(), value);
@@ -946,6 +1109,11 @@ unsafe fn uint8_from_value(value: NapiValue) -> Result<u8, NapiStatus> {
 }
 
 unsafe fn fixed_index_exists(object: NapiValue, key: &PropertyKey) -> bool {
+    if matches!(value_ref(object), Ok(Value::Array(_)))
+        && intrinsic_property_attributes(object, key).is_some()
+    {
+        return true;
+    }
     let Some(index) = property_array_index(key) else {
         return false;
     };
@@ -1056,6 +1224,9 @@ unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
 }
 
 unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey) -> u32 {
+    if let Some(attributes) = intrinsic_property_attributes(owner as NapiValue, key) {
+        return attributes;
+    }
     env.as_ref()
         .and_then(|env| env.property_attributes.get(&(owner, key.clone())).copied())
         .or_else(|| {
@@ -1105,6 +1276,9 @@ unsafe fn find_property_value(
     let mut current = Some(object);
     let mut visited = HashSet::new();
     while let Some(value) = current.filter(|value| visited.insert(*value as usize)) {
+        if let Some(property) = intrinsic_property_value(env, value, key) {
+            return Some(property);
+        }
         let property = own_property_value(env, value, key);
         if property.is_some() {
             return property;
@@ -4139,7 +4313,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                         .filter(|(_, value)| value.is_some())
                         .map(|(index, _)| (EnumeratedPropertyKey::Number(index), owner)),
                 );
-                Vec::new()
+                vec![PropertyKey::String("length".into())]
             }
             Ok(Value::Buffer(bytes)) => {
                 keys.extend(
@@ -7521,6 +7695,111 @@ mod tests {
                 NAPI_OK
             );
             assert!(!present);
+        }
+    }
+
+    #[test]
+    fn collection_metadata_properties_follow_javascript_descriptors() {
+        unsafe {
+            fn number(value: NapiValue) -> f64 {
+                match unsafe { value_ref(value) }.unwrap() {
+                    Value::Number(value) => *value,
+                    _ => panic!("metadata property was not numeric"),
+                }
+            }
+
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut array = ptr::null_mut();
+            assert_eq!(
+                napi_create_array_with_length(env_ptr, 3, &mut array),
+                NAPI_OK
+            );
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_get_named_property(env_ptr, array, c"length".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(number(actual), 3.0);
+            let one = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_set_named_property(env_ptr, array, c"length".as_ptr(), one),
+                NAPI_OK
+            );
+            let mut length = 0;
+            assert_eq!(napi_get_array_length(env_ptr, array, &mut length), NAPI_OK);
+            assert_eq!(length, 1);
+
+            let length_key = env.alloc(Value::String("length".into()));
+            let mut own = false;
+            assert_eq!(
+                napi_has_own_property(env_ptr, array, length_key, &mut own),
+                NAPI_OK
+            );
+            assert!(own);
+            let mut deleted = true;
+            assert_eq!(
+                napi_delete_property(env_ptr, array, length_key, &mut deleted),
+                NAPI_OK
+            );
+            assert!(!deleted);
+
+            let mut data = ptr::null_mut();
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_buffer(env_ptr, 4, &mut data, &mut buffer),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, buffer, c"length".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(number(actual), 4.0);
+            assert_eq!(
+                napi_has_own_property(env_ptr, buffer, length_key, &mut own),
+                NAPI_OK
+            );
+            assert!(!own, "Buffer length is inherited metadata");
+            assert_eq!(
+                napi_set_named_property(env_ptr, buffer, c"length".as_ptr(), one),
+                NAPI_GENERIC_FAILURE
+            );
+
+            let mut backing = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 16, &mut data, &mut backing),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, backing, c"byteLength".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(number(actual), 16.0);
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 4, 3, backing, 2, &mut view),
+                NAPI_OK
+            );
+            for (name, expected) in [(c"length", 3.0), (c"byteLength", 6.0), (c"byteOffset", 2.0)] {
+                assert_eq!(
+                    napi_get_named_property(env_ptr, view, name.as_ptr(), &mut actual),
+                    NAPI_OK
+                );
+                assert_eq!(number(actual), expected);
+            }
+            assert_eq!(
+                napi_get_named_property(env_ptr, view, c"buffer".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, backing);
+            assert_eq!(napi_detach_arraybuffer(env_ptr, backing), NAPI_OK);
+            for name in [c"length", c"byteLength", c"byteOffset"] {
+                assert_eq!(
+                    napi_get_named_property(env_ptr, view, name.as_ptr(), &mut actual),
+                    NAPI_OK
+                );
+                assert_eq!(number(actual), 0.0);
+            }
         }
     }
 
