@@ -3153,6 +3153,21 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_string_length" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("string length expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "string length receiver")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_string_char_code_at" => {
+                        let [value, index] = args.as_slice() else {
+                            return Err("string charCodeAt expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "charCodeAt receiver")?;
+                        self.expect_type(&HirType::F64, index, "charCodeAt index")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
@@ -4721,6 +4736,10 @@ impl<'a> FnLowerer<'a> {
                     HirType::Array(_) | HirType::Tuple(_) if prop.sym == *"length" => {
                         Ok(HirExpr::ArrayLen(Box::new(obj)))
                     }
+                    HirType::Str if prop.sym == *"length" => Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_length".to_string())),
+                        vec![obj],
+                    )),
                     HirType::Object(fields) => {
                         if fields.iter().any(|(name, _)| name == prop.sym.as_str()) {
                             Ok(HirExpr::PropAccess(
@@ -5446,6 +5465,26 @@ impl<'a> FnLowerer<'a> {
                             &[(name, ty, value)],
                         );
                     }
+                }
+                if property.sym == *"charCodeAt" {
+                    if call.args.len() > 1 {
+                        return Err("native `.charCodeAt()` expects zero or one argument".into());
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("charCodeAt spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "charCodeAt receiver")?;
+                    let index = if let Some(argument) = call.args.first() {
+                        let index = self.lower_expr(&argument.expr)?;
+                        self.coerce_primitive_to_number(index)?
+                    } else {
+                        HirExpr::Lit(HirLit::F64(0.0))
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_char_code_at".to_string())),
+                        vec![receiver, index],
+                    ));
                 }
                 if property.sym == *"concat" {
                     if call.args.iter().any(|argument| argument.spread.is_some()) {

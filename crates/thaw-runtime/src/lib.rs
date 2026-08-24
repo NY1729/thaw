@@ -857,6 +857,43 @@ pub unsafe extern "C" fn thaw_string_trim_end(value: *const c_char) -> *const c_
     unsafe { trim_javascript_string(value, false, true) }
 }
 
+#[no_mangle]
+/// Returns the JavaScript UTF-16 code-unit length of a native string.
+///
+/// # Safety
+///
+/// `value` must reference a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_length(value: *const c_char) -> f64 {
+    if value.is_null() {
+        return 0.0;
+    }
+    unsafe { CStr::from_ptr(value) }
+        .to_string_lossy()
+        .encode_utf16()
+        .count() as f64
+}
+
+#[no_mangle]
+/// Implements `String.prototype.charCodeAt` using UTF-16 code units.
+///
+/// # Safety
+///
+/// `value` must reference a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_char_code_at(value: *const c_char, index: f64) -> f64 {
+    if value.is_null() || index.is_infinite() {
+        return f64::NAN;
+    }
+    let index = if index.is_nan() { 0.0 } else { index.trunc() };
+    if index < 0.0 || index > usize::MAX as f64 {
+        return f64::NAN;
+    }
+    unsafe { CStr::from_ptr(value) }
+        .to_string_lossy()
+        .encode_utf16()
+        .nth(index as usize)
+        .map_or(f64::NAN, f64::from)
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 

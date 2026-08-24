@@ -641,6 +641,18 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
         }
+        let string_length_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_string_length",
+            string_length_type,
+            Some(Linkage::External),
+        );
+        let string_char_code_type = f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false);
+        self.module.add_function(
+            "thaw_string_char_code_at",
+            string_char_code_type,
+            Some(Linkage::External),
+        );
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -7618,6 +7630,29 @@ impl<'ctx> HirCompiler<'ctx> {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 return self.compile_single_arg_call(&runtime, args, "string trim");
             }
+            "__thaw_string_length" => {
+                return self.compile_single_arg_call("thaw_string_length", args, "string length")
+            }
+            "__thaw_string_char_code_at" => {
+                let [value, index] = args else {
+                    return Err("string charCodeAt expects two operands".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let index = self.compile_expr(index)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_string_char_code_at")
+                            .unwrap(),
+                        &[value.into(), index.into()],
+                        "string_char_code_at",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("charCodeAt returned no value".to_string());
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
@@ -11527,6 +11562,42 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "string_concat_method"),
             "receiver\nargument\nvalue=42;values=1,2;object=[object Object]\nempty\nawaited-concat\nflag=true\n"
+        );
+    }
+
+    #[test]
+    fn compiles_utf16_string_length_and_char_code_at() {
+        let source = r#"
+            function text(): string {
+                console.log("receiver");
+                return "abc";
+            }
+            function index(): string {
+                console.log("index");
+                return "2";
+            }
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-string");
+                return "😀";
+            }
+            async function main(): Promise<void> {
+                const unicode: string = "😀a";
+                console.log(unicode.length);
+                console.log(unicode.charCodeAt(0));
+                console.log(unicode.charCodeAt(1));
+                console.log(unicode.charCodeAt(2));
+                console.log("a".charCodeAt());
+                console.log("a".charCodeAt(0 / 0));
+                console.log(Number.isNaN(unicode.charCodeAt(-1)));
+                console.log(Number.isNaN(unicode.charCodeAt(Infinity)));
+                console.log(text().charCodeAt(index()));
+                console.log((await delayed()).length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_utf16_access"),
+            "3\n55357\n56832\n97\n97\n97\ntrue\ntrue\nreceiver\nindex\n99\nawaited-string\n2\n"
         );
     }
 
