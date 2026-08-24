@@ -464,6 +464,8 @@ assignment headも同じloweringを共有し、ループ終了後に最後の要
 `for await...of`は`Promise<T>[]`のtyped indexを各反復で`AwaitPromise<T>`へ変換し、
 逐次settlement順、break/continue、既存localへの代入、最寄りのtry/catchへのreject伝播を
 frame splitter上で維持する。同期typed arrayは通常値として同じループを通る。
+array literalのspreadは各sourceをtyped array partとして保持し、awaitを含むpart/elementを
+左から右へframe temporaryへ抽出してから、LLVMが合計長を計算してarena配列へ連結する。
 
 ## 12. Promise constructorとcontinuation chain
 

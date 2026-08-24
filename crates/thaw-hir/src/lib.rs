@@ -178,6 +178,9 @@ pub enum HirExpr {
     /// Phase 1 arrays are number-only at codegen time (see hir_codegen);
     /// the HIR shape itself doesn't enforce that.
     ArrayLit(Vec<HirExpr>),
+    /// Array literal containing one or more spreads. Every part is itself a
+    /// homogeneous typed array and is evaluated once in source order.
+    ArrayConcat(Vec<HirExpr>, HirType),
     /// `array[index]`
     Index(Box<HirExpr>, Box<HirExpr>),
     /// `array[index]` with the statically resolved element type.
@@ -344,6 +347,7 @@ pub fn set_ffi_error_abi(
             }
             HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
             HirExpr::ArrayLit(values)
+            | HirExpr::ArrayConcat(values, _)
             | HirExpr::PromiseAll(values, _)
             | HirExpr::PromiseAllTuple(values, _)
             | HirExpr::PromiseRace(values, _)
@@ -434,6 +438,7 @@ pub fn set_ffi_ownership(
         match expr {
             HirExpr::FfiCall(_, args)
             | HirExpr::ArrayLit(args)
+            | HirExpr::ArrayConcat(args, _)
             | HirExpr::PromiseAll(args, _)
             | HirExpr::PromiseAllTuple(args, _)
             | HirExpr::PromiseRace(args, _)
@@ -587,6 +592,7 @@ pub fn set_ffi_string_abi(
         match expr {
             HirExpr::FfiCall(_, values)
             | HirExpr::ArrayLit(values)
+            | HirExpr::ArrayConcat(values, _)
             | HirExpr::PromiseAll(values, _)
             | HirExpr::PromiseAllTuple(values, _)
             | HirExpr::PromiseRace(values, _)
