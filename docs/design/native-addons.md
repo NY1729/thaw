@@ -633,3 +633,5 @@ Bufferは従来どおりUint8Array互換viewとして扱う。
 exception、get-and-clear処理へ統合する。
 `napi_create_external_arraybuffer`／`napi_create_external_buffer`はcaller-owned pointerをcopyせず
 保持し、通常のview／Buffer APIへ参加させる。登録finalizerはEnv破棄時に一度だけ実行する。
+`napi_adjust_external_memory`はEnv単位のsigned byte totalを追跡し、overflow時は値を変更せず
+generic failureを返す。
