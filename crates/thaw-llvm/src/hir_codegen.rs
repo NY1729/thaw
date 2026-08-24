@@ -4855,6 +4855,46 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_number_predicate(
+        &mut self,
+        args: &[HirExpr],
+        finite: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("number predicate expects one operand".to_string());
+        };
+        let value = self.compile_expr(value)?.into_float_value();
+        if !finite {
+            return self
+                .builder
+                .build_float_compare(FloatPredicate::UNO, value, value, "number_is_nan")
+                .map(Into::into)
+                .map_err(|error| error.to_string());
+        }
+        let at_most_max = self
+            .builder
+            .build_float_compare(
+                FloatPredicate::OLE,
+                value,
+                self.context.f64_type().const_float(f64::MAX),
+                "number_below_infinity",
+            )
+            .map_err(|error| error.to_string())?;
+        let at_least_min = self
+            .builder
+            .build_float_compare(
+                FloatPredicate::OGE,
+                value,
+                self.context.f64_type().const_float(-f64::MAX),
+                "number_above_negative_infinity",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_and(at_most_max, at_least_min, "number_is_finite")
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -7055,6 +7095,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
             }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
+            "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
+            "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10637,6 +10679,43 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_to_string_methods"),
             "42.5\ntrue\nword\n1,2.5\n3,x,false\nobject-method-receiver\n[object Object]\nawaited-method-receiver\n9\n"
+        );
+    }
+
+    #[test]
+    fn compiles_number_predicates_and_aggregate_numeric_conversion() {
+        let source = r#"
+            function text(): string {
+                console.log("strict-predicate-evaluated");
+                return "bad";
+            }
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited-predicate");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(Number.isNaN(0 / 0));
+                console.log(Number.isNaN(text()));
+                console.log(Number.isFinite(42));
+                console.log(Number.isFinite(Number("Infinity")));
+                console.log(isNaN("bad"));
+                console.log(isNaN("12"));
+                console.log(isFinite("12"));
+                console.log(isFinite("Infinity"));
+                const empty: number[] = [];
+                const one: number[] = [7];
+                const many: number[] = [1, 2];
+                console.log(Number(empty));
+                console.log(Number(one));
+                console.log(isNaN(many));
+                console.log(isNaN({ value: 1 }));
+                console.log(isNaN(await delayed("9")));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "number_predicates"),
+            "true\nstrict-predicate-evaluated\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n0\n7\ntrue\ntrue\nawaited-predicate\nfalse\n"
         );
     }
 
