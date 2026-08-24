@@ -437,10 +437,12 @@ standalone executable. Automatic instance-method and callback syntax lowering
 now covers callback-free methods on variables directly initialized from an
 external constructor. A CLI E2E compiles and runs `new NativeBox(42)` followed
 by ordinary `box.get()` syntax through the typed HIR/LLVM N-API path. Instance
-methods whose final argument has the existing `(Json, Json) => Json` native
-callback shape also use the receiver's persistent N-API environment and retain
-`this`; the same E2E exercises `box.getLater(callback)`. Other callback shapes,
-getters, static methods, and aliased instances remain explicit gaps.
+methods whose final argument is a zero-to-two argument dynamic callback also
+use the receiver's persistent N-API environment and retain `this`; callback
+arguments such as `Error | null` and `any` cross this boundary as `Json`, and
+both `Json` and `void` callback returns are supported. The same E2E exercises
+`box.getLater(callback)`. Getters, static methods, aliased instances, and native
+addons that require directly driving a private libuv loop remain explicit gaps.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
@@ -479,8 +481,9 @@ embeds it into an executable that starts after the registry is removed
 (`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
 registry_add_fetches_and_loads_sqlite3_when_enabled -- --nocapture`). Typed
 construction is integrated, callback-free instance methods are supported, and
-the existing two-JSON callback ABI works on instance methods. sqlite3's broader
-error-first callback shapes and overload selection remain outside that path.
+dynamic error-first callbacks work on instance methods. sqlite3 callbacks still
+need direct libuv-loop draining, and its overloaded method selection remains
+outside that path.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back

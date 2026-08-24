@@ -678,6 +678,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     i8_ptr.into(),
                     i8_ptr.into(),
                     i8_ptr.into(),
+                    self.context.i8_type().into(),
                 ],
                 false,
             ),
@@ -5021,7 +5022,10 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$method$") {
+        if signature.backend == DynamicBackend::Napi
+            && (signature.symbol.starts_with("$method$")
+                || signature.symbol.starts_with("$methodvoid$"))
+        {
             return self.compile_typed_napi_method(signature, args);
         }
         let array = self
@@ -5339,6 +5343,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 method.as_pointer_value(),
                 args_json,
                 callback,
+                signature.symbol.starts_with("$methodvoid$"),
             )?
         } else {
             self.builder
@@ -5413,6 +5418,7 @@ impl<'ctx> HirCompiler<'ctx> {
         method: PointerValue<'ctx>,
         args_json: BasicValueEnum<'ctx>,
         callback: &HirExpr,
+        discard_result: bool,
     ) -> Result<StructValue<'ctx>, String> {
         let callback_type = match callback {
             HirExpr::Lambda(_, params, ret, _) => HirType::Function(
@@ -5429,8 +5435,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let HirType::Function(params, ret) = callback_type else {
             return Err("typed N-API method callback must be a function".into());
         };
-        if params != vec![HirType::Json, HirType::Json] || *ret != HirType::Json {
-            return Err("native addon callback must have type (Json, Json) => Json".into());
+        if params.len() > 2
+            || params.iter().any(|param| *param != HirType::Json)
+            || !matches!(*ret, HirType::Json | HirType::Void)
+        {
+            return Err(
+                "native addon method callback must take zero to two Json arguments and return Json or void"
+                    .into(),
+            );
         }
         let closure = self.compile_expr(callback)?.into_pointer_value();
         let callback_name = format!("__thaw_napi_method_callback_{}", self.next_lambda);
@@ -5470,11 +5482,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .into_pointer_value();
         let closure_type = self.function_type(&params, &ret)?;
+        let mut callback_args = vec![context.into()];
+        if !params.is_empty() {
+            callback_args.push(error_json.into());
+        }
+        if params.len() == 2 {
+            callback_args.push(result_json.into());
+        }
         self.builder
             .build_indirect_call(
                 closure_type,
                 code,
-                &[context.into(), error_json.into(), result_json.into()],
+                &callback_args,
                 "invoke_thaw_method_callback",
             )
             .map_err(|error| error.to_string())?;
@@ -5491,6 +5510,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     args_json.into(),
                     adapter.as_global_value().as_pointer_value().into(),
                     closure.into(),
+                    self.context
+                        .i8_type()
+                        .const_int(discard_result as u64, false)
+                        .into(),
                 ],
                 "napi_method_callback_result",
             )
