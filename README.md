@@ -453,7 +453,9 @@ The workspace crates have narrow responsibilities:
   its operand once and accepts awaited arrays
 - `Object.keys` returns an arena-owned string array for fixed-layout objects,
   preserving declaration/insertion order across property overrides and
-  evaluating synchronous or awaited receivers exactly once
+  evaluating synchronous or awaited receivers exactly once;
+  `Object.getOwnPropertyNames` and `Reflect.ownKeys` share this result because
+  the current fixed-object model has only enumerable string-named own fields
 - `Object.values` returns field values in the same order, retaining homogeneous
   native arrays or heterogeneous typed tuples as appropriate, including empty
   objects and synchronous/awaited receivers
