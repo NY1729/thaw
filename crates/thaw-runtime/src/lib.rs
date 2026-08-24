@@ -799,6 +799,64 @@ pub unsafe extern "C" fn thaw_string_ends_with(
     (value.get(end - search.len()..end) == Some(search.as_slice())).into()
 }
 
+fn is_javascript_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}' | '\u{000b}' | '\u{000c}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+                | '\u{000a}'
+                | '\u{000d}'
+                | '\u{2028}'
+                | '\u{2029}'
+    )
+}
+
+unsafe fn trim_javascript_string(value: *const c_char, start: bool, end: bool) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let value = if start {
+        value.trim_start_matches(is_javascript_whitespace)
+    } else {
+        value.as_ref()
+    };
+    let value = if end {
+        value.trim_end_matches(is_javascript_whitespace)
+    } else {
+        value
+    };
+    arena_c_string(value).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must reference a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_trim(value: *const c_char) -> *const c_char {
+    unsafe { trim_javascript_string(value, true, true) }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must reference a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_trim_start(value: *const c_char) -> *const c_char {
+    unsafe { trim_javascript_string(value, true, false) }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must reference a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_trim_end(value: *const c_char) -> *const c_char {
+    unsafe { trim_javascript_string(value, false, true) }
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 

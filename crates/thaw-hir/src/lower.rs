@@ -3144,6 +3144,15 @@ impl<'a> FnLowerer<'a> {
                             HirType::Bool
                         });
                     }
+                    "__thaw_string_trim"
+                    | "__thaw_string_trim_start"
+                    | "__thaw_string_trim_end" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("string trim expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "string trim receiver")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
@@ -5437,6 +5446,23 @@ impl<'a> FnLowerer<'a> {
                             &[(name, ty, value)],
                         );
                     }
+                }
+                if matches!(property.sym.as_ref(), "trim" | "trimStart" | "trimEnd") {
+                    if !call.args.is_empty() {
+                        return Err(format!("native `.{}()` expects no arguments", property.sym));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "string trim receiver")?;
+                    let suffix = match property.sym.as_ref() {
+                        "trim" => "trim",
+                        "trimStart" => "trim_start",
+                        "trimEnd" => "trim_end",
+                        _ => unreachable!(),
+                    };
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                        vec![receiver],
+                    ));
                 }
                 if property.sym == *"join" {
                     if call.args.len() > 1 {
