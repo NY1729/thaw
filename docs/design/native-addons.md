@@ -35,7 +35,10 @@ instance methodをtyped N-API callへ書き換える。数値を保持する自�
 HIR、LLVM、N-API hostを通した実行ファイルE2Eで検証した。local aliasへの初期化・代入も
 class情報を伝播し、未知値への再代入で安全に追跡を破棄する。静的な名前の
 nested object propertyとproperty代入も追跡し、分岐で一致するfactだけを保持する。
-parentの上書きは全descendantの追跡を破棄する。getterとstatic methodは引き続き残課題である。
+parentの上書きは全descendantの追跡を破棄する。static methodはclass export自体を
+N-API receiverにし、instance methodと同じarity、overload、callback、native value
+marshal規則でnamed・namespace callを書き換える。自作addonの`NativeBox.twice(21)`を
+実行ファイルE2Eで検証した。getterは引き続き残課題である。
 callback ABIについてはinstance methodにも接続し、0〜2個の動的引数と`Json`／`void`
 戻り値を扱う。`.d.ts`の`Error | null`や`any`はこの境界で`Json`へ正規化する。
 receiverと同じ永続`napi_env`内にcallback functionを作り、`this`を維持してmethodを

@@ -5024,7 +5024,9 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         if signature.backend == DynamicBackend::Napi
             && (signature.symbol.starts_with("$method$")
-                || signature.symbol.starts_with("$methodvoid$"))
+                || signature.symbol.starts_with("$methodvoid$")
+                || signature.symbol.starts_with("$staticmethod$")
+                || signature.symbol.starts_with("$staticmethodvoid$"))
         {
             return self.compile_typed_napi_method(signature, args);
         }
@@ -5242,8 +5244,15 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let [receiver, method_args @ ..] = args else {
-            return Err("typed N-API method expects a receiver".into());
+        let is_static = signature.symbol.starts_with("$staticmethod$")
+            || signature.symbol.starts_with("$staticmethodvoid$");
+        let (receiver_expr, method_args) = if is_static {
+            (None, args)
+        } else {
+            let [receiver, method_args @ ..] = args else {
+                return Err("typed N-API method expects a receiver".into());
+            };
+            (Some(receiver), method_args)
         };
         let callback = matches!(signature.params.last(), Some(HirType::Function(_, _)))
             .then(|| method_args.last())
@@ -5253,7 +5262,29 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             method_args
         };
-        let receiver = self.compile_expr(receiver)?;
+        let receiver = if let Some(receiver) = receiver_expr {
+            self.compile_expr(receiver)?
+        } else {
+            let class = signature
+                .symbol
+                .split('$')
+                .nth(2)
+                .ok_or("invalid typed N-API static method symbol")?;
+            let class = self
+                .builder
+                .build_global_string_ptr(class, "napi_static_class_name")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_napi_get_export").unwrap(),
+                    &[class.as_pointer_value().into()],
+                    "napi_static_class",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+        };
         let array = self
             .builder
             .build_call(
@@ -5267,7 +5298,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap();
         for (index, (argument, ty)) in marshalled_args
             .iter()
-            .zip(signature.params.iter().skip(1))
+            .zip(signature.params.iter().skip(usize::from(!is_static)))
             .enumerate()
         {
             let mut value = self.compile_expr(argument)?;
@@ -5343,7 +5374,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 method.as_pointer_value(),
                 args_json,
                 callback,
-                signature.symbol.starts_with("$methodvoid$"),
+                signature.symbol.starts_with("$methodvoid$")
+                    || signature.symbol.starts_with("$staticmethodvoid$"),
             )?
         } else {
             self.builder
