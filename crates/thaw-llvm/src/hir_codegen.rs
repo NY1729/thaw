@@ -402,6 +402,15 @@ impl<'ctx> HirCompiler<'ctx> {
         let printf_type = i32_type.fn_type(&[i8_ptr.into()], true);
         self.module
             .add_function("printf", printf_type, Some(Linkage::External));
+        let pow_type = self.context.f64_type().fn_type(
+            &[
+                self.context.f64_type().into(),
+                self.context.f64_type().into(),
+            ],
+            false,
+        );
+        self.module
+            .add_function("pow", pow_type, Some(Linkage::External));
 
         let arena_alloc_type = i8_ptr.fn_type(&[i64_type.into(), i64_type.into()], false);
         self.module.add_function(
@@ -6624,6 +6633,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_float_div(lhs_val, rhs_val, "divtmp")
                 .map(Into::into)
                 .map_err(|e| e.to_string()),
+            BinOp::Mod => self
+                .builder
+                .build_float_rem(lhs_val, rhs_val, "modtmp")
+                .map(Into::into)
+                .map_err(|e| e.to_string()),
+            BinOp::Exp => self
+                .builder
+                .build_call(
+                    self.module.get_function("pow").unwrap(),
+                    &[lhs_val.into(), rhs_val.into()],
+                    "powtmp",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "pow returned no value".to_string()),
             BinOp::Lt => self
                 .builder
                 .build_float_compare(FloatPredicate::OLT, lhs_val, rhs_val, "lttmp")
@@ -9383,6 +9408,30 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "extended_operators"),
             "left\n-2\n2\ntrue\nleft\ntrue\nfalse\nfalse\n-3\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_remainder_exponentiation_and_compound_forms() {
+        let source = r#"
+            async function numberValue(): Promise<number> {
+                await sleep(1);
+                return 10;
+            }
+            async function main(): Promise<void> {
+                let value = 10;
+                console.log(value % 3);
+                console.log(2 ** 3);
+                value %= 4;
+                value **= 3;
+                console.log(value);
+                console.log((await numberValue()) % 4);
+                console.log(2 ** (await numberValue()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "remainder_exponentiation"),
+            "1\n8\n8\n2\n1024\n"
         );
     }
 

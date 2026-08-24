@@ -1759,6 +1759,8 @@ fn compound_op(op: AssignOp) -> Option<BinOp> {
         AssignOp::SubAssign => Some(BinOp::Sub),
         AssignOp::MulAssign => Some(BinOp::Mul),
         AssignOp::DivAssign => Some(BinOp::Div),
+        AssignOp::ModAssign => Some(BinOp::Mod),
+        AssignOp::ExpAssign => Some(BinOp::Exp),
         _ => None,
     }
 }
@@ -1769,6 +1771,8 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
         BinaryOp::Sub => Ok(BinOp::Sub),
         BinaryOp::Mul => Ok(BinOp::Mul),
         BinaryOp::Div => Ok(BinOp::Div),
+        BinaryOp::Mod => Ok(BinOp::Mod),
+        BinaryOp::Exp => Ok(BinOp::Exp),
         BinaryOp::Lt => Ok(BinOp::Lt),
         BinaryOp::Gt => Ok(BinOp::Gt),
         BinaryOp::EqEqEq => Ok(BinOp::EqEqEq),
@@ -2622,7 +2626,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         Ok(HirType::Bool)
                     }
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Exp => {
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
                         {
@@ -4882,6 +4886,40 @@ mod tests {
                 HirExpr::BinOp(..) | HirExpr::Lit(..)
             ));
         }
+    }
+
+    #[test]
+    fn lowers_remainder_exponentiation_and_compound_assignments() {
+        let program = lower(
+            r#"function main(): void {
+                let value = 10;
+                console.log(value % 3);
+                console.log(2 ** 3);
+                value %= 4;
+                value **= 3;
+                console.log(value);
+            }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[1],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::BinOp(BinOp::Mod, _, _))
+        ));
+        assert!(matches!(
+            &program.functions[0].body[2],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::BinOp(BinOp::Exp, _, _))
+        ));
+        assert!(matches!(
+            &program.functions[0].body[3],
+            HirStmt::Expr(HirExpr::Assign(_, value))
+                if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Mod, _, _))
+        ));
+        assert!(matches!(
+            &program.functions[0].body[4],
+            HirStmt::Expr(HirExpr::Assign(_, value))
+                if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Exp, _, _))
+        ));
     }
 
     #[test]
