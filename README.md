@@ -509,9 +509,12 @@ literals retain recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
 name and type. Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
-compound assignments invalidate the affected fact. Branch joins and
-computed/spread object-literal properties remain outside this local inference
-pass.
+compound assignments invalidate the affected fact. Computed/spread
+object-literal properties remain outside this local inference pass. `if/else`
+branches are analyzed from the same incoming state and retain
+only value, class-instance, and callback facts that agree on every outgoing
+path; an omitted `else` joins against the unchanged incoming path. Loop,
+switch, and exception-flow joins remain explicit gaps.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
