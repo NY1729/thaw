@@ -272,7 +272,8 @@ The workspace crates have narrow responsibilities:
 - `new Promise<T>((resolve, reject) => ...)` supports contextually typed arrow
   executors. `.then()` transforms resolved values, `.catch()` recovers rejected
   values, returned Promises are flattened, and callback/executor throws reject
-  the derived Promise
+  the derived Promise. `new Promise<void>` exposes a zero-argument `resolve()`;
+  direct awaits preserve both fulfillment and rejection through async frames
 - `.finally()` runs for either settlement, preserves the original value/error,
   waits for returned Promises, and replaces the result when cleanup throws or
   rejects. Promise callbacks accept arrows, function variables, and named
