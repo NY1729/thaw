@@ -500,9 +500,12 @@ primitive conversion calls, and `.length`. Trailing optional method parameters
 generate every callable arity from the required prefix through the complete
 signature. Number-typed rest
 parameters are expanded only for the argument counts observed at compiled call
-sites, so they do not impose an arbitrary maximum arity. User-function return
-inference, arbitrary property types, and rest element types beyond the currently
-native-representable surface remain explicit gaps.
+sites, so they do not impose an arbitrary maximum arity. User-function calls
+participate in overload selection through explicit return annotations or a
+uniformly inferred return type; repeated collection resolves forward call
+chains. Parameter-dependent/conflicting returns, arbitrary property types, and
+rest element types beyond the currently native-representable surface remain
+explicit gaps.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
