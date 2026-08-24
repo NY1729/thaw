@@ -656,9 +656,11 @@ The workspace crates have narrow responsibilities:
   merge identical bindings and propagate ambiguity through barrel modules;
   importing an ambiguous name is a source-located error. Top-level-await
   cycles are explicit errors. `import.meta.url` is replaced per source module
-  with its percent-encoded absolute `file://` URL; other `import.meta`
-  properties, non-JSON attributes and genuinely runtime-computed external
-  package imports remain outside the supported subset. Expression-free
+  with its percent-encoded absolute `file://` URL. Static relative/absolute
+  `import.meta.resolve(specifier)` uses lexical path normalization and preserves
+  queries/fragments. Bare-package resolution, other meta properties, non-JSON
+  attributes and genuinely runtime-computed external package imports remain
+  outside the supported subset. Expression-free
   templates, parentheses and string-only concatenations are folded and bundled;
   conditional branches and template interpolations composed from those values
   produce a bounded finite candidate set (up to 64 external specifiers)
