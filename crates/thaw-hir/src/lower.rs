@@ -3156,7 +3156,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     "__thaw_number_neg" | "__thaw_math_abs" | "__thaw_math_floor"
                     | "__thaw_math_ceil" | "__thaw_math_trunc" | "__thaw_math_sqrt"
-                    | "__thaw_math_sign" | "__thaw_math_round" => {
+                    | "__thaw_math_sign" | "__thaw_math_round" | "__thaw_math_exp"
+                    | "__thaw_math_log" | "__thaw_math_log2" | "__thaw_math_log10"
+                    | "__thaw_math_sin" | "__thaw_math_cos" => {
                         let [argument] = args.as_slice() else {
                             return Err("unary Math function expects one operand".into());
                         };
@@ -5194,7 +5196,17 @@ impl<'a> FnLowerer<'a> {
                     if object.sym == *"Math"
                         && matches!(
                             property.sym.as_ref(),
-                            "abs" | "floor" | "ceil" | "trunc" | "sqrt"
+                            "abs"
+                                | "floor"
+                                | "ceil"
+                                | "trunc"
+                                | "sqrt"
+                                | "exp"
+                                | "log"
+                                | "log2"
+                                | "log10"
+                                | "sin"
+                                | "cos"
                         )
                     {
                         let [argument] = call.args.as_slice() else {

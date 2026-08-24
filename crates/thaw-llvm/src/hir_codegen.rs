@@ -425,6 +425,12 @@ impl<'ctx> HirCompiler<'ctx> {
             "llvm.ceil.f64",
             "llvm.trunc.f64",
             "llvm.sqrt.f64",
+            "llvm.exp.f64",
+            "llvm.log.f64",
+            "llvm.log2.f64",
+            "llvm.log10.f64",
+            "llvm.sin.f64",
+            "llvm.cos.f64",
         ] {
             self.module
                 .add_function(name, unary_f64_type, Some(Linkage::External));
@@ -7568,6 +7574,16 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_math_sqrt" => {
                 return self.compile_single_arg_call("llvm.sqrt.f64", args, "Math.sqrt")
             }
+            "__thaw_math_exp" | "__thaw_math_log" | "__thaw_math_log2" | "__thaw_math_log10"
+            | "__thaw_math_sin" | "__thaw_math_cos" => {
+                let operation = name.trim_start_matches("__thaw_math_");
+                let intrinsic = format!("llvm.{operation}.f64");
+                return self.compile_single_arg_call(
+                    &intrinsic,
+                    args,
+                    &format!("Math.{operation}"),
+                );
+            }
             "__thaw_math_pow" => {
                 let [left, right] = args else {
                     return Err("Math.pow expects two operands".to_string());
@@ -11456,6 +11472,38 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "math_round"),
             "1\n2\n-1\n-2\ntrue\ntrue\ntrue\ntrue\nfalse\nawaited-round\n5\n"
+        );
+    }
+
+    #[test]
+    fn compiles_transcendental_math_intrinsics() {
+        let source = r#"
+            function value(): string {
+                console.log("value-evaluated");
+                return "8";
+            }
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-math");
+                return "1000";
+            }
+            async function main(): Promise<void> {
+                console.log(Math.exp(0) === 1);
+                console.log(Math.log(1) === 0);
+                console.log(Math.log2(value()) === 3);
+                console.log(Math.log10(await delayed()) === 3);
+                console.log(Math.sin(0) === 0);
+                console.log(Math.cos(0) === 1);
+                console.log(Number.isFinite(Math.log(0)));
+                console.log(Math.log(0) < 0);
+                console.log(Number.isNaN(Math.log(-1)));
+                console.log(Number.isFinite(Math.exp(Number("Infinity"))));
+                console.log(Number.isNaN(Math.sin(Number("Infinity"))));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "transcendental_math"),
+            "true\ntrue\nvalue-evaluated\ntrue\nawaited-math\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\n"
         );
     }
 
