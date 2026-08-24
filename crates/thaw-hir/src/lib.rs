@@ -1139,11 +1139,6 @@ pub fn set_ffi_aggregate_layout(
             "FFI aggregate layout for `{symbol}` requires a portable or packed aggregate return ABI"
         ));
     }
-    if signature.error_abi != FfiErrorAbi::Direct {
-        return Err(format!(
-            "FFI aggregate layout for `{symbol}` currently supports only the direct error ABI"
-        ));
-    }
     if layout.field_offsets.len() != fields.len() {
         return Err(format!(
             "FFI aggregate layout for `{symbol}` has {} field offsets, expected {}",
