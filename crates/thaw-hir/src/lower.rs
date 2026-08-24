@@ -6164,6 +6164,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     return match receiver_type {
                         HirType::Array(element) => {
+                            let array_type = HirType::Array(element.clone());
                             let builtin = match element.as_ref() {
                                 HirType::F64 => "__thaw_number_array_join",
                                 HirType::Str => "__thaw_string_array_join",
@@ -6175,10 +6176,28 @@ impl<'a> FnLowerer<'a> {
                                     ))
                                 }
                             };
-                            Ok(HirExpr::Call(
+                            let receiver_name =
+                                format!("__thaw_join_receiver_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let separator_name =
+                                format!("__thaw_join_separator_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(receiver_name.clone(), array_type.clone());
+                            self.scope.insert(separator_name.clone(), HirType::Str);
+                            let result = HirExpr::Call(
                                 Box::new(HirExpr::Var(builtin.to_string())),
-                                vec![receiver, separator],
-                            ))
+                                vec![
+                                    HirExpr::Var(receiver_name.clone()),
+                                    HirExpr::Var(separator_name.clone()),
+                                ],
+                            );
+                            self.wrap_call_argument_bindings(
+                                result,
+                                &[
+                                    (receiver_name, array_type, receiver),
+                                    (separator_name, HirType::Str, separator),
+                                ],
+                            )
                         }
                         HirType::Tuple(elements) => self.join_tuple(receiver, elements, separator),
                         other => Err(format!(
