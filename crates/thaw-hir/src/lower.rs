@@ -2097,7 +2097,7 @@ impl<'a> FnLowerer<'a> {
                             indexed
                         }
                     };
-                    let item_stmt = match &for_of.left {
+                    let item_stmts = match &for_of.left {
                         ForHead::VarDecl(decl) => {
                             let [declarator] = decl.decls.as_slice() else {
                                 return Err("`for...of` requires exactly one loop binding".into());
@@ -2107,65 +2107,97 @@ impl<'a> FnLowerer<'a> {
                                     "`for...of` loop bindings cannot have an initializer".into(),
                                 );
                             }
-                            let Pat::Ident(binding) = &declarator.name else {
-                                return Err(
-                                    "`for...of` requires an identifier loop binding".into(),
-                                );
-                            };
-                            let item_ty = match &binding.type_ann {
-                                Some(annotation) => {
-                                    let declared = lower_ts_type(
-                                        &annotation.type_ann,
-                                        self.interfaces,
-                                        self.generic_interfaces,
-                                    )?;
-                                    if declared != item_type {
-                                        return Err(format!(
-                                            "`for...of` binding has type {declared:?}, expected {:?}",
-                                            item_type
-                                        ));
+                            if let Pat::Ident(binding) = &declarator.name {
+                                let item_ty = match &binding.type_ann {
+                                    Some(annotation) => {
+                                        let declared = lower_ts_type(
+                                            &annotation.type_ann,
+                                            self.interfaces,
+                                            self.generic_interfaces,
+                                        )?;
+                                        if declared != item_type {
+                                            return Err(format!(
+                                                "`for...of` binding has type {declared:?}, expected {:?}",
+                                                item_type
+                                            ));
+                                        }
+                                        declared
                                     }
-                                    declared
-                                }
-                                None => item_type.clone(),
-                            };
-                            let source_name = binding.id.sym.to_string();
-                            let item_name =
-                                format!("{source_name}__thaw_{}", self.next_binding);
-                            self.next_binding += 1;
-                            self.scope.insert(item_name.clone(), item_ty.clone());
-                            self.bindings
-                                .entry(source_name)
-                                .or_default()
-                                .push(item_name.clone());
-                            HirStmt::Let(item_name, item_ty, item_value())
+                                    None => item_type.clone(),
+                                };
+                                let source_name = binding.id.sym.to_string();
+                                let item_name =
+                                    format!("{source_name}__thaw_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(item_name.clone(), item_ty.clone());
+                                self.bindings
+                                    .entry(source_name)
+                                    .or_default()
+                                    .push(item_name.clone());
+                                vec![HirStmt::Let(item_name, item_ty, item_value())]
+                            } else if matches!(declarator.name, Pat::Object(_) | Pat::Array(_)) {
+                                let temporary =
+                                    format!("__thaw_for_of_item_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(temporary.clone(), item_type.clone());
+                                let mut statements = vec![HirStmt::Let(
+                                    temporary.clone(),
+                                    item_type.clone(),
+                                    item_value(),
+                                )];
+                                self.lower_binding_pattern(
+                                    &declarator.name,
+                                    HirExpr::Var(temporary),
+                                    &item_type,
+                                    &mut statements,
+                                )?;
+                                statements
+                            } else {
+                                return Err("unsupported `for...of` binding pattern".into());
+                            }
                         }
                         ForHead::Pat(pattern) => {
-                            let Pat::Ident(binding) = pattern.as_ref() else {
-                                return Err(
-                                    "`for...of` assignment requires an identifier target".into(),
-                                );
-                            };
-                            let item_name = self.resolve_binding(binding.id.sym.as_ref());
-                            let item_ty = self.scope.get(&item_name).cloned().ok_or_else(|| {
-                                format!("unknown `for...of` assignment target `{item_name}`")
-                            })?;
-                            if item_ty != item_type {
-                                return Err(format!(
-                                    "`for...of` assignment target has type {item_ty:?}, expected {:?}",
-                                    item_type
-                                ));
+                            if let Pat::Ident(binding) = pattern.as_ref() {
+                                let item_name = self.resolve_binding(binding.id.sym.as_ref());
+                                let item_ty = self.scope.get(&item_name).cloned().ok_or_else(|| {
+                                    format!("unknown `for...of` assignment target `{item_name}`")
+                                })?;
+                                if item_ty != item_type {
+                                    return Err(format!(
+                                        "`for...of` assignment target has type {item_ty:?}, expected {:?}",
+                                        item_type
+                                    ));
+                                }
+                                vec![HirStmt::Expr(HirExpr::Assign(
+                                    item_name,
+                                    Box::new(item_value()),
+                                ))]
+                            } else if matches!(pattern.as_ref(), Pat::Object(_) | Pat::Array(_)) {
+                                let temporary =
+                                    format!("__thaw_for_of_item_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(temporary.clone(), item_type.clone());
+                                let mut statements = vec![HirStmt::Let(
+                                    temporary.clone(),
+                                    item_type.clone(),
+                                    item_value(),
+                                )];
+                                self.lower_assignment_pattern(
+                                    pattern,
+                                    HirExpr::Var(temporary),
+                                    &item_type,
+                                    &mut statements,
+                                )?;
+                                statements
+                            } else {
+                                return Err("unsupported `for...of` assignment pattern".into());
                             }
-                            HirStmt::Expr(HirExpr::Assign(
-                                item_name,
-                                Box::new(item_value()),
-                            ))
                         }
                         ForHead::UsingDecl(_) => {
                             return Err("`using` bindings in `for...of` are not supported".into())
                         }
                     };
-                    let mut body = vec![item_stmt];
+                    let mut body = item_stmts;
                     body.extend(self.lower_body(&for_of.body)?);
                     let update = HirExpr::Assign(
                         index_name.clone(),
@@ -5959,6 +5991,33 @@ mod tests {
             main.body.last(),
             Some(HirStmt::Expr(HirExpr::Call(_, _)))
         ));
+    }
+
+    #[test]
+    fn lowers_for_of_destructuring_bindings_and_assignment_heads() {
+        let program = lower(
+            r#"function main(): void {
+                const rows = [{ x: 1, label: "a" }];
+                for (const { x, label } of rows) { console.log(x); }
+                let assigned = 0;
+                for ({ x: assigned } of rows) { console.log(assigned); }
+                const pairs: [number, string][] = [[2, "b"]];
+                for (const [value, text] of pairs) { console.log(text); }
+            }"#,
+        );
+        let loops = program.functions[0]
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                HirStmt::While(_, body) => Some(body),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loops.len(), 3);
+        assert!(loops.iter().all(|body| matches!(
+            body.first(),
+            Some(HirStmt::Let(name, _, _)) if name.starts_with("__thaw_for_of_item_")
+        )));
     }
 
     #[test]

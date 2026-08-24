@@ -515,6 +515,8 @@ renaming、array hole、object/tuple restを扱い、awaited sourceもframe slot
 default valueはundefined表現が必要なため、誤ったfallbackを生成せず明示的に診断する。
 destructuring assignmentも同じfixed-layout展開を使い、既存bindingへ順番に代入した後、式の
 結果として保存済みの元の右辺を返す。nested/rest patternとawaited RHSでも評価は一度だけになる。
+`for...of`/`for await...of`のdeclarationおよびassignment headも、各itemを一度だけ内部localへ
+保存してからobject/tuple patternを展開する。continue時のindex更新とbreakは既存loop変換を維持する。
 
 ## 12. Promise constructorとcontinuation chain
 
