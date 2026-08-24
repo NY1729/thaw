@@ -2996,11 +2996,6 @@ impl<'a> FnLowerer<'a> {
                 for property in &pattern.props {
                     match property {
                         ObjectPatProp::Assign(property) => {
-                            if property.value.is_some() {
-                                return Err(
-                                    "destructuring defaults require undefined support".into()
-                                );
-                            }
                             let key = property.key.id.sym.to_string();
                             let field_type = fields
                                 .iter()
@@ -3008,10 +3003,19 @@ impl<'a> FnLowerer<'a> {
                                 .map(|(_, ty)| ty.clone())
                                 .ok_or_else(|| format!("object has no field `{key}`"))?;
                             used.insert(key.clone());
+                            let mut field_value =
+                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key);
+                            let mut binding_type = field_type.clone();
+                            if let Some(default) = &property.value {
+                                let default = self.lower_expr(default)?;
+                                field_value =
+                                    self.lower_nullish_coalescing(field_value, default)?;
+                                binding_type = self.infer_expr_type(&field_value)?;
+                            }
                             self.lower_binding_pattern(
                                 &Pat::Ident(property.key.clone()),
-                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key),
-                                &field_type,
+                                field_value,
+                                &binding_type,
                                 statements,
                             )?;
                         }
@@ -3133,7 +3137,12 @@ impl<'a> FnLowerer<'a> {
                 }
                 Ok(())
             }
-            Pat::Assign(_) => Err("destructuring defaults require undefined support".into()),
+            Pat::Assign(assign) => {
+                let default = self.lower_expr(&assign.right)?;
+                let value = self.lower_nullish_coalescing(value, default)?;
+                let value_type = self.infer_expr_type(&value)?;
+                self.lower_binding_pattern(&assign.left, value, &value_type, statements)
+            }
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
             _ => Err("unsupported destructuring binding pattern".into()),
         }
@@ -3167,10 +3176,16 @@ impl<'a> FnLowerer<'a> {
                     expected.len()
                 ));
             }
-            for (index, (expected, value)) in expected.iter().zip(values).enumerate() {
-                self.expect_type(expected, value, &format!("tuple element {index}"))?;
-            }
-            return Ok(value);
+            let values = expected
+                .iter()
+                .zip(values)
+                .enumerate()
+                .map(|(index, (expected, value))| {
+                    self.coerce_to_declared(expected, value.clone())
+                        .map_err(|error| format!("tuple element {index}: {error}"))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(HirExpr::ArrayLit(values));
         }
         let (HirType::Object(declared_fields), HirExpr::ObjectLit(lit_fields)) = (declared, &value)
         else {
@@ -5742,11 +5757,6 @@ impl<'a> FnLowerer<'a> {
                 for property in &pattern.props {
                     match property {
                         ObjectPatProp::Assign(property) => {
-                            if property.value.is_some() {
-                                return Err(
-                                    "destructuring defaults require undefined support".into()
-                                );
-                            }
                             let key = property.key.id.sym.to_string();
                             let field_type = fields
                                 .iter()
@@ -5754,10 +5764,19 @@ impl<'a> FnLowerer<'a> {
                                 .map(|(_, ty)| ty.clone())
                                 .ok_or_else(|| format!("object has no field `{key}`"))?;
                             used.insert(key.clone());
+                            let mut field_value =
+                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key);
+                            let mut binding_type = field_type.clone();
+                            if let Some(default) = &property.value {
+                                let default = self.lower_expr(default)?;
+                                field_value =
+                                    self.lower_nullish_coalescing(field_value, default)?;
+                                binding_type = self.infer_expr_type(&field_value)?;
+                            }
                             self.lower_assignment_pattern(
                                 &Pat::Ident(property.key.clone()),
-                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key),
-                                &field_type,
+                                field_value,
+                                &binding_type,
                                 statements,
                             )?;
                         }
@@ -5881,7 +5900,12 @@ impl<'a> FnLowerer<'a> {
                 }
                 Ok(())
             }
-            Pat::Assign(_) => Err("destructuring defaults require undefined support".into()),
+            Pat::Assign(assign) => {
+                let default = self.lower_expr(&assign.right)?;
+                let value = self.lower_nullish_coalescing(value, default)?;
+                let value_type = self.infer_expr_type(&value)?;
+                self.lower_assignment_pattern(&assign.left, value, &value_type, statements)
+            }
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
             _ => Err("unsupported destructuring assignment target".into()),
         }
