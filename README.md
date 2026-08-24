@@ -426,6 +426,8 @@ The workspace crates have narrow responsibilities:
 - Native strings implement `.trim()`, `.trimStart()` and `.trimEnd()` with the
   exact ECMAScript whitespace/line-terminator set (rather than the broader
   host-language predicate), arena-owned results, single evaluation and `await`
+- Strict equality and inequality recognize every native string-producing
+  builtin and compare C-string contents, not arena/global pointer identities
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
