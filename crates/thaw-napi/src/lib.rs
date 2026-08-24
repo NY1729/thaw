@@ -249,6 +249,12 @@ pub struct Reference {
     count: u32,
 }
 
+struct AsyncContext {
+    env: usize,
+    resource: NapiValue,
+    resource_name: String,
+}
+
 #[repr(C)]
 pub struct NapiPropertyDescriptor {
     utf8name: *const c_char,
@@ -3745,12 +3751,40 @@ pub unsafe extern "C" fn napi_close_callback_scope(env: NapiEnv, scope: *mut c_v
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, _context: *mut c_void) -> NapiStatus {
-    if env.is_null() {
-        NAPI_INVALID_ARG
-    } else {
-        NAPI_OK
+pub unsafe extern "C" fn napi_async_init(
+    env: NapiEnv,
+    resource: NapiValue,
+    resource_name: NapiValue,
+    out: *mut *mut c_void,
+) -> NapiStatus {
+    if env.is_null() || out.is_null() {
+        return NAPI_INVALID_ARG;
     }
+    let name = match value_ref(resource_name) {
+        Ok(Value::String(name)) => name.clone(),
+        _ => return NAPI_STRING_EXPECTED,
+    };
+    *out = Box::into_raw(Box::new(AsyncContext {
+        env: env as usize,
+        resource,
+        resource_name: name,
+    }))
+    .cast();
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, context: *mut c_void) -> NapiStatus {
+    if env.is_null() || context.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let context = Box::from_raw(context.cast::<AsyncContext>());
+    if context.env != env as usize {
+        std::mem::forget(context);
+        return NAPI_INVALID_ARG;
+    }
+    let _ = (context.resource, context.resource_name);
+    NAPI_OK
 }
 
 #[no_mangle]
@@ -4865,6 +4899,38 @@ mod tests {
             assert_eq!(
                 napi_create_typedarray(env_ptr, 1, 0, buffer, 0, &mut view),
                 NAPI_INVALID_ARG
+            );
+        }
+    }
+
+    #[test]
+    fn async_contexts_validate_names_and_environment_ownership() {
+        unsafe {
+            let mut env = Env::new();
+            let mut other_env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut name = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"test-resource".as_ptr(), 13, &mut name),
+                NAPI_OK
+            );
+            let mut context = ptr::null_mut();
+            assert_eq!(
+                napi_async_init(env_ptr, ptr::null_mut(), name, &mut context),
+                NAPI_OK
+            );
+            assert!(!context.is_null());
+            assert_eq!(
+                napi_async_destroy(&mut other_env, context),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_async_destroy(env_ptr, context), NAPI_OK);
+
+            let mut number = ptr::null_mut();
+            assert_eq!(napi_create_int32(env_ptr, 1, &mut number), NAPI_OK);
+            assert_eq!(
+                napi_async_init(env_ptr, ptr::null_mut(), number, &mut context),
+                NAPI_STRING_EXPECTED
             );
         }
     }
