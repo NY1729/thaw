@@ -395,6 +395,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// and thaw-arena's `thaw_arena_alloc` (backing Phase 1 arrays).
     fn declare_runtime_builtins(&self) {
         let i8_ptr = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
 
@@ -556,6 +557,34 @@ impl<'ctx> HirCompiler<'ctx> {
         ] {
             self.module
                 .add_function(name, array_join_type, Some(Linkage::External));
+        }
+        for (name, needle_type, return_type) in [
+            (
+                "thaw_number_array_index_of",
+                f64_type.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_number_array_includes",
+                f64_type.into(),
+                i8_type.into(),
+            ),
+            ("thaw_string_array_index_of", i8_ptr.into(), f64_type.into()),
+            ("thaw_string_array_includes", i8_ptr.into(), i8_type.into()),
+            ("thaw_bool_array_index_of", i8_type.into(), f64_type.into()),
+            ("thaw_bool_array_includes", i8_type.into(), i8_type.into()),
+        ] {
+            let function_type = match return_type {
+                BasicTypeEnum::FloatType(return_type) => {
+                    return_type.fn_type(&[i8_ptr.into(), needle_type, f64_type.into()], false)
+                }
+                BasicTypeEnum::IntType(return_type) => {
+                    return_type.fn_type(&[i8_ptr.into(), needle_type, f64_type.into()], false)
+                }
+                _ => unreachable!(),
+            };
+            self.module
+                .add_function(name, function_type, Some(Linkage::External));
         }
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
@@ -7402,6 +7431,57 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array join returned no value".to_string());
             }
+            "__thaw_number_array_index_of"
+            | "__thaw_number_array_includes"
+            | "__thaw_string_array_index_of"
+            | "__thaw_string_array_includes"
+            | "__thaw_bool_array_index_of"
+            | "__thaw_bool_array_includes" => {
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                if args.len() != 3 {
+                    return Err("array search expects three operands".to_string());
+                }
+                let mut arguments = Vec::with_capacity(3);
+                for (index, argument) in args.iter().enumerate() {
+                    let mut value = self.compile_expr(argument)?;
+                    if index == 1 && name.starts_with("__thaw_bool_array_") {
+                        value = self
+                            .builder
+                            .build_int_z_extend(
+                                value.into_int_value(),
+                                self.context.i8_type(),
+                                "array_bool_needle",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into();
+                    }
+                    arguments.push(value.into());
+                }
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &arguments,
+                        "array_search",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array search returned no value".to_string())?;
+                if name.ends_with("_includes") {
+                    return self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            result.into_int_value(),
+                            self.context.i8_type().const_zero(),
+                            "array_includes_bool",
+                        )
+                        .map(Into::into)
+                        .map_err(|error| error.to_string());
+                }
+                return Ok(result);
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
@@ -11074,6 +11154,48 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_join"),
             "1,0,2.5\na--c\ntruefalse\n[object Object] / [object Object]\nreceiver-evaluated\nseparator-evaluated\n7 | x | false | 8,9\n\narray-awaited\n4+5+6\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_array_index_of_and_includes() {
+        let source = r#"
+            function values(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function wrongNeedle(): string {
+                console.log("needle");
+                return "2";
+            }
+            function start(): boolean {
+                console.log("start");
+                return true;
+            }
+            async function delayedStart(): Promise<number> {
+                await sleep(1);
+                console.log("awaited-start");
+                return -2;
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, 2, 0 / 0, -0];
+                const words: string[] = ["a", "b", "a"];
+                const flags: boolean[] = [false, true, false];
+                console.log(numbers.indexOf(2));
+                console.log(numbers.indexOf(0 / 0));
+                console.log(numbers.includes(0 / 0));
+                console.log(numbers.includes(0));
+                console.log(words.indexOf("a", 1));
+                console.log(words.includes("a", -1));
+                console.log(flags.indexOf(false, -2));
+                console.log(numbers.includes(1, Number("Infinity")));
+                console.log(values().includes(wrongNeedle(), start()));
+                console.log(numbers.indexOf(0, await delayedStart()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_search"),
+            "1\n-1\ntrue\ntrue\n2\ntrue\n2\nfalse\nreceiver\nneedle\nstart\nfalse\nawaited-start\n3\n"
         );
     }
 
