@@ -5901,6 +5901,209 @@ impl<'a> FnLowerer<'a> {
         self.lower_promise_callback(expr, &available[..arity], Some(expected_return))
     }
 
+    fn lower_array_reducer_callback(
+        &mut self,
+        expr: &Expr,
+        accumulator_type: &HirType,
+        element_type: &HirType,
+        array_type: &HirType,
+    ) -> Result<HirExpr, String> {
+        let arity = match expr {
+            Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Ident(ident) => {
+                let name = self.resolve_binding(ident.sym.as_ref());
+                self.scope
+                    .get(&name)
+                    .and_then(|ty| match ty {
+                        HirType::Function(params, _) => Some(params.len()),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.signatures
+                            .get(&name)
+                            .map(|signature| signature.params.len())
+                    })
+                    .ok_or_else(|| format!("unknown array reducer `{name}`"))?
+            }
+            _ => return Err("array reducer must be an arrow or function value".into()),
+        };
+        if arity > 4 {
+            return Err(format!(
+                "array reducer accepts at most four parameters, got {arity}"
+            ));
+        }
+        let available = [
+            accumulator_type.clone(),
+            element_type.clone(),
+            HirType::F64,
+            array_type.clone(),
+        ];
+        self.lower_promise_callback(expr, &available[..arity], Some(accumulator_type))
+    }
+
+    fn lower_array_reduce(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback: HirExpr,
+        initial: Option<(HirExpr, HirType)>,
+        reverse: bool,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_reduce_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_name = format!("__thaw_reduce_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let callback_type = self.infer_expr_type(&callback)?;
+        let accumulator_type = initial
+            .as_ref()
+            .map(|(_, ty)| ty.clone())
+            .unwrap_or_else(|| element_type.clone());
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        self.scope
+            .insert(callback_name.clone(), callback_type.clone());
+        let length_name = format!("__thaw_reduce_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_name = format!("__thaw_reduce_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let accumulator_name = format!("__thaw_reduce_accumulator_{}", self.next_binding);
+        self.next_binding += 1;
+        let element_name = format!("__thaw_reduce_element_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(index_name.clone(), HirType::F64);
+        self.scope
+            .insert(accumulator_name.clone(), accumulator_type.clone());
+        self.scope
+            .insert(element_name.clone(), element_type.clone());
+
+        let one = || HirExpr::Lit(HirLit::F64(1.0));
+        let length = || HirExpr::Var(length_name.clone());
+        let index = || HirExpr::Var(index_name.clone());
+        let receiver_var = || HirExpr::Var(receiver_name.clone());
+        let (initial_value, initial_index, empty_guard, initial_name) = if initial.is_some() {
+            let initial_name = format!("__thaw_reduce_initial_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope
+                .insert(initial_name.clone(), accumulator_type.clone());
+            (
+                HirExpr::Var(initial_name.clone()),
+                if reverse {
+                    HirExpr::BinOp(BinOp::Sub, Box::new(length()), Box::new(one()))
+                } else {
+                    HirExpr::Lit(HirLit::F64(0.0))
+                },
+                None,
+                Some(initial_name),
+            )
+        } else {
+            (
+                HirExpr::TypedIndex(
+                    Box::new(receiver_var()),
+                    Box::new(if reverse {
+                        HirExpr::BinOp(BinOp::Sub, Box::new(length()), Box::new(one()))
+                    } else {
+                        HirExpr::Lit(HirLit::F64(0.0))
+                    }),
+                    element_type.clone(),
+                ),
+                if reverse {
+                    HirExpr::BinOp(
+                        BinOp::Sub,
+                        Box::new(length()),
+                        Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+                    )
+                } else {
+                    one()
+                },
+                Some(HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(length()),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                    ),
+                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "Reduce of empty array with no initial value".into(),
+                    )))],
+                    Vec::new(),
+                )),
+                None,
+            )
+        };
+        let HirType::Function(params, _) = &callback_type else {
+            unreachable!("array reducer was validated as a function")
+        };
+        let available = [
+            HirExpr::Var(accumulator_name.clone()),
+            HirExpr::Var(element_name.clone()),
+            index(),
+            receiver_var(),
+        ];
+        let callback_call = HirExpr::Call(
+            Box::new(HirExpr::Var(callback_name.clone())),
+            available[..params.len()].to_vec(),
+        );
+        let mut statements = vec![HirStmt::Let(
+            length_name.clone(),
+            HirType::F64,
+            HirExpr::ArrayLen(Box::new(receiver_var())),
+        )];
+        if let Some(empty_guard) = empty_guard {
+            statements.push(empty_guard);
+        }
+        statements.extend([
+            HirStmt::Let(accumulator_name.clone(), accumulator_type, initial_value),
+            HirStmt::Let(index_name.clone(), HirType::F64, initial_index),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    if reverse { BinOp::GtEq } else { BinOp::Lt },
+                    Box::new(index()),
+                    Box::new(if reverse {
+                        HirExpr::Lit(HirLit::F64(0.0))
+                    } else {
+                        length()
+                    }),
+                ),
+                vec![
+                    HirStmt::Let(
+                        element_name,
+                        element_type.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(receiver_var()),
+                            Box::new(index()),
+                            element_type,
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(
+                        accumulator_name.clone(),
+                        Box::new(callback_call),
+                    )),
+                    HirStmt::Expr(HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            if reverse { BinOp::Sub } else { BinOp::Add },
+                            Box::new(index()),
+                            Box::new(one()),
+                        )),
+                    )),
+                ],
+            ),
+            HirStmt::Return(Some(HirExpr::Var(accumulator_name))),
+        ]);
+        let mut bindings = vec![
+            (receiver_name, array_type, receiver),
+            (callback_name, callback_type, callback),
+        ];
+        if let Some((initial, ty)) = initial {
+            bindings.push((
+                initial_name.expect("initial accumulator binding must be retained"),
+                ty,
+                initial,
+            ));
+        }
+        self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings)
+    }
+
     fn lower_array_predicate_method(
         &mut self,
         receiver: HirExpr,
@@ -6760,6 +6963,51 @@ impl<'a> FnLowerer<'a> {
                             "findLastIndex" => ArrayPredicateMode::FindLastIndex,
                             _ => unreachable!(),
                         },
+                    );
+                }
+                if matches!(property.sym.as_ref(), "reduce" | "reduceRight") {
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(format!(
+                            "native `.{}()` expects a reducer and optional initial value",
+                            property.sym
+                        ));
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array reducer spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "`.{}()` requires a homogeneous array, got {array_type:?}",
+                            property.sym
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let initial = call
+                        .args
+                        .get(1)
+                        .map(|argument| {
+                            let value = self.lower_expr(&argument.expr)?;
+                            let ty = self.infer_expr_type(&value)?;
+                            Ok::<_, String>((value, ty))
+                        })
+                        .transpose()?;
+                    let accumulator_type =
+                        initial.as_ref().map(|(_, ty)| ty).unwrap_or(&element_type);
+                    let callback = self.lower_array_reducer_callback(
+                        &call.args[0].expr,
+                        accumulator_type,
+                        &element_type,
+                        &array_type,
+                    )?;
+                    return self.lower_array_reduce(
+                        receiver,
+                        array_type,
+                        element_type,
+                        callback,
+                        initial,
+                        property.sym == *"reduceRight",
                     );
                 }
                 if property.sym == *"forEach" {

@@ -464,6 +464,11 @@ The workspace crates have narrow responsibilities:
   arguments and receiver/optional `thisArg` ordering, visiting every element
   once in index order and returning `void`; captures, empty arrays, every native
   element layout and awaited receivers are supported
+- Homogeneous native arrays implement `.reduce()` and `.reduceRight()` with
+  typed zero-to-four-argument reducers, distinct accumulator and element types,
+  captures, named callbacks, ordered receiver/initial-value evaluation and
+  awaited receivers. Calls without an initial value seed from the appropriate
+  endpoint and throw on empty arrays, matching JavaScript behavior
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
