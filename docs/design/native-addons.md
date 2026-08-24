@@ -59,8 +59,10 @@ native表現を越えるrest要素型は引き続き残課題である。
 object literalはfield名と再帰的に推論した型を保持し、property readと同一arityの
 structural object overloadを選択する。直線的な`=`代入はlocal変数とnested propertyの
 型を更新し、静的文字列のcomputed propertyも扱う。未知またはcompound assignmentは
-該当する型情報を破棄する。branch joinとcomputed/spread object literalは引き続き
-残課題である。
+該当する型情報を破棄する。computed/spread object literalは引き続き残課題である。
+`if/else`は同じ入力状態から両branchを解析し、全ての出口で一致する
+value、class instance、callback情報だけを保持する。`else`省略時は未変更の入力経路と
+joinする。loop、switch、exception flowのjoinは引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 

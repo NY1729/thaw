@@ -946,8 +946,8 @@ fn rewrite_external_class_methods(
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Expr,
-        FnDecl, FunctionBody, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt,
-        SimpleAssignTarget, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
+        FnDecl, FunctionBody, IfStmt, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread,
+        ReturnStmt, SimpleAssignTarget, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
     };
     use thaw_parser::common::Spanned;
 
@@ -1363,6 +1363,32 @@ fn rewrite_external_class_methods(
         edits: Vec<(u32, u32, String)>,
     }
     impl Visit for Finder<'_> {
+        fn visit_if_stmt(&mut self, statement: &IfStmt) {
+            statement.test.visit_with(self);
+            let base_variables = self.variables.clone();
+            let base_value_types = self.value_types.clone();
+            let base_callbacks = self.callbacks.clone();
+
+            statement.cons.visit_with(self);
+            let mut joined_variables = self.variables.clone();
+            let mut joined_value_types = self.value_types.clone();
+            let mut joined_callbacks = self.callbacks.clone();
+
+            self.variables = base_variables;
+            self.value_types = base_value_types;
+            self.callbacks = base_callbacks;
+            if let Some(alternate) = &statement.alt {
+                alternate.visit_with(self);
+            }
+
+            joined_variables.retain(|name, class| self.variables.get(name) == Some(class));
+            joined_value_types.retain(|name, ty| self.value_types.get(name) == Some(ty));
+            joined_callbacks.retain(|name| self.callbacks.contains(name));
+            self.variables = joined_variables;
+            self.value_types = joined_value_types;
+            self.callbacks = joined_callbacks;
+        }
+
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
@@ -4372,5 +4398,46 @@ mod tests {
         assert!(rewritten.contains("__set_string(box, value); const config"));
         assert!(rewritten.contains("__set_string(box, config.nested.value)"));
         assert!(rewritten.contains("__set_number(box, config.direct)"));
+    }
+
+    #[test]
+    fn joins_if_branch_types_and_discards_conflicting_facts() {
+        let source = r#"const box = new NativeBox(1); const flag = true; let stable = 1; if (flag) { stable = 2; } else { stable = 3; } box.set(stable); let conflict = 1; if (flag) { conflict = "text"; box.set(conflict); } else { conflict = 2; box.set(conflict); } box.set(conflict); let oneSided = 1; if (flag) { oneSided = "changed"; } box.set(oneSided);"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_unknown".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Bool],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("__set_number(box, stable)"));
+        assert!(rewritten.contains("conflict = \"text\"; __set_string(box, conflict)"));
+        assert!(rewritten.contains("conflict = 2; __set_number(box, conflict)"));
+        assert!(rewritten.contains("} __set_unknown(box, conflict)"));
+        assert!(rewritten.contains("} __set_unknown(box, oneSided)"));
     }
 }
