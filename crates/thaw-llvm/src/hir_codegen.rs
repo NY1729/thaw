@@ -1371,12 +1371,13 @@ impl<'ctx> HirCompiler<'ctx> {
         let param_types = self.ffi_param_types(&sig.params, &sig.param_string_abis)?;
 
         let fn_type = match (&sig.error_abi, &sig.ret) {
-            (FfiErrorAbi::ThawResult, HirType::Void) => {
-                return Err(format!(
-                    "FFI function `{}` cannot use thaw-result with a void return yet",
-                    sig.symbol
-                ));
-            }
+            (FfiErrorAbi::ThawResult, HirType::Void) => self
+                .context
+                .struct_type(
+                    &[self.context.ptr_type(AddressSpace::default()).into()],
+                    false,
+                )
+                .fn_type(&param_types, false),
             (FfiErrorAbi::ThawResult, ret) => self
                 .context
                 .struct_type(
@@ -4050,6 +4051,12 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_stmt(&mut self, stmt: &HirStmt) -> Result<bool, String> {
         match stmt {
             HirStmt::Expr(expr) => {
+                if let HirExpr::FfiCall(sig, args) = expr {
+                    if sig.ret == HirType::Void {
+                        self.compile_ffi_call(sig, args)?;
+                        return Ok(false);
+                    }
+                }
                 self.compile_expr(expr)?;
                 Ok(false)
             }
@@ -4454,7 +4461,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_lambda(captures, params, ret, body)
             }
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
-            HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args),
+            HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args)?.ok_or_else(|| {
+                format!(
+                    "the void result of FFI function `{}` cannot be used as a value",
+                    sig.symbol
+                )
+            }),
             HirExpr::DynamicCall(sig, args) => self.compile_typed_dynamic_call(sig, args),
 
             HirExpr::ArrayLit(elems) => self.compile_array_lit(elems),
@@ -9904,7 +9916,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         sig: &FfiSignature,
         args: &[HirExpr],
-    ) -> Result<BasicValueEnum<'ctx>, String> {
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
         let function = self
             .module
             .get_function(&sig.symbol)
@@ -9994,10 +10006,29 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_call(function, &compiled_args, "ffi_calltmp")
             .map_err(|e| e.to_string())?;
         call_site.set_call_convention(Self::ffi_calling_convention(sig.calling_convention));
-        let returned = call_site
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| format!("`{}` does not return a value", sig.symbol))?;
+        let returned = call_site.try_as_basic_value().basic();
+        if sig.ret == HirType::Void {
+            if sig.error_abi == FfiErrorAbi::Direct {
+                return Ok(None);
+            }
+            let result = returned
+                .ok_or_else(|| format!("`{}` did not return its error result", sig.symbol))?
+                .into_struct_value();
+            let error = self
+                .builder
+                .build_extract_value(result, 0, "ffi_result_error")
+                .map_err(|e| e.to_string())?
+                .into_pointer_value();
+            let error =
+                self.apply_ffi_string_ownership(error, &sig.error_ownership, "ffi_error")?;
+            self.builder
+                .build_store(self.pending_exception().as_pointer_value(), error)
+                .map_err(|e| e.to_string())?;
+            self.branch_on_pending_exception()?;
+            return Ok(None);
+        }
+        let returned =
+            returned.ok_or_else(|| format!("`{}` does not return a value", sig.symbol))?;
         if sig.error_abi == FfiErrorAbi::Direct {
             if sig.ret == HirType::Str && sig.return_string_abi == FfiStringAbi::NullTerminated {
                 return self
@@ -10006,14 +10037,17 @@ impl<'ctx> HirCompiler<'ctx> {
                         &sig.return_ownership,
                         "ffi_return",
                     )
-                    .map(BasicValueEnum::from);
+                    .map(BasicValueEnum::from)
+                    .map(Some);
             }
-            return self.marshal_ffi_return(
-                returned,
-                &sig.ret,
-                sig.return_string_abi,
-                &sig.return_ownership,
-            );
+            return self
+                .marshal_ffi_return(
+                    returned,
+                    &sig.ret,
+                    sig.return_string_abi,
+                    &sig.return_ownership,
+                )
+                .map(Some);
         }
 
         let result = returned.into_struct_value();
@@ -10038,7 +10072,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     &sig.return_ownership,
                     "ffi_return",
                 )
-                .map(BasicValueEnum::from);
+                .map(BasicValueEnum::from)
+                .map(Some);
         }
         self.marshal_ffi_return(
             value,
@@ -10046,6 +10081,7 @@ impl<'ctx> HirCompiler<'ctx> {
             sig.return_string_abi,
             &sig.return_ownership,
         )
+        .map(Some)
     }
 
     /// Compiles `args`, calls `function` with them, and extracts the
@@ -17998,6 +18034,102 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "20\nnative read failed\ncleanup\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
+        let source = r#"
+            declare function native_mark(value: number): void;
+            declare function mark_count(): number;
+            declare function native_check(value: number): void;
+            declare function error_destroy_count(): number;
+
+            function main(): void {
+                native_mark(2);
+                console.log(mark_count());
+                native_check(1);
+                console.log("ok");
+                try {
+                    native_check(0 - 1);
+                    console.log("unreachable");
+                } catch (error) {
+                    console.log(error);
+                    console.log(error_destroy_count());
+                }
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_check",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+        thaw_hir::set_ffi_ownership(
+            &mut program,
+            "native_check",
+            thaw_hir::FfiOwnership::Borrowed,
+            thaw_hir::FfiOwnership::Owned {
+                destroy: "destroy_error".into(),
+            },
+        )
+        .unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_void_result");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-void-result-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdlib.h>\n#include <string.h>\n\
+             typedef struct { char *error; } ThawVoidResult;\n\
+             static int marks; static int error_destroys;\n\
+             static char *copy(const char *s) { size_t n = strlen(s) + 1; char *p = malloc(n); memcpy(p, s, n); return p; }\n\
+             void native_mark(double value) { marks += (int)value; }\n\
+             double mark_count(void) { return marks; }\n\
+             ThawVoidResult native_check(double value) {\n\
+               if (value < 0) return (ThawVoidResult){copy(\"void check failed\")};\n\
+               return (ThawVoidResult){0};\n\
+             }\n\
+             void destroy_error(char *p) { ++error_destroys; free(p); }\n\
+             double error_destroy_count(void) { return error_destroys; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "2\nok\nvoid check failed\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

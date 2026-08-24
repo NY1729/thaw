@@ -386,6 +386,9 @@ pointer ABI for existing builtins and native archives.
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
-Versions 1 and 2 remain backward-compatible. Void thaw-result values,
-target-specific packing, variadics and nested aggregate ownership remain future
-extensions.
+Versions 1 and 2 remain backward-compatible. Target-specific packing, variadics
+and nested aggregate ownership remain future extensions. Void declarations use
+an ordinary C `void` return with the direct
+ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
+field follows the same ownership, pending-exception and `try/catch/finally`
+rules as value-bearing results.
