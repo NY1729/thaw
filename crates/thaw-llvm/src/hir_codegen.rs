@@ -635,6 +635,19 @@ impl<'ctx> HirCompiler<'ctx> {
             array_reverse_type,
             Some(Linkage::External),
         );
+        for name in [
+            "thaw_number_array_sort",
+            "thaw_string_array_sort",
+            "thaw_bool_array_sort",
+            "thaw_object_array_sort",
+            "thaw_number_array_to_sorted",
+            "thaw_string_array_to_sorted",
+            "thaw_bool_array_to_sorted",
+            "thaw_object_array_to_sorted",
+        ] {
+            self.module
+                .add_function(name, array_reverse_type, Some(Linkage::External));
+        }
         for (name, needle_type, return_type) in [
             (
                 "thaw_number_array_index_of",
@@ -7704,6 +7717,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     "array toReversed",
                 )
             }
+            "__thaw_number_array_sort"
+            | "__thaw_string_array_sort"
+            | "__thaw_bool_array_sort"
+            | "__thaw_object_array_sort"
+            | "__thaw_number_array_to_sorted"
+            | "__thaw_string_array_to_sorted"
+            | "__thaw_bool_array_to_sorted"
+            | "__thaw_object_array_to_sorted" => {
+                let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
+                return self.compile_single_arg_call(&runtime, args, "array sort");
+            }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
             | "__thaw_string_array_index_of"
@@ -11961,6 +11985,38 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_to_reversed"),
             "3,2,1\n1,2,3\n9\n0\nawaited-array\ncba\n"
+        );
+    }
+
+    #[test]
+    fn compiles_default_native_array_sorting() {
+        let source = r#"
+            interface Item { value: number; }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["b", "a"];
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [10, 2, 1, 0 / 0, -0];
+                console.log(numbers.sort().join(","));
+                console.log(numbers.join(","));
+                const words: string[] = ["ä", "z", "a", "😀"];
+                const sortedWords: string[] = words.toSorted();
+                console.log(sortedWords.join("|"));
+                console.log(words.join("|"));
+                const flags: boolean[] = [true, false, true, false];
+                console.log(flags.toSorted().join("-"));
+                const objects: Item[] = [{ value: 2 }, { value: 1 }];
+                console.log(objects.toSorted()[0].value);
+                console.log((await delayed()).toSorted().join(""));
+                const empty: number[] = [];
+                console.log(empty.sort().length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_default_sort"),
+            "0,1,10,2,NaN\n0,1,10,2,NaN\na|z|ä|😀\nä|z|a|😀\nfalse-false-true-true\n2\nawaited\nab\n0\n"
         );
     }
 

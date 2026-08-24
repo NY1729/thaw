@@ -448,6 +448,11 @@ The workspace crates have narrow responsibilities:
 - ES2023 `.toReversed()` returns an arena-owned reversed shallow copy without
   mutating its homogeneous source array; object sharing, empty and awaited
   receivers follow the same native array rules
+- Homogeneous native arrays implement stable default `.sort()` and ES2023
+  `.toSorted()`: numbers use their JavaScript string keys, strings compare
+  UTF-16 code units, booleans order `false` before `true`, fixed objects retain
+  source order, and `toSorted` returns an arena-owned shallow copy. Comparator
+  callbacks remain an explicit unsupported form
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
