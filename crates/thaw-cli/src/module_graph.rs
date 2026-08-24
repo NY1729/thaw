@@ -26,7 +26,7 @@ fn export_name(name: &ModuleExportName) -> Result<String, String> {
     }
 }
 
-fn file_url(path: &Path) -> String {
+pub(crate) fn file_url(path: &Path) -> String {
     let mut url = String::from("file://");
     for byte in path.to_string_lossy().as_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~') {
@@ -57,12 +57,13 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn resolve_import_meta(module_path: &Path, specifier: &str) -> Option<String> {
+fn resolve_import_meta(
+    module_path: &Path,
+    specifier: &str,
+    external_resolutions: &HashMap<String, String>,
+) -> Option<String> {
     if specifier.starts_with("file://") {
         return Some(specifier.to_string());
-    }
-    if !specifier.starts_with('.') && !specifier.starts_with('/') {
-        return None;
     }
     let suffix_at = specifier
         .char_indices()
@@ -70,6 +71,11 @@ fn resolve_import_meta(module_path: &Path, specifier: &str) -> Option<String> {
     let (path, suffix) = suffix_at
         .map(|index| specifier.split_at(index))
         .unwrap_or((specifier, ""));
+    if !path.starts_with('.') && !path.starts_with('/') {
+        return external_resolutions
+            .get(path)
+            .map(|resolution| format!("{resolution}{suffix}"));
+    }
     let target = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
@@ -212,6 +218,7 @@ struct RenameReferences<'a> {
     namespaces: &'a HashMap<String, HashMap<String, String>>,
     import_meta_url: &'a str,
     module_path: &'a Path,
+    external_resolutions: &'a HashMap<String, String>,
 }
 
 impl RenameReferences<'_> {
@@ -236,7 +243,9 @@ impl VisitMut for RenameReferences<'_> {
                 if let Expr::Lit(thaw_parser::ast::Lit::Str(specifier)) = call.args[0].expr.as_ref()
                 {
                     let specifier = specifier.value.to_string_lossy();
-                    if let Some(resolved) = resolve_import_meta(self.module_path, &specifier) {
+                    if let Some(resolved) =
+                        resolve_import_meta(self.module_path, &specifier, self.external_resolutions)
+                    {
                         *expr = Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {
                             span: call.span,
                             value: resolved.into(),
@@ -390,6 +399,7 @@ pub fn bundle(
     entry: &Path,
     entry_source: &str,
     external_exports: &HashMap<String, HashMap<String, String>>,
+    external_resolutions: &HashMap<String, String>,
 ) -> Result<Module, String> {
     let entry = entry
         .canonicalize()
@@ -507,6 +517,7 @@ pub fn bundle(
                         namespaces: &namespaces,
                         import_meta_url: &import_meta_url,
                         module_path: &modules[index].path,
+                        external_resolutions,
                     });
                     items.push(ModuleItem::Stmt(statement));
                 }
@@ -522,6 +533,7 @@ pub fn bundle(
                         namespaces: &namespaces,
                         import_meta_url: &import_meta_url,
                         module_path: &modules[index].path,
+                        external_resolutions,
                     });
                     if let Some(original) = original {
                         public.insert(original.clone(), names[&original].clone());
@@ -616,6 +628,7 @@ pub fn bundle(
                                 namespaces: &namespaces,
                                 import_meta_url: &import_meta_url,
                                 module_path: &modules[index].path,
+                                external_resolutions,
                             });
                             let mut ident = function.ident.take().unwrap_or_else(|| {
                                 thaw_parser::ast::Ident::new_no_ctxt(
@@ -643,6 +656,7 @@ pub fn bundle(
                                 namespaces: &namespaces,
                                 import_meta_url: &import_meta_url,
                                 module_path: &modules[index].path,
+                                external_resolutions,
                             });
                             public.insert("default".to_string(), interface.id.sym.to_string());
                             explicit_exports.insert("default".to_string());

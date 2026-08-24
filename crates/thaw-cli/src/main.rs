@@ -2624,6 +2624,40 @@ fn build(
     )
 }
 
+fn registry_import_meta_resolutions(
+    registry_dir: &Path,
+    packages: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut resolutions = std::collections::HashMap::new();
+    for specifier in packages {
+        if specifier.starts_with("node:") {
+            resolutions.insert(specifier.clone(), specifier.clone());
+            continue;
+        }
+        let parts = specifier.split('/').collect::<Vec<_>>();
+        let package_parts = usize::from(specifier.starts_with('@')) + 1;
+        if parts.len() < package_parts {
+            continue;
+        }
+        let package = parts[..package_parts].join("/");
+        let mut directory = registry_dir.join(package);
+        if parts.len() > package_parts {
+            directory = directory
+                .join("subpaths")
+                .join(parts[package_parts..].join("/"));
+        }
+        let artifact = ["native.node", "bundle.js", "native.a"]
+            .into_iter()
+            .map(|name| directory.join(name))
+            .find(|path| path.is_file());
+        if let Some(artifact) = artifact {
+            let artifact = artifact.canonicalize().unwrap_or(artifact);
+            resolutions.insert(specifier.clone(), module_graph::file_url(&artifact));
+        }
+    }
+    resolutions
+}
+
 // Keep the build inputs explicit: the slices come from separate CLI/registry
 // sources and are independently varied by integration tests.
 #[allow(clippy::too_many_arguments)]
@@ -2683,6 +2717,7 @@ fn build_with_link_mode(
         static_class_setter_rewrites,
         external_exports,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
+    let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
         .iter()
         .map(|package| qualifier_identifier(package))
@@ -2724,7 +2759,12 @@ fn build_with_link_mode(
     shim_source.push_str(&format!(
         "function __thaw_artifact_metadata(): string {{ return {marker_literal}; }}\n"
     ));
-    let mut module = module_graph::bundle(input, &user_source, &external_exports)?;
+    let mut module = module_graph::bundle(
+        input,
+        &user_source,
+        &external_exports,
+        &external_resolutions,
+    )?;
     if !shim_source.is_empty() {
         let mut shim = thaw_parser::parse_typescript(&shim_source)?;
         shim.body.extend(module.body);
@@ -3213,8 +3253,13 @@ mod tests {
         )
         .unwrap();
         let source = std::fs::read_to_string(&entry).unwrap();
-        let error =
-            module_graph::bundle(&entry, &source, &std::collections::HashMap::new()).unwrap_err();
+        let error = module_graph::bundle(
+            &entry,
+            &source,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap_err();
         assert!(
             error.contains("ambiguous star export named `shared`"),
             "{error}"
@@ -3245,6 +3290,7 @@ mod tests {
         let error = module_graph::bundle(
             &dir.join("main.ts"),
             &std::fs::read_to_string(dir.join("main.ts")).unwrap(),
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
         .unwrap_err();
@@ -3398,6 +3444,8 @@ mod tests {
                     console.log(reversed[0]);
                     const point = shift({ x: 3, y: 4 });
                     console.log(point.x * 10 + point.y);
+                    console.log(import.meta.resolve("math-kit"));
+                    console.log(import.meta.resolve("math-kit/advanced?raw"));
                     try {
                         const ignored = fail();
                     } catch (error) {
@@ -3417,7 +3465,36 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\n`math-kit::fail` threw: typed dynamic failed\n"
+            format!(
+                "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\nfile://{}\nfile://{}?raw\n`math-kit::fail` threw: typed dynamic failed\n",
+                registry.join("math-kit/bundle.js").display(),
+                registry
+                    .join("math-kit/subpaths/advanced/bundle.js")
+                    .display()
+            )
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn import_meta_resolution_prefers_the_selected_registry_backend() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-import-meta-backend-{}",
+            std::process::id()
+        ));
+        let package = dir.join("pkg");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("bundle.js"), "module.exports = {};").unwrap();
+        std::fs::write(package.join("native.node"), []).unwrap();
+        let resolutions =
+            registry_import_meta_resolutions(&dir, &["pkg".to_string(), "node:fs".to_string()]);
+        assert_eq!(
+            resolutions.get("pkg"),
+            Some(&module_graph::file_url(&package.join("native.node")))
+        );
+        assert_eq!(
+            resolutions.get("node:fs").map(String::as_str),
+            Some("node:fs")
         );
         let _ = std::fs::remove_dir_all(dir);
     }
