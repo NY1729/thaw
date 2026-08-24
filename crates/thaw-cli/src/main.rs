@@ -3090,7 +3090,7 @@ mod tests {
     #[test]
     fn builds_relative_typescript_module_graph_with_generics_and_aliases() {
         let dir =
-            std::env::temp_dir().join(format!("thaw-cli-user-modules-{}", std::process::id()));
+            std::env::temp_dir().join(format!("thaw cli user modules {}", std::process::id()));
         std::fs::create_dir_all(dir.join("lib")).unwrap();
         std::fs::write(
             dir.join("lib/pair.ts"),
@@ -3122,7 +3122,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("lib/expression.ts"),
-            "function offset(): number { return 2; }\nexport default offset;\n",
+            "function offset(): number { return 2; }\nexport function moduleUrl(): string { return import.meta.url; }\nexport default offset;\n",
         )
         .unwrap();
         let entry = dir.join("main.ts");
@@ -3132,7 +3132,7 @@ mod tests {
                 import { makePair, chooseFirst as first, value, values, offset as reexportedOffset } from "./lib";
                 import offset, { value as sameValue } from "./lib/values";
                 import { value as otherValue } from "./lib/other";
-                import expressionOffset from "./lib/expression";
+                import expressionOffset, { moduleUrl } from "./lib/expression";
                 function main(): void {
                     const pair = makePair(value(), "ok");
                     console.log(pair.first + otherValue());
@@ -3140,6 +3140,7 @@ mod tests {
                     console.log(values.value() + values.default());
                     console.log(value() + reexportedOffset());
                     console.log(value() + expressionOffset());
+                    console.log(moduleUrl());
                 }
             "#,
         )
@@ -3154,7 +3155,13 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\nselected\n42\n42\n42\n"
+            format!(
+                "42\nselected\n42\n42\n42\nfile://{}\n",
+                dir.join("lib/expression.ts")
+                    .display()
+                    .to_string()
+                    .replace(' ', "%20")
+            )
         );
         let _ = std::fs::remove_dir_all(dir);
     }

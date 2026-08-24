@@ -654,8 +654,10 @@ The workspace crates have narrow responsibilities:
   top-level declaration. Star exports follow explicit-export precedence,
   merge identical bindings and propagate ambiguity through barrel modules;
   importing an ambiguous name is a source-located error. Top-level-await
-  cycles are explicit errors; `import.meta`, non-JSON attributes and
-  runtime-computed external package imports remain outside the supported subset
+  cycles are explicit errors. `import.meta.url` is replaced per source module
+  with its percent-encoded absolute `file://` URL; other `import.meta`
+  properties, non-JSON attributes and runtime-computed external package
+  imports remain outside the supported subset
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit
