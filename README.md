@@ -451,8 +451,10 @@ as their N-API receiver and share the same arity, overload, callback, and native
 value marshalling rules as instance methods; named and namespace calls are
 rewritten. Typed instance getters use a dedicated N-API property-result ABI and
 the same native return conversion surface; getter access through tracked aliases
-and object properties is rewritten as well. Setters and private non-default
-event loops remain explicit gaps.
+and object properties is rewritten as well. Typed instance setters marshal the
+assigned native value through a property-result ABI, preserve the assignment
+expression's value, and use the same tracked receiver paths. Static accessors
+and private non-default event loops remain explicit gaps.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
