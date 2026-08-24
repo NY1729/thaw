@@ -3160,12 +3160,14 @@ impl<'a> FnLowerer<'a> {
         if let HirType::Optional(payload) = declared {
             return match self.infer_expr_type(&value)? {
                 HirType::Undefined => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
-                actual if actual == **payload => Ok(HirExpr::OptionalSome(
-                    Box::new(value),
-                    payload.as_ref().clone(),
-                )),
                 actual if actual == *declared => Ok(value),
-                actual => Err(format!("value has type {actual:?}, expected {declared:?}")),
+                _ => {
+                    let value = self.coerce_to_declared(payload.as_ref(), value)?;
+                    Ok(HirExpr::OptionalSome(
+                        Box::new(value),
+                        payload.as_ref().clone(),
+                    ))
+                }
             };
         }
         if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
@@ -4549,7 +4551,7 @@ impl<'a> FnLowerer<'a> {
             Expr::Call(call) => self.lower_call(call),
 
             Expr::OptChain(chain) => match chain.base.as_ref() {
-                OptChainBase::Member(member) => self.lower_member_read(member),
+                OptChainBase::Member(member) => self.lower_optional_member_read(member),
                 OptChainBase::Call(call) => {
                     let call = CallExpr::from(call.clone());
                     self.lower_call(&call)
@@ -5464,6 +5466,63 @@ impl<'a> FnLowerer<'a> {
             }
             _ => Err("unsupported property access".into()),
         }
+    }
+
+    fn lower_optional_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
+        let object = self.lower_expr(&member.obj)?;
+        let object_type = self.infer_expr_type(&object)?;
+        let HirType::Optional(payload) = object_type.clone() else {
+            // Optional access on a statically non-nullish native value has the
+            // same runtime behavior as ordinary member access.
+            return self.lower_member_read(member);
+        };
+        let HirType::Object(fields) = payload.as_ref() else {
+            return Err(format!(
+                "optional member access is not yet supported on {payload:?}"
+            ));
+        };
+        let field = match &member.prop {
+            MemberProp::Ident(field) => field.sym.to_string(),
+            MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                Expr::Lit(Lit::Str(field)) => field.value.to_string_lossy().into_owned(),
+                _ => return Err("optional computed object keys must be string literals".into()),
+            },
+            _ => return Err("unsupported optional object member".into()),
+        };
+        let field_type = fields
+            .iter()
+            .find(|(name, _)| name == &field)
+            .map(|(_, ty)| ty.clone())
+            .ok_or_else(|| format!("object has no field `{field}`"))?;
+        let (result_payload, present_value) = match &field_type {
+            HirType::Optional(inner) => (inner.as_ref().clone(), None),
+            other => (other.clone(), Some(other.clone())),
+        };
+
+        let name = format!("__thaw_optional_object_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), object_type.clone());
+        let bound = HirExpr::Var(name.clone());
+        let access = HirExpr::PropAccess(
+            Box::new(HirExpr::OptionalValue(
+                Box::new(bound.clone()),
+                payload.as_ref().clone(),
+            )),
+            payload.as_ref().clone(),
+            field,
+        );
+        let present_value = match present_value {
+            Some(payload) => HirExpr::OptionalSome(Box::new(access), payload),
+            None => access,
+        };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+            vec![HirStmt::Return(Some(HirExpr::OptionalNone(
+                result_payload.clone(),
+            )))],
+            vec![HirStmt::Return(Some(present_value))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, object_type, object)])
     }
 
     /// Resolves a computed assignment/update target without confusing the
