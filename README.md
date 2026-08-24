@@ -746,6 +746,8 @@ The workspace crates have narrow responsibilities:
   result handle have been validated.
   Property and class descriptor batches are fully preflighted before applying
   the first property or allocating a constructor/prototype.
+  Accessor getters normalize null callback returns to `undefined` and reject
+  non-null return handles that do not belong to the active Env.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
