@@ -566,9 +566,11 @@ unsafe fn reference_mut<'a>(
         .iter_mut()
         .find(|candidate| std::ptr::eq(candidate.as_ref(), reference))
     else {
+        record_status(env, NAPI_INVALID_ARG);
         return Err(NAPI_INVALID_ARG);
     };
     if reference.deleted || reference.env != env as usize {
+        record_status(env, NAPI_INVALID_ARG);
         return Err(NAPI_INVALID_ARG);
     }
     Ok(reference)
@@ -602,12 +604,16 @@ unsafe fn async_work_ref<'a>(
     let Ok(env_ref) = env_mut(env) else {
         return Err(NAPI_INVALID_ARG);
     };
-    env_ref
+    let work = env_ref
         .async_works
         .iter()
         .find(|candidate| std::ptr::eq(candidate.as_ref(), work))
         .map(Box::as_ref)
-        .ok_or(NAPI_INVALID_ARG)
+        .ok_or(NAPI_INVALID_ARG);
+    if work.is_err() {
+        record_status(env, NAPI_INVALID_ARG);
+    }
+    work
 }
 
 unsafe fn open_handle_scope(
@@ -6129,7 +6135,7 @@ pub unsafe extern "C" fn napi_create_reference(
         return NAPI_INVALID_ARG;
     };
     if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     *out = alloc_reference(env_ref, value, initial_count);
     NAPI_OK
@@ -6141,7 +6147,7 @@ pub unsafe extern "C" fn napi_delete_reference(
     reference: *mut Reference,
 ) -> NapiStatus {
     let Ok(reference) = reference_mut(env, reference) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     reference.deleted = true;
     NAPI_OK
@@ -6154,10 +6160,11 @@ pub unsafe extern "C" fn napi_get_reference_value(
     out: *mut NapiValue,
 ) -> NapiStatus {
     let Ok(reference) = reference_mut(env, reference) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let _ = reference.count;
-    write_value(out, reference.value)
+    let status = write_value(out, reference.value);
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -6167,10 +6174,10 @@ pub unsafe extern "C" fn napi_reference_ref(
     result: *mut u32,
 ) -> NapiStatus {
     let Ok(reference) = reference_mut(env, reference) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let Some(count) = reference.count.checked_add(1) else {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     };
     reference.count = count;
     if !result.is_null() {
@@ -6186,10 +6193,10 @@ pub unsafe extern "C" fn napi_reference_unref(
     result: *mut u32,
 ) -> NapiStatus {
     let Ok(reference) = reference_mut(env, reference) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if reference.count == 0 {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     reference.count -= 1;
     if !result.is_null() {
@@ -6838,7 +6845,7 @@ pub unsafe extern "C" fn napi_create_promise(
     promise: *mut NapiValue,
 ) -> NapiStatus {
     if deferred.is_null() || promise.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -6872,14 +6879,14 @@ unsafe fn settle_deferred(
         .iter_mut()
         .find(|candidate| std::ptr::eq(candidate.as_ref(), deferred))
     else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if deferred_ref.env != env as usize {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let mut state = deferred_ref.state.borrow_mut();
     if !matches!(*state, PromiseState::Pending) {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     *state = if rejected {
         PromiseState::Rejected(value)
@@ -6923,12 +6930,12 @@ pub unsafe extern "C" fn napi_create_async_work(
         || (!async_resource_name.is_null()
             && !value_belongs_to_environment(env, async_resource_name))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if !async_resource_name.is_null()
         && !matches!(value_ref(async_resource_name), Ok(Value::String(_)))
     {
-        return NAPI_STRING_EXPECTED;
+        return record_status(env, NAPI_STRING_EXPECTED);
     }
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -6950,7 +6957,7 @@ pub unsafe extern "C" fn napi_create_async_work(
 #[no_mangle]
 pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
     let Ok(work_ref) = async_work_ref(env, work) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if work_ref
         .state
@@ -6962,12 +6969,12 @@ pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWor
         )
         .is_err()
     {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
 
     let Some(pool) = async_pool() else {
         work_ref.state.store(ASYNC_CREATED, Ordering::Release);
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     };
     ACTIVE_ASYNC_WORK.fetch_add(1, Ordering::AcqRel);
     pool.queue
@@ -6981,20 +6988,20 @@ pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWor
 #[no_mangle]
 pub unsafe extern "C" fn napi_cancel_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
     let Ok(work_ref) = async_work_ref(env, work) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let Some(pool) = async_pool() else {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     };
     let mut queue = pool
         .queue
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if work_ref.state.load(Ordering::Acquire) != ASYNC_QUEUED {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     let Some(position) = queue.iter().position(|queued| *queued == work as usize) else {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     };
     queue.remove(position);
     work_ref
@@ -7014,18 +7021,18 @@ pub unsafe extern "C" fn napi_cancel_async_work(env: NapiEnv, work: *mut AsyncWo
 #[no_mangle]
 pub unsafe extern "C" fn napi_delete_async_work(env: NapiEnv, work: *mut AsyncWork) -> NapiStatus {
     let Ok(work_ref) = async_work_ref(env, work) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let state = work_ref.state.load(Ordering::Acquire);
     if state != ASYNC_CREATED && state != ASYNC_COMPLETED {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     if work_ref
         .state
         .compare_exchange(state, ASYNC_DELETED, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     NAPI_OK
 }
@@ -9067,6 +9074,66 @@ mod tests {
             );
             assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
             assert_eq!((*info).error_code, NAPI_PENDING_EXCEPTION);
+        }
+    }
+
+    #[test]
+    fn deferred_reference_and_async_handle_errors_update_last_error() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let value = env.alloc(Value::Number(1.0));
+            let mut info = ptr::null();
+
+            let mut reference = ptr::null_mut();
+            assert_eq!(
+                napi_create_reference(env_ptr, value, 0, &mut reference),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_reference_unref(env_ptr, reference, ptr::null_mut()),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_GENERIC_FAILURE);
+            assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+            assert_eq!(
+                napi_get_reference_value(env_ptr, reference, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+
+            let mut deferred = ptr::null_mut();
+            let mut promise = ptr::null_mut();
+            assert_eq!(
+                napi_create_promise(env_ptr, &mut deferred, &mut promise),
+                NAPI_OK
+            );
+            assert_eq!(napi_resolve_deferred(env_ptr, deferred, value), NAPI_OK);
+            assert_eq!(
+                napi_resolve_deferred(env_ptr, deferred, value),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_GENERIC_FAILURE);
+
+            let name = env.alloc(Value::Number(2.0));
+            let mut work = ptr::null_mut();
+            assert_eq!(
+                napi_create_async_work(
+                    env_ptr,
+                    ptr::null_mut(),
+                    name,
+                    Some(probe_execute),
+                    None,
+                    ptr::null_mut(),
+                    &mut work,
+                ),
+                NAPI_STRING_EXPECTED
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_STRING_EXPECTED);
         }
     }
 
