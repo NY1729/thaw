@@ -607,6 +607,13 @@ impl<'ctx> HirCompiler<'ctx> {
             array_copy_within_type,
             Some(Linkage::External),
         );
+        let array_slice_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false);
+        self.module.add_function(
+            "thaw_array_slice",
+            array_slice_type,
+            Some(Linkage::External),
+        );
         for (name, needle_type, return_type) in [
             (
                 "thaw_number_array_index_of",
@@ -7585,6 +7592,26 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array copyWithin returned no value".to_string());
             }
+            "__thaw_array_slice" => {
+                if args.len() != 3 {
+                    return Err("array slice expects three operands".to_string());
+                }
+                let mut arguments = Vec::with_capacity(3);
+                for argument in args {
+                    arguments.push(self.compile_expr(argument)?.into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_slice").unwrap(),
+                        &arguments,
+                        "array_slice",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array slice returned no value".to_string());
+            }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
             | "__thaw_string_array_index_of"
@@ -11585,6 +11612,44 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_copy_within"),
             "4,5,3,4,5\n1,1,2,3,4\n1,2,3,2,3\naab\nreceiver\ntarget\nstart\nawaited-end\n1-1-2-3-4\n"
+        );
+    }
+
+    #[test]
+    fn compiles_non_mutating_native_array_slice() {
+        let source = r#"
+            function values(): number[] {
+                console.log("receiver");
+                return [1, 2, 3, 4];
+            }
+            function start(): string {
+                console.log("start");
+                return "1";
+            }
+            async function end(): Promise<number> {
+                await sleep(1);
+                console.log("awaited-end");
+                return 3;
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, 2, 3, 4, 5];
+                console.log(numbers.slice().join(","));
+                console.log(numbers.slice(1, 4).join(","));
+                console.log(numbers.slice(-3, -1).join(","));
+                console.log(numbers.slice(4, 2).length);
+                console.log(numbers.join(","));
+                const words: string[] = ["a", "b", "c"];
+                console.log(words.slice(1).join(""));
+                const objects: { value: number }[] = [{ value: 1 }, { value: 2 }];
+                const shallow: { value: number }[] = objects.slice(0, 1);
+                shallow[0].value = 9;
+                console.log(objects[0].value);
+                console.log(values().slice(start(), await end()).join("-"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_slice"),
+            "1,2,3,4,5\n2,3,4\n3,4\n0\n1,2,3,4,5\nbc\n9\nreceiver\nstart\nawaited-end\n2-3\n"
         );
     }
 
