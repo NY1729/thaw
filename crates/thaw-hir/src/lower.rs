@@ -3094,6 +3094,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "number predicate")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_math_abs" | "__thaw_math_floor" | "__thaw_math_ceil"
+                    | "__thaw_math_trunc" | "__thaw_math_sqrt" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("unary Math function expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, argument, "Math operand")?;
+                        return Ok(HirType::F64);
+                    }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -5066,6 +5074,28 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"Math"
+                        && matches!(
+                            property.sym.as_ref(),
+                            "abs" | "floor" | "ceil" | "trunc" | "sqrt"
+                        )
+                    {
+                        let [argument] = call.args.as_slice() else {
+                            return Err(format!(
+                                "`Math.{}` expects exactly one argument",
+                                property.sym
+                            ));
+                        };
+                        if argument.spread.is_some() {
+                            return Err("Math function spread is not supported".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        let value = self.coerce_primitive_to_number(value)?;
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var(format!("__thaw_math_{}", property.sym))),
+                            vec![value],
+                        ));
+                    }
                     if object.sym == *"Number"
                         && matches!(property.sym.as_ref(), "isNaN" | "isFinite")
                     {
