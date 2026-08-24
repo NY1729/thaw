@@ -31,8 +31,8 @@ use swc_ecma_ast::{
     ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp,
     Module, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat, Prop,
     PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam,
-    TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, UnaryOp, UpdateOp, VarDecl,
-    VarDeclOrExpr,
+    TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp,
+    UpdateOp, VarDecl, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -1145,11 +1145,33 @@ fn lower_ts_type(
             TsKeywordTypeKind::TsNumberKeyword => Ok(HirType::F64),
             TsKeywordTypeKind::TsStringKeyword => Ok(HirType::Str),
             TsKeywordTypeKind::TsBooleanKeyword => Ok(HirType::Bool),
+            TsKeywordTypeKind::TsUndefinedKeyword => Ok(HirType::Undefined),
             TsKeywordTypeKind::TsVoidKeyword => Ok(HirType::Void),
             other => Err(format!(
                 "unsupported type keyword {other:?} (supports number/string/boolean/void)"
             )),
         },
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let elements = union
+                .types
+                .iter()
+                .map(|element| lower_ts_type(element, interfaces, generic_interfaces))
+                .collect::<Result<Vec<_>, _>>()?;
+            if elements.len() == 2 {
+                if elements[0] == HirType::Undefined {
+                    return Ok(HirType::Optional(Box::new(elements[1].clone())));
+                }
+                if elements[1] == HirType::Undefined {
+                    return Ok(HirType::Optional(Box::new(elements[0].clone())));
+                }
+            }
+            Err(format!(
+                "unsupported union type {elements:?} (only T | undefined is native)"
+            ))
+        }
+        TsType::TsUnionOrIntersectionType(
+            TsUnionOrIntersectionType::TsIntersectionType(_),
+        ) => Err("intersection types are not supported yet".into()),
         TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(lower_ts_type(
             &arr.elem_type,
             interfaces,
@@ -1511,7 +1533,9 @@ enum Target {
 enum ArrayPredicateMode {
     Some,
     Every,
+    Find,
     FindIndex,
+    FindLast,
     FindLastIndex,
 }
 
@@ -1570,7 +1594,9 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::ArrayLen(value)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
-        | HirExpr::JsonAsBool(value) => collect_referenced_bindings(value, names),
+        | HirExpr::JsonAsBool(value)
+        | HirExpr::OptionalSome(value, _)
+        | HirExpr::OptionalIsNone(value, _) => collect_referenced_bindings(value, names),
         HirExpr::Lambda(captures, _, _, _) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
         }
@@ -1613,7 +1639,10 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(object, names);
             collect_referenced_bindings(value, names);
         }
-        HirExpr::Lit(_) | HirExpr::EnvVar(_) | HirExpr::FunctionRef(..) => {}
+        HirExpr::Lit(_)
+        | HirExpr::OptionalNone(_)
+        | HirExpr::EnvVar(_)
+        | HirExpr::FunctionRef(..) => {}
     }
 }
 
@@ -1647,7 +1676,9 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::JsonGet(value, _)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
-        | HirExpr::JsonAsBool(value) => contains_await(value),
+        | HirExpr::JsonAsBool(value)
+        | HirExpr::OptionalSome(value, _)
+        | HirExpr::OptionalIsNone(value, _) => contains_await(value),
         HirExpr::PromiseThen(source, callback, _, _, _, _)
         | HirExpr::PromiseFinally(source, callback, _, _) => {
             contains_await(source) || contains_await(callback)
@@ -1663,6 +1694,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         HirExpr::Lambda(..)
         | HirExpr::FunctionRef(..)
         | HirExpr::Lit(_)
+        | HirExpr::OptionalNone(_)
         | HirExpr::Var(_)
         | HirExpr::EnvVar(_) => false,
     }
@@ -1933,6 +1965,7 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
 fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
     match ty {
         HirType::F64 | HirType::I64 => Some("number"),
+        HirType::Undefined => Some("undefined"),
         HirType::Str => Some("string"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
@@ -1948,7 +1981,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
                 .all(|element| native_typeof_name(element) == Some(first))
                 .then_some(first)
         }
-        HirType::Void | HirType::Dynamic | HirType::JsValue => None,
+        HirType::Optional(_) | HirType::Void | HirType::Dynamic | HirType::JsValue => None,
     }
 }
 
@@ -2998,6 +3031,17 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        if let HirType::Optional(payload) = declared {
+            return match self.infer_expr_type(&value)? {
+                HirType::Undefined => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
+                actual if actual == **payload => Ok(HirExpr::OptionalSome(
+                    Box::new(value),
+                    payload.as_ref().clone(),
+                )),
+                actual if actual == *declared => Ok(value),
+                actual => Err(format!("value has type {actual:?}, expected {declared:?}")),
+            };
+        }
         if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
             if expected.len() != values.len() {
                 return Err(format!(
@@ -3069,6 +3113,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Lit(HirLit::F64(_)) => Ok(HirType::F64),
             HirExpr::Lit(HirLit::Str(_)) => Ok(HirType::Str),
             HirExpr::Lit(HirLit::Bool(_)) => Ok(HirType::Bool),
+            HirExpr::Lit(HirLit::Undefined) => Ok(HirType::Undefined),
             HirExpr::Var(name) => self
                 .scope
                 .get(name)
@@ -3076,6 +3121,19 @@ impl<'a> FnLowerer<'a> {
                 .ok_or_else(|| format!("unknown variable `{name}`")),
             HirExpr::FunctionRef(_, params, ret) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
+            }
+            HirExpr::OptionalSome(value, payload) => {
+                self.expect_type(payload, value, "optional payload")?;
+                Ok(HirType::Optional(Box::new(payload.clone())))
+            }
+            HirExpr::OptionalNone(payload) => Ok(HirType::Optional(Box::new(payload.clone()))),
+            HirExpr::OptionalIsNone(value, payload) => {
+                self.expect_type(
+                    &HirType::Optional(Box::new(payload.clone())),
+                    value,
+                    "optional test",
+                )?;
+                Ok(HirType::Bool)
             }
             HirExpr::ArrayAlloc(length, element) => {
                 self.expect_type(&HirType::F64, length, "array allocation length")?;
@@ -3946,6 +4004,31 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn lower_optional_undefined_equality(
+        &self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        let result = match (&lhs_type, &rhs_type) {
+            (HirType::Optional(payload), HirType::Undefined) => Some(HirExpr::OptionalIsNone(
+                Box::new(lhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Undefined, HirType::Optional(payload)) => Some(HirExpr::OptionalIsNone(
+                Box::new(rhs),
+                payload.as_ref().clone(),
+            )),
+            (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
+            (HirType::Undefined, _) | (_, HirType::Undefined) => {
+                Some(HirExpr::Lit(HirLit::Bool(false)))
+            }
+            _ => None,
+        };
+        Ok(result)
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
@@ -3959,6 +4042,7 @@ impl<'a> FnLowerer<'a> {
                     match ident.sym.as_ref() {
                         "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
                         "Infinity" => return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
+                        "undefined" => return Ok(HirExpr::Lit(HirLit::Undefined)),
                         _ => {}
                     }
                 }
@@ -4096,15 +4180,27 @@ impl<'a> FnLowerer<'a> {
                     BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
                     BinaryOp::GtEq => self.lower_relational(lhs, rhs, BinOp::GtEq)?,
-                    BinaryOp::NotEqEq => HirExpr::BinOp(
-                        BinOp::EqEqEq,
-                        Box::new(HirExpr::BinOp(
+                    BinaryOp::EqEqEq => self
+                        .lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
+                        .unwrap_or(HirExpr::BinOp(
                             BinOp::EqEqEq,
                             Box::new(lhs),
                             Box::new(rhs),
                         )),
-                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                    ),
+                    BinaryOp::NotEqEq => {
+                        let equality = self
+                            .lower_optional_undefined_equality(lhs.clone(), rhs.clone())?
+                            .unwrap_or(HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(lhs),
+                                Box::new(rhs),
+                            ));
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(equality),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                        )
+                    }
                     BinaryOp::EqEq => self.lower_loose_equality(lhs, rhs)?,
                     BinaryOp::NotEq => HirExpr::BinOp(
                         BinOp::EqEqEq,
@@ -6572,6 +6668,103 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    fn lower_array_at(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        index: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_at_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_argument_name = format!("__thaw_at_index_argument_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        self.scope.insert(index_argument_name.clone(), HirType::F64);
+        let length_name = format!("__thaw_at_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let actual_index_name = format!("__thaw_at_actual_index_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(actual_index_name.clone(), HirType::F64);
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let var = |name: &str| HirExpr::Var(name.into());
+        let assign =
+            |value| HirStmt::Expr(HirExpr::Assign(actual_index_name.clone(), Box::new(value)));
+        let none = || HirStmt::Return(Some(HirExpr::OptionalNone(element_type.clone())));
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
+            ),
+            HirStmt::Let(
+                actual_index_name.clone(),
+                HirType::F64,
+                var(&index_argument_name),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(var(&actual_index_name)),
+                ),
+                Vec::new(),
+                vec![assign(number(0.0))],
+            ),
+            assign(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                vec![var(&actual_index_name)],
+            )),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(number(0.0)),
+                ),
+                vec![assign(HirExpr::BinOp(
+                    BinOp::Add,
+                    Box::new(var(&length_name)),
+                    Box::new(var(&actual_index_name)),
+                ))],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(number(0.0)),
+                ),
+                vec![none()],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::GtEq,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(var(&length_name)),
+                ),
+                vec![none()],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(HirExpr::OptionalSome(
+                Box::new(HirExpr::TypedIndex(
+                    Box::new(var(&receiver_name)),
+                    Box::new(var(&actual_index_name)),
+                    element_type.clone(),
+                )),
+                element_type,
+            ))),
+        ]);
+        self.wrap_call_argument_bindings(
+            body,
+            &[
+                (receiver_name, array_type, receiver),
+                (index_argument_name, HirType::F64, index),
+            ],
+        )
+    }
+
     fn lower_array_to_spliced(
         &mut self,
         receiver: HirExpr,
@@ -6995,7 +7188,9 @@ impl<'a> FnLowerer<'a> {
         let stop_condition = if matches!(
             mode,
             ArrayPredicateMode::Some
+                | ArrayPredicateMode::Find
                 | ArrayPredicateMode::FindIndex
+                | ArrayPredicateMode::FindLast
                 | ArrayPredicateMode::FindLastIndex
         ) {
             callback_call
@@ -7009,6 +7204,10 @@ impl<'a> FnLowerer<'a> {
         let stop_result = match mode {
             ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(true)),
             ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(false)),
+            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast => HirExpr::OptionalSome(
+                Box::new(HirExpr::Var(element_name.clone())),
+                element_type.clone(),
+            ),
             ArrayPredicateMode::FindIndex | ArrayPredicateMode::FindLastIndex => {
                 HirExpr::Var(index_name.clone())
             }
@@ -7016,12 +7215,18 @@ impl<'a> FnLowerer<'a> {
         let final_result = match mode {
             ArrayPredicateMode::Some => HirExpr::Lit(HirLit::Bool(false)),
             ArrayPredicateMode::Every => HirExpr::Lit(HirLit::Bool(true)),
+            ArrayPredicateMode::Find | ArrayPredicateMode::FindLast => {
+                HirExpr::OptionalNone(element_type.clone())
+            }
             ArrayPredicateMode::FindIndex | ArrayPredicateMode::FindLastIndex => {
                 HirExpr::Lit(HirLit::F64(-1.0))
             }
         };
         let one = || HirExpr::Lit(HirLit::F64(1.0));
-        let reverse = matches!(mode, ArrayPredicateMode::FindLastIndex);
+        let reverse = matches!(
+            mode,
+            ArrayPredicateMode::FindLast | ArrayPredicateMode::FindLastIndex
+        );
         let body = HirExpr::Block(vec![
             HirStmt::Let(
                 length_name.clone(),
@@ -8023,7 +8228,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if matches!(
                     property.sym.as_ref(),
-                    "some" | "every" | "findIndex" | "findLastIndex"
+                    "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex"
                 ) {
                     if !(1..=2).contains(&call.args.len()) {
                         return Err(format!(
@@ -8063,7 +8268,9 @@ impl<'a> FnLowerer<'a> {
                         match property.sym.as_ref() {
                             "some" => ArrayPredicateMode::Some,
                             "every" => ArrayPredicateMode::Every,
+                            "find" => ArrayPredicateMode::Find,
                             "findIndex" => ArrayPredicateMode::FindIndex,
+                            "findLast" => ArrayPredicateMode::FindLast,
                             "findLastIndex" => ArrayPredicateMode::FindLastIndex,
                             _ => unreachable!(),
                         },
@@ -8143,6 +8350,25 @@ impl<'a> FnLowerer<'a> {
                         element_type,
                         arguments,
                     );
+                }
+                if property.sym == *"at" {
+                    let [index] = call.args.as_slice() else {
+                        return Err("native array `.at()` expects exactly one index".into());
+                    };
+                    if index.spread.is_some() {
+                        return Err("array at spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "array `.at()` requires a homogeneous array, got {array_type:?}"
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let index = self.lower_expr(&index.expr)?;
+                    let index = self.coerce_primitive_to_number(index)?;
+                    return self.lower_array_at(receiver, array_type, element_type, index);
                 }
                 if property.sym == *"with" {
                     let [index, value] = call.args.as_slice() else {

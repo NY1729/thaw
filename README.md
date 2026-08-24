@@ -457,11 +457,16 @@ The workspace crates have narrow responsibilities:
   synchronous comparator may be a contextually typed arrow (including
   captures) or named function; stable HIR sorting propagates callback errors
 - Homogeneous native arrays implement short-circuiting `.some()`, `.every()`,
-  `.findIndex()` and ES2023 `.findLastIndex()` with contextually typed or named boolean predicates
+  `.find()`, `.findIndex()` and ES2023 `.findLast()`/`.findLastIndex()` with
+  contextually typed or named boolean predicates
   receiving zero to three `(element, index, array)` parameters. Captures, empty
   arrays, all native element layouts, optional `thisArg` evaluation and awaited
   receivers work; the index methods return the first match in their respective
-  traversal direction or `-1`
+  traversal direction or `-1`, while value methods return a collision-free
+  tagged `T | undefined`
+- Homogeneous native arrays implement `.at()` with numeric coercion,
+  truncation, negative indexing, ordered/awaited receiver and index evaluation,
+  and the same tagged `T | undefined` result for out-of-range access
 - Homogeneous native arrays implement `.forEach()` with the same typed callback
   arguments and receiver/optional `thisArg` ordering, visiting every element
   once in index order and returning `void`; captures, empty arrays, every native
@@ -598,9 +603,10 @@ The workspace crates have narrow responsibilities:
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
   tuples, broad union/intersection support, multi-capture export keys, anonymous
   default functions and the complete JavaScript expression/statement set
-- Nullish optional-chain short-circuiting still requires native
-  `null`/`undefined` representations; optional chains currently normalize only
-  for statically non-null native values
+- Tagged native `T | undefined` values now support annotations, returns,
+  strict undefined comparison, logging and array lookup APIs without sentinel
+  collisions. General optional-chain short-circuiting still requires native
+  `null` plus flow-sensitive optional unwrapping
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
