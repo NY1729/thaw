@@ -457,6 +457,9 @@ The workspace crates have narrow responsibilities:
 - `Object.values` returns field values in the same order, retaining homogeneous
   native arrays or heterogeneous typed tuples as appropriate, including empty
   objects and synchronous/awaited receivers
+- `Object.entries` returns ordered, explicitly typed `[string, value]` tuples;
+  homogeneous entry shapes remain native arrays while heterogeneous field
+  types retain a statically indexed outer tuple, including empty/awaited input
 - `Object.hasOwn` checks fixed-layout own fields after native primitive-to-key
   string conversion, including empty objects and synchronous/awaited object
   plus key evaluation in source order

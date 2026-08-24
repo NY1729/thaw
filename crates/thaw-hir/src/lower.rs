@@ -5757,6 +5757,56 @@ impl<'a> FnLowerer<'a> {
                         );
                         return self.wrap_call_argument_bindings(values, &[(name, ty, value)]);
                     }
+                    if object.sym == *"Object" && property.sym == *"entries" {
+                        let [argument] = call.args.as_slice() else {
+                            return Err("`Object.entries` expects exactly one argument".into());
+                        };
+                        if argument.spread.is_some() {
+                            return Err("Object.entries spread is not supported".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        let ty = self.infer_expr_type(&value)?;
+                        let HirType::Object(fields) = &ty else {
+                            return Err(format!(
+                                "`Object.entries` currently requires a fixed object, got {ty:?}"
+                            ));
+                        };
+                        let entry_fields = fields
+                            .iter()
+                            .map(|(name, field_type)| (name.clone(), field_type.clone()))
+                            .collect::<Vec<_>>();
+                        let name = format!("__thaw_object_entries_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        let entries = HirExpr::ArrayLit(
+                            entry_fields
+                                .into_iter()
+                                .map(|(field, field_type)| {
+                                    let entry_type = HirType::Tuple(vec![HirType::Str, field_type]);
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Lambda(
+                                            vec![HirParam {
+                                                name: name.clone(),
+                                                ty: ty.clone(),
+                                            }],
+                                            Vec::new(),
+                                            entry_type,
+                                            Box::new(HirExpr::ArrayLit(vec![
+                                                HirExpr::Lit(HirLit::Str(field.clone())),
+                                                HirExpr::PropAccess(
+                                                    Box::new(HirExpr::Var(name.clone())),
+                                                    ty.clone(),
+                                                    field,
+                                                ),
+                                            ])),
+                                        )),
+                                        Vec::new(),
+                                    )
+                                })
+                                .collect(),
+                        );
+                        return self.wrap_call_argument_bindings(entries, &[(name, ty, value)]);
+                    }
                     if object.sym == *"Object" && property.sym == *"hasOwn" {
                         let [object, key] = call.args.as_slice() else {
                             return Err("`Object.hasOwn` expects exactly two arguments".into());
