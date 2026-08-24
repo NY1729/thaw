@@ -753,6 +753,17 @@ unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {
     env.as_mut().ok_or(NAPI_INVALID_ARG)
 }
 
+unsafe fn env_for_value_output<'a>(
+    env: NapiEnv,
+    out: *mut NapiValue,
+) -> Result<&'a mut Env, NapiStatus> {
+    if out.is_null() {
+        Err(NAPI_INVALID_ARG)
+    } else {
+        env_mut(env)
+    }
+}
+
 unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
     value.as_ref().ok_or(NAPI_INVALID_ARG)
 }
@@ -2449,7 +2460,7 @@ pub unsafe extern "C" fn thaw_napi_call(name: *const c_char, args: *const c_char
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_undefined(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Undefined);
@@ -2457,7 +2468,7 @@ pub unsafe extern "C" fn napi_get_undefined(env: NapiEnv, out: *mut NapiValue) -
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_null(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Null);
@@ -2469,7 +2480,7 @@ pub unsafe extern "C" fn napi_get_boolean(
     value: bool,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Bool(value));
@@ -2481,7 +2492,7 @@ pub unsafe extern "C" fn napi_create_double(
     value: f64,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Number(value));
@@ -2521,7 +2532,7 @@ pub unsafe extern "C" fn napi_create_date(
     value: f64,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Date(value));
@@ -2565,7 +2576,7 @@ pub unsafe extern "C" fn napi_create_bigint_int64(
     value: i64,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let magnitude = value.unsigned_abs();
@@ -2582,7 +2593,7 @@ pub unsafe extern "C" fn napi_create_bigint_uint64(
     value: u64,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::BigInt {
@@ -2600,7 +2611,7 @@ pub unsafe extern "C" fn napi_create_bigint_words(
     words: *const u64,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if sign_bit != 0 && sign_bit != 1 || (word_count != 0 && words.is_null()) {
+    if out.is_null() || sign_bit != 0 && sign_bit != 1 || (word_count != 0 && words.is_null()) {
         return NAPI_INVALID_ARG;
     }
     let mut magnitude = if word_count == 0 {
@@ -2714,7 +2725,7 @@ pub unsafe extern "C" fn napi_create_string_utf8(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() {
+    if value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     let bytes = if length == NAPI_AUTO_LENGTH {
@@ -2737,7 +2748,7 @@ pub unsafe extern "C" fn napi_create_string_latin1(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() {
+    if value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     let bytes = if length == NAPI_AUTO_LENGTH {
@@ -2760,7 +2771,7 @@ pub unsafe extern "C" fn napi_create_string_utf16(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if value.is_null() {
+    if value.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     let length = if length == NAPI_AUTO_LENGTH {
@@ -2913,6 +2924,10 @@ pub unsafe extern "C" fn napi_create_symbol(
     description: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() || (!description.is_null() && !value_belongs_to_environment(env, description))
+    {
+        return NAPI_INVALID_ARG;
+    }
     let description = if description.is_null() {
         String::new()
     } else {
@@ -3011,7 +3026,7 @@ pub unsafe extern "C" fn napi_get_value_external(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_object(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Object(HashMap::new()));
@@ -3027,7 +3042,7 @@ pub unsafe extern "C" fn napi_create_array_with_length(
     length: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Array(vec![None; length]));
@@ -5216,7 +5231,7 @@ pub unsafe extern "C" fn napi_create_buffer(
     data: *mut *mut c_void,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::Buffer(vec![0; length]));
@@ -5426,7 +5441,7 @@ pub unsafe extern "C" fn napi_create_arraybuffer(
     data: *mut *mut c_void,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(env) = env_mut(env) else {
+    let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::ArrayBuffer {
@@ -5614,7 +5629,7 @@ pub unsafe extern "C" fn napi_create_typedarray(
     byte_offset: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if !value_belongs_to_environment(env, array_buffer) {
+    if out.is_null() || !value_belongs_to_environment(env, array_buffer) {
         return NAPI_INVALID_ARG;
     }
     let Some(element_size) = typedarray_element_size(array_type) else {
@@ -5674,7 +5689,7 @@ pub unsafe extern "C" fn napi_create_dataview(
     byte_offset: usize,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if !value_belongs_to_environment(env, array_buffer) {
+    if out.is_null() || !value_belongs_to_environment(env, array_buffer) {
         return NAPI_INVALID_ARG;
     }
     let Ok((_, buffer_length, detached)) = arraybuffer_parts(array_buffer) else {
@@ -7206,6 +7221,107 @@ mod tests {
             }
             let json = json_from_value(object).unwrap();
             assert_eq!(json, serde_json::json!({"same": 1.0}));
+        }
+    }
+
+    #[test]
+    fn value_creation_rejects_null_outputs_before_mutating_the_environment() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let baseline = env.values.len();
+            assert_eq!(
+                napi_get_undefined(env_ptr, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_null(env_ptr, ptr::null_mut()), NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_get_boolean(env_ptr, true, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_double(env_ptr, 1.0, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_date(env_ptr, 1.0, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_bigint_int64(env_ptr, 1, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_bigint_uint64(env_ptr, 1, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_bigint_words(env_ptr, 0, 0, ptr::null(), ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"value".as_ptr(), 5, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_string_latin1(env_ptr, c"value".as_ptr(), 5, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            let utf16 = [b'v' as u16, 0];
+            assert_eq!(
+                napi_create_string_utf16(env_ptr, utf16.as_ptr(), 1, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_object(env_ptr, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_array_with_length(env_ptr, 2, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            let sentinel = ptr::dangling_mut::<c_void>();
+            let mut data = sentinel;
+            assert_eq!(
+                napi_create_buffer(env_ptr, 2, &mut data, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(data, sentinel);
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 2, &mut data, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(data, sentinel);
+            assert_eq!(env.values.len(), baseline);
+
+            let array_buffer = env.alloc(Value::ArrayBuffer {
+                bytes: vec![0; 8],
+                detached: false,
+            });
+            let after_backing = env.values.len();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 1, 1, array_buffer, 0, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_dataview(env_ptr, 1, array_buffer, 0, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_symbol(env_ptr, ptr::null_mut(), ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(env.values.len(), after_backing);
+
+            let mut foreign_env = Env::new();
+            let foreign_description = foreign_env.alloc(Value::String("foreign".into()));
+            let mut symbol = ptr::null_mut();
+            assert_eq!(
+                napi_create_symbol(env_ptr, foreign_description, &mut symbol),
+                NAPI_INVALID_ARG
+            );
+            assert!(symbol.is_null());
+            assert_eq!(env.values.len(), after_backing);
         }
     }
 
