@@ -3849,8 +3849,35 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
-        let target = self.lower_assign_target(&assign.left)?;
+        let mut target = self.lower_assign_target(&assign.left)?;
         let rhs = self.lower_expr(&assign.right)?;
+        let mut bindings = Vec::new();
+
+        if assign.op != AssignOp::Assign {
+            target = match target {
+                Target::Var(name) => Target::Var(name),
+                Target::Index(array, index) => {
+                    let array_name = format!("__thaw_assign_array_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let array_type = HirType::Array(Box::new(HirType::F64));
+                    self.scope.insert(array_name.clone(), array_type.clone());
+                    bindings.push((array_name.clone(), array_type, array));
+
+                    let index_name = format!("__thaw_assign_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    bindings.push((index_name.clone(), HirType::F64, index));
+                    Target::Index(HirExpr::Var(array_name), HirExpr::Var(index_name))
+                }
+                Target::Prop(object, object_type, field) => {
+                    let object_name = format!("__thaw_assign_object_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(object_name.clone(), object_type.clone());
+                    bindings.push((object_name.clone(), object_type.clone(), object));
+                    Target::Prop(HirExpr::Var(object_name), object_type, field)
+                }
+            };
+        }
 
         let value = if assign.op == AssignOp::Assign {
             rhs
@@ -3892,7 +3919,8 @@ impl<'a> FnLowerer<'a> {
             }
         };
 
-        Ok(build_assign(target, value))
+        let result = build_assign(target, value);
+        self.wrap_call_argument_bindings(result, &bindings)
     }
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
@@ -5349,6 +5377,28 @@ mod tests {
             &program.functions[0].body[2],
             HirStmt::Let(_, HirType::F64, HirExpr::PropAssign(_, _, field, _)) if field == "value"
         ));
+    }
+
+    #[test]
+    fn binds_compound_assignment_references_once() {
+        let program = lower(
+            r#"function values(): number[] { return [1]; }
+            function index(): number { return 0; }
+            function point(): { value: number } { return { value: 1 }; }
+            function main(): void {
+                values()[index()] += 2;
+                point().value *= 3;
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(main
+            .body
+            .iter()
+            .all(|statement| matches!(statement, HirStmt::Expr(HirExpr::Call(_, _)))));
     }
 
     #[test]

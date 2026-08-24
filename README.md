@@ -135,6 +135,8 @@ The workspace crates have narrow responsibilities:
 - Prefix and postfix `++`/`--` return the correct expression value and evaluate
   computed array and numeric object-field targets once, including awaited
   indexes and object expressions
+- Compound assignments evaluate array/object references and computed indexes
+  once before evaluating the right-hand side, including awaited components
 - Typed array literals support multiple spreads and ordinary elements with
   single, left-to-right evaluation, including awaited spread sources
 - `Promise.all`, `allSettled`, `race`, and `any` accept homogeneous array
