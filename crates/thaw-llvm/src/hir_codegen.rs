@@ -13875,13 +13875,47 @@ mod tests {
                     record(trace, "a", 1), await delayed(trace, "b", 2), record(trace, "c", 3)
                 );
                 consume(trace, record(trace, "d", 4), await delayed(trace, "e", 5));
+                consume(trace, record(trace, "f", 6), 1 + await delayed(trace, "g", 6));
                 console.log(trace.value);
                 console.log(value);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "call_argument_order_across_await"),
-            "abcde45\n123\n"
+            "abcde45fg67\n123\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_preserves_binary_left_operand_before_nested_await() {
+        let source = r#"
+            interface Trace { value: string; }
+            function record(trace: Trace, label: string, value: number): number {
+                trace.value = trace.value + label;
+                return value;
+            }
+            async function delayed(trace: Trace, label: string, value: number): Promise<number> {
+                trace.value = trace.value + label;
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                const trace: Trace = { value: "" };
+                const sum: number = record(trace, "a", 20)
+                    + await delayed(trace, "b", 22);
+                const comparison: boolean = record(trace, "c", 1)
+                    < await delayed(trace, "d", 2);
+                const nested: number = 2 * (record(trace, "e", 3)
+                    + await delayed(trace, "f", 4));
+                console.log(trace.value);
+                console.log(sum);
+                console.log(comparison);
+                console.log(nested);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "binary_order_across_nested_await"),
+            "abcdef\n42\ntrue\n14\n"
         );
     }
 
