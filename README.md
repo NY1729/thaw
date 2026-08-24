@@ -428,6 +428,9 @@ The workspace crates have narrow responsibilities:
   host-language predicate), arena-owned results, single evaluation and `await`
 - Strict equality and inequality recognize every native string-producing
   builtin and compare C-string contents, not arena/global pointer identities
+- Native strings implement variadic `.concat()` with left-to-right receiver
+  and argument evaluation, aggregate/primitive conversion, arena ownership and
+  awaited operands
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
