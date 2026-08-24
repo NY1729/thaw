@@ -441,8 +441,10 @@ methods whose final argument is a zero-to-two argument dynamic callback also
 use the receiver's persistent N-API environment and retain `this`; callback
 arguments such as `Error | null` and `any` cross this boundary as `Json`, and
 both `Json` and `void` callback returns are supported. The same E2E exercises
-`box.getLater(callback)`. Getters, static methods, aliased instances, and native
-addons that require directly driving a private libuv loop remain explicit gaps.
+`box.getLater(callback)`. The generated process now drives the default libuv
+loop alongside N-API async work; a real libuv timer regression test verifies
+delivery. Getters, static methods, aliased instances, and private non-default
+event loops remain explicit gaps.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
@@ -481,9 +483,10 @@ embeds it into an executable that starts after the registry is removed
 (`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
 registry_add_fetches_and_loads_sqlite3_when_enabled -- --nocapture`). Typed
 construction is integrated, callback-free instance methods are supported, and
-dynamic error-first callbacks work on instance methods. sqlite3 callbacks still
-need direct libuv-loop draining, and its overloaded method selection remains
-outside that path.
+dynamic error-first callbacks work on instance methods. The default libuv loop
+is drained, but sqlite3's `close` callback still exposes a deeper host-API or
+lifecycle incompatibility; its overloaded method selection also remains outside
+that path.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
