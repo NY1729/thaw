@@ -60,6 +60,9 @@ pub struct DtsConstructor {
 pub struct DtsMethod {
     pub name: String,
     pub params: Vec<(String, DtsType)>,
+    /// Number of parameters that must be present at a call site. Any
+    /// remaining trailing parameters were marked optional in the `.d.ts`.
+    pub required_params: usize,
     pub ret: DtsType,
     pub is_static: bool,
     pub kind: DtsMethodKind,
@@ -255,6 +258,16 @@ fn lower_dts_class(
                 methods.push(DtsMethod {
                     name: function.name,
                     params: function.params,
+                    required_params: method
+                        .function
+                        .params
+                        .iter()
+                        .take_while(|param| match &param.pat {
+                            Pat::Ident(binding) => !binding.optional,
+                            Pat::Assign(_) | Pat::Rest(_) => false,
+                            _ => true,
+                        })
+                        .count(),
                     ret: function.ret,
                     is_static: method.is_static,
                     kind: match method.kind {
@@ -2729,6 +2742,7 @@ mod tests {
             .iter()
             .find(|method| method.name == "close")
             .unwrap();
+        assert_eq!(close.required_params, 0);
         assert_eq!(
             close.params[0].1,
             DtsType::Native(HirType::Function(
@@ -2736,6 +2750,9 @@ mod tests {
                 Box::new(HirType::Void)
             ))
         );
+        assert!(runs
+            .iter()
+            .all(|method| method.required_params == method.params.len()));
         assert!(database
             .methods
             .iter()
