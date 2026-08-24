@@ -206,10 +206,11 @@ type NapiValue = *mut NapiValueData; // Box::into_raw で確保、そのまま�
 管理する。Thaw に GC は無い（アリーナベース、[[project_thaw_overview]]
 と同じ設計哲学）ので、ここは大胆に単純化してよい:
 
-- `napi_open_handle_scope`/`napi_close_handle_scope`/
-  `napi_open_escapable_handle_scope`/`napi_close_escapable_handle_scope`/
-  `napi_escape_handle` は **全部 no-op** にする（呼ばれたことにして
-  成功を返すだけ）。
+- `napi_open_handle_scope`/`napi_close_handle_scope`、callback scope、
+  escapable handle scope は Env ごとのスタックとして追跡する。別 Env の
+  scope、LIFO 順序違反、scope 種別違反、二重 close は拒否する。
+- `napi_escape_handle` は escapable scope ごとに一度だけ成功し、二度目は
+  `napi_escape_called_twice` を返す。GC による値の寿命短縮は行わない。
 - `napi_env` に1回の `thaw_napi_call` 呼び出し中に作られた全ての
   `NapiValueData` の `Box` ポインタを push だけしておき、呼び出しが
   終わったら（結果を JSON に変換し終えたら）まとめて `Box::from_raw` で
@@ -296,7 +297,7 @@ type NapiValue = *mut NapiValueData; // Box::into_raw で確保、そのまま�
 - `napi_get_version`
 - `napi_get_node_version`
 
-**スコープ（3.3節の通り no-op）**
+**スコープ（3.3節のアリーナ寿命モデル）**
 - `napi_open_handle_scope` / `napi_close_handle_scope`
 - `napi_open_escapable_handle_scope` / `napi_close_escapable_handle_scope` /
   `napi_escape_handle`
