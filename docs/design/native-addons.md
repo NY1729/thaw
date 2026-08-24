@@ -629,3 +629,5 @@ byte幅、alignment、offset、範囲を検証し、viewのdata pointerは共有
 Bufferは従来どおりUint8Array互換viewとして扱う。
 `napi_create_dataview`／`napi_get_dataview_info`も同じArrayBufferを共有し、TypedArrayと異なり
 非整列byte offsetを許可しながらoffset＋lengthの範囲を検証する。
+`napi_create_range_error`／`napi_throw_range_error`と`napi_is_error`を既存のError Value、pending
+exception、get-and-clear処理へ統合する。

@@ -2697,6 +2697,14 @@ pub unsafe extern "C" fn napi_throw_type_error(
     napi_throw_error(env, code, message)
 }
 #[no_mangle]
+pub unsafe extern "C" fn napi_throw_range_error(
+    env: NapiEnv,
+    code: *const c_char,
+    message: *const c_char,
+) -> NapiStatus {
+    napi_throw_error(env, code, message)
+}
+#[no_mangle]
 pub unsafe extern "C" fn napi_is_exception_pending(env: NapiEnv, out: *mut bool) -> NapiStatus {
     if out.is_null() {
         return NAPI_INVALID_ARG;
@@ -3383,6 +3391,29 @@ pub unsafe extern "C" fn napi_create_type_error(
     out: *mut NapiValue,
 ) -> NapiStatus {
     napi_create_error(env, code, message, out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_range_error(
+    env: NapiEnv,
+    code: NapiValue,
+    message: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    napi_create_error(env, code, message, out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_is_error(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *out = matches!(value_ref(value), Ok(Value::Error(_)));
+    NAPI_OK
 }
 
 #[no_mangle]
@@ -4470,6 +4501,43 @@ mod tests {
                 napi_create_dataview(env_ptr, 14, buffer, 3, &mut view),
                 NAPI_INVALID_ARG
             );
+        }
+    }
+
+    #[test]
+    fn range_errors_participate_in_exception_state() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut message = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"outside range".as_ptr(), 13, &mut message),
+                NAPI_OK
+            );
+            let mut error = ptr::null_mut();
+            assert_eq!(
+                napi_create_range_error(env_ptr, ptr::null_mut(), message, &mut error),
+                NAPI_OK
+            );
+            let mut is_error = false;
+            assert_eq!(napi_is_error(env_ptr, error, &mut is_error), NAPI_OK);
+            assert!(is_error);
+            assert_eq!(napi_throw(env_ptr, error), NAPI_OK);
+            let mut pending = false;
+            assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
+            assert!(pending);
+            let mut caught = ptr::null_mut();
+            assert_eq!(
+                napi_get_and_clear_last_exception(env_ptr, &mut caught),
+                NAPI_OK
+            );
+            assert_eq!(caught, error);
+            assert_eq!(
+                napi_throw_range_error(env_ptr, ptr::null(), c"again".as_ptr()),
+                NAPI_OK
+            );
+            assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
+            assert!(pending);
         }
     }
 
