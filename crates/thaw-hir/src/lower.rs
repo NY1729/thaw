@@ -2818,46 +2818,71 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
-        let fields = obj_lit
-            .props
-            .iter()
-            .map(|prop| {
-                let PropOrSpread::Prop(prop) = prop else {
-                    return Err(
-                        "spread properties are not supported in object literals".to_string()
-                    );
-                };
-                match prop.as_ref() {
-                    Prop::KeyValue(KeyValueProp { key, value }) => {
-                        let name = match key {
-                            PropName::Ident(ident) => ident.sym.to_string(),
-                            PropName::Str(s) => s.value.to_string_lossy().into_owned(),
-                            PropName::Computed(computed) => match computed.expr.as_ref() {
-                                Expr::Lit(Lit::Str(value)) => {
-                                    value.value.to_string_lossy().into_owned()
-                                }
-                                _ => {
-                                    return Err(
-                                        "computed object literal keys must be string literals"
-                                            .to_string(),
-                                    )
-                                }
-                            },
-                            _ => return Err("unsupported object literal key".to_string()),
+        let mut fields = Vec::new();
+        for property in &obj_lit.props {
+            let additions =
+                match property {
+                    PropOrSpread::Spread(spread) => {
+                        if !matches!(spread.expr.as_ref(), Expr::Ident(_)) {
+                            return Err("object spread currently requires a local object variable"
+                                .to_string());
+                        }
+                        let source = self.lower_expr(&spread.expr)?;
+                        let source_type = self.infer_expr_type(&source)?;
+                        let HirType::Object(source_fields) = &source_type else {
+                            return Err(format!(
+                            "cannot spread a value of type {source_type:?} into an object literal"
+                        ));
                         };
-                        Ok((name, self.lower_expr(value)?))
+                        source_fields
+                            .iter()
+                            .map(|(name, _)| {
+                                (
+                                    name.clone(),
+                                    HirExpr::PropAccess(
+                                        Box::new(source.clone()),
+                                        source_type.clone(),
+                                        name.clone(),
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
                     }
-                    Prop::Shorthand(ident) => Ok((
-                        ident.sym.to_string(),
-                        self.lower_expr(&Expr::Ident(ident.clone()))?,
-                    )),
-                    _ => Err(
-                        "only `key: value` and shorthand object literal properties are supported"
-                            .to_string(),
-                    ),
-                }
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+                    PropOrSpread::Prop(prop) => {
+                        match prop.as_ref() {
+                            Prop::KeyValue(KeyValueProp { key, value }) => {
+                                let name = match key {
+                                    PropName::Ident(ident) => ident.sym.to_string(),
+                                    PropName::Str(s) => s.value.to_string_lossy().into_owned(),
+                                    PropName::Computed(computed) => match computed.expr.as_ref() {
+                                        Expr::Lit(Lit::Str(value)) => {
+                                            value.value.to_string_lossy().into_owned()
+                                        }
+                                        _ => return Err(
+                                            "computed object literal keys must be string literals"
+                                                .to_string(),
+                                        ),
+                                    },
+                                    _ => return Err("unsupported object literal key".to_string()),
+                                };
+                                vec![(name, self.lower_expr(value)?)]
+                            }
+                            Prop::Shorthand(ident) => vec![(
+                                ident.sym.to_string(),
+                                self.lower_expr(&Expr::Ident(ident.clone()))?,
+                            )],
+                            _ => {
+                                return Err("only data properties are supported in object literals"
+                                    .to_string())
+                            }
+                        }
+                    }
+                };
+            for (name, value) in additions {
+                fields.retain(|(existing, _)| existing != &name);
+                fields.push((name, value));
+            }
+        }
         Ok(HirExpr::ObjectLit(fields))
     }
 
@@ -4384,6 +4409,40 @@ mod tests {
                 ]),
                 HirExpr::ObjectLit(vec![
                     ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
+                    ("label".into(), HirExpr::Lit(HirLit::Str("point".into()))),
+                ]),
+            )
+        );
+    }
+
+    #[test]
+    fn lowers_local_object_spread_and_later_property_overrides() {
+        let program = lower(
+            r#"function main(): void {
+                const base: { x: number; label: string } = { x: 1, label: "base" };
+                const point: { x: number; label: string } = { ...base, label: "point" };
+                console.log(point.label);
+            }"#,
+        );
+        let base_type = HirType::Object(vec![
+            ("x".into(), HirType::F64),
+            ("label".into(), HirType::Str),
+        ]);
+
+        assert_eq!(
+            program.functions[0].body[1],
+            HirStmt::Let(
+                "point".into(),
+                base_type.clone(),
+                HirExpr::ObjectLit(vec![
+                    (
+                        "x".into(),
+                        HirExpr::PropAccess(
+                            Box::new(HirExpr::Var("base".into())),
+                            base_type,
+                            "x".into(),
+                        ),
+                    ),
                     ("label".into(), HirExpr::Lit(HirLit::Str("point".into()))),
                 ]),
             )
