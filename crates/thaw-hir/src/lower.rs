@@ -5260,6 +5260,43 @@ impl<'a> FnLowerer<'a> {
         Ok((values, *element))
     }
 
+    fn lower_parse_call(&mut self, call: &CallExpr, parse_int: bool) -> Result<HirExpr, String> {
+        let label = if parse_int { "parseInt" } else { "parseFloat" };
+        let expected = if parse_int { 1..=2 } else { 1..=1 };
+        if !expected.contains(&call.args.len()) {
+            return Err(format!(
+                "`{label}` expects one{} argument",
+                if parse_int { " or two" } else { "" }
+            ));
+        }
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("parse function spread is not supported".into());
+        }
+        let text = self.lower_expr(&call.args[0].expr)?;
+        let text = self.coerce_primitive_to_string(text)?;
+        let mut arguments = vec![text];
+        if parse_int {
+            let radix = if let Some(argument) = call.args.get(1) {
+                let value = self.lower_expr(&argument.expr)?;
+                self.coerce_primitive_to_number(value)?
+            } else {
+                HirExpr::Lit(HirLit::F64(0.0))
+            };
+            arguments.push(radix);
+        }
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var(
+                if parse_int {
+                    "__thaw_parse_int"
+                } else {
+                    "__thaw_parse_float"
+                }
+                .to_string(),
+            )),
+            arguments,
+        ))
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
@@ -5268,6 +5305,11 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"Number"
+                        && matches!(property.sym.as_ref(), "parseFloat" | "parseInt")
+                    {
+                        return self.lower_parse_call(call, property.sym == *"parseInt");
+                    }
                     if object.sym == *"Math" && property.sym == *"random" {
                         if !call.args.is_empty() {
                             return Err("`Math.random` expects no arguments".into());
@@ -6000,45 +6042,7 @@ impl<'a> FnLowerer<'a> {
         // value. Unlike `console.log` (whose codegen can disambiguate its
         // argument by LLVM value shape -- f64 vs. pointer), `Str`/`Array`/
         if matches!(callee_name.as_str(), "parseFloat" | "parseInt") {
-            let expected = if callee_name == "parseFloat" {
-                1..=1
-            } else {
-                1..=2
-            };
-            if !expected.contains(&call.args.len()) {
-                return Err(format!(
-                    "`{callee_name}` expects one{} argument",
-                    if callee_name == "parseInt" {
-                        " or two"
-                    } else {
-                        ""
-                    }
-                ));
-            }
-            if call.args.iter().any(|argument| argument.spread.is_some()) {
-                return Err("parse function spread is not supported".into());
-            }
-            let text = self.lower_expr(&call.args[0].expr)?;
-            let text = self.coerce_primitive_to_string(text)?;
-            let mut arguments = vec![text];
-            if callee_name == "parseInt" {
-                let radix = if let Some(argument) = call.args.get(1) {
-                    let value = self.lower_expr(&argument.expr)?;
-                    self.coerce_primitive_to_number(value)?
-                } else {
-                    HirExpr::Lit(HirLit::F64(0.0))
-                };
-                arguments.push(radix);
-            }
-            let builtin = if callee_name == "parseFloat" {
-                "__thaw_parse_float"
-            } else {
-                "__thaw_parse_int"
-            };
-            return Ok(HirExpr::Call(
-                Box::new(HirExpr::Var(builtin.to_string())),
-                arguments,
-            ));
+            return self.lower_parse_call(call, callee_name == "parseInt");
         }
 
         // `Object`/`Json` all share the same pointer representation, so
