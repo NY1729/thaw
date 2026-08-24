@@ -258,6 +258,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     inner.as_ref(),
                     HirExpr::PromiseNew(_, _, _)
                         | HirExpr::PromiseThen(_, _, _, _, _, _)
+                        | HirExpr::PromiseFinally(_, _, _, _)
                         | HirExpr::PromiseAll(_, _)
                         | HirExpr::PromiseAllArray(_, _)
                         | HirExpr::PromiseAllTuple(_, _)
@@ -2110,6 +2111,7 @@ impl<'ctx> HirCompiler<'ctx> {
             expr,
             HirExpr::PromiseNew(_, _, _)
                 | HirExpr::PromiseThen(_, _, _, _, _, _)
+                | HirExpr::PromiseFinally(_, _, _, _)
                 | HirExpr::PromiseAll(_, _)
                 | HirExpr::PromiseAllArray(_, _)
                 | HirExpr::PromiseAllTuple(_, _)
@@ -2164,6 +2166,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                     HirExpr::PromiseNew(_, resolved, _) => resolved.clone(),
                     HirExpr::PromiseThen(_, _, _, output, _, _) => output.clone(),
+                    HirExpr::PromiseFinally(_, _, input, _) => input.clone(),
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
                         HirType::Array(Box::new(element.clone()))
                     }
@@ -10574,6 +10577,33 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "promise_finally"),
             "fulfilled cleanup\n41\nrejected cleanup\noriginal rejection\n42\nasync cleanup\n43\nfinally failure\n44\n"
+        );
+    }
+
+    #[test]
+    fn directly_awaited_finally_uses_async_frame_rejection_handling() {
+        let source = r#"
+            async function main(): Promise<void> {
+                const value: number = await new Promise<number>((resolve, reject) => {
+                    resolve(41);
+                }).finally(() => {
+                    console.log("fulfilled cleanup");
+                });
+                console.log(value);
+                try {
+                    await new Promise<number>((resolve, reject) => {
+                        reject("finally rejection");
+                    }).finally(() => {
+                        console.log("rejected cleanup");
+                    });
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "direct_await_finally"),
+            "fulfilled cleanup\n41\nrejected cleanup\nfinally rejection\n"
         );
     }
 
