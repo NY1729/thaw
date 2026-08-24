@@ -38,9 +38,10 @@ callback ABIについてはinstance methodにも接続し、0〜2個の動的引
 戻り値を扱う。`.d.ts`の`Error | null`や`any`はこの境界で`Json`へ正規化する。
 receiverと同じ永続`napi_env`内にcallback functionを作り、`this`を維持してmethodを
 呼ぶ。自作addonの`box.getLater(callback)`を通常構文から実行し、callback結果と
-method戻り値の双方を検証した。sqlite3の`close`ではmethod開始まで確認できたが、
-完了通知はaddonが直接使うlibuv loopを現在の終了時drainが駆動しないため未達である。
-直接libuv loop統合とoverload解決は次の拡張対象である。
+method戻り値の双方を検証した。終了時drainにはdefault libuv loopの`UV_RUN_NOWAIT`も
+統合し、実timerの発火とhandle closeを回帰testで確認した。sqlite3の`close`はmethod
+開始まで到達するが、このloop統合後もcallbackが未達のため、残る原因はN-API host API
+またはlifecycle互換性として切り分けた。sqlite3固有の不足とoverload解決が次の対象である。
 
 ## 1. 何が難しいのか（おさらい）
 
