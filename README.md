@@ -495,6 +495,9 @@ The workspace crates have narrow responsibilities:
   static level is flattened into an arena-owned shallow result; depth zero and
   already-flat arrays are copied, while dynamic depths remain an explicit
   layout error because their result element type is not statically fixed
+- `Array.of()` constructs homogeneous native arrays for every supported
+  element layout, preserves scalar/spread evaluation order and accepts awaited
+  spreads. Explicit element type arguments support empty construction
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
