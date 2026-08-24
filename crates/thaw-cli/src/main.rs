@@ -2505,6 +2505,57 @@ fn parse_ffi_aggregate_layout(
         })
         .transpose()?
         .unwrap_or_else(|| vec![None; field_offsets.len()]);
+    let field_bitfields = object
+        .get("bitFields")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "FFI metadata for `{symbol}` in `{}` requires `bitFields` to be an array",
+                        path.display()
+                    )
+                })?
+                .iter()
+                .map(|value| {
+                    if value.is_null() {
+                        return Ok(None);
+                    }
+                    let bitfield = value.as_object().ok_or_else(|| {
+                        format!(
+                            "FFI metadata for `{symbol}` in `{}` requires bitfield entries to be objects or null",
+                            path.display()
+                        )
+                    })?;
+                    let bit_offset = bitfield
+                        .get("bitOffset")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u8::try_from(value).ok())
+                        .ok_or_else(|| {
+                            format!(
+                                "FFI metadata for `{symbol}` in `{}` requires an 8-bit integer `bitOffset`",
+                                path.display()
+                            )
+                        })?;
+                    let storage_bytes = bitfield
+                        .get("storageBytes")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| u8::try_from(value).ok())
+                        .ok_or_else(|| {
+                            format!(
+                                "FFI metadata for `{symbol}` in `{}` requires an 8-bit integer `storageBytes`",
+                                path.display()
+                            )
+                        })?;
+                    Ok(Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset,
+                        storage_bytes,
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_else(|| vec![None; field_offsets.len()]);
     let size = object
         .get("size")
         .and_then(|value| value.as_u64())
@@ -2542,6 +2593,7 @@ fn parse_ffi_aggregate_layout(
     Ok(thaw_hir::FfiAggregateLayout {
         field_offsets,
         field_layouts,
+        field_bitfields,
         size,
         alignment,
         indirect,
@@ -4320,7 +4372,7 @@ mod tests {
         let path = dir.join("ffi.json");
         std::fs::write(
             &path,
-            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"size":32,"alignment":32,"indirect":true}}}}"#,
+            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"storageBytes":1},null],"size":32,"alignment":32,"indirect":true}}}}"#,
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
@@ -4333,10 +4385,18 @@ mod tests {
                     Some(Box::new(thaw_hir::FfiAggregateLayout {
                         field_offsets: vec![0],
                         field_layouts: vec![None],
+                        field_bitfields: vec![None],
                         size: 8,
                         alignment: 8,
                         indirect: false,
                     })),
+                ],
+                field_bitfields: vec![
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 2,
+                        storage_bytes: 1,
+                    }),
+                    None,
                 ],
                 size: 32,
                 alignment: 32,

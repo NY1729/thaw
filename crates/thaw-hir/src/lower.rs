@@ -10630,7 +10630,7 @@ impl<'a> FnLowerer<'a> {
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
             };
-            let result = HirExpr::FfiCall(ffi_signature, args);
+            let result = HirExpr::FfiCall(Box::new(ffi_signature), args);
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
@@ -13006,7 +13006,7 @@ mod tests {
             HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var("console.log".into())),
                 vec![HirExpr::FfiCall(
-                    crate::FfiSignature {
+                    Box::new(crate::FfiSignature {
                         symbol: "native_add".into(),
                         params: vec![HirType::F64, HirType::F64],
                         variadic: None,
@@ -13019,7 +13019,7 @@ mod tests {
                         calling_convention: crate::FfiCallingConvention::C,
                         aggregate_return_abi: crate::FfiAggregateAbi::Internal,
                         aggregate_return_layout: None,
-                    },
+                    }),
                     vec![
                         HirExpr::Lit(HirLit::F64(2.0)),
                         HirExpr::Lit(HirLit::F64(3.0)),

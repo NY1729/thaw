@@ -350,8 +350,9 @@ extern "C" fn thaw_dynamic_call(
   単位への展開に加え、`Array`/`Object`のportable struct戻り値、文字列の
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
-  packed C struct戻り値も明示指定できる。任意のfield offset／alignment、
-  bitfield、number／boolean／string以外のvariadicは未対応。
+  packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
+  boolean bitfieldも明示できる。複数bitの整数field、
+  number／boolean／string以外のvariadicは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -399,7 +400,11 @@ padding; and `indirect: true` selects an explicit hidden return-storage
 pointer. `fieldLayouts` has one entry per field: scalar entries are `null`,
 while object entries recursively contain the child object's offsets, size,
 alignment, and optional child `fieldLayouts` (`indirect` defaults to `false`
-for children). LLVM represents the value as a packed structure with byte-array
+for children). `bitFields` contains `null` for ordinary fields or a
+`bitOffset`/`storageBytes` object for boolean fields. Multiple consecutive
+boolean entries may share the same 1/2/4/8-byte storage offset; LLVM loads that
+storage once and independently shifts/masks each field. LLVM represents the
+value as a packed structure with byte-array
 padding at the declared offsets and gives the storage the requested alignment.
 The implementation accepts direct and `thaw-result` portable/packed object
 returns whose fields are `boolean`, `number`, `bigint`/`i64`, or `string`.
@@ -415,8 +420,8 @@ Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
 parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
 variadic declaration. Extra values are passed as C `double`, default-promoted
 `int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
-subject to the ordinary marshal rules. Bitfields, explicit register-class
-returns and other vararg types remain future extensions.
+subject to the ordinary marshal rules. Multi-bit integer fields, explicit
+register-class returns and other vararg types remain future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
