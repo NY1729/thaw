@@ -512,9 +512,10 @@ name and type. Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
 compound assignments invalidate the affected fact. String-literal computed
 object keys such as `{ ["value"]: 1 }` are supported. Object spreads from a
-statically typed local variable, such as `{ ...base, value: 1 }`, preserve its
+statically typed local variable or a nested object literal preserve their
 fields and allow later properties to override them. Dynamic computed keys and
-spreads of non-local expressions remain outside this path. `if/else`
+spreads of other expressions, including calls with side effects, remain outside
+this path. `if/else`
 branches are analyzed from the same incoming state and retain
 only value, class-instance, and callback facts that agree on every outgoing
 path; an omitted `else` joins against the unchanged incoming path. `while` and

@@ -1004,17 +1004,14 @@ fn rewrite_external_class_methods(
                 let mut fields = Vec::with_capacity(object.props.len());
                 for property in &object.props {
                     if let PropOrSpread::Spread(spread) = property {
-                        let Expr::Ident(identifier) = spread.expr.as_ref() else {
-                            return Some(thaw_hir::HirType::Object(Vec::new()));
-                        };
                         let Some(thaw_hir::HirType::Object(spread_fields)) =
-                            variables.get(identifier.sym.as_str())
+                            source_expr_type(&spread.expr, variables, functions)
                         else {
                             return Some(thaw_hir::HirType::Object(Vec::new()));
                         };
                         for (name, value_type) in spread_fields {
-                            fields.retain(|(existing, _)| existing != name);
-                            fields.push((name.clone(), value_type.clone()));
+                            fields.retain(|(existing, _)| existing != &name);
+                            fields.push((name, value_type));
                         }
                         continue;
                     }
@@ -4435,7 +4432,7 @@ mod tests {
 
     #[test]
     fn selects_object_overloads_from_structural_property_types() {
-        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" }); box.configure({ ...numeric }); box.configure({ ...numeric, value: "override" });"#;
+        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" }); box.configure({ ...numeric }); box.configure({ ...numeric, value: "override" }); box.configure({ ...{ value: 9 } });"#;
         let rewritten = rewrite_external_class_methods(
             source,
             &[("addon".into(), "NativeBox".into())],
@@ -4471,6 +4468,7 @@ mod tests {
         assert!(rewritten.contains("__configure_string(box, { [\"value\"]: \"computed\" })"));
         assert!(rewritten.contains("__configure_number(box, { ...numeric })"));
         assert!(rewritten.contains("__configure_string(box, { ...numeric, value: \"override\" })"));
+        assert!(rewritten.contains("__configure_number(box, { ...{ value: 9 } })"));
     }
 
     #[test]
