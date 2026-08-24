@@ -32,6 +32,7 @@
 //! `docs/design/async-await.md`.
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use inkwell::basic_block::BasicBlock;
@@ -51,9 +52,15 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
 use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
-    FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi, HirExpr,
-    HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
+    FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi,
+    HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt, HirType,
 };
+
+#[derive(Clone)]
+struct ExplicitFfiField {
+    native_index: u32,
+    bitfield: Option<FfiBitFieldLayout>,
+}
 
 /// The user's `main`, if any, is compiled under this symbol instead of
 /// `main` so we can wrap it in a proper `i32 main(void)` C entry point
@@ -1640,19 +1647,64 @@ impl<'ctx> HirCompiler<'ctx> {
         &self,
         fields: &[(String, HirType)],
         layout: &FfiAggregateLayout,
-    ) -> Result<(inkwell::types::StructType<'ctx>, Vec<u32>), String> {
+    ) -> Result<(inkwell::types::StructType<'ctx>, Vec<ExplicitFfiField>), String> {
         let mut native_fields = Vec::new();
         let mut logical_indices = Vec::with_capacity(fields.len());
         let mut cursor = 0_u64;
+        let mut shared_bit_storage = None;
         for (index, ((name, field_ty), offset)) in
             fields.iter().zip(&layout.field_offsets).enumerate()
         {
+            if let Some(bitfield) = &layout.field_bitfields[index] {
+                let shared_index =
+                    shared_bit_storage.and_then(|(shared_offset, shared_bytes, native_index)| {
+                        (shared_offset == *offset && shared_bytes == bitfield.storage_bytes)
+                            .then_some(native_index)
+                    });
+                let native_index = if let Some(native_index) = shared_index {
+                    native_index
+                } else {
+                    if *offset < cursor {
+                        return Err(format!(
+                            "FFI bitfield `{name}` does not share its declared storage unit"
+                        ));
+                    }
+                    if *offset > cursor {
+                        let padding = u32::try_from(*offset - cursor).map_err(|_| {
+                            "FFI aggregate padding exceeds LLVM's array limit".to_owned()
+                        })?;
+                        native_fields.push(self.context.i8_type().array_type(padding).into());
+                    }
+                    let native_index = native_fields.len() as u32;
+                    native_fields.push(
+                        self.context
+                            .custom_width_int_type(
+                                NonZeroU32::new(u32::from(bitfield.storage_bytes) * 8)
+                                    .expect("validated bitfield storage is non-zero"),
+                            )
+                            .map_err(str::to_owned)?
+                            .into(),
+                    );
+                    cursor = offset + u64::from(bitfield.storage_bytes);
+                    shared_bit_storage = Some((*offset, bitfield.storage_bytes, native_index));
+                    native_index
+                };
+                logical_indices.push(ExplicitFfiField {
+                    native_index,
+                    bitfield: Some(bitfield.clone()),
+                });
+                continue;
+            }
+            shared_bit_storage = None;
             if *offset > cursor {
                 let padding = u32::try_from(*offset - cursor)
                     .map_err(|_| "FFI aggregate padding exceeds LLVM's array limit".to_owned())?;
                 native_fields.push(self.context.i8_type().array_type(padding).into());
             }
-            logical_indices.push(native_fields.len() as u32);
+            logical_indices.push(ExplicitFfiField {
+                native_index: native_fields.len() as u32,
+                bitfield: None,
+            });
             native_fields.push(
                 self.ffi_return_type(
                     field_ty,
@@ -10152,16 +10204,47 @@ impl<'ctx> HirCompiler<'ctx> {
                     .unwrap()
                     .into_pointer_value();
                 for (index, (name, field_ty)) in fields.iter().enumerate() {
+                    let explicit_field = field_indices.as_ref().map(|indices| &indices[index]);
                     let mut field = self
                         .builder
                         .build_extract_value(
                             native,
-                            field_indices
-                                .as_ref()
-                                .map_or(index as u32, |indices| indices[index]),
+                            explicit_field.map_or(index as u32, |field| field.native_index),
                             &format!("ffi_{name}"),
                         )
                         .map_err(|error| error.to_string())?;
+                    if let Some(bitfield) = explicit_field.and_then(|field| field.bitfield.as_ref())
+                    {
+                        let storage = field.into_int_value();
+                        let storage_type = storage.get_type();
+                        let shifted = self
+                            .builder
+                            .build_right_shift(
+                                storage,
+                                storage_type.const_int(u64::from(bitfield.bit_offset), false),
+                                false,
+                                &format!("ffi_{name}_shift"),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        let masked = self
+                            .builder
+                            .build_and(
+                                shifted,
+                                storage_type.const_int(1, false),
+                                &format!("ffi_{name}_mask"),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        field = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                masked,
+                                storage_type.const_zero(),
+                                &format!("ffi_{name}_bool"),
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into();
+                    }
                     field = match field_ty {
                         HirType::Str if *ownership != FfiOwnership::Borrowed => self
                             .apply_ffi_string_ownership(
@@ -18887,6 +18970,7 @@ mod tests {
             declare function native_aligned_record(): { active: boolean; value: number };
             declare function native_checked_aligned_record(value: number): { active: boolean; value: number };
             declare function native_nested_aligned_record(): { meta: { active: boolean; value: number }; total: number };
+            declare function native_bit_record(): { active: boolean; ready: boolean; value: number };
 
             function main(): void {
                 const record: { active: boolean; value: number } = native_aligned_record();
@@ -18902,6 +18986,10 @@ mod tests {
                 const nested = native_nested_aligned_record();
                 console.log(nested.meta.active);
                 console.log(nested.meta.value + nested.total);
+                const bits = native_bit_record();
+                console.log(bits.active);
+                console.log(bits.ready);
+                console.log(bits.value);
             }
         "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
@@ -18922,6 +19010,7 @@ mod tests {
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 0],
                 field_layouts: vec![None, None],
+                field_bitfields: vec![None, None],
                 size: 16,
                 alignment: 8,
                 indirect: true,
@@ -18935,6 +19024,64 @@ mod tests {
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 16],
                 field_layouts: vec![None, None],
+                field_bitfields: vec![None, None],
+                size: 32,
+                alignment: 32,
+                indirect: true,
+            },
+        )
+        .unwrap();
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            "native_bit_record",
+            vec![],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+        let mut invalid_bits = program.clone();
+        assert!(thaw_hir::set_ffi_aggregate_layout(
+            &mut invalid_bits,
+            "native_bit_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 0, 8],
+                field_layouts: vec![None, None, None],
+                field_bitfields: vec![
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 32,
+                        storage_bytes: 4,
+                    }),
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 1,
+                        storage_bytes: 4,
+                    }),
+                    None,
+                ],
+                size: 32,
+                alignment: 32,
+                indirect: true,
+            },
+        )
+        .unwrap_err()
+        .contains("invalid bit offset"));
+        thaw_hir::set_ffi_aggregate_layout(
+            &mut program,
+            "native_bit_record",
+            thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 0, 8],
+                field_layouts: vec![None, None, None],
+                field_bitfields: vec![
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 0,
+                        storage_bytes: 4,
+                    }),
+                    Some(thaw_hir::FfiBitFieldLayout {
+                        bit_offset: 1,
+                        storage_bytes: 4,
+                    }),
+                    None,
+                ],
                 size: 32,
                 alignment: 32,
                 indirect: true,
@@ -18956,6 +19103,7 @@ mod tests {
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 48],
                 field_layouts: vec![None, None],
+                field_bitfields: vec![None, None],
                 size: 64,
                 alignment: 32,
                 indirect: true,
@@ -18972,12 +19120,14 @@ mod tests {
                     Some(Box::new(thaw_hir::FfiAggregateLayout {
                         field_offsets: vec![0, 16],
                         field_layouts: vec![None, None],
+                        field_bitfields: vec![None, None],
                         size: 32,
                         alignment: 32,
                         indirect: false,
                     })),
                     None,
                 ],
+                field_bitfields: vec![None, None],
                 size: 64,
                 alignment: 32,
                 indirect: true,
@@ -19005,6 +19155,7 @@ mod tests {
             thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 16],
                 field_layouts: vec![None, None],
+                field_bitfields: vec![None, None],
                 size: 32,
                 alignment: 32,
                 indirect: true,
@@ -19029,9 +19180,13 @@ mod tests {
         compiler.write_object_file(&obj_path).unwrap();
         std::fs::write(
             &native_c_path,
-            "typedef struct __attribute__((aligned(32))) { _Bool active; char padding[15]; double value; char tail[8]; } AlignedRecord;\n\
+            "#include <stddef.h>\n\
+             typedef struct __attribute__((aligned(32))) { _Bool active; char padding[15]; double value; char tail[8]; } AlignedRecord;\n\
              typedef struct { AlignedRecord value; const char *error; } AlignedRecordResult;\n\
              typedef struct __attribute__((aligned(32))) { AlignedRecord meta; char padding[16]; double total; char tail[8]; } NestedAlignedRecord;\n\
+             typedef struct __attribute__((aligned(32))) { unsigned active:1; unsigned ready:1; double value; } BitRecord;\n\
+             _Static_assert(sizeof(BitRecord) == 32, \"unexpected BitRecord size\");\n\
+             _Static_assert(offsetof(BitRecord, value) == 8, \"unexpected BitRecord value offset\");\n\
              AlignedRecord native_aligned_record(void) { return (AlignedRecord){1, {0}, 42, {0}}; }\n\
              AlignedRecordResult native_checked_aligned_record(double value) {\n\
                if (value < 0) return (AlignedRecordResult){{0, {0}, 0, {0}}, \"aligned check failed\"};\n\
@@ -19039,7 +19194,8 @@ mod tests {
              }\n\
              NestedAlignedRecord native_nested_aligned_record(void) {\n\
                return (NestedAlignedRecord){{1, {0}, 20, {0}}, {0}, 22, {0}};\n\
-             }\n",
+             }\n\
+             BitRecord native_bit_record(void) { return (BitRecord){1, 0, 42}; }\n",
         )
         .unwrap();
         assert!(Command::new("cc")
@@ -19064,7 +19220,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "true\n42\n21\naligned check failed\ntrue\n42\n"
+            "true\n42\n21\naligned check failed\ntrue\n42\ntrue\nfalse\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

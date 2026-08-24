@@ -120,9 +120,16 @@ pub enum FfiAggregateAbi {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FfiBitFieldLayout {
+    pub bit_offset: u8,
+    pub storage_bytes: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfiAggregateLayout {
     pub field_offsets: Vec<u64>,
     pub field_layouts: Vec<Option<Box<FfiAggregateLayout>>>,
+    pub field_bitfields: Vec<Option<FfiBitFieldLayout>>,
     pub size: u64,
     pub alignment: u32,
     pub indirect: bool,
@@ -222,7 +229,7 @@ pub enum HirExpr {
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     Block(Vec<HirStmt>),
-    FfiCall(FfiSignature, Vec<HirExpr>),
+    FfiCall(Box<FfiSignature>, Vec<HirExpr>),
     DynamicCall(DynamicSignature, Vec<HirExpr>),
     /// `name = value` (and desugared compound assignments / `++`/`--`).
     /// Evaluates to `value`.
@@ -1147,12 +1154,15 @@ pub fn set_ffi_aggregate_layout(
         layout: &FfiAggregateLayout,
         root: bool,
     ) -> Result<(), String> {
-        if layout.field_offsets.len() != fields.len() || layout.field_layouts.len() != fields.len()
+        if layout.field_offsets.len() != fields.len()
+            || layout.field_layouts.len() != fields.len()
+            || layout.field_bitfields.len() != fields.len()
         {
             return Err(format!(
-                "FFI aggregate layout for `{symbol}` at `{path}` has {} field offsets and {} field layouts, expected {} of each",
+                "FFI aggregate layout for `{symbol}` at `{path}` has {} field offsets, {} field layouts, and {} bitfield entries, expected {} of each",
                 layout.field_offsets.len(),
                 layout.field_layouts.len(),
+                layout.field_bitfields.len(),
                 fields.len()
             ));
         }
@@ -1172,12 +1182,30 @@ pub fn set_ffi_aggregate_layout(
             ));
         }
         let mut previous_end = 0;
+        let mut shared_bit_storage = None;
         for (index, ((name, ty), offset)) in fields.iter().zip(&layout.field_offsets).enumerate() {
             let child = layout.field_layouts[index].as_deref();
-            let field_size = match (ty, child) {
-                (HirType::Bool, None) => 1,
-                (HirType::F64 | HirType::I64 | HirType::Str, None) => 8,
-                (HirType::Object(child_fields), Some(child_layout)) => {
+            let bitfield = layout.field_bitfields[index].as_ref();
+            let field_size = match (ty, child, bitfield) {
+                (HirType::Bool, None, Some(bitfield)) => {
+                    if !matches!(bitfield.storage_bytes, 1 | 2 | 4 | 8)
+                        || u16::from(bitfield.bit_offset)
+                            >= u16::from(bitfield.storage_bytes) * 8
+                    {
+                        return Err(format!(
+                            "FFI bitfield `{path}.{name}` of `{symbol}` has an invalid bit offset or storage size"
+                        ));
+                    }
+                    u64::from(bitfield.storage_bytes)
+                }
+                (_, _, Some(_)) => {
+                    return Err(format!(
+                        "FFI bitfield `{path}.{name}` of `{symbol}` requires a boolean field without a nested layout"
+                    ))
+                }
+                (HirType::Bool, None, None) => 1,
+                (HirType::F64 | HirType::I64 | HirType::Str, None, None) => 8,
+                (HirType::Object(child_fields), Some(child_layout), None) => {
                     validate_layout(
                         symbol,
                         &format!("{path}.{name}"),
@@ -1187,28 +1215,31 @@ pub fn set_ffi_aggregate_layout(
                     )?;
                     child_layout.size
                 }
-                (HirType::Object(_), None) => {
+                (HirType::Object(_), None, None) => {
                     return Err(format!(
                         "FFI aggregate layout field `{path}.{name}` of `{symbol}` needs a nested field layout"
                     ))
                 }
-                (_, Some(_)) => {
+                (_, Some(_), None) => {
                     return Err(format!(
                         "FFI aggregate layout field `{path}.{name}` of `{symbol}` has a nested layout for a non-object type"
                     ))
                 }
-                (other, None) => {
+                (other, None, None) => {
                     return Err(format!(
                         "FFI aggregate layout field `{path}.{name}` of `{symbol}` has unsupported explicit-layout type {other:?}"
                     ))
                 }
             };
-            if *offset < previous_end || offset.saturating_add(field_size) > layout.size {
+            let end = offset.saturating_add(field_size);
+            let shares_storage = bitfield.is_some() && shared_bit_storage == Some((*offset, end));
+            if (*offset < previous_end && !shares_storage) || end > layout.size {
                 return Err(format!(
                     "FFI aggregate layout field `{path}.{name}` of `{symbol}` is outside or overlaps the declared size"
                 ));
             }
-            previous_end = offset + field_size;
+            previous_end = previous_end.max(end);
+            shared_bit_storage = bitfield.map(|_| (*offset, end));
         }
         Ok(())
     }
