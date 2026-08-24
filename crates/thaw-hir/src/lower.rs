@@ -405,6 +405,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             return_string_abi: FfiStringAbi::NullTerminated,
             calling_convention: FfiCallingConvention::C,
             aggregate_return_abi: FfiAggregateAbi::Internal,
+            aggregate_return_layout: None,
         })
         .collect();
 
@@ -1594,7 +1595,7 @@ fn resolve_ts_type_with_substitution(
 #[derive(Clone)]
 enum Target {
     Var(Symbol),
-    Index(HirExpr, HirExpr),
+    Index(HirExpr, Box<HirExpr>),
     Prop(HirExpr, HirType, Symbol),
 }
 
@@ -1611,7 +1612,7 @@ enum ArrayPredicateMode {
 fn target_to_read_expr(target: &Target) -> HirExpr {
     match target {
         Target::Var(name) => HirExpr::Var(name.clone()),
-        Target::Index(arr, idx) => HirExpr::Index(Box::new(arr.clone()), Box::new(idx.clone())),
+        Target::Index(arr, idx) => HirExpr::Index(Box::new(arr.clone()), idx.clone()),
         Target::Prop(obj, ty, field) => {
             HirExpr::PropAccess(Box::new(obj.clone()), ty.clone(), field.clone())
         }
@@ -1621,9 +1622,7 @@ fn target_to_read_expr(target: &Target) -> HirExpr {
 fn build_assign(target: Target, value: HirExpr) -> HirExpr {
     match target {
         Target::Var(name) => HirExpr::Assign(name, Box::new(value)),
-        Target::Index(arr, idx) => {
-            HirExpr::IndexAssign(Box::new(arr), Box::new(idx), Box::new(value))
-        }
+        Target::Index(arr, idx) => HirExpr::IndexAssign(Box::new(arr), idx, Box::new(value)),
         Target::Prop(obj, ty, field) => {
             HirExpr::PropAssign(Box::new(obj), ty, field, Box::new(value))
         }
@@ -6076,7 +6075,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Array(element) if element.as_ref() == &HirType::F64 => {
                 let index = self.lower_expr(&computed.expr)?;
                 self.expect_type(&HirType::F64, &index, "index expression")?;
-                Ok(Target::Index(object, index))
+                Ok(Target::Index(object, Box::new(index)))
             }
             HirType::Object(fields) => {
                 let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() else {
@@ -6199,8 +6198,8 @@ impl<'a> FnLowerer<'a> {
                     let index_name = format!("__thaw_assign_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
-                    bindings.push((index_name.clone(), HirType::F64, index));
-                    Target::Index(HirExpr::Var(array_name), HirExpr::Var(index_name))
+                    bindings.push((index_name.clone(), HirType::F64, *index));
+                    Target::Index(HirExpr::Var(array_name), Box::new(HirExpr::Var(index_name)))
                 }
                 Target::Prop(object, object_type, field) => {
                     let object_name = format!("__thaw_assign_object_{}", self.next_binding);
@@ -6612,8 +6611,8 @@ impl<'a> FnLowerer<'a> {
                 let index_name = format!("__thaw_update_index_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(index_name.clone(), HirType::F64);
-                bindings.push((index_name.clone(), HirType::F64, index));
-                Target::Index(HirExpr::Var(array_name), HirExpr::Var(index_name))
+                bindings.push((index_name.clone(), HirType::F64, *index));
+                Target::Index(HirExpr::Var(array_name), Box::new(HirExpr::Var(index_name)))
             }
             Target::Prop(object, object_type, field) => {
                 let object_name = format!("__thaw_update_object_{}", self.next_binding);
@@ -10629,6 +10628,7 @@ impl<'a> FnLowerer<'a> {
                 return_string_abi: FfiStringAbi::NullTerminated,
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             };
             let result = HirExpr::FfiCall(ffi_signature, args);
             return self.wrap_call_argument_bindings(result, &argument_bindings);
@@ -12996,6 +12996,7 @@ mod tests {
                 return_string_abi: crate::FfiStringAbi::NullTerminated,
                 calling_convention: crate::FfiCallingConvention::C,
                 aggregate_return_abi: crate::FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             }]
         );
 
@@ -13017,6 +13018,7 @@ mod tests {
                         return_string_abi: crate::FfiStringAbi::NullTerminated,
                         calling_convention: crate::FfiCallingConvention::C,
                         aggregate_return_abi: crate::FfiAggregateAbi::Internal,
+                        aggregate_return_layout: None,
                     },
                     vec![
                         HirExpr::Lit(HirLit::F64(2.0)),
