@@ -695,6 +695,7 @@ Array／Buffer／ArrayBuffer／view／Function／Promise／Error／Dateを含む
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
 handleも型判定やbacking memory参照より先にinvalid-argとして拒否する。
+比較、coercion、prototype、seal／freeze、throwも同じEnv境界を使い、Env単位APIはnull Envを拒否する。
 generic property APIはArray／Buffer／ArrayBuffer／SharedArrayBuffer／TypedArray／DataView／Promise／
 Error／Dateにもnamed／Symbol data propertyとaccessorを保持する。prototype探索、own判定、descriptor属性、
 列挙順、delete、seal／freezeはplain Object／Functionと同じmetadata経路を使う。Arrayのcanonical数値名は
