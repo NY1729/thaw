@@ -126,8 +126,8 @@ The workspace crates have narrow responsibilities:
   objects
 - `interface`, interface inheritance and generic interface instantiation
 - Local-variable inference from supported expressions
-- `let`/`const`, assignment, arithmetic, comparison, `if`, `while` and classic
-  `for`
+- `let`/`const`, assignment, arithmetic, comparison, `if`, `while`, classic
+  `for`, `do/while`, and typed-array `for...of`
 - Object fields and array indexing/mutation
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
@@ -222,6 +222,8 @@ The workspace crates have narrow responsibilities:
   HIR lowering, while conflicting call-site constraints produce an error
 - Assignments, returns, arithmetic/comparisons, array indexes/elements, and
   function argument count/types are checked against the inferred native layout
+- Strict equality compares numbers and booleans by value, strings by content,
+  and arrays/objects by reference identity
 - Unresolved and conflicting parameter constraints identify the responsible
   function or call with its source byte range
 - Identity-shaped generic functions are monomorphized once per concrete
