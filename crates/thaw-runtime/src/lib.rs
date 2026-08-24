@@ -482,6 +482,33 @@ pub unsafe extern "C" fn thaw_array_copy_within(
 }
 
 #[no_mangle]
+/// Returns an arena-owned shallow copy of a native array range.
+///
+/// # Safety
+///
+/// `array` must point to a readable Thaw array whose elements occupy
+/// eight-byte slots.
+pub unsafe extern "C" fn thaw_array_slice(array: *const u8, start: f64, end: f64) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    let start = relative_array_index(start, length);
+    let end = relative_array_index(end, length);
+    let count = end.saturating_sub(start);
+    let output = thaw_arena::thaw_arena_alloc((count + 1) * 8, 8);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(count as u64);
+        if count != 0 {
+            std::ptr::copy_nonoverlapping(array.add(8 + start * 8), output.add(8), count * 8);
+        }
+    }
+    output
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing `f64` element slots.

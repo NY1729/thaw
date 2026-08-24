@@ -3135,6 +3135,19 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
+                    "__thaw_array_slice" => {
+                        if args.len() != 3 {
+                            return Err("array slice expects three operands".into());
+                        }
+                        let ty = self.infer_expr_type(&args[0])?;
+                        if !matches!(ty, HirType::Array(_)) {
+                            return Err("array slice requires a homogeneous array".into());
+                        }
+                        for argument in &args[1..] {
+                            self.expect_type(&HirType::F64, argument, "slice index")?;
+                        }
+                        return Ok(ty);
+                    }
                     "__thaw_number_array_index_of"
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"
@@ -5574,6 +5587,50 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
                         vec![receiver],
                     ));
+                }
+                if property.sym == *"slice" {
+                    if call.args.len() > 2 {
+                        return Err("native `.slice()` expects zero to two arguments".into());
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array slice spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !matches!(receiver_type, HirType::Array(_)) {
+                        return Err(format!(
+                            "`.slice()` requires a homogeneous array, got {receiver_type:?}"
+                        ));
+                    }
+                    let mut indices = Vec::with_capacity(2);
+                    for argument in &call.args {
+                        let value = self.lower_expr(&argument.expr)?;
+                        indices.push(self.coerce_primitive_to_number(value)?);
+                    }
+                    if indices.is_empty() {
+                        indices.push(HirExpr::Lit(HirLit::F64(0.0)));
+                    }
+                    if indices.len() == 1 {
+                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                    }
+                    let receiver_name = format!("__thaw_slice_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), receiver_type.clone());
+                    let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
+                    let mut arguments = vec![HirExpr::Var(receiver_name)];
+                    for (position, index) in indices.into_iter().enumerate() {
+                        let name = format!("__thaw_slice_index_{}_{}", position, self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::F64);
+                        arguments.push(HirExpr::Var(name.clone()));
+                        bindings.push((name, HirType::F64, index));
+                    }
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_slice".to_string())),
+                        arguments,
+                    );
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"copyWithin" {
                     if !(2..=3).contains(&call.args.len()) {
