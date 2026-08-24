@@ -1005,8 +1005,24 @@ ESMのローカルexportとre-exportは値コピーではなくgetterで公開�
 上でも保たれる。`.cjs`/`.mjs`/`.json`、directory package entry、package
 `imports`、exact／single-wildcard `exports`とcondition選択も解決対象に加えた。
 混在グラフの実行テストは、live export、循環、`#imports`、JSON、dynamic importを
-同時に通してQuickJS上で最終値42を確認する。lexical named-importの完全なlive binding、
-import assertion、top-level await、非literal dynamic importは引き続き未対応である。
+同時に通してQuickJS上で最終値42を確認する。
+## 27. ESM live bindingと非同期module初期化
+
+named/default importの使用箇所を、import時の値コピーではなく依存moduleの
+getter参照へAST span単位で置換する。関数引数、block binding、catch bindingの
+shadowingとobject shorthandを区別し、再exportされたimportも同じlive参照を使う。
+
+top-level awaitを持つmoduleと、そのmoduleを静的importする上流moduleはasync factoryに
+する。CommonJS cacheはexports identityを先に確立し、別の`ready` Promiseで初期化完了を
+表す。QuickJSの`loadScript`はentryのreadyをtimer/job queueとともに駆動してからglobal
+export aliasを公開する。async dependency cycleはdeadlockさせず、module keyを並べた
+明示エラーにする。同期ESM cycleは従来どおり部分初期化cacheで動作する。
+
+JSON moduleは`with { type: "json" }`と旧`assert { type: "json" }`を受理し、その他の
+attributeを明示エラーにする。dynamic importは実行時式を`requireAsync(String(expr))`へ
+変換し、同一package内のJS／JSON候補をbundle mapへ収録する。同じmoduleを複数回import
+しても同じnamespace objectとready Promiseを再利用する。runtime-computedな外部package、
+`import.meta`、star exportの曖昧性解決はまだ対象外である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

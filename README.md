@@ -142,9 +142,11 @@ The workspace crates have narrow responsibilities:
   C/fast/cold LLVM calling conventions
 - QuickJS fallback for signatures which cannot use the C ABI path
 - Parser-backed CommonJS/ESM dependency discovery and bundling, including
-  literal dynamic imports, live namespace/re-export bindings, cycles, JSON
-  modules, package `imports`, conditional exact/wildcard `exports`, selected
-  Node built-in polyfills, scoped packages and package version locking
+  literal and same-package runtime dynamic imports, lexical live named/default
+  bindings with shadowing, live namespace/re-export bindings, synchronous
+  cycles, acyclic top-level await, JSON import attributes, package `imports`,
+  conditional exact/wildcard `exports`, selected Node built-in polyfills,
+  scoped packages and package version locking
 - Relative user-module graphs (`./file`, `./file.ts`, and `./dir/index.ts`)
   with named/default imports, aliases, named re-exports, export-all,
   module-local symbol isolation, dependency deduplication and cycle diagnostics
@@ -336,10 +338,11 @@ The workspace crates have narrow responsibilities:
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
   API
-- Full ESM semantics: the parser-backed bundler preserves live exported and
-  namespace-imported values, but lexical named-import live bindings, import
-  assertions, top-level await and non-literal dynamic imports remain outside
-  the supported subset
+- Full ESM semantics: the parser-backed bundler covers live imports, JSON
+  `with`/`assert` attributes, acyclic top-level await and same-package runtime
+  dynamic imports. Top-level-await cycles are explicit errors; `import.meta`,
+  star-export ambiguity, non-JSON attributes and runtime-computed external
+  package imports remain outside the supported subset
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit
