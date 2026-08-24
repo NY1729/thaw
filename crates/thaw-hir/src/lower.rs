@@ -2216,6 +2216,8 @@ impl<'a> FnLowerer<'a> {
                     "setDynamicProperty" => return Ok(HirType::Bool),
                     "callDynamicMethod" => return Ok(HirType::Json),
                     "readDynamicValue" => return Ok(HirType::Json),
+                    "callDynamicValueMixed" => return Ok(HirType::Json),
+                    "constructDynamicValue" => return Ok(HirType::JsValue),
                     "loadNativeAddon" => return Ok(HirType::Bool),
                     "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
                     "callNativeAddon" => return Ok(HirType::Json),

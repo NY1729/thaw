@@ -318,6 +318,7 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
         thaw_hir::HirType::Str => Some("string".into()),
         thaw_hir::HirType::Bool => Some("boolean".into()),
         thaw_hir::HirType::Json => Some("Json".into()),
+        thaw_hir::HirType::JsValue => Some("JsValue".into()),
         thaw_hir::HirType::Array(element) => {
             render_dynamic_type(element).map(|element| format!("{element}[]"))
         }
@@ -2576,28 +2577,18 @@ mod tests {
             added.dependency_versions.get("p-try").map(String::as_str),
             Some("2.2.0")
         );
-        let bundle = std::fs::read_to_string(registry.join("p-limit/bundle.js")).unwrap();
-        let bundle = bundle.replacen("module.exports = ", "globalThis.__thawPLimit = ", 1);
-        let script = format!(
-            r#"{bundle}
-            globalThis.__thawPLimitTask = async function() {{ return {{ sum: 42 }}; }};"#
-        );
-        let script_literal = serde_json::to_string(&script).unwrap();
         let source = dir.join("main.ts");
         let output = dir.join("app");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             &source,
-            format!(
-                r#"function main(): void {{
-                    loadScript({script_literal});
-                    const factory: JsValue = getDynamicValue("__thawPLimit");
-                    const limit: JsValue = callDynamicValueHandle(factory, JSON.parse("[2]"));
-                    const task: JsValue = getDynamicValue("__thawPLimitTask");
+            r#"import pLimit from "p-limit";
+                function main(): void {
+                    const limit: JsValue = pLimit(2);
+                    const task: JsValue = getDynamicValue("Number");
                     const result: Json = callDynamicValueWithValue(limit, task);
-                    console.log(Number(result.sum));
-                }}"#
-            ),
+                    console.log(Number(result));
+                }"#,
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -2607,7 +2598,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
