@@ -700,6 +700,10 @@ get／set／has／列挙はview offsetとdetach状態を反映し、代入値は
 TypedArrayの全11 kindも同じindex APIへ統合し、signed／unsigned modulo、Uint8Clampedのties-to-even、
 Float32／Float64、BigInt64／BigUint64の変換を行う。byte offsetとunaligned backingを保持し、detach後は
 indexを存在しないものとして扱い、範囲内のattached indexはdeleteできない。
+Arrayのown `length`は非列挙・非configurable・writable propertyとしてresizeを行う。Bufferの`length`、
+ArrayBuffer／SharedArrayBufferの`byteLength`、TypedArray／DataViewの`length`／`byteLength`／
+`byteOffset`／`buffer`は読み取り専用metadataとしてgeneric get／hasから取得できる。detach後のview長と
+offsetは0になり、backing identityは維持する。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
