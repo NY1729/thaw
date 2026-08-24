@@ -675,6 +675,14 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_set_property_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_call_method_with_callback_result",
             result_type.fn_type(
                 &[
@@ -5030,6 +5038,9 @@ impl<'ctx> HirCompiler<'ctx> {
         if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$getter$") {
             return self.compile_typed_napi_getter(signature, args);
         }
+        if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$setter$") {
+            return self.compile_typed_napi_setter(signature, args);
+        }
         if signature.backend == DynamicBackend::Napi
             && (signature.symbol.starts_with("$method$")
                 || signature.symbol.starts_with("$methodvoid$")
@@ -5243,6 +5254,165 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed dynamic return does not support {other:?} yet"
+            )),
+        }
+    }
+
+    fn compile_typed_napi_setter(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver, assigned] = args else {
+            return Err("typed N-API setter expects a receiver and value".into());
+        };
+        let receiver = self.compile_expr(receiver)?;
+        let assigned_type = signature
+            .params
+            .get(1)
+            .ok_or("typed N-API setter is missing its value type")?;
+        let mut assigned_value = self.compile_expr(assigned)?;
+        let array = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "napi_setter_args",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let push = match assigned_type {
+            HirType::F64 => "thaw_json_array_push_number",
+            HirType::Str => "thaw_json_array_push_string",
+            HirType::Bool => {
+                assigned_value = self
+                    .builder
+                    .build_int_z_extend(
+                        assigned_value.into_int_value(),
+                        self.context.i8_type(),
+                        "napi_setter_bool",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into();
+                "thaw_json_array_push_bool"
+            }
+            HirType::Json => "thaw_json_array_push_json",
+            HirType::Array(element) if **element == HirType::F64 => {
+                assigned_value = self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_json_from_number_array")
+                            .unwrap(),
+                        &[assigned_value.into()],
+                        "marshal_napi_setter_number_array",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .unwrap();
+                "thaw_json_array_push_json"
+            }
+            HirType::Object(_) => {
+                assigned_value = self.compile_native_object_to_json(
+                    assigned_value.into_pointer_value(),
+                    assigned_type,
+                )?;
+                "thaw_json_array_push_json"
+            }
+            other => return Err(format!("N-API setter value does not support {other:?}")),
+        };
+        self.builder
+            .build_call(
+                self.module.get_function(push).unwrap(),
+                &[array.into(), assigned_value.into()],
+                "marshal_napi_setter_value",
+            )
+            .map_err(|error| error.to_string())?;
+        let property = signature
+            .symbol
+            .split('$')
+            .nth(3)
+            .ok_or("invalid typed N-API setter symbol")?;
+        let property = self
+            .builder
+            .build_global_string_ptr(property, "napi_setter_name")
+            .map_err(|error| error.to_string())?;
+        let args_json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[array.into()],
+                "napi_setter_args_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_set_property_result")
+                    .unwrap(),
+                &[
+                    receiver.into(),
+                    property.as_pointer_value().into(),
+                    args_json.into(),
+                ],
+                "napi_setter_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "napi_setter_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "napi_setter_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "napi_setter_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse returned no setter value".to_string())?;
+        match signature.ret {
+            HirType::Json => Ok(json),
+            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
+            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
+            HirType::Bool => self.compile_json_as_bool_value(json),
+            HirType::Array(ref element) if **element == HirType::F64 => self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_to_number_array")
+                        .unwrap(),
+                    &[json.into()],
+                    "napi_setter_number_array_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
+            ref other => Err(format!(
+                "typed N-API setter return does not support {other:?} yet"
             )),
         }
     }

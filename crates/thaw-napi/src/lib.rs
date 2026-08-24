@@ -1015,6 +1015,43 @@ pub unsafe extern "C" fn thaw_napi_get_property_result(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_set_property_result(
+    receiver: u64,
+    property: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    let result = (|| -> Result<String, String> {
+        let env = module_env_for_handle(receiver)?;
+        let property_name = text(property)?;
+        let property_name_c =
+            CString::new(property_name.clone()).map_err(|_| "property contains NUL")?;
+        let values = module_arguments(env, args)?;
+        let [value] = values.as_slice() else {
+            return Err("native property setter expects exactly one value".into());
+        };
+        let status =
+            napi_set_named_property(env, receiver as NapiValue, property_name_c.as_ptr(), *value);
+        take_env_exception(env)?;
+        if status != NAPI_OK {
+            return Err(format!(
+                "failed to set native property `{property_name}`: status {status}"
+            ));
+        }
+        serde_json::to_string(&json_from_value(*value)?).map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: ptr::null_mut(),
+        },
+        Err(error) => ThawResult {
+            value: ptr::null_mut(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let Some(info) = info.as_ref() else {
         return ptr::null_mut();
