@@ -1452,6 +1452,38 @@ pub unsafe extern "C" fn napi_create_bigint_uint64(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_bigint_words(
+    env: NapiEnv,
+    sign_bit: i32,
+    word_count: usize,
+    words: *const u64,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if sign_bit != 0 && sign_bit != 1 || (word_count != 0 && words.is_null()) {
+        return NAPI_INVALID_ARG;
+    }
+    let mut magnitude = if word_count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(words, word_count).to_vec()
+    };
+    while magnitude.last() == Some(&0) {
+        magnitude.pop();
+    }
+    if magnitude.is_empty() {
+        magnitude.push(0);
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::BigInt {
+        negative: sign_bit == 1 && magnitude != [0],
+        words: magnitude,
+    });
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_value_bigint_int64(
     _env: NapiEnv,
     value: NapiValue,
@@ -1501,6 +1533,36 @@ pub unsafe extern "C" fn napi_get_value_bigint_uint64(
     let low = words.first().copied().unwrap_or(0);
     *out = if *negative { low.wrapping_neg() } else { low };
     *lossless = !*negative && words.len() <= 1;
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_bigint_words(
+    _env: NapiEnv,
+    value: NapiValue,
+    sign_bit: *mut i32,
+    word_count: *mut usize,
+    words: *mut u64,
+) -> NapiStatus {
+    if sign_bit.is_null() || word_count.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Value::BigInt {
+        negative,
+        words: magnitude,
+    } = (match value_ref(value) {
+        Ok(value) => value,
+        Err(_) => return NAPI_INVALID_ARG,
+    })
+    else {
+        return NAPI_BIGINT_EXPECTED;
+    };
+    *sign_bit = i32::from(*negative);
+    let capacity = *word_count;
+    *word_count = magnitude.len();
+    if !words.is_null() && capacity != 0 {
+        ptr::copy_nonoverlapping(magnitude.as_ptr(), words, capacity.min(magnitude.len()));
+    }
     NAPI_OK
 }
 
@@ -4007,6 +4069,55 @@ mod tests {
             let mut value_type = -1;
             assert_eq!(napi_typeof(env_ptr, value, &mut value_type), NAPI_OK);
             assert_eq!(value_type, 9);
+        }
+    }
+
+    #[test]
+    fn bigint_words_preserve_little_endian_magnitude_and_sign() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let source = [1_u64, 2, 3, 0];
+            let mut value = ptr::null_mut();
+            assert_eq!(
+                napi_create_bigint_words(env_ptr, 1, source.len(), source.as_ptr(), &mut value),
+                NAPI_OK
+            );
+            let mut sign = 0;
+            let mut count = 0;
+            assert_eq!(
+                napi_get_value_bigint_words(env_ptr, value, &mut sign, &mut count, ptr::null_mut(),),
+                NAPI_OK
+            );
+            assert_eq!(sign, 1);
+            assert_eq!(count, 3);
+
+            let mut copy = [0_u64; 2];
+            count = copy.len();
+            assert_eq!(
+                napi_get_value_bigint_words(
+                    env_ptr,
+                    value,
+                    &mut sign,
+                    &mut count,
+                    copy.as_mut_ptr(),
+                ),
+                NAPI_OK
+            );
+            assert_eq!(count, 3);
+            assert_eq!(copy, [1, 2]);
+
+            assert_eq!(
+                napi_create_bigint_words(env_ptr, 1, 0, ptr::null(), &mut value),
+                NAPI_OK
+            );
+            count = 0;
+            assert_eq!(
+                napi_get_value_bigint_words(env_ptr, value, &mut sign, &mut count, ptr::null_mut(),),
+                NAPI_OK
+            );
+            assert_eq!(sign, 0);
+            assert_eq!(count, 1);
         }
     }
 

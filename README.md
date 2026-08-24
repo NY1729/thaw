@@ -703,7 +703,8 @@ The workspace crates have narrow responsibilities:
   64-bit number constructors share the existing JavaScript-number conversion path.
   Date values preserve millisecond timestamps and report JavaScript object type.
   Signed and unsigned 64-bit BigInt creation/extraction preserves low bits and
-  reports whether conversion was lossless.
+  reports whether conversion was lossless. Arbitrary-precision little-endian
+  word arrays support sign, size queries and capacity-limited extraction.
   Own-property checks and property deletion are supported for objects and functions
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design
