@@ -53,8 +53,8 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
     FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiRegisterClass,
-    FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram, HirStmt,
-    HirType,
+    FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram,
+    HirStmt, HirType,
 };
 
 #[derive(Clone)]
@@ -10527,7 +10527,49 @@ impl<'ctx> HirCompiler<'ctx> {
             for arg in &args[sig.params.len()..] {
                 let value = self.compile_expr(arg)?;
                 match variadic {
-                    HirType::F64 => compiled_args.push(value.into()),
+                    HirType::F64 => {
+                        let value = value.into_float_value();
+                        let converted: BasicValueEnum<'ctx> = match sig.variadic_abi {
+                            FfiVariadicAbi::Native => value.into(),
+                            FfiVariadicAbi::I32 => self
+                                .builder
+                                .build_float_to_signed_int(
+                                    value,
+                                    self.context.i32_type(),
+                                    "ffi_vararg_i32",
+                                )
+                                .map_err(|error| error.to_string())?
+                                .into(),
+                            FfiVariadicAbi::I64 => self
+                                .builder
+                                .build_float_to_signed_int(
+                                    value,
+                                    self.context.i64_type(),
+                                    "ffi_vararg_i64",
+                                )
+                                .map_err(|error| error.to_string())?
+                                .into(),
+                            FfiVariadicAbi::U32 => self
+                                .builder
+                                .build_float_to_unsigned_int(
+                                    value,
+                                    self.context.i32_type(),
+                                    "ffi_vararg_u32",
+                                )
+                                .map_err(|error| error.to_string())?
+                                .into(),
+                            FfiVariadicAbi::U64 => self
+                                .builder
+                                .build_float_to_unsigned_int(
+                                    value,
+                                    self.context.i64_type(),
+                                    "ffi_vararg_u64",
+                                )
+                                .map_err(|error| error.to_string())?
+                                .into(),
+                        };
+                        compiled_args.push(converted.into());
+                    }
                     HirType::Bool => {
                         let promoted = self
                             .builder
@@ -18560,16 +18602,24 @@ mod tests {
             declare function native_sum(count: number, ...values: number[]): number;
             declare function native_true_count(count: number, ...values: boolean[]): number;
             declare function native_total_length(count: number, ...values: string[]): number;
+            declare function native_sum_i32(count: number, ...values: number[]): number;
+            declare function native_sum_i64(count: number, ...values: number[]): number;
+            declare function native_sum_u32(count: number, ...values: number[]): number;
+            declare function native_sum_u64(count: number, ...values: number[]): number;
 
             function main(): void {
                 console.log(native_sum(0));
                 console.log(native_sum(3, 2, 3, 5));
                 console.log(native_true_count(4, true, false, true, true));
                 console.log(native_total_length(3, "thaw", "ffi", "ok"));
+                console.log(native_sum_i32(2, 0 - 2, 5));
+                console.log(native_sum_i64(2, 0 - 4, 10));
+                console.log(native_sum_u32(2, 20, 22));
+                console.log(native_sum_u64(2, 40, 2));
             }
         "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
-        let program = thaw_hir::lower_module(&module).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
         assert!(program
             .extern_functions
             .iter()
@@ -18582,6 +18632,21 @@ mod tests {
             .extern_functions
             .iter()
             .any(|signature| signature.variadic == Some(HirType::Str)));
+        for (symbol, abi) in [
+            ("native_sum_i32", thaw_hir::FfiVariadicAbi::I32),
+            ("native_sum_i64", thaw_hir::FfiVariadicAbi::I64),
+            ("native_sum_u32", thaw_hir::FfiVariadicAbi::U32),
+            ("native_sum_u64", thaw_hir::FfiVariadicAbi::U64),
+        ] {
+            thaw_hir::set_ffi_variadic_abi(&mut program, symbol, abi).unwrap();
+        }
+        assert!(thaw_hir::set_ffi_variadic_abi(
+            &mut program,
+            "native_true_count",
+            thaw_hir::FfiVariadicAbi::I32,
+        )
+        .unwrap_err()
+        .contains("requires a number[] rest parameter"));
 
         let context = Context::create();
         let mut compiler = HirCompiler::new(&context, "ffi_variadic");
@@ -18616,6 +18681,30 @@ mod tests {
                va_start(args, raw_count);\n\
                for (int i = 0; i < count; ++i) length += strlen(va_arg(args, const char *));\n\
                va_end(args); return (double)length;\n\
+             }\n\
+             double native_sum_i32(double raw_count, ...) {\n\
+               int count = (int)raw_count; int sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) sum += va_arg(args, int);\n\
+               va_end(args); return (double)sum;\n\
+             }\n\
+             double native_sum_i64(double raw_count, ...) {\n\
+               int count = (int)raw_count; long long sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) sum += va_arg(args, long long);\n\
+               va_end(args); return (double)sum;\n\
+             }\n\
+             double native_sum_u32(double raw_count, ...) {\n\
+               int count = (int)raw_count; unsigned int sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) sum += va_arg(args, unsigned int);\n\
+               va_end(args); return (double)sum;\n\
+             }\n\
+             double native_sum_u64(double raw_count, ...) {\n\
+               int count = (int)raw_count; unsigned long long sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) sum += va_arg(args, unsigned long long);\n\
+               va_end(args); return (double)sum;\n\
              }\n",
         )
         .unwrap();
@@ -18639,7 +18728,10 @@ mod tests {
             .success());
         let output = Command::new(&exe_path).output().unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n10\n3\n9\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "0\n10\n3\n9\n3\n6\n42\n42\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

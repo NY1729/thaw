@@ -2397,6 +2397,7 @@ struct FfiMetadata {
     calling_convention: thaw_hir::FfiCallingConvention,
     aggregate_return_abi: thaw_hir::FfiAggregateAbi,
     aggregate_return_layout: Option<thaw_hir::FfiAggregateLayout>,
+    variadic_abi: thaw_hir::FfiVariadicAbi,
 }
 
 fn parse_string_abi(
@@ -2803,6 +2804,27 @@ fn read_ffi_metadata(
                 } else {
                     None
                 },
+                variadic_abi: if version == Some(4) {
+                    match entry
+                        .get("variadicAbi")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("native")
+                    {
+                        "native" => thaw_hir::FfiVariadicAbi::Native,
+                        "i32" => thaw_hir::FfiVariadicAbi::I32,
+                        "i64" => thaw_hir::FfiVariadicAbi::I64,
+                        "u32" => thaw_hir::FfiVariadicAbi::U32,
+                        "u64" => thaw_hir::FfiVariadicAbi::U64,
+                        other => {
+                            return Err(format!(
+                                "unknown variadic ABI `{other}` for `{symbol}` in `{}`",
+                                path.display()
+                            ))
+                        }
+                    }
+                } else {
+                    thaw_hir::FfiVariadicAbi::Native
+                },
             };
             if let Some(previous) = configured.insert(symbol.clone(), metadata.clone()) {
                 if previous != metadata {
@@ -3012,6 +3034,7 @@ fn build_with_link_mode(
         if let Some(layout) = metadata.aggregate_return_layout {
             thaw_hir::set_ffi_aggregate_layout(&mut program, &symbol, layout)?;
         }
+        thaw_hir::set_ffi_variadic_abi(&mut program, &symbol, metadata.variadic_abi)?;
     }
 
     let context = Context::create();
@@ -4320,6 +4343,7 @@ mod tests {
                 calling_convention: thaw_hir::FfiCallingConvention::C,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
+                variadic_abi: thaw_hir::FfiVariadicAbi::Native,
             }
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -4376,6 +4400,7 @@ mod tests {
                 calling_convention: thaw_hir::FfiCallingConvention::C,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
+                variadic_abi: thaw_hir::FfiVariadicAbi::Native,
             }
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -4404,6 +4429,7 @@ mod tests {
                 calling_convention: thaw_hir::FfiCallingConvention::Fast,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Portable,
                 aggregate_return_layout: None,
+                variadic_abi: thaw_hir::FfiVariadicAbi::Native,
             }
         );
         assert_eq!(
@@ -4423,7 +4449,7 @@ mod tests {
         let path = dir.join("ffi.json");
         std::fs::write(
             &path,
-            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"bitWidth":5,"storageBytes":1,"signed":true},null],"size":32,"alignment":32,"indirect":true}},"register":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,8],"size":16,"alignment":8,"indirect":false,"registerClasses":["integer","sse"]}}}}"#,
+            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"bitWidth":5,"storageBytes":1,"signed":true},null],"size":32,"alignment":32,"indirect":true}},"register":{"errorAbi":"direct","aggregateReturnAbi":"portable","variadicAbi":"i64","aggregateReturnLayout":{"fieldOffsets":[0,8],"size":16,"alignment":8,"indirect":false,"registerClasses":["integer","sse"]}}}}"#,
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
@@ -4457,6 +4483,10 @@ mod tests {
                 alignment: 32,
                 indirect: true,
             })
+        );
+        assert_eq!(
+            metadata["register"].variadic_abi,
+            thaw_hir::FfiVariadicAbi::I64
         );
         assert_eq!(
             metadata["register"]
