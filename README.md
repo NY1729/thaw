@@ -605,8 +605,9 @@ The workspace crates have narrow responsibilities:
   default functions and the complete JavaScript expression/statement set
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel
-  collisions. General optional-chain short-circuiting still requires native
-  `null` plus flow-sensitive optional unwrapping
+  collisions. Nullish coalescing unwraps the payload with true RHS
+  short-circuiting, including across suspension points. General optional-chain
+  short-circuiting still requires native `null` plus flow-sensitive unwrapping
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
