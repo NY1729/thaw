@@ -3099,7 +3099,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     "__thaw_number_neg" | "__thaw_math_abs" | "__thaw_math_floor"
                     | "__thaw_math_ceil" | "__thaw_math_trunc" | "__thaw_math_sqrt"
-                    | "__thaw_math_sign" => {
+                    | "__thaw_math_sign" | "__thaw_math_round" => {
                         let [argument] = args.as_slice() else {
                             return Err("unary Math function expects one operand".into());
                         };
@@ -5115,11 +5115,14 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     if object.sym == *"Math"
-                        && matches!(property.sym.as_ref(), "pow" | "min" | "max" | "sign")
+                        && matches!(
+                            property.sym.as_ref(),
+                            "pow" | "min" | "max" | "sign" | "round"
+                        )
                     {
                         let expected = match property.sym.as_ref() {
                             "pow" => Some(2),
-                            "sign" => Some(1),
+                            "sign" | "round" => Some(1),
                             _ => None,
                         };
                         if expected.is_some_and(|expected| call.args.len() != expected) {

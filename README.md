@@ -380,6 +380,9 @@ The workspace crates have narrow responsibilities:
   left-to-right numeric coercion. Empty extrema return signed infinity, `NaN`
   propagates, zero ties retain JavaScript's sign ordering, and unary negation
   preserves negative zero
+- `Math.round` implements JavaScript's ties-toward-positive-infinity rule,
+  including negative-zero results between `-0.5` and zero, numeric coercion,
+  non-finite values, single evaluation and awaited arguments
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
