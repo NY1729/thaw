@@ -713,8 +713,8 @@ The workspace crates have narrow responsibilities:
   External-memory adjustments are tracked per Env with checked signed totals.
   ArrayBuffer detachment zeroes data/length for the backing value and existing
   TypedArray/DataView views while preserving external finalizer ownership.
-  Async contexts validate resource names and Env ownership and are released by
-  the matching `napi_async_destroy` call.
+  Async contexts validate resource names and Env ownership, reject double
+  destruction, and are checked by callback scopes and `napi_make_callback`.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.

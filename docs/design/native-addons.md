@@ -640,7 +640,8 @@ generic failureを返す。
 保持する。detach後はArrayBufferと既存TypedArray／DataViewのdataをnull、lengthを0として返し、
 新しいview作成を拒否する一方、external memoryのfinalizer所有権はEnv破棄まで維持する。
 `napi_async_init`はresource nameと所有Envを保持するcontextを作り、`napi_async_destroy`は同じ
-Envからの破棄だけを受理してcontextを一度解放する。callback scope／make_callbackへ渡せる。
+Envからの破棄だけを一度受理する。context は Env 終了まで追跡されるため、二重破棄や破棄後の
+callback scope／make_callback 利用も安全に拒否できる。
 `napi_object_seal`は新規propertyとdeleteを禁止し、既存data property更新を許す。
 `napi_object_freeze`はさらに既存data property更新も禁止する。named／generic property、function、
 array elementへ同じintegrity levelを適用し、accessor setter呼び出しはJavaScript規約どおり維持する。

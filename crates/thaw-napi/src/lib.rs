@@ -306,6 +306,7 @@ struct AsyncContext {
     env: usize,
     resource: NapiValue,
     resource_name: String,
+    destroyed: bool,
 }
 
 #[repr(C)]
@@ -371,6 +372,9 @@ pub struct Env {
     #[allow(clippy::vec_box)]
     handle_scopes: Vec<Box<HandleScope>>,
     active_handle_scopes: Vec<*mut HandleScope>,
+    // Box keeps async_context pointers stable and retained long enough to reject reuse.
+    #[allow(clippy::vec_box)]
+    async_contexts: Vec<Box<AsyncContext>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -440,6 +444,7 @@ impl Env {
             module_file_name: CString::new("").unwrap(),
             handle_scopes: Vec::new(),
             active_handle_scopes: Vec::new(),
+            async_contexts: Vec::new(),
         }
     }
 
@@ -448,6 +453,27 @@ impl Env {
         self.values.push(value);
         value
     }
+}
+
+unsafe fn async_context_mut<'a>(
+    env: NapiEnv,
+    context: *mut c_void,
+) -> Result<&'a mut AsyncContext, NapiStatus> {
+    let Ok(env_ref) = env_mut(env) else {
+        return Err(NAPI_INVALID_ARG);
+    };
+    let context_ptr = context.cast::<AsyncContext>();
+    let Some(context_ref) = env_ref
+        .async_contexts
+        .iter_mut()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), context_ptr))
+    else {
+        return Err(NAPI_INVALID_ARG);
+    };
+    if context_ref.env != env as usize || context_ref.destroyed {
+        return Err(NAPI_INVALID_ARG);
+    }
+    Ok(context_ref)
 }
 
 unsafe fn open_handle_scope(
@@ -5785,13 +5811,16 @@ pub unsafe extern "C" fn napi_call_function(
 #[no_mangle]
 pub unsafe extern "C" fn napi_make_callback(
     env: NapiEnv,
-    _async_context: *mut c_void,
+    async_context: *mut c_void,
     this_arg: NapiValue,
     function: NapiValue,
     argc: usize,
     argv: *const NapiValue,
     result: *mut NapiValue,
 ) -> NapiStatus {
+    if !async_context.is_null() && async_context_mut(env, async_context).is_err() {
+        return NAPI_INVALID_ARG;
+    }
     napi_call_function(env, this_arg, function, argc, argv, result)
 }
 
@@ -6017,10 +6046,16 @@ pub unsafe extern "C" fn napi_close_handle_scope(env: NapiEnv, scope: *mut c_voi
 #[no_mangle]
 pub unsafe extern "C" fn napi_open_callback_scope(
     env: NapiEnv,
-    _resource: NapiValue,
-    _context: *mut c_void,
+    resource: NapiValue,
+    context: *mut c_void,
     out: *mut *mut c_void,
 ) -> NapiStatus {
+    if context.is_null()
+        || async_context_mut(env, context).is_err()
+        || (!resource.is_null() && !value_belongs_to_environment(env, resource))
+    {
+        return NAPI_INVALID_ARG;
+    }
     open_handle_scope(env, out, HandleScopeKind::Callback)
 }
 
@@ -6036,33 +6071,39 @@ pub unsafe extern "C" fn napi_async_init(
     resource_name: NapiValue,
     out: *mut *mut c_void,
 ) -> NapiStatus {
-    if env.is_null() || out.is_null() {
+    if out.is_null()
+        || resource_name.is_null()
+        || !value_belongs_to_environment(env, resource_name)
+        || (!resource.is_null() && !value_belongs_to_environment(env, resource))
+    {
         return NAPI_INVALID_ARG;
     }
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
     let name = match value_ref(resource_name) {
         Ok(Value::String(name)) => name.clone(),
         _ => return NAPI_STRING_EXPECTED,
     };
-    *out = Box::into_raw(Box::new(AsyncContext {
+    let mut context = Box::new(AsyncContext {
         env: env as usize,
         resource,
         resource_name: name,
-    }))
-    .cast();
+        destroyed: false,
+    });
+    let context_ptr = (&mut *context) as *mut AsyncContext;
+    env_ref.async_contexts.push(context);
+    *out = context_ptr.cast();
     NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, context: *mut c_void) -> NapiStatus {
-    if env.is_null() || context.is_null() {
+    let Ok(context) = async_context_mut(env, context) else {
         return NAPI_INVALID_ARG;
-    }
-    let context = Box::from_raw(context.cast::<AsyncContext>());
-    if context.env != env as usize {
-        std::mem::forget(context);
-        return NAPI_INVALID_ARG;
-    }
-    let _ = (context.resource, context.resource_name);
+    };
+    let _ = (context.resource, &context.resource_name);
+    context.destroyed = true;
     NAPI_OK
 }
 
@@ -6802,17 +6843,6 @@ mod tests {
                 napi_close_handle_scope(env_ptr, outer),
                 NAPI_HANDLE_SCOPE_MISMATCH
             );
-
-            let mut callback = ptr::null_mut();
-            assert_eq!(
-                napi_open_callback_scope(env_ptr, ptr::null_mut(), ptr::null_mut(), &mut callback),
-                NAPI_OK
-            );
-            assert_eq!(
-                napi_close_handle_scope(env_ptr, callback),
-                NAPI_HANDLE_SCOPE_MISMATCH
-            );
-            assert_eq!(napi_close_callback_scope(env_ptr, callback), NAPI_OK);
         }
     }
 
@@ -8867,6 +8897,12 @@ mod tests {
 
     #[test]
     fn async_contexts_validate_names_and_environment_ownership() {
+        unsafe extern "C" fn return_undefined(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+            let mut result = ptr::null_mut();
+            let _ = napi_get_undefined(env, &mut result);
+            result
+        }
+
         unsafe {
             let mut env = Env::new();
             let mut other_env = Env::new();
@@ -8886,13 +8922,71 @@ mod tests {
                 napi_async_destroy(&mut other_env, context),
                 NAPI_INVALID_ARG
             );
+            let mut callback_scope = ptr::null_mut();
+            assert_eq!(
+                napi_open_callback_scope(env_ptr, ptr::null_mut(), context, &mut callback_scope),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_close_handle_scope(env_ptr, callback_scope),
+                NAPI_HANDLE_SCOPE_MISMATCH
+            );
+            assert_eq!(napi_close_callback_scope(env_ptr, callback_scope), NAPI_OK);
+
+            let mut function = ptr::null_mut();
+            let mut receiver = ptr::null_mut();
+            assert_eq!(
+                napi_create_function(
+                    env_ptr,
+                    c"callback".as_ptr(),
+                    8,
+                    Some(return_undefined),
+                    ptr::null_mut(),
+                    &mut function
+                ),
+                NAPI_OK
+            );
+            assert_eq!(napi_get_undefined(env_ptr, &mut receiver), NAPI_OK);
+            assert_eq!(
+                napi_make_callback(
+                    env_ptr,
+                    context,
+                    receiver,
+                    function,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut()
+                ),
+                NAPI_OK
+            );
             assert_eq!(napi_async_destroy(env_ptr, context), NAPI_OK);
+            assert_eq!(napi_async_destroy(env_ptr, context), NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_open_callback_scope(env_ptr, ptr::null_mut(), context, &mut callback_scope),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_make_callback(
+                    env_ptr,
+                    context,
+                    receiver,
+                    function,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut()
+                ),
+                NAPI_INVALID_ARG
+            );
 
             let mut number = ptr::null_mut();
             assert_eq!(napi_create_int32(env_ptr, 1, &mut number), NAPI_OK);
             assert_eq!(
                 napi_async_init(env_ptr, ptr::null_mut(), number, &mut context),
                 NAPI_STRING_EXPECTED
+            );
+            assert_eq!(
+                napi_async_init(&mut other_env, ptr::null_mut(), name, &mut context),
+                NAPI_INVALID_ARG
             );
         }
     }
