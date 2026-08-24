@@ -466,6 +466,9 @@ assignment headも同じloweringを共有し、ループ終了後に最後の要
 frame splitter上で維持する。同期typed arrayは通常値として同じループを通る。
 array literalのspreadは各sourceをtyped array partとして保持し、awaitを含むpart/elementを
 左から右へframe temporaryへ抽出してから、LLVMが合計長を計算してarena配列へ連結する。
+`Promise.all`/`allSettled`/`race`/`any`内のhomogeneous array spreadも同じ`ArrayConcat`
+を受け取り、連結後の`Promise<T>[]`を既存の可変長runtime結合子へ渡す。spread sourceの
+副作用は一度だけ、通常elementと混在した左から右の順序で評価される。
 named function callのargument spreadは、array literalまたは静的長を持つtyped tupleを
 個別の引数へ展開する。通常引数を含む各sourceを左から右のnested closure parameterへ一度だけ
 束縛するため、副作用の順序を保ち、`...(await tuplePromise)`もframe splitterで処理できる。

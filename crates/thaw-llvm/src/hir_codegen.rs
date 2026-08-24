@@ -11096,6 +11096,48 @@ mod tests {
     }
 
     #[test]
+    fn promise_combinators_accept_array_literal_spreads() {
+        let source = r#"
+            async function succeeds(value: number, ms: number): Promise<number> {
+                await sleep(ms); return value;
+            }
+            async function fails(message: string, ms: number): Promise<number> {
+                await sleep(ms); throw message;
+            }
+            function allBatch(): Promise<number>[] {
+                console.log("all-batch");
+                return [succeeds(2, 2), succeeds(3, 1)];
+            }
+            function failedBatch(): Promise<number>[] {
+                console.log("failed-batch");
+                return [fails("no", 1)];
+            }
+            async function main(): Promise<void> {
+                const all: number[] = await Promise.all([
+                    succeeds(1, 1), ...allBatch()
+                ]);
+                console.log(all[0]); console.log(all[1]); console.log(all[2]);
+                const settled: { status: string; value: number; reason: string }[] =
+                    await Promise.allSettled([...failedBatch(), succeeds(4, 1)]);
+                console.log(settled[0].status); console.log(settled[0].reason);
+                console.log(settled[1].status); console.log(settled[1].value);
+                const raced: number = await Promise.race([
+                    ...[succeeds(9, 10)], succeeds(5, 1)
+                ]);
+                console.log(raced);
+                const any: number = await Promise.any([
+                    ...[fails("skip", 1)], succeeds(7, 2)
+                ]);
+                console.log(any);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_combinator_spreads"),
+            "all-batch\n1\n2\n3\nfailed-batch\nrejected\nno\nfulfilled\n4\n5\n7\n"
+        );
+    }
+
+    #[test]
     fn frame_split_promise_all_settled_supports_native_value_shapes() {
         let source = r#"
             interface Item { value: number; }

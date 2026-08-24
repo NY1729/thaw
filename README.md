@@ -137,6 +137,8 @@ The workspace crates have narrow responsibilities:
   indexes and object expressions
 - Typed array literals support multiple spreads and ordinary elements with
   single, left-to-right evaluation, including awaited spread sources
+- `Promise.all`, `allSettled`, `race`, and `any` accept homogeneous array
+  literal spreads while retaining dynamic `Promise<T>[]` sources and order
 - Named function calls support fixed-length argument spreads from array
   literals and typed tuples, preserving single left-to-right evaluation across
   ordinary, spread, and awaited arguments
