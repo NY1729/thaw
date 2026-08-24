@@ -722,6 +722,8 @@ Buffer等の任意Objectを返した場合もそのidentityを採用する。`na
 `napi_instanceof`はinstance作成時のconstructor直結判定ではなく、constructorの現在の`prototype`
 identityをreceiverのprototype chain上で探索する。derived prototypeからbase prototypeへの継承、
 primitive receiver=false、非Function constructor=function-expected、prototype cycle停止を扱う。
+`napi_get_version`は実際に公開するNode-API v10 surfaceと一致する10を返す。`napi_get_node_version`は
+process lifetimeで安定したversion／release pointerを返し、両APIともnull Env／resultを拒否する。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending

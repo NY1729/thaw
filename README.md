@@ -858,6 +858,8 @@ pending exceptions, fills missing callback arguments with undefined, and honors
 all object-valued constructor returns.
 Instance checks walk the live constructor-prototype chain, including class
 inheritance, primitive receivers, invalid constructors, and cycle protection.
+Version reporting advertises the implemented Node-API v10 surface and returns a
+process-stable host version descriptor with consistent argument validation.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
