@@ -6230,6 +6230,163 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
+    fn lower_array_with(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        index: HirExpr,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_with_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        let index_argument_name = format!("__thaw_with_index_argument_{}", self.next_binding);
+        self.next_binding += 1;
+        let value_name = format!("__thaw_with_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(receiver_name.clone(), array_type.clone());
+        self.scope.insert(index_argument_name.clone(), HirType::F64);
+        self.scope.insert(value_name.clone(), element_type.clone());
+        let length_name = format!("__thaw_with_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let actual_index_name = format!("__thaw_with_actual_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let copy_index_name = format!("__thaw_with_copy_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_name = format!("__thaw_with_result_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(length_name.clone(), HirType::F64);
+        self.scope.insert(actual_index_name.clone(), HirType::F64);
+        self.scope.insert(copy_index_name.clone(), HirType::F64);
+        self.scope.insert(result_name.clone(), array_type.clone());
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let var = |name: &str| HirExpr::Var(name.into());
+        let assign =
+            |name: &str, value| HirStmt::Expr(HirExpr::Assign(name.into(), Box::new(value)));
+        let range_error = || {
+            HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                "Invalid index for Array.prototype.with".into(),
+            )))
+        };
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
+            ),
+            HirStmt::Let(
+                actual_index_name.clone(),
+                HirType::F64,
+                var(&index_argument_name),
+            ),
+            // ToIntegerOrInfinity maps NaN to +0; finite fractional indices
+            // are truncated by the typed element-address conversion.
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(var(&actual_index_name)),
+                ),
+                Vec::new(),
+                vec![assign(&actual_index_name, number(0.0))],
+            ),
+            assign(
+                &actual_index_name,
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                    vec![var(&actual_index_name)],
+                ),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(number(0.0)),
+                ),
+                vec![assign(
+                    &actual_index_name,
+                    HirExpr::BinOp(
+                        BinOp::Add,
+                        Box::new(var(&length_name)),
+                        Box::new(var(&actual_index_name)),
+                    ),
+                )],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(number(0.0)),
+                ),
+                vec![range_error()],
+                Vec::new(),
+            ),
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::GtEq,
+                    Box::new(var(&actual_index_name)),
+                    Box::new(var(&length_name)),
+                ),
+                vec![range_error()],
+                Vec::new(),
+            ),
+            HirStmt::Let(
+                result_name.clone(),
+                array_type.clone(),
+                HirExpr::ArrayAlloc(Box::new(var(&length_name)), element_type.clone()),
+            ),
+            HirStmt::Let(copy_index_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&copy_index_name)),
+                    Box::new(var(&length_name)),
+                ),
+                vec![
+                    HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(var(&copy_index_name)),
+                            Box::new(var(&actual_index_name)),
+                        ),
+                        vec![HirStmt::Expr(HirExpr::IndexAssign(
+                            Box::new(var(&result_name)),
+                            Box::new(var(&copy_index_name)),
+                            Box::new(var(&value_name)),
+                        ))],
+                        vec![HirStmt::Expr(HirExpr::IndexAssign(
+                            Box::new(var(&result_name)),
+                            Box::new(var(&copy_index_name)),
+                            Box::new(HirExpr::TypedIndex(
+                                Box::new(var(&receiver_name)),
+                                Box::new(var(&copy_index_name)),
+                                element_type.clone(),
+                            )),
+                        ))],
+                    ),
+                    assign(
+                        &copy_index_name,
+                        HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(var(&copy_index_name)),
+                            Box::new(number(1.0)),
+                        ),
+                    ),
+                ],
+            ),
+            HirStmt::Return(Some(var(&result_name))),
+        ]);
+        self.wrap_call_argument_bindings(
+            body,
+            &[
+                (receiver_name, array_type, receiver),
+                (index_argument_name, HirType::F64, index),
+                (value_name, element_type, value),
+            ],
+        )
+    }
+
     fn lower_array_reduce(
         &mut self,
         receiver: HirExpr,
@@ -7298,6 +7455,27 @@ impl<'a> FnLowerer<'a> {
                         initial,
                         property.sym == *"reduceRight",
                     );
+                }
+                if property.sym == *"with" {
+                    let [index, value] = call.args.as_slice() else {
+                        return Err("native `.with()` expects an index and value".into());
+                    };
+                    if index.spread.is_some() || value.spread.is_some() {
+                        return Err("array with spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "`.with()` requires a homogeneous array, got {array_type:?}"
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let index = self.lower_expr(&index.expr)?;
+                    self.expect_type(&HirType::F64, &index, "array with index")?;
+                    let value = self.lower_expr(&value.expr)?;
+                    self.expect_type(&element_type, &value, "array with value")?;
+                    return self.lower_array_with(receiver, array_type, element_type, index, value);
                 }
                 if property.sym == *"map" {
                     if !(1..=2).contains(&call.args.len()) {
