@@ -7929,6 +7929,28 @@ impl<'a> FnLowerer<'a> {
                         vec![receiver],
                     ));
                 }
+                if matches!(property.sym.as_ref(), "isWellFormed" | "toWellFormed") {
+                    if !call.args.is_empty() {
+                        return Err(format!("native `.{}()` expects no arguments", property.sym));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(
+                        &HirType::Str,
+                        &receiver,
+                        &format!("string {} receiver", property.sym),
+                    )?;
+                    if property.sym == *"toWellFormed" {
+                        return Ok(receiver);
+                    }
+                    let receiver_name =
+                        format!("__thaw_well_formed_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    return self.wrap_call_argument_bindings(
+                        HirExpr::Lit(HirLit::Bool(true)),
+                        &[(receiver_name, HirType::Str, receiver)],
+                    );
+                }
                 if property.sym == *"toReversed" {
                     if !call.args.is_empty() {
                         return Err("native `.toReversed()` expects no arguments".into());

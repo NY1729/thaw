@@ -546,6 +546,10 @@ The workspace crates have narrow responsibilities:
   truncation and `NaN` handling, Unicode-preserving arena-owned output,
   receiver-before-count evaluation, awaited operands and range errors for
   negative or infinite counts
+- ES2024 `.isWellFormed()` returns true for every native string and
+  `.toWellFormed()` preserves it, reflecting the runtime's invariant that all
+  native string values are valid UTF-8; receiver evaluation and `await` remain
+  observable in source order
 - Native string `.length` and `.charCodeAt()` operate on JavaScript UTF-16
   code units, including surrogate pairs, default/converted indices, out-of-range
   `NaN`, receiver-before-index evaluation and awaited receivers
