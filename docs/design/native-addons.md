@@ -665,3 +665,7 @@ Arrayは各indexをoptional slotとして保持し、初期lengthのhole、明�
 property列挙からholeを除外、JSON変換ではholeをnullとして扱う。sealは既存要素の更新だけを許す。
 `napi_is_promise`はhost Promise値を判定し、`napi_get_threadsafe_function_context`は作成時contextを
 worker側から変更せず取得できる。
+`napi_add_async_cleanup_hook`はopaque handleをEnvへ登録し、teardown時に逆順でhookを開始する。
+hookが`napi_remove_async_cleanup_hook`でhandleを完了するまでactive cleanup countを保持し、addon
+libraryの`dlclose`を延期する。開始前のremoveはhookを解除し、同期完了と後続threadでの非同期完了を
+同じhandle state machineで扱う。
