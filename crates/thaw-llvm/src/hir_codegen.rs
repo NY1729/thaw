@@ -645,6 +645,8 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_string_array_includes", i8_ptr.into(), i8_type.into()),
             ("thaw_bool_array_index_of", i8_type.into(), f64_type.into()),
             ("thaw_bool_array_includes", i8_type.into(), i8_type.into()),
+            ("thaw_object_array_index_of", i8_ptr.into(), f64_type.into()),
+            ("thaw_object_array_includes", i8_ptr.into(), i8_type.into()),
         ] {
             let function_type = match return_type {
                 BasicTypeEnum::FloatType(return_type) => {
@@ -7675,7 +7677,9 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_string_array_index_of"
             | "__thaw_string_array_includes"
             | "__thaw_bool_array_index_of"
-            | "__thaw_bool_array_includes" => {
+            | "__thaw_bool_array_includes"
+            | "__thaw_object_array_index_of"
+            | "__thaw_object_array_includes" => {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 if args.len() != 3 {
                     return Err("array search expects three operands".to_string());
@@ -11614,6 +11618,7 @@ mod tests {
     #[test]
     fn compiles_native_array_index_of_and_includes() {
         let source = r#"
+            interface Item { value: number; }
             function values(): number[] {
                 console.log("receiver");
                 return [1, 2, 3];
@@ -11631,6 +11636,15 @@ mod tests {
                 console.log("awaited-start");
                 return -2;
             }
+            function objectValues(first: Item, second: Item): Item[] {
+                console.log("object-receiver");
+                return [first, second];
+            }
+            async function delayedItem(item: Item): Promise<Item> {
+                console.log("object-needle");
+                await sleep(1);
+                return item;
+            }
             async function main(): Promise<void> {
                 const numbers: number[] = [1, 2, 0 / 0, -0];
                 const words: string[] = ["a", "b", "a"];
@@ -11645,11 +11659,16 @@ mod tests {
                 console.log(numbers.includes(1, Number("Infinity")));
                 console.log(values().includes(wrongNeedle(), start()));
                 console.log(numbers.indexOf(0, await delayedStart()));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 1 };
+                console.log(objectValues(first, second).indexOf(await delayedItem(first)));
+                console.log([first, second].includes({ value: 1 }));
+                console.log([first, second, first].indexOf(first, 1));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "array_search"),
-            "1\n-1\ntrue\ntrue\n2\ntrue\n2\nfalse\nreceiver\nneedle\nstart\nfalse\nawaited-start\n3\n"
+            "1\n-1\ntrue\ntrue\n2\ntrue\n2\nfalse\nreceiver\nneedle\nstart\nfalse\nawaited-start\n3\nobject-receiver\nobject-needle\n0\nfalse\n2\n"
         );
     }
 
