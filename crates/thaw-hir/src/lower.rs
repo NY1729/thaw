@@ -5722,6 +5722,41 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(name.clone(), ty.clone());
                         return self.wrap_call_argument_bindings(keys, &[(name, ty, value)]);
                     }
+                    if object.sym == *"Object" && property.sym == *"values" {
+                        let [argument] = call.args.as_slice() else {
+                            return Err("`Object.values` expects exactly one argument".into());
+                        };
+                        if argument.spread.is_some() {
+                            return Err("Object.values spread is not supported".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        let ty = self.infer_expr_type(&value)?;
+                        let HirType::Object(fields) = &ty else {
+                            return Err(format!(
+                                "`Object.values` currently requires a fixed object, got {ty:?}"
+                            ));
+                        };
+                        let field_names = fields
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>();
+                        let name = format!("__thaw_object_values_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        let values = HirExpr::ArrayLit(
+                            field_names
+                                .into_iter()
+                                .map(|field| {
+                                    HirExpr::PropAccess(
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        ty.clone(),
+                                        field,
+                                    )
+                                })
+                                .collect(),
+                        );
+                        return self.wrap_call_argument_bindings(values, &[(name, ty, value)]);
+                    }
                     if object.sym == *"Object" && property.sym == *"hasOwn" {
                         let [object, key] = call.args.as_slice() else {
                             return Err("`Object.hasOwn` expects exactly two arguments".into());
