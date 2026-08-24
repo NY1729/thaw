@@ -230,7 +230,7 @@ pub enum Value {
     },
     String(String),
     Object(HashMap<PropertyKey, NapiValue>),
-    Array(Vec<NapiValue>),
+    Array(Vec<Option<NapiValue>>),
     Buffer(Vec<u8>),
     ExternalBuffer {
         data: *mut u8,
@@ -920,7 +920,7 @@ fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
         JsonValue::Array(values) => {
             let values = values
                 .iter()
-                .map(|value| value_from_json(env, value))
+                .map(|value| Some(value_from_json(env, value)))
                 .collect();
             env.alloc(Value::Array(values))
         }
@@ -957,7 +957,10 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         Value::Array(values) => JsonValue::Array(
             values
                 .iter()
-                .map(|value| json_from_value(*value))
+                .map(|value| match value {
+                    Some(value) => json_from_value(*value),
+                    None => Ok(JsonValue::Null),
+                })
                 .collect::<Result<_, _>>()?,
         ),
         Value::Object(values) => JsonValue::Object(
@@ -1961,8 +1964,7 @@ pub unsafe extern "C" fn napi_create_array_with_length(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let undefined = env.alloc(Value::Undefined);
-    let value = env.alloc(Value::Array(vec![undefined; length]));
+    let value = env.alloc(Value::Array(vec![None; length]));
     write_value(out, value)
 }
 
@@ -3243,7 +3245,11 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                     .map(|key| (EnumeratedPropertyKey::Property(key), owner)),
             ),
             Ok(Value::Array(values)) => keys.extend(
-                (0..values.len()).map(|index| (EnumeratedPropertyKey::Number(index), owner)),
+                values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| value.is_some())
+                    .map(|(index, _)| (EnumeratedPropertyKey::Number(index), owner)),
             ),
             _ => {}
         }
@@ -3309,7 +3315,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
         };
         values.push(value);
     }
-    let result = env.alloc(Value::Array(values));
+    let result = env.alloc(Value::Array(values.into_iter().map(Some).collect()));
     write_value(out, result)
 }
 
@@ -3324,8 +3330,11 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
     let mut names = match value_ref(object) {
         Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
         Ok(Value::Function(function)) => function.properties.keys().cloned().collect(),
-        Ok(Value::Array(values)) => (0..values.len())
-            .map(|index| PropertyKey::String(index.to_string()))
+        Ok(Value::Array(values)) => values
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.is_some())
+            .map(|(index, _)| PropertyKey::String(index.to_string()))
             .collect(),
         _ => Vec::new(),
     };
@@ -3430,6 +3439,19 @@ pub unsafe extern "C" fn napi_is_array(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_is_promise(
+    _env: NapiEnv,
+    value: NapiValue,
+    result: *mut bool,
+) -> NapiStatus {
+    let Some(result) = result.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = matches!(value_ref(value), Ok(Value::Promise(_)));
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_array_length(
     _env: NapiEnv,
     value: NapiValue,
@@ -3463,26 +3485,70 @@ pub unsafe extern "C" fn napi_set_element(
             )
         })
         .unwrap_or((false, false));
-    let existing_length = match value_ref(array) {
-        Ok(Value::Array(values)) => values.len(),
+    let exists = match value_ref(array) {
+        Ok(Value::Array(values)) => values.get(index as usize).is_some_and(Option::is_some),
         _ => return NAPI_INVALID_ARG,
     };
-    if frozen || (sealed && index as usize >= existing_length) {
+    if frozen || (sealed && !exists) {
         return NAPI_GENERIC_FAILURE;
     }
-    let Ok(host_env) = env_mut(env) else {
+    if env.is_null() {
         return NAPI_INVALID_ARG;
-    };
+    }
     match array.as_mut() {
         Some(Value::Array(values)) => {
             while values.len() <= index as usize {
-                values.push(host_env.alloc(Value::Undefined));
+                values.push(None);
             }
-            values[index as usize] = value;
+            values[index as usize] = Some(value);
             NAPI_OK
         }
         _ => NAPI_INVALID_ARG,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_has_element(
+    _env: NapiEnv,
+    array: NapiValue,
+    index: u32,
+    result: *mut bool,
+) -> NapiStatus {
+    let Some(result) = result.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    let Ok(Value::Array(values)) = value_ref(array) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = values.get(index as usize).is_some_and(Option::is_some);
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_delete_element(
+    env: NapiEnv,
+    array: NapiValue,
+    index: u32,
+    result: *mut bool,
+) -> NapiStatus {
+    let Some(result) = result.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    if env
+        .as_ref()
+        .is_some_and(|env| env.sealed_objects.contains(&(array as usize)))
+    {
+        *result = false;
+        return NAPI_OK;
+    }
+    let Some(Value::Array(values)) = array.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    if let Some(value) = values.get_mut(index as usize) {
+        *value = None;
+    }
+    *result = true;
+    NAPI_OK
 }
 
 #[no_mangle]
@@ -3493,7 +3559,7 @@ pub unsafe extern "C" fn napi_get_element(
     out: *mut NapiValue,
 ) -> NapiStatus {
     let value = match value_ref(array) {
-        Ok(Value::Array(values)) => values.get(index as usize).copied(),
+        Ok(Value::Array(values)) => values.get(index as usize).copied().flatten(),
         _ => None,
     };
     match value {
@@ -4408,6 +4474,18 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_get_threadsafe_function_context(
+    function: *mut ThreadsafeFunction,
+    result: *mut *mut c_void,
+) -> NapiStatus {
+    let (Some(function), Some(result)) = (function.as_ref(), result.as_mut()) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = function.context as *mut c_void;
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_call_threadsafe_function(
     function: *mut ThreadsafeFunction,
     data: *mut c_void,
@@ -5085,7 +5163,9 @@ mod tests {
                 panic!("property names were not returned as an array");
             };
             assert_eq!(names.len(), 1);
-            assert!(matches!(value_ref(names[0]), Ok(Value::String(name)) if name == "visible"));
+            assert!(
+                matches!(names[0].and_then(|value| value_ref(value).ok()), Some(Value::String(name)) if name == "visible")
+            );
 
             assert_eq!(
                 napi_get_all_property_names(
@@ -5101,13 +5181,15 @@ mod tests {
             let Ok(Value::Array(names)) = value_ref(names_value) else {
                 panic!("symbol names were not returned as an array");
             };
-            assert_eq!(names.as_slice(), &[symbol]);
+            assert_eq!(names.as_slice(), &[Some(symbol)]);
 
             let mut array = ptr::null_mut();
             assert_eq!(
                 napi_create_array_with_length(env_ptr, 2, &mut array),
                 NAPI_OK
             );
+            assert_eq!(napi_set_element(env_ptr, array, 0, value), NAPI_OK);
+            assert_eq!(napi_set_element(env_ptr, array, 1, value), NAPI_OK);
             assert_eq!(
                 napi_get_all_property_names(
                     env_ptr,
@@ -5122,8 +5204,14 @@ mod tests {
             let Ok(Value::Array(names)) = value_ref(names_value) else {
                 panic!("array keys were not returned as an array");
             };
-            assert!(matches!(value_ref(names[0]), Ok(Value::Number(0.0))));
-            assert!(matches!(value_ref(names[1]), Ok(Value::Number(1.0))));
+            assert!(matches!(
+                names[0].and_then(|value| value_ref(value).ok()),
+                Some(Value::Number(0.0))
+            ));
+            assert!(matches!(
+                names[1].and_then(|value| value_ref(value).ok()),
+                Some(Value::Number(1.0))
+            ));
         }
     }
 
@@ -5213,7 +5301,7 @@ mod tests {
             );
             assert!(
                 matches!(value_ref(names), Ok(Value::Array(values)) if values.iter().any(
-                    |value| matches!(value_ref(*value), Ok(Value::String(name)) if name == "late")
+                    |value| matches!(value.and_then(|value| value_ref(value).ok()), Some(Value::String(name)) if name == "late")
                 ))
             );
 
@@ -5896,6 +5984,7 @@ mod tests {
                 napi_create_array_with_length(env_ptr, 1, &mut array),
                 NAPI_OK
             );
+            assert_eq!(napi_set_element(env_ptr, array, 0, value), NAPI_OK);
             assert_eq!(napi_object_seal(env_ptr, array), NAPI_OK);
             assert_eq!(napi_set_element(env_ptr, array, 0, value), NAPI_OK);
             assert_eq!(
@@ -6016,6 +6105,53 @@ mod tests {
                 NAPI_OK
             );
             assert!(!present);
+        }
+    }
+
+    #[test]
+    fn array_holes_and_promise_detection_follow_node_api() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut array = ptr::null_mut();
+            assert_eq!(
+                napi_create_array_with_length(env_ptr, 3, &mut array),
+                NAPI_OK
+            );
+            let mut present = true;
+            assert_eq!(napi_has_element(env_ptr, array, 1, &mut present), NAPI_OK);
+            assert!(!present);
+            let value = env.alloc(Value::Undefined);
+            assert_eq!(napi_set_element(env_ptr, array, 1, value), NAPI_OK);
+            assert_eq!(napi_has_element(env_ptr, array, 1, &mut present), NAPI_OK);
+            assert!(present, "an explicit undefined value is not an array hole");
+            let mut deleted = false;
+            assert_eq!(
+                napi_delete_element(env_ptr, array, 1, &mut deleted),
+                NAPI_OK
+            );
+            assert!(deleted);
+            assert_eq!(napi_has_element(env_ptr, array, 1, &mut present), NAPI_OK);
+            assert!(!present);
+            let mut length = 0;
+            assert_eq!(napi_get_array_length(env_ptr, array, &mut length), NAPI_OK);
+            assert_eq!(length, 3, "deleting an element must preserve array length");
+            assert_eq!(
+                json_from_value(array).unwrap(),
+                serde_json::json!([null, null, null])
+            );
+
+            let mut deferred = ptr::null_mut();
+            let mut promise = ptr::null_mut();
+            assert_eq!(
+                napi_create_promise(env_ptr, &mut deferred, &mut promise),
+                NAPI_OK
+            );
+            assert_eq!(napi_is_promise(env_ptr, promise, &mut present), NAPI_OK);
+            assert!(present);
+            assert_eq!(napi_is_promise(env_ptr, array, &mut present), NAPI_OK);
+            assert!(!present);
+            assert_eq!(napi_resolve_deferred(env_ptr, deferred, value), NAPI_OK);
         }
     }
 
@@ -6163,6 +6299,9 @@ mod tests {
         }) {
             let mut collected = probe.events.lock().unwrap();
             for event in events {
+                let Some(event) = event else {
+                    continue;
+                };
                 let Ok(Value::Object(fields)) = value_ref(*event) else {
                     continue;
                 };
@@ -6308,6 +6447,12 @@ mod tests {
                 ),
                 NAPI_OK
             );
+            let mut context = ptr::null_mut();
+            assert_eq!(
+                napi_get_threadsafe_function_context(threadsafe, &mut context),
+                NAPI_OK
+            );
+            assert_eq!(context, probe.cast());
             assert_eq!(napi_acquire_threadsafe_function(threadsafe), NAPI_OK);
             assert_eq!(napi_release_threadsafe_function(threadsafe, 0), NAPI_OK);
             assert_eq!(thaw_napi_unload_all(), 0);
