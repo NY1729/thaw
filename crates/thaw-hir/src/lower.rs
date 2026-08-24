@@ -8744,6 +8744,19 @@ impl<'a> FnLowerer<'a> {
                     let receiver = self.lower_expr(&member.obj)?;
                     return self.coerce_primitive_to_string(receiver);
                 }
+                if property.sym == *"valueOf" {
+                    if !call.args.is_empty() {
+                        return Err("native `.valueOf()` expects no arguments".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !matches!(receiver_type, HirType::F64 | HirType::Str | HirType::Bool) {
+                        return Err(format!(
+                            "native `.valueOf()` requires a number, string or boolean receiver, got {receiver_type:?}"
+                        ));
+                    }
+                    return Ok(receiver);
+                }
                 if property.sym == *"finally" {
                     let source = self.lower_expr(&member.obj)?;
                     let HirType::Promise(input) = self.infer_expr_type(&source)? else {

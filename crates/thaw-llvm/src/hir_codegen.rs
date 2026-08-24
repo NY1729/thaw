@@ -11772,6 +11772,51 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_primitive_value_of() {
+        let source = r#"
+            function numberValue(): number {
+                console.log("number");
+                return 42;
+            }
+            function stringValue(): string {
+                console.log("string");
+                return "word";
+            }
+            function booleanValue(): boolean {
+                console.log("boolean");
+                return true;
+            }
+            async function delayedNumber(): Promise<number> {
+                console.log("awaited number");
+                await sleep(1);
+                return 7;
+            }
+            async function delayedString(): Promise<string> {
+                console.log("awaited string");
+                await sleep(1);
+                return "later";
+            }
+            async function delayedBoolean(): Promise<boolean> {
+                console.log("awaited boolean");
+                await sleep(1);
+                return false;
+            }
+            async function main(): Promise<void> {
+                console.log(numberValue().valueOf());
+                console.log(stringValue().valueOf());
+                console.log(booleanValue().valueOf());
+                console.log((await delayedNumber()).valueOf());
+                console.log((await delayedString()).valueOf());
+                console.log((await delayedBoolean()).valueOf());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "primitive_value_of"),
+            "number\n42\nstring\nword\nboolean\ntrue\nawaited number\n7\nawaited string\nlater\nawaited boolean\nfalse\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_join() {
         let source = r#"
             function separator(): string {

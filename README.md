@@ -377,6 +377,8 @@ The workspace crates have narrow responsibilities:
 - Zero-argument `.toString()` is available on native numbers, booleans,
   strings, fixed objects, typed arrays and heterogeneous tuples, including
   receivers produced by side-effecting calls or `await`
+- Zero-argument `.valueOf()` preserves native number, string and boolean
+  primitives, evaluating synchronous or awaited receivers exactly once
 - `Number.isNaN`/`Number.isFinite` perform non-coercing checks, while global
   `isNaN`/`isFinite` apply native numeric conversion first. Aggregate numeric
   conversion follows each value's native string form, so empty/single/multiple
