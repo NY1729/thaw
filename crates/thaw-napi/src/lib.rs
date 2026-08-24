@@ -404,14 +404,6 @@ pub struct NapiTypeTag {
     upper: u64,
 }
 
-static LAST_ERROR_INFO: NapiExtendedErrorInfo = NapiExtendedErrorInfo {
-    error_message: ptr::null(),
-    engine_reserved: ptr::null_mut(),
-    engine_error_code: 0,
-    error_code: NAPI_OK,
-};
-unsafe impl Sync for NapiExtendedErrorInfo {}
-
 pub struct Env {
     values: Vec<NapiValue>,
     global: NapiValue,
@@ -437,6 +429,7 @@ pub struct Env {
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
     module_file_name: CString,
+    last_error_info: NapiExtendedErrorInfo,
     // Box keeps the opaque C handle stable when the owning vector grows.
     #[allow(clippy::vec_box)]
     handle_scopes: Vec<Box<HandleScope>>,
@@ -527,6 +520,12 @@ impl Env {
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
             module_file_name: CString::new("").unwrap(),
+            last_error_info: NapiExtendedErrorInfo {
+                error_message: ptr::null(),
+                engine_reserved: ptr::null_mut(),
+                engine_error_code: 0,
+                error_code: NAPI_OK,
+            },
             handle_scopes: Vec::new(),
             active_handle_scopes: Vec::new(),
             async_contexts: Vec::new(),
@@ -796,6 +795,18 @@ unsafe fn text(ptr: *const c_char) -> Result<String, String> {
 
 unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {
     env.as_mut().ok_or(NAPI_INVALID_ARG)
+}
+
+unsafe fn record_status(env: NapiEnv, status: NapiStatus) -> NapiStatus {
+    if status != NAPI_OK {
+        if let Some(env) = env.as_mut() {
+            env.last_error_info.error_code = status;
+            env.last_error_info.engine_error_code = 0;
+            env.last_error_info.engine_reserved = ptr::null_mut();
+            env.last_error_info.error_message = ptr::null();
+        }
+    }
+    status
 }
 
 unsafe fn env_for_value_output<'a>(
@@ -2623,15 +2634,16 @@ pub unsafe extern "C" fn napi_get_date_value(
     out: *mut f64,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Date(milliseconds)) => {
             *out = *milliseconds;
             NAPI_OK
         }
         _ => NAPI_DATE_EXPECTED,
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -2707,13 +2719,13 @@ pub unsafe extern "C" fn napi_get_value_bigint_int64(
     lossless: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || lossless.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Value::BigInt { negative, words } = (match value_ref(value) {
         Ok(value) => value,
-        Err(_) => return NAPI_INVALID_ARG,
+        Err(_) => return record_status(env, NAPI_INVALID_ARG),
     }) else {
-        return NAPI_BIGINT_EXPECTED;
+        return record_status(env, NAPI_BIGINT_EXPECTED);
     };
     let low = words.first().copied().unwrap_or(0);
     *out = if *negative {
@@ -2738,13 +2750,13 @@ pub unsafe extern "C" fn napi_get_value_bigint_uint64(
     lossless: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || lossless.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Value::BigInt { negative, words } = (match value_ref(value) {
         Ok(value) => value,
-        Err(_) => return NAPI_INVALID_ARG,
+        Err(_) => return record_status(env, NAPI_INVALID_ARG),
     }) else {
-        return NAPI_BIGINT_EXPECTED;
+        return record_status(env, NAPI_BIGINT_EXPECTED);
     };
     let low = words.first().copied().unwrap_or(0);
     *out = if *negative { low.wrapping_neg() } else { low };
@@ -2761,17 +2773,17 @@ pub unsafe extern "C" fn napi_get_value_bigint_words(
     words: *mut u64,
 ) -> NapiStatus {
     if sign_bit.is_null() || word_count.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Value::BigInt {
         negative,
         words: magnitude,
     } = (match value_ref(value) {
         Ok(value) => value,
-        Err(_) => return NAPI_INVALID_ARG,
+        Err(_) => return record_status(env, NAPI_INVALID_ARG),
     })
     else {
-        return NAPI_BIGINT_EXPECTED;
+        return record_status(env, NAPI_BIGINT_EXPECTED);
     };
     *sign_bit = i32::from(*negative);
     let capacity = *word_count;
@@ -4370,15 +4382,16 @@ pub unsafe extern "C" fn napi_get_value_double(
     out: *mut f64,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
             *out = *number;
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
-    }
+    };
+    record_status(env, status)
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_value_int32(
@@ -4387,15 +4400,16 @@ pub unsafe extern "C" fn napi_get_value_int32(
     out: *mut i32,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
             *out = *number as i32;
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -4405,15 +4419,16 @@ pub unsafe extern "C" fn napi_get_value_uint32(
     out: *mut u32,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
             *out = *number as u32;
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -4423,15 +4438,16 @@ pub unsafe extern "C" fn napi_get_value_int64(
     out: *mut i64,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Number(number)) => {
             *out = *number as i64;
             NAPI_OK
         }
         _ => NAPI_NUMBER_EXPECTED,
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -4652,15 +4668,16 @@ pub unsafe extern "C" fn napi_get_value_bool(
     out: *mut bool,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::Bool(boolean)) => {
             *out = *boolean;
             NAPI_OK
         }
         _ => NAPI_BOOLEAN_EXPECTED,
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -4672,11 +4689,11 @@ pub unsafe extern "C" fn napi_get_value_string_utf8(
     written: *mut usize,
 ) -> NapiStatus {
     if !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let string = match value_ref(value) {
         Ok(Value::String(string)) => string,
-        _ => return NAPI_STRING_EXPECTED,
+        _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
     let mut count = string.len();
     if !buffer.is_null() && size > 0 {
@@ -4702,11 +4719,11 @@ pub unsafe extern "C" fn napi_get_value_string_latin1(
     written: *mut usize,
 ) -> NapiStatus {
     if !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let string = match value_ref(value) {
         Ok(Value::String(string)) => string,
-        _ => return NAPI_STRING_EXPECTED,
+        _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
     let encoded: Vec<u8> = string.encode_utf16().map(|unit| unit as u8).collect();
     let count = if buffer.is_null() || size == 0 {
@@ -4732,11 +4749,11 @@ pub unsafe extern "C" fn napi_get_value_string_utf16(
     written: *mut usize,
 ) -> NapiStatus {
     if !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let string = match value_ref(value) {
         Ok(Value::String(string)) => string,
-        _ => return NAPI_STRING_EXPECTED,
+        _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
     let encoded: Vec<u16> = string.encode_utf16().collect();
     let count = if buffer.is_null() || size == 0 {
@@ -6365,10 +6382,14 @@ pub unsafe extern "C" fn napi_get_last_error_info(
     env: NapiEnv,
     out: *mut *const NapiExtendedErrorInfo,
 ) -> NapiStatus {
-    if env.is_null() || out.is_null() {
+    let Some(env) = env.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    if out.is_null() {
+        env.last_error_info.error_code = NAPI_INVALID_ARG;
         return NAPI_INVALID_ARG;
     }
-    *out = &LAST_ERROR_INFO;
+    *out = &env.last_error_info;
     NAPI_OK
 }
 
@@ -8878,6 +8899,49 @@ mod tests {
             let mut signed64 = 0;
             assert_eq!(napi_get_value_int64(env_ptr, value, &mut signed64), NAPI_OK);
             assert_eq!(signed64, 9_007_199_254_740_991);
+        }
+    }
+
+    #[test]
+    fn last_error_info_tracks_value_extraction_failures_per_environment() {
+        unsafe {
+            let mut env = Env::new();
+            let mut other_env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let string = env.alloc(Value::String("not a number".into()));
+            let number = env.alloc(Value::Number(7.0));
+            let mut output = 0.0;
+            assert_eq!(
+                napi_get_value_double(env_ptr, string, &mut output),
+                NAPI_NUMBER_EXPECTED
+            );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_NUMBER_EXPECTED);
+            assert_eq!((*info).engine_error_code, 0);
+            assert!((*info).engine_reserved.is_null());
+
+            assert_eq!(napi_get_value_double(env_ptr, number, &mut output), NAPI_OK);
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!(
+                (*info).error_code,
+                NAPI_NUMBER_EXPECTED,
+                "a successful call must not clear the last error"
+            );
+
+            assert_eq!(
+                napi_get_value_double(env_ptr, number, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+
+            let mut other_info = ptr::null();
+            assert_eq!(
+                napi_get_last_error_info(&mut other_env, &mut other_info),
+                NAPI_OK
+            );
+            assert_eq!((*other_info).error_code, NAPI_OK);
         }
     }
 
