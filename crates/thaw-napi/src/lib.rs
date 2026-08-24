@@ -3303,7 +3303,10 @@ pub unsafe extern "C" fn napi_coerce_to_object(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if matches!(value_ref(value), Ok(Value::Object(_) | Value::Function(_))) {
+    if env.is_null() || out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    if matches!(value_ref(value), Ok(value) if is_object_value(value)) {
         return write_value(out, value);
     }
     if matches!(value_ref(value), Ok(Value::Undefined | Value::Null)) {
@@ -6361,6 +6364,35 @@ mod tests {
             let mut value_type = -1;
             assert_eq!(napi_typeof(env_ptr, value, &mut value_type), NAPI_OK);
             assert_eq!(value_type, 9);
+        }
+    }
+
+    #[test]
+    fn coerce_to_object_preserves_existing_object_identity() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let object_values = [
+                env.alloc(Value::Array(Vec::new())),
+                env.alloc(Value::Buffer(vec![1, 2, 3])),
+                env.alloc(Value::Date(123.0)),
+                env.alloc(Value::Error("failure".into())),
+                env.alloc(Value::Promise(Rc::new(RefCell::new(PromiseState::Pending)))),
+            ];
+            for value in object_values {
+                let mut result = ptr::null_mut();
+                assert_eq!(napi_coerce_to_object(env_ptr, value, &mut result), NAPI_OK);
+                assert_eq!(result, value);
+            }
+
+            let primitive = env.alloc(Value::Number(42.0));
+            let mut boxed = ptr::null_mut();
+            assert_eq!(
+                napi_coerce_to_object(env_ptr, primitive, &mut boxed),
+                NAPI_OK
+            );
+            assert_ne!(boxed, primitive);
+            assert!(matches!(value_ref(boxed), Ok(Value::Object(_))));
         }
     }
 

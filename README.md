@@ -823,6 +823,8 @@ Class-style addons can use `napi_define_class`, wrapped native instance data,
 prototype methods/accessors, construction, `instanceof`, and wrap finalizers.
 Element APIs work on arrays, objects, and functions, including inherited numeric
 properties, accessors, descriptor configurability, and optional delete results.
+Object coercion preserves the identity of every existing host object, including
+arrays, buffers and views, promises, errors, dates, and functions.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
