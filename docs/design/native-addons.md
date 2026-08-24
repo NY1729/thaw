@@ -627,3 +627,5 @@ low 64 bitとlossless flagをN-API規約どおり返す。`napi_typeof`は`napi_
 `napi_get_typedarray_info`は独立したbacking storageとviewを保持する。11種のelement typeごとの
 byte幅、alignment、offset、範囲を検証し、viewのdata pointerは共有buffer内を指す。Nodeの
 Bufferは従来どおりUint8Array互換viewとして扱う。
+`napi_create_dataview`／`napi_get_dataview_info`も同じArrayBufferを共有し、TypedArrayと異なり
+非整列byte offsetを許可しながらoffset＋lengthの範囲を検証する。

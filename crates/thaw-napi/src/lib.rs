@@ -209,6 +209,11 @@ pub enum Value {
         array_buffer: NapiValue,
         byte_offset: usize,
     },
+    DataView {
+        length: usize,
+        array_buffer: NapiValue,
+        byte_offset: usize,
+    },
     External(*mut c_void),
     Symbol(String),
     Function(Function),
@@ -754,7 +759,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         Value::Buffer(values) => {
             JsonValue::Array(values.iter().map(|value| JsonValue::from(*value)).collect())
         }
-        Value::ArrayBuffer(_) | Value::TypedArray { .. } => {
+        Value::ArrayBuffer(_) | Value::TypedArray { .. } | Value::DataView { .. } => {
             return Err("cannot JSON-encode an ArrayBuffer view".into());
         }
         Value::Function(_) => return Err("cannot JSON-encode a function".into()),
@@ -3082,6 +3087,84 @@ pub unsafe extern "C" fn napi_is_typedarray(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_dataview(
+    env: NapiEnv,
+    length: usize,
+    array_buffer: NapiValue,
+    byte_offset: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let buffer_length = match value_ref(array_buffer) {
+        Ok(Value::ArrayBuffer(bytes)) => bytes.len(),
+        _ => return NAPI_ARRAYBUFFER_EXPECTED,
+    };
+    let Some(end) = byte_offset.checked_add(length) else {
+        return NAPI_INVALID_ARG;
+    };
+    if end > buffer_length {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::DataView {
+        length,
+        array_buffer,
+        byte_offset,
+    });
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_is_dataview(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *out = matches!(value_ref(value), Ok(Value::DataView { .. }));
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_dataview_info(
+    _env: NapiEnv,
+    value: NapiValue,
+    length: *mut usize,
+    data: *mut *mut c_void,
+    array_buffer: *mut NapiValue,
+    byte_offset: *mut usize,
+) -> NapiStatus {
+    let Some(Value::DataView {
+        length: view_length,
+        array_buffer: backing,
+        byte_offset: offset,
+    }) = value.as_mut()
+    else {
+        return NAPI_INVALID_ARG;
+    };
+    let (view_length, backing, offset) = (*view_length, *backing, *offset);
+    let Some(Value::ArrayBuffer(bytes)) = backing.as_mut() else {
+        return NAPI_ARRAYBUFFER_EXPECTED;
+    };
+    if !length.is_null() {
+        *length = view_length;
+    }
+    if !data.is_null() {
+        *data = bytes.as_mut_ptr().add(offset).cast();
+    }
+    if !array_buffer.is_null() {
+        *array_buffer = backing;
+    }
+    if !byte_offset.is_null() {
+        *byte_offset = offset;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_typedarray_info(
     _env: NapiEnv,
     value: NapiValue,
@@ -4338,6 +4421,53 @@ mod tests {
             );
             assert_eq!(
                 napi_create_typedarray(env_ptr, 8, 5, buffer, 0, &mut view),
+                NAPI_INVALID_ARG
+            );
+        }
+    }
+
+    #[test]
+    fn dataviews_allow_unaligned_bounded_arraybuffer_views() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut data = ptr::null_mut();
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                napi_create_arraybuffer(env_ptr, 16, &mut data, &mut buffer),
+                NAPI_OK
+            );
+            *(data as *mut u8).add(3) = 99;
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_dataview(env_ptr, 7, buffer, 3, &mut view),
+                NAPI_OK
+            );
+            let mut is_view = false;
+            assert_eq!(napi_is_dataview(env_ptr, view, &mut is_view), NAPI_OK);
+            assert!(is_view);
+
+            let mut length = 0;
+            let mut view_data = ptr::null_mut();
+            let mut backing = ptr::null_mut();
+            let mut offset = 0;
+            assert_eq!(
+                napi_get_dataview_info(
+                    env_ptr,
+                    view,
+                    &mut length,
+                    &mut view_data,
+                    &mut backing,
+                    &mut offset,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(length, 7);
+            assert_eq!(offset, 3);
+            assert_eq!(backing, buffer);
+            assert_eq!(*(view_data as *const u8), 99);
+            assert_eq!(
+                napi_create_dataview(env_ptr, 14, buffer, 3, &mut view),
                 NAPI_INVALID_ARG
             );
         }
