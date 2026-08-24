@@ -683,3 +683,6 @@ copyせずBuffer viewとして保持する。Buffer／TypedArray infoは共有po
 返し、detach後はdata=null／length=0となる。overflowを含む範囲外指定はpending RangeErrorにする。
 `node_api_create_property_key_utf8`／`latin1`／`utf16`はencodingを内部UTF-8へ正規化し、Env単位の
 intern tableから同じ文字列handleを再利用する。生成keyは通常のgeneric property APIで利用できる。
+`node_api_create_external_string_latin1`／`utf16`はhostのowned UTF-8 String表現へ変換するため常に
+`copied=true`を返す。仕様どおりcopy完了時にfinalizerを即時かつ一度だけ呼び、Env teardownでは
+再実行しない。NUL終端と明示lengthの両方を通常のstring APIと同じ変換規則で扱う。

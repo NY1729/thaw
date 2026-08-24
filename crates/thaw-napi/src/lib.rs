@@ -2023,6 +2023,54 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_create_external_string_latin1(
+    env: NapiEnv,
+    value: *mut c_char,
+    length: usize,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+    out: *mut NapiValue,
+    copied: *mut bool,
+) -> NapiStatus {
+    if value.is_null() || out.is_null() || copied.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let status = napi_create_string_latin1(env, value, length, out);
+    if status != NAPI_OK {
+        return status;
+    }
+    *copied = true;
+    if let Some(finalize) = finalize {
+        finalize(env, value.cast(), hint);
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_create_external_string_utf16(
+    env: NapiEnv,
+    value: *mut u16,
+    length: usize,
+    finalize: Option<NapiFinalize>,
+    hint: *mut c_void,
+    out: *mut NapiValue,
+    copied: *mut bool,
+) -> NapiStatus {
+    if value.is_null() || out.is_null() || copied.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let status = napi_create_string_utf16(env, value, length, out);
+    if status != NAPI_OK {
+        return status;
+    }
+    *copied = true;
+    if let Some(finalize) = finalize {
+        finalize(env, value.cast(), hint);
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_create_symbol(
     env: NapiEnv,
     description: NapiValue,
@@ -5378,6 +5426,7 @@ mod tests {
     static BCRYPT_ASYNC_RESULT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static EXTERNAL_MEMORY_FINALIZED: AtomicUsize = AtomicUsize::new(0);
+    static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
     #[cfg(target_os = "linux")]
     static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
@@ -5403,6 +5452,14 @@ mod tests {
         _hint: *mut c_void,
     ) {
         EXTERNAL_MEMORY_FINALIZED.fetch_add(1, Ordering::AcqRel);
+    }
+
+    unsafe extern "C" fn external_string_finalize(
+        _env: NapiEnv,
+        _data: *mut c_void,
+        hint: *mut c_void,
+    ) {
+        EXTERNAL_STRING_FINALIZED.fetch_add(*(hint as *const usize), Ordering::AcqRel);
     }
 
     #[test]
@@ -5916,6 +5973,57 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!(actual, value);
+        }
+    }
+
+    #[test]
+    fn external_strings_report_copying_and_finalize_immediately() {
+        unsafe {
+            EXTERNAL_STRING_FINALIZED.store(0, Ordering::Release);
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut latin1 = [0xe9_u8, 0];
+            let mut utf16 = [0x03bb_u16, 0];
+            let mut value = ptr::null_mut();
+            let mut copied = false;
+            let latin1_hint = 1_usize;
+            let utf16_hint = 2_usize;
+            assert_eq!(
+                node_api_create_external_string_latin1(
+                    env_ptr,
+                    latin1.as_mut_ptr().cast(),
+                    NAPI_AUTO_LENGTH,
+                    Some(external_string_finalize),
+                    (&latin1_hint as *const usize).cast_mut().cast(),
+                    &mut value,
+                    &mut copied,
+                ),
+                NAPI_OK
+            );
+            assert!(copied);
+            assert!(matches!(value_ref(value), Ok(Value::String(text)) if text == "é"));
+            copied = false;
+            assert_eq!(
+                node_api_create_external_string_utf16(
+                    env_ptr,
+                    utf16.as_mut_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    Some(external_string_finalize),
+                    (&utf16_hint as *const usize).cast_mut().cast(),
+                    &mut value,
+                    &mut copied,
+                ),
+                NAPI_OK
+            );
+            assert!(copied);
+            assert!(matches!(value_ref(value), Ok(Value::String(text)) if text == "λ"));
+            assert_eq!(EXTERNAL_STRING_FINALIZED.load(Ordering::Acquire), 3);
+            drop(env);
+            assert_eq!(
+                EXTERNAL_STRING_FINALIZED.load(Ordering::Acquire),
+                3,
+                "copied external strings must not finalize twice at Env teardown"
+            );
         }
     }
 
