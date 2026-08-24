@@ -239,16 +239,15 @@ var formats = require('./formats');
 辿って**同一パッケージ内のファイルだけ**を1つの JS にバンドルする
 `bundle_commonjs_package` を実装した:
 
-1. `main` から開始し、各ファイルの生テキストを正規表現ではなく
-   単純な文字列走査で `require('./x')`/`require("../y")` パターンだけ
-   探す（この Rust コードベースには汎用 JS パーサーがなく、
-   thaw-parser は `.d.ts`/`.ts` 向けの TS パーサーのため）。相対パス
-   （`./`/`../` で始まる）だけを対象にする -- `require('lodash')` の
-   ような裸のパッケージ名は意図的にそのまま残す。
+1. `main` から開始し、各ファイルを thaw-parser の JavaScript mode で
+   構文木にして、literal `require()`、静的 `import`、`export ... from`、
+   `export * from`、literal `import()` を収集する。コメント・文字列・
+   member call・動的 `require(variable)` は依存と誤認しない。相対依存と
+   bare package依存を同じグラフへ載せる。
 2. 各相対 require の相手先を、既存の `resolve_module_path`（7章、
    元々は `main` フィールド解決用だった関数を汎用化）で解決し、
    まだ見ていないファイルならキューに積む。解決できない場合
-   （`.json` を require しているなど）はそのファイルの依存マップに
+   （対応外のnative moduleなど）はそのファイルの依存マップに
    含めず、実行時に外部 require スタブへフォールスルーさせる --
    バンドル全体を中断させない。
 3. 集めた各ファイルを `function(module, exports, require) { ... }`
@@ -993,6 +992,21 @@ call signatureを持つinterfaceはnative recordではなく`JsValue`として�
 bind競合のcodeをfield accessして検証する。
 listenerが一つもない場合はstderrへ`Unhandled 'error' event`を出し、生成実行ファイルの終了値を
 非ゼロにする。failure flagは一度だけconsumeされ、listenerがある場合は従来どおり継続する。
+
+## 26. parser-backed ESM／CommonJS graph
+
+依存収集を生テキスト走査からSWC構文木へ移した。静的import、re-export、
+literal dynamic import、literal CommonJS requireを同じグラフへ載せ、コメント、
+文字列、member callを除外する。literal `import()`はbundle-local requireを
+Promise境界内で呼ぶ形へ変換するため、解決失敗も同期throwではなくrejectionになる。
+
+ESMのローカルexportとre-exportは値コピーではなくgetterで公開する。これにより
+更新されたexport、namespace import、循環参照時の部分初期化がCommonJS module cache
+上でも保たれる。`.cjs`/`.mjs`/`.json`、directory package entry、package
+`imports`、exact／single-wildcard `exports`とcondition選択も解決対象に加えた。
+混在グラフの実行テストは、live export、循環、`#imports`、JSON、dynamic importを
+同時に通してQuickJS上で最終値42を確認する。lexical named-importの完全なlive binding、
+import assertion、top-level await、非literal dynamic importは引き続き未対応である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

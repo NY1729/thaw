@@ -903,15 +903,35 @@ fn find_own_dts(manifest: &serde_json::Value, package_dir: &Path) -> Option<(Str
 /// common shapes.
 fn resolve_module_path(package_dir: &Path, path: &str) -> Result<(String, PathBuf), String> {
     let trimmed = path.trim_end_matches('/');
+    let directory = package_dir.join(trimmed);
+    if directory.is_dir() {
+        if let Ok(manifest) = read_manifest(&directory) {
+            let entry =
+                package_export_target(&manifest, None, &["require", "import", "node", "default"])
+                    .or_else(|| manifest.get("main").and_then(|value| value.as_str()));
+            if let Some(entry) = entry {
+                if let Ok((relative, absolute)) = resolve_module_path(&directory, entry) {
+                    return Ok((
+                        normalize_path_string(&format!("{trimmed}/{relative}")),
+                        absolute,
+                    ));
+                }
+            }
+        }
+    }
     let candidates = [
         path.to_string(),
         format!("{trimmed}.js"),
+        format!("{trimmed}.cjs"),
         // Real ESM packages commonly use an explicit `.mjs` extension
         // (sometimes alongside a separate `.cjs` build) rather than
         // relying on `package.json`'s `"type": "module"`.
         format!("{trimmed}.mjs"),
+        format!("{trimmed}.json"),
         format!("{trimmed}/index.js"),
+        format!("{trimmed}/index.cjs"),
         format!("{trimmed}/index.mjs"),
+        format!("{trimmed}/index.json"),
     ];
     for candidate in &candidates {
         let resolved = package_dir.join(candidate);
@@ -1009,6 +1029,14 @@ fn bundle_commonjs_package(
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
         let source = fs::read_to_string(&abs_path)
             .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+        let source = if abs_path.extension().is_some_and(|ext| ext == "json") {
+            let value: serde_json::Value = serde_json::from_str(&source)
+                .map_err(|error| format!("invalid JSON module `{key}`: {error}"))?;
+            format!("module.exports = {};", value)
+        } else {
+            source
+        };
+        let module_specs = find_module_specs(&source);
         // A no-op for a file that's already CommonJS (or doesn't parse as
         // JS at all -- left completely untouched either way, so this can
         // never make an already-working file worse).
@@ -1021,7 +1049,11 @@ fn bundle_commonjs_package(
 
         let mut requires = Vec::new();
 
-        for spec in find_relative_require_specs(&source) {
+        for spec in module_specs
+            .iter()
+            .filter(|spec| spec.starts_with("./") || spec.starts_with("../"))
+            .cloned()
+        {
             let combined = if requiring_dir.as_os_str().is_empty() {
                 spec.clone()
             } else {
@@ -1050,7 +1082,29 @@ fn bundle_commonjs_package(
             }
         }
 
-        for spec in find_bare_require_specs(&source) {
+        for spec in module_specs
+            .iter()
+            .filter(|spec| !(spec.starts_with("./") || spec.starts_with("../")))
+            .cloned()
+        {
+            if spec.starts_with('#') {
+                if let Some((resolved_relative, resolved_abs)) =
+                    resolve_package_import(&pkg_dir, &spec)
+                {
+                    let resolved_key = format!("{pkg_name}/{resolved_relative}");
+                    requires.push((spec, resolved_key.clone()));
+                    if !visited.contains(&resolved_key) {
+                        visited.push(resolved_key.clone());
+                        worklist.push((
+                            resolved_key,
+                            resolved_abs,
+                            pkg_name.clone(),
+                            pkg_dir.clone(),
+                        ));
+                    }
+                }
+                continue;
+            }
             if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
                 resolve_bare_require(node_modules_dir, &spec)
             {
@@ -1111,58 +1165,191 @@ fn record_package_version(versions: &mut BTreeMap<String, String>, name: &str, d
     }
 }
 
-/// The shared text scan behind `find_relative_require_specs`/
-/// `find_bare_require_specs`: finds every `require('x')`/`require("y")`
-/// call spec in raw JS text, deliberately just a text scan rather than
-/// real parsing (this project has no general JS/CommonJS parser, only
-/// thaw-parser's TS-oriented one for `.d.ts`/`.ts`). A dynamic
-/// `require(someVariable)` or a template-literal spec simply won't be
-/// found, which just means that one call falls through to whatever
-/// runtime `require` is in scope -- no worse than every `require` call
-/// failing outright, which is what happened before any of this existed.
-fn find_require_specs(source: &str) -> Vec<String> {
-    let bytes = source.as_bytes();
-    let mut specs = Vec::new();
-    let mut i = 0;
-    while let Some(offset) = source[i..].find("require") {
-        let start = i + offset + "require".len();
-        i = start;
+/// Parses a JavaScript module and collects its statically knowable dependency
+/// edges. This deliberately recognizes only a direct `require("literal")`
+/// call and a literal `import("literal")`; shadowed/member calls, comments,
+/// strings, templates, and computed specifiers are not mistaken for edges.
+/// ESM declarations are collected directly from the module AST before they
+/// are lowered to CommonJS.
+#[derive(Default)]
+struct ModuleAnalysis {
+    specs: Vec<String>,
+    _commonjs_exports: Vec<String>,
+}
 
-        let mut j = start;
-        while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
-            j += 1;
-        }
-        if bytes.get(j) != Some(&b'(') {
-            continue;
-        }
-        j += 1;
-        while bytes.get(j).is_some_and(u8::is_ascii_whitespace) {
-            j += 1;
-        }
-        let Some(&quote) = bytes.get(j).filter(|b| **b == b'\'' || **b == b'"') else {
-            continue;
-        };
-        j += 1;
-        let content_start = j;
-        while bytes.get(j).is_some_and(|b| *b != quote) {
-            j += 1;
-        }
-        if bytes.get(j) != Some(&quote) {
-            continue;
-        }
+fn analyze_module(source: &str) -> ModuleAnalysis {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{
+        AssignExpr, AssignTarget, CallExpr, Callee, Expr, Lit, MemberExpr, MemberProp, ModuleDecl,
+        ModuleItem, SimpleAssignTarget,
+    };
 
-        specs.push(source[content_start..j].to_string());
+    struct Calls {
+        specs: Vec<String>,
+        commonjs_exports: Vec<String>,
     }
-    specs
+    impl Visit for Calls {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            let is_require = matches!(
+                &call.callee,
+                Callee::Expr(callee)
+                    if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == "require")
+            );
+            let is_import = matches!(&call.callee, Callee::Import(_));
+            if (is_require || is_import) && call.args.len() == 1 && call.args[0].spread.is_none() {
+                if let Expr::Lit(Lit::Str(spec)) = call.args[0].expr.as_ref() {
+                    self.specs.push(spec.value.to_string_lossy().into_owned());
+                }
+            }
+            call.visit_children_with(self);
+        }
+
+        fn visit_assign_expr(&mut self, assignment: &AssignExpr) {
+            let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assignment.left else {
+                assignment.visit_children_with(self);
+                return;
+            };
+            if let Some(name) = commonjs_export_name(member) {
+                self.commonjs_exports.push(name);
+            }
+            assignment.visit_children_with(self);
+        }
+    }
+
+    fn property_name(property: &MemberProp) -> Option<String> {
+        match property {
+            MemberProp::Ident(ident) => Some(ident.sym.to_string()),
+            MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
+                _ => None,
+            },
+            MemberProp::PrivateName(_) => None,
+        }
+    }
+
+    fn is_module_exports(member: &MemberExpr) -> bool {
+        matches!(member.obj.as_ref(), Expr::Ident(module) if module.sym == "module")
+            && property_name(&member.prop).as_deref() == Some("exports")
+    }
+
+    fn commonjs_export_name(member: &MemberExpr) -> Option<String> {
+        if matches!(member.obj.as_ref(), Expr::Ident(exports) if exports.sym == "exports") {
+            return property_name(&member.prop);
+        }
+        if is_module_exports(member) {
+            return Some("default".to_string());
+        }
+        if let Expr::Member(object) = member.obj.as_ref() {
+            if is_module_exports(object) {
+                return property_name(&member.prop);
+            }
+        }
+        None
+    }
+
+    let Ok(module) = thaw_parser::parse_javascript(source) else {
+        return ModuleAnalysis::default();
+    };
+    let mut calls = Calls {
+        specs: Vec::new(),
+        commonjs_exports: Vec::new(),
+    };
+    module.visit_with(&mut calls);
+    for item in &module.body {
+        let source = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(decl)) => Some(&decl.src),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(decl)) => decl.src.as_ref(),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(decl)) => Some(&decl.src),
+            _ => None,
+        };
+        if let Some(source) = source {
+            calls
+                .specs
+                .push(source.value.to_string_lossy().into_owned());
+        }
+    }
+    let mut unique = Vec::new();
+    for spec in calls.specs {
+        if !unique.contains(&spec) {
+            unique.push(spec);
+        }
+    }
+    calls.commonjs_exports.sort();
+    calls.commonjs_exports.dedup();
+    ModuleAnalysis {
+        specs: unique,
+        _commonjs_exports: calls.commonjs_exports,
+    }
+}
+
+fn find_module_specs(source: &str) -> Vec<String> {
+    analyze_module(source).specs
+}
+
+/// Converts literal dynamic imports to an asynchronous call through the
+/// bundle's per-module `require` map. The `then` boundary ensures a missing or
+/// throwing module rejects the returned Promise instead of throwing before a
+/// Promise is returned.
+fn rewrite_dynamic_imports(source: &str) -> Option<String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, Lit};
+    use thaw_parser::common::Spanned;
+
+    struct Imports {
+        spans: Vec<(u32, u32, String)>,
+    }
+    impl Visit for Imports {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(&call.callee, Callee::Import(_))
+                && call.args.len() == 1
+                && call.args[0].spread.is_none()
+            {
+                if let Expr::Lit(Lit::Str(spec)) = call.args[0].expr.as_ref() {
+                    let span = call.span();
+                    self.spans.push((
+                        span.lo.0,
+                        span.hi.0,
+                        spec.value.to_string_lossy().into_owned(),
+                    ));
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let mut imports = Imports { spans: Vec::new() };
+    module.visit_with(&mut imports);
+    if imports.spans.is_empty() {
+        return None;
+    }
+    imports.spans.sort_by_key(|(lo, _, _)| *lo);
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for (lo, hi, spec) in imports.spans {
+        let lo = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+            .pos
+            .0 as usize;
+        let hi = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+            .pos
+            .0 as usize;
+        output.push_str(&source[cursor..lo]);
+        output.push_str("Promise.resolve().then(function() { return require(");
+        output.push_str(&js_string_literal(&spec));
+        output.push_str("); })");
+        cursor = hi;
+    }
+    output.push_str(&source[cursor..]);
+    Some(output)
 }
 
 /// Rewrites ESM (`import`/`export`) syntax to the CommonJS shape the rest
 /// of this bundler's require-graph resolution already understands:
-/// `find_relative_require_specs`/`find_bare_require_specs`'s text scan
-/// only ever looks for ordinary `require(...)` calls, so as long as this
-/// produces those, nothing else in the pipeline needs to know ESM was
-/// ever involved -- deep imports, builtins, and cross-package resolution
-/// all keep working unmodified on the rewritten text.
+/// the parser-backed dependency walk recognizes the synthesized
+/// `require(...)` calls alongside original CommonJS calls, so deep imports,
+/// builtins, and cross-package resolution share one graph.
 ///
 /// Returns `None` (caller keeps the original source untouched) if the
 /// file doesn't parse as JS at all, or parses but uses no `import`/
@@ -1186,13 +1373,15 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
+    let dynamic_source = rewrite_dynamic_imports(source);
+    let source = dynamic_source.as_deref().unwrap_or(source);
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
     let has_esm_syntax = module
         .body
         .iter()
         .any(|item| matches!(item, ModuleItem::ModuleDecl(_)));
     if !has_esm_syntax {
-        return None;
+        return dynamic_source;
     }
 
     let snippet = |span: thaw_parser::common::Span| cm.span_to_snippet(span).ok();
@@ -1219,7 +1408,8 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
         }
     };
 
-    let mut prologue = String::from("module.exports.__esModule = true;\n");
+    let mut prologue = String::new();
+    let mut local_export_prologue = String::new();
     let mut rest = String::new();
     let mut synthetic_count = 0usize;
 
@@ -1268,7 +1458,10 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                     rest.push('\n');
                 }
                 for name in names_declared_by(&export_decl.decl) {
-                    rest.push_str(&format!("exports.{name} = {name};\n"));
+                    local_export_prologue.push_str(&format!(
+                        "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ return {name}; }} }});\n",
+                        js_string_literal(&name)
+                    ));
                 }
             }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(default_decl)) => {
@@ -1303,7 +1496,11 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                                 .as_ref()
                                 .map(&export_name)
                                 .unwrap_or_else(|| orig.clone());
-                            rest.push_str(&format!("exports.{exported} = {var_name}.{orig};\n"));
+                            rest.push_str(&format!(
+                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ return {var_name}[{}]; }} }});\n",
+                                js_string_literal(&exported),
+                                js_string_literal(&orig)
+                            ));
                         }
                         // `export * as ns from './y'`/`export v from './y'`:
                         // rare re-export forms, best-effort skipped.
@@ -1318,7 +1515,10 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                                 .as_ref()
                                 .map(&export_name)
                                 .unwrap_or_else(|| orig.clone());
-                            rest.push_str(&format!("exports.{exported} = {orig};\n"));
+                            local_export_prologue.push_str(&format!(
+                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ return {orig}; }} }});\n",
+                                js_string_literal(&exported)
+                            ));
                         }
                     }
                 }
@@ -1332,7 +1532,7 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                     js_string_literal(&spec)
                 ));
                 rest.push_str(&format!(
-                    "for (var __thaw_esm_key in {var_name}) {{ exports[__thaw_esm_key] = {var_name}[__thaw_esm_key]; }}\n"
+                    "for (let __thaw_esm_key in {var_name}) {{ if (__thaw_esm_key !== 'default' && __thaw_esm_key !== '__esModule') Object.defineProperty(exports, __thaw_esm_key, {{ enumerable: true, get: function() {{ return {var_name}[__thaw_esm_key]; }} }}); }}\n"
                 ));
             }
             // `import foo = require(...)`/`export = foo`/`export as
@@ -1343,24 +1543,9 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
         }
     }
 
-    Some(format!("{prologue}{rest}"))
-}
-
-/// Specs starting with `./` or `../` -- same-package relative requires.
-fn find_relative_require_specs(source: &str) -> Vec<String> {
-    find_require_specs(source)
-        .into_iter()
-        .filter(|spec| spec.starts_with("./") || spec.starts_with("../"))
-        .collect()
-}
-
-/// Everything else -- another npm package (or a Node core builtin,
-/// which just won't resolve under `node_modules_dir` and is left alone).
-fn find_bare_require_specs(source: &str) -> Vec<String> {
-    find_require_specs(source)
-        .into_iter()
-        .filter(|spec| !(spec.starts_with("./") || spec.starts_with("../")))
-        .collect()
+    Some(format!(
+        "module.exports.__esModule = true;\n{local_export_prologue}{prologue}{rest}"
+    ))
 }
 
 /// Splits a bare require spec into its package name and, if present, a
@@ -1533,17 +1718,66 @@ fn resolve_bare_require(
 ) -> Option<(String, String, PathBuf, PathBuf)> {
     let (dep_name, subpath) = split_bare_spec(spec);
     let dep_dir = node_modules_dir.join(dep_name);
-    let (dep_relative, dep_abs) = match subpath {
-        Some(sub) => resolve_module_path(&dep_dir, sub).ok()?,
+    let target = match subpath {
+        Some(sub) => read_manifest(&dep_dir)
+            .ok()
+            .and_then(|manifest| package_subpath_runtime_target(&manifest, sub))
+            .unwrap_or_else(|| sub.to_string()),
         None => {
             let manifest = read_manifest(&dep_dir).ok()?;
-            let main = package_export_target(&manifest, None, &["require", "import", "default"])
+            package_export_target(&manifest, None, &["require", "import", "default"])
                 .or_else(|| manifest.get("main").and_then(|v| v.as_str()))
-                .unwrap_or("index.js");
-            resolve_module_path(&dep_dir, main).ok()?
+                .unwrap_or("index.js")
+                .to_string()
         }
     };
+    let (dep_relative, dep_abs) = resolve_module_path(&dep_dir, &target).ok()?;
     Some((dep_name.to_string(), dep_relative, dep_abs, dep_dir))
+}
+
+fn package_subpath_runtime_target(manifest: &serde_json::Value, subpath: &str) -> Option<String> {
+    if let Some(target) = package_export_target(
+        manifest,
+        Some(subpath),
+        &["require", "import", "node", "default"],
+    ) {
+        return Some(target.to_string());
+    }
+    let exports = manifest.get("exports")?.as_object()?;
+    for (key, value) in exports {
+        let Some(pattern) = key.strip_prefix("./") else {
+            continue;
+        };
+        let Some(capture) = wildcard_capture(pattern, subpath) else {
+            continue;
+        };
+        if let Some(target) =
+            select_export_condition(value, &["require", "import", "node", "default"])
+        {
+            return Some(target.replace('*', capture));
+        }
+    }
+    None
+}
+
+fn resolve_package_import(package_dir: &Path, spec: &str) -> Option<(String, PathBuf)> {
+    let manifest = read_manifest(package_dir).ok()?;
+    let imports = manifest.get("imports")?.as_object()?;
+    if let Some(value) = imports.get(spec) {
+        let target = select_export_condition(value, &["require", "import", "node", "default"])?;
+        return resolve_module_path(package_dir, target).ok();
+    }
+    for (pattern, value) in imports {
+        let Some(capture) = wildcard_capture(pattern, spec) else {
+            continue;
+        };
+        if let Some(target) =
+            select_export_condition(value, &["require", "import", "node", "default"])
+        {
+            return resolve_module_path(package_dir, &target.replace('*', capture)).ok();
+        }
+    }
+    None
 }
 
 /// Collapses `.`/`..` segments in a `/`-separated path string (npm
@@ -2093,6 +2327,23 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_required_directory_through_its_own_package_manifest() {
+        let dir = temp_registry("nested_directory_manifest");
+        let feature = dir.join("feature");
+        fs::create_dir_all(feature.join("dist")).unwrap();
+        fs::write(
+            feature.join("package.json"),
+            r#"{"exports":{".":{"require":"./dist/index.cjs"}}}"#,
+        )
+        .unwrap();
+        fs::write(feature.join("dist/index.cjs"), "module.exports = 42;").unwrap();
+        let (relative, absolute) = resolve_module_path(&dir, "./feature").unwrap();
+        assert_eq!(relative, "feature/dist/index.cjs");
+        assert_eq!(absolute, feature.join("dist/index.cjs"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn resolves_main_field_written_exactly() {
         let dir = temp_registry("main_exact");
         fs::write(dir.join("main.js"), "module.exports = 1;").unwrap();
@@ -2114,22 +2365,77 @@ mod tests {
 
     #[test]
     fn finds_single_and_double_quoted_relative_requires() {
-        let specs =
-            find_relative_require_specs(r#"var a = require('./a'); var b = require("../lib/b");"#);
+        let specs: Vec<_> =
+            find_module_specs(r#"var a = require('./a'); var b = require("../lib/b");"#)
+                .into_iter()
+                .filter(|spec| spec.starts_with('.'))
+                .collect();
         assert_eq!(specs, vec!["./a".to_string(), "../lib/b".to_string()]);
     }
 
     #[test]
+    fn parser_collects_esm_reexports_and_dynamic_imports_without_false_positives() {
+        let specs = find_module_specs(
+            r#"
+                import main from './main.js';
+                export { value } from "./value.js";
+                export * from './all.js';
+                const later = import('./later.js');
+                const text = "require('./not-real.js')";
+                // require('./also-not-real.js')
+                object.require('./member.js');
+                require(variable);
+            "#,
+        );
+        assert_eq!(
+            specs,
+            vec!["./later.js", "./main.js", "./value.js", "./all.js"]
+        );
+    }
+
+    #[test]
+    fn parser_identifies_commonjs_export_assignments() {
+        let analysis = analyze_module(
+            r#"
+                exports.alpha = 1;
+                module.exports.beta = 2;
+                module.exports["gamma"] = 3;
+                module.exports = function () {};
+                object.exports.nope = 4;
+            "#,
+        );
+        assert_eq!(
+            analysis._commonjs_exports,
+            vec!["alpha", "beta", "default", "gamma"]
+        );
+    }
+
+    #[test]
+    fn rewrites_literal_dynamic_import_to_an_async_bundle_require() {
+        let rewritten =
+            rewrite_esm_to_commonjs("function load() { return import('./feature.js'); }").unwrap();
+        assert!(rewritten
+            .contains("Promise.resolve().then(function() { return require(\"./feature.js\"); })"));
+        assert!(!rewritten.contains("import("));
+    }
+
+    #[test]
     fn ignores_bare_specifier_requires() {
-        let specs = find_relative_require_specs(r#"var x = require('is-number');"#);
+        let specs: Vec<_> = find_module_specs(r#"var x = require('is-number');"#)
+            .into_iter()
+            .filter(|spec| spec.starts_with('.'))
+            .collect();
         assert!(specs.is_empty());
     }
 
     #[test]
     fn finds_bare_specifiers_including_scoped_packages() {
-        let specs = find_bare_require_specs(
+        let specs: Vec<_> = find_module_specs(
             r#"var a = require('side-channel'); var b = require('@babel/core'); var c = require('./local');"#,
-        );
+        )
+        .into_iter()
+        .filter(|spec| !spec.starts_with('.'))
+        .collect();
         assert_eq!(
             specs,
             vec!["side-channel".to_string(), "@babel/core".to_string()]
@@ -2233,9 +2539,12 @@ mod tests {
         // `require(name)` (a variable, not a literal) and a stray
         // "require" that isn't actually a call must not confuse the scan
         // -- and must not stop it from still finding a real one after.
-        let specs = find_relative_require_specs(
+        let specs: Vec<_> = find_module_specs(
             "var x = require(name); var note = 'requirements'; var y = require('./y');",
-        );
+        )
+        .into_iter()
+        .filter(|spec| spec.starts_with('.'))
+        .collect();
         assert_eq!(specs, vec!["./y".to_string()]);
     }
 
@@ -2770,7 +3079,7 @@ mod tests {
         let rewritten =
             rewrite_esm_to_commonjs("export function add(a, b) { return a + b; }").unwrap();
         assert!(rewritten.contains("function add(a, b) { return a + b; }"));
-        assert!(rewritten.contains("exports.add = add;"));
+        assert!(rewritten.contains("get: function() { return add; }"));
     }
 
     #[test]
@@ -2831,5 +3140,93 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn mixed_esm_bundle_supports_live_exports_cycles_imports_json_and_dynamic_import() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("esm_mixed_graph");
+        fs::write(
+            dir.join("package.json"),
+            r##"{"imports":{"#counter":{"node":"./counter.js","default":"./wrong.js"}}}"##,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("index.js"),
+            "import * as counter from '#counter';\n\
+             import data from './data.json';\n\
+             import { fromA } from './a.js';\n\
+             export default async function run() {\n\
+               counter.increment();\n\
+               const dynamic = await import('./dynamic.js');\n\
+               return counter.value + dynamic.extra + data.base + (fromA() === 'b' ? 10 : 0);\n\
+             }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("counter.js"),
+            "export let value = 1; export function increment() { value++; }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("a.js"),
+            "import * as b from './b.js'; export function fromA() { return b.name; } export const name = 'a';",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("b.js"),
+            "import * as a from './a.js'; export const name = 'b'; export function fromB() { return a.name; }",
+        )
+        .unwrap();
+        fs::write(dir.join("dynamic.js"), "export const extra = 10;").unwrap();
+        fs::write(dir.join("data.json"), r#"{"base":20}"#).unwrap();
+
+        let empty_node_modules = temp_registry("esm_mixed_graph_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 6);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(name); }};\n\
+             {bundle}\n\
+             globalThis.runMixed = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("runMixed").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn bare_subpaths_honor_exact_and_wildcard_export_conditions() {
+        let node_modules = temp_registry("conditional_subpath_modules");
+        let package = node_modules.join("conditional-pkg");
+        fs::create_dir_all(package.join("dist/features")).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"exports":{"./feature":{"require":"./dist/feature.cjs","default":"./wrong.js"},"./features/*":{"require":"./dist/features/*.cjs"}}}"#,
+        )
+        .unwrap();
+        fs::write(package.join("dist/feature.cjs"), "module.exports = 1;").unwrap();
+        fs::write(
+            package.join("dist/features/math.cjs"),
+            "module.exports = 2;",
+        )
+        .unwrap();
+
+        let (_, exact, ..) =
+            resolve_bare_require(&node_modules, "conditional-pkg/feature").unwrap();
+        let (_, wildcard, ..) =
+            resolve_bare_require(&node_modules, "conditional-pkg/features/math").unwrap();
+        assert_eq!(exact, "./dist/feature.cjs");
+        assert_eq!(wildcard, "./dist/features/math.cjs");
+        let _ = fs::remove_dir_all(&node_modules);
     }
 }

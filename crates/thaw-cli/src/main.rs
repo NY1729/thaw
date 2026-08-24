@@ -677,8 +677,8 @@ fn generate_registry_shims(
 ///
 /// Uses `swc_ecma_visit`'s `Visit` to walk the whole AST (a call can be
 /// nested arbitrarily deep in an expression), unlike the top-level-only
-/// walks elsewhere in this project (thaw-registry's ESM rewrite only
-/// ever needs to look at a module's immediate top-level items). Matched
+/// walks elsewhere in this project (thaw-registry also uses a full AST walk
+/// for JavaScript dependency discovery). Matched
 /// spans are collected first and applied as one pass of text
 /// substitution over the original source afterward, copying everything
 /// else verbatim -- this project carries no general JS/TS code
@@ -2656,6 +2656,38 @@ mod tests {
             String::from_utf8_lossy(&result.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&result.stdout), "0\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registry_add_builds_and_runs_a_real_esm_package_when_enabled() {
+        if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-auto-has-flag-{}", std::process::id()));
+        let registry = dir.join("modules");
+        thaw_registry::add(&registry, "has-flag@5.0.1").unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &source,
+            r#"import hasFlag from "has-flag";
+                function main(): void {
+                    const present: Json = hasFlag(JSON.parse("[\"--thaw-parser-backed-bundler\"]"));
+                    console.log(Boolean(present));
+                }"#,
+        )
+        .unwrap();
+        build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "false\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
