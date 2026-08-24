@@ -3044,6 +3044,13 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Str);
                     }
+                    "__thaw_bool_to_string" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("boolean string conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Bool, argument, "boolean string conversion")?;
+                        return Ok(HirType::Str);
+                    }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -3380,8 +3387,23 @@ impl<'a> FnLowerer<'a> {
                         parts.push(HirExpr::Lit(HirLit::Str(text)));
                     }
                     if let Some(expression) = template.exprs.get(index) {
-                        let value = self.lower_expr(expression)?;
-                        self.expect_type(&HirType::Str, &value, "template interpolation")?;
+                        let mut value = self.lower_expr(expression)?;
+                        match self.infer_expr_type(&value)? {
+                            HirType::Str => {}
+                            HirType::Bool => {
+                                value = HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_bool_to_string".to_string(),
+                                    )),
+                                    vec![value],
+                                );
+                            }
+                            other => {
+                                return Err(format!(
+                                    "template interpolation cannot stringify {other:?} yet"
+                                ))
+                            }
+                        }
                         parts.push(value);
                     }
                 }
@@ -5309,6 +5331,15 @@ impl<'a> FnLowerer<'a> {
             }
             let value = self.lower_expr(&arg.expr)?;
             let ty = self.infer_expr_type(&value)?;
+            if callee_name == "String" && ty == HirType::Str {
+                return Ok(value);
+            }
+            if callee_name == "String" && ty == HirType::Bool {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
+                    vec![value],
+                ));
+            }
             if ty != HirType::Json {
                 return Err(format!(
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"

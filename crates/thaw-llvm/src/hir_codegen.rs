@@ -4749,6 +4749,26 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(allocation.into())
     }
 
+    fn compile_bool_to_string(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("boolean string conversion expects one operand".to_string());
+        };
+        let value = self.compile_expr(value)?.into_int_value();
+        let true_value = self
+            .builder
+            .build_global_string_ptr("true", "bool_true")
+            .map_err(|error| error.to_string())?
+            .as_pointer_value();
+        let false_value = self
+            .builder
+            .build_global_string_ptr("false", "bool_false")
+            .map_err(|error| error.to_string())?
+            .as_pointer_value();
+        self.builder
+            .build_select(value, true_value, false_value, "bool_string")
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -6890,6 +6910,7 @@ impl<'ctx> HirCompiler<'ctx> {
         match name.as_str() {
             "console.log" => return self.compile_console_log(args),
             "__thaw_string_concat" => return self.compile_string_concat(args),
+            "__thaw_bool_to_string" => return self.compile_bool_to_string(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10230,13 +10251,16 @@ mod tests {
             async function main(): Promise<void> {
                 console.log(`plain`);
                 console.log(`A:${word("first", "x")}:${word("second", "y")}:Z`);
+                const enabled: boolean = true;
+                console.log(`enabled=${enabled}, disabled=${false}`);
+                console.log(String(enabled));
                 console.log(`before:${await delayed("done")}:after`);
                 console.log(``);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "string_templates"),
-            "plain\nfirst\nsecond\nA:x:y:Z\nawaited\nbefore:done:after\n\n"
+            "plain\nfirst\nsecond\nA:x:y:Z\nenabled=true, disabled=false\ntrue\nawaited\nbefore:done:after\n\n"
         );
     }
 
