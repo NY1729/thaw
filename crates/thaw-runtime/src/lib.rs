@@ -226,6 +226,120 @@ pub unsafe extern "C" fn thaw_string_to_number(value: *const c_char) -> f64 {
     javascript_string_number(&text)
 }
 
+fn javascript_parse_float(text: &str) -> f64 {
+    let text = text
+        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    let bytes = text.as_bytes();
+    let mut index = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
+    if text
+        .get(index..)
+        .is_some_and(|rest| rest.starts_with("Infinity"))
+    {
+        return if bytes.first() == Some(&b'-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    let mut digits = 0;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        digits += 1;
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            digits += 1;
+            index += 1;
+        }
+    }
+    if digits == 0 {
+        return f64::NAN;
+    }
+    if matches!(bytes.get(index), Some(b'e') | Some(b'E')) {
+        let exponent_mark = index;
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+') | Some(b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            index = exponent_mark;
+        }
+    }
+    text[..index].parse().unwrap_or(f64::NAN)
+}
+
+fn javascript_parse_int(text: &str, radix: f64) -> f64 {
+    let mut text = text
+        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    let negative = text.starts_with('-');
+    if matches!(text.as_bytes().first(), Some(b'+') | Some(b'-')) {
+        text = &text[1..];
+    }
+    let radix = if radix.is_finite() {
+        let unsigned = radix.trunc().rem_euclid(4_294_967_296.0) as u32;
+        unsigned as i32
+    } else {
+        0
+    };
+    if radix != 0 && !(2..=36).contains(&radix) {
+        return f64::NAN;
+    }
+    let mut radix = radix as u32;
+    let has_hex_prefix = text.starts_with("0x") || text.starts_with("0X");
+    if radix == 0 {
+        radix = if has_hex_prefix { 16 } else { 10 };
+    }
+    if radix == 16 && has_hex_prefix {
+        text = &text[2..];
+    }
+    let mut value = 0.0;
+    let mut digits = 0;
+    for character in text.chars() {
+        let Some(digit) = character.to_digit(radix) else {
+            break;
+        };
+        value = value * f64::from(radix) + f64::from(digit);
+        digits += 1;
+    }
+    if digits == 0 {
+        return f64::NAN;
+    }
+    if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_parse_float(value: *const c_char) -> f64 {
+    if value.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    javascript_parse_float(&text)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_parse_int(value: *const c_char, radix: f64) -> f64 {
+    if value.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    javascript_parse_int(&text, radix)
+}
+
 #[no_mangle]
 /// Compares UTF-8 native strings using JavaScript's UTF-16 code-unit order.
 ///
@@ -2701,6 +2815,26 @@ mod tests {
         assert!(javascript_string_number("+0x1").is_nan());
         assert!(javascript_string_number("inf").is_nan());
         assert!(javascript_string_number("-0").is_sign_negative());
+    }
+
+    #[test]
+    fn parses_float_and_integer_prefixes_like_javascript() {
+        assert_eq!(javascript_parse_float("  -12.5px"), -12.5);
+        assert_eq!(javascript_parse_float("1e2rest"), 100.0);
+        assert_eq!(javascript_parse_float("1e+"), 1.0);
+        assert_eq!(javascript_parse_float("+Infinity!"), f64::INFINITY);
+        assert!(javascript_parse_float("0x10").is_sign_positive());
+        assert_eq!(javascript_parse_float("0x10"), 0.0);
+        assert!(javascript_parse_float("words").is_nan());
+
+        assert_eq!(javascript_parse_int("  -0x10more", 0.0), -16.0);
+        assert_eq!(javascript_parse_int("11", 2.0), 3.0);
+        assert_eq!(javascript_parse_int("0x20", 16.0), 32.0);
+        assert_eq!(javascript_parse_int("010", 0.0), 10.0);
+        assert_eq!(javascript_parse_int("15px", 10.0), 15.0);
+        assert!(javascript_parse_int("10", 1.0).is_nan());
+        assert!(javascript_parse_int("xyz", 36.0).is_finite());
+        assert!(javascript_parse_int("-0", 10.0).is_sign_negative());
     }
 
     #[test]
