@@ -9259,6 +9259,38 @@ mod tests {
     }
 
     #[test]
+    fn compiles_unary_and_extended_comparisons_without_duplicate_evaluation() {
+        let source = r#"
+            function left(): number {
+                console.log("left");
+                return 2;
+            }
+            async function numberValue(): Promise<number> {
+                await sleep(1);
+                return 3;
+            }
+            async function boolValue(): Promise<boolean> {
+                await sleep(1);
+                return false;
+            }
+            async function main(): Promise<void> {
+                console.log(-left());
+                console.log(+2);
+                console.log(!false);
+                console.log(left() <= 2);
+                console.log(2 >= 3);
+                console.log("same" !== "same");
+                console.log(-(await numberValue()));
+                console.log(!(await boolValue()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "extended_operators"),
+            "left\n-2\n2\ntrue\nleft\ntrue\nfalse\nfalse\n-3\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
