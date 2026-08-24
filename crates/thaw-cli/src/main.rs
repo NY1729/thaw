@@ -946,7 +946,8 @@ fn rewrite_external_class_methods(
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         ArrowFunctionBody, BinaryOp, CallExpr, Callee, Expr, FnDecl, FunctionBody, Lit, MemberProp,
-        Pat, ReturnStmt, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
+        Pat, Prop, PropName, PropOrSpread, ReturnStmt, TsKeywordTypeKind, TsType, UnaryOp,
+        VarDeclarator,
     };
     use thaw_parser::common::Spanned;
 
@@ -998,7 +999,39 @@ fn rewrite_external_class_methods(
             {
                 Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))
             }
-            Expr::Object(_) => Some(thaw_hir::HirType::Object(Vec::new())),
+            Expr::Object(object) => {
+                let mut fields = Vec::with_capacity(object.props.len());
+                for property in &object.props {
+                    let PropOrSpread::Prop(property) = property else {
+                        return Some(thaw_hir::HirType::Object(Vec::new()));
+                    };
+                    let (name, value_type) = match property.as_ref() {
+                        Prop::KeyValue(property) => {
+                            let name = match &property.key {
+                                PropName::Ident(identifier) => identifier.sym.to_string(),
+                                PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                                _ => return Some(thaw_hir::HirType::Object(Vec::new())),
+                            };
+                            let Some(value_type) =
+                                source_expr_type(&property.value, variables, functions)
+                            else {
+                                return Some(thaw_hir::HirType::Object(Vec::new()));
+                            };
+                            (name, value_type)
+                        }
+                        Prop::Shorthand(identifier) => {
+                            let Some(value_type) = variables.get(identifier.sym.as_str()).cloned()
+                            else {
+                                return Some(thaw_hir::HirType::Object(Vec::new()));
+                            };
+                            (identifier.sym.to_string(), value_type)
+                        }
+                        _ => return Some(thaw_hir::HirType::Object(Vec::new())),
+                    };
+                    fields.push((name, value_type));
+                }
+                Some(thaw_hir::HirType::Object(fields))
+            }
             Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
             Expr::Paren(parenthesized) => {
                 source_expr_type(&parenthesized.expr, variables, functions)
@@ -1071,8 +1104,22 @@ fn rewrite_external_class_methods(
                 },
                 _ => None,
             },
-            Expr::Member(member) if matches!(&member.prop, MemberProp::Ident(name) if name.sym == *"length") => {
-                Some(thaw_hir::HirType::F64)
+            Expr::Member(member) => {
+                let MemberProp::Ident(property) = &member.prop else {
+                    return None;
+                };
+                if property.sym == *"length" {
+                    return Some(thaw_hir::HirType::F64);
+                }
+                let thaw_hir::HirType::Object(fields) =
+                    source_expr_type(&member.obj, variables, functions)?
+                else {
+                    return None;
+                };
+                fields
+                    .into_iter()
+                    .find(|(name, _)| name == property.sym.as_str())
+                    .map(|(_, ty)| ty)
             }
             _ => None,
         }
@@ -1233,7 +1280,18 @@ fn rewrite_external_class_methods(
     fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
         match (declared, actual) {
             (thaw_hir::HirType::Json, _) => Some(0),
-            (thaw_hir::HirType::Object(_), thaw_hir::HirType::Object(_)) => Some(2),
+            (thaw_hir::HirType::Object(declared), thaw_hir::HirType::Object(actual)) => {
+                if declared.is_empty() || actual.is_empty() {
+                    return Some(1);
+                }
+                let mut score = 2u8;
+                for (name, declared_type) in declared {
+                    let (_, actual_type) =
+                        actual.iter().find(|(candidate, _)| candidate == name)?;
+                    score = score.saturating_add(overload_type_score(declared_type, actual_type)?);
+                }
+                Some(score)
+            }
             (left, right) if left == right => Some(2),
             _ => None,
         }
@@ -4051,7 +4109,7 @@ mod tests {
 
     #[test]
     fn infers_external_overload_types_from_composed_expressions() {
-        let source = r#"const box = new NativeBox(1); const n = 20 + 22; const s = "hel" + "lo"; const b = n > 0; box.set(n); box.set(s); box.set(b); box.set(Number("7")); box.set(`value-${s}`); box.set(true ? "yes" : "no");"#;
+        let source = r#"const box = new NativeBox(1); const n = 20 + 22; const s = "hel" + "lo"; const b = n > 0; const config = { n, nested: { text: s }, enabled: b }; box.set(n); box.set(s); box.set(b); box.set(Number("7")); box.set(`value-${s}`); box.set(true ? "yes" : "no"); box.set(config.n); box.set(config.nested.text); box.set(config.enabled); box.set(({ value: 7 }).value);"#;
         let rewritten = rewrite_external_class_methods(
             source,
             &[("addon".into(), "NativeBox".into())],
@@ -4089,6 +4147,10 @@ mod tests {
         assert!(rewritten.contains("__set_number(box, Number(\"7\"))"));
         assert!(rewritten.contains("__set_string(box, `value-${s}`)"));
         assert!(rewritten.contains("__set_string(box, true ? \"yes\" : \"no\")"));
+        assert!(rewritten.contains("__set_number(box, config.n)"));
+        assert!(rewritten.contains("__set_string(box, config.nested.text)"));
+        assert!(rewritten.contains("__set_boolean(box, config.enabled)"));
+        assert!(rewritten.contains("__set_number(box, ({ value: 7 }).value)"));
     }
 
     #[test]
@@ -4131,5 +4193,42 @@ mod tests {
         assert!(rewritten.contains("__set_number(box, inferredNumber())"));
         assert!(rewritten.contains("__set_string(box, inferredText())"));
         assert!(rewritten.contains("__set_boolean(box, inferredFlag())"));
+    }
+
+    #[test]
+    fn selects_object_overloads_from_structural_property_types() {
+        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 });"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "configure".into(),
+                    "__configure_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Object(vec![(
+                        "value".into(),
+                        thaw_hir::HirType::F64,
+                    )])],
+                ),
+                (
+                    "NativeBox".into(),
+                    "configure".into(),
+                    "__configure_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Object(vec![(
+                        "value".into(),
+                        thaw_hir::HirType::Str,
+                    )])],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("__configure_number(box, numeric)"));
+        assert!(rewritten.contains("__configure_string(box, textual)"));
+        assert!(rewritten.contains("__configure_number(box, { value: 7 })"));
     }
 }
