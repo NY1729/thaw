@@ -410,6 +410,28 @@ pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const 
     }
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_lower_case(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    arena_c_string(&value.to_lowercase()).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    arena_c_string(&value.to_uppercase()).map_or(std::ptr::null(), |value| value.cast())
+}
+
 unsafe fn native_array_length(array: *const u8) -> Option<usize> {
     (!array.is_null()).then(|| unsafe { array.cast::<u64>().read() as usize })
 }

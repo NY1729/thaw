@@ -707,6 +707,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_string_trim",
             "thaw_string_trim_start",
             "thaw_string_trim_end",
+            "thaw_string_to_lower_case",
+            "thaw_string_to_upper_case",
         ] {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
@@ -7796,9 +7798,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return Ok(result);
             }
-            "__thaw_string_trim" | "__thaw_string_trim_start" | "__thaw_string_trim_end" => {
+            "__thaw_string_trim"
+            | "__thaw_string_trim_start"
+            | "__thaw_string_trim_end"
+            | "__thaw_string_to_lower_case"
+            | "__thaw_string_to_upper_case" => {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
-                return self.compile_single_arg_call(&runtime, args, "string trim");
+                return self.compile_single_arg_call(&runtime, args, "string transform");
             }
             "__thaw_string_length" => {
                 return self.compile_single_arg_call("thaw_string_length", args, "string length")
@@ -12161,6 +12167,29 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "string_trim"),
             "receiver-evaluated\nthaw\ntrue\ntrue\ntrue\nawaited-trim\ndone\n"
+        );
+    }
+
+    #[test]
+    fn compiles_unicode_string_case_conversion() {
+        let source = r#"
+            async function delayed(): Promise<string> {
+                console.log("awaited");
+                await sleep(1);
+                return "Straße";
+            }
+            async function main(): Promise<void> {
+                console.log("ThAw".toLowerCase());
+                console.log("ThAw".toUpperCase());
+                console.log("Straße".toUpperCase());
+                console.log("İ".toLowerCase());
+                console.log("".toUpperCase().length);
+                console.log((await delayed()).toUpperCase());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_case_conversion"),
+            "thaw\nTHAW\nSTRASSE\ni̇\n0\nawaited\nSTRASSE\n"
         );
     }
 
