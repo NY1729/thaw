@@ -1034,7 +1034,8 @@ exact subpathと実fileへ展開できるwildcard subpathも同じmapへ加え�
 exportsに現れず実行時に組み立てる未知のdeep subpathはまだ対象外である。user moduleの静的なrelative/absolute
 `import.meta.resolve()`はsource directory基準でpathを正規化し、query/fragmentを保った
 `file://` URLへ変換する。Node互換の`import.meta.filename`/`dirname`はpercent encodeしない
-絶対filesystem pathへ変換する。bare registry package/subpathは選択済みの`bundle.js`、
+絶対filesystem pathへ変換し、`import.meta.main`は実行ファイルのentry moduleだけ`true`にする。
+bare registry package/subpathは選択済みの`bundle.js`、
 `native.node`、`native.a`の実pathへ解決し、`node:` builtinはspecifier自体をURLとして保つ。
 通常のstatic/dynamic importでもquery/fragmentをfilesystem解決から除外しつつmodule cache key
 には保持する。同一URLの再importはnamespaceを再利用し、suffixが異なるURLは別module instanceとして

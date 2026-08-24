@@ -658,6 +658,7 @@ The workspace crates have narrow responsibilities:
   cycles are explicit errors. `import.meta.url` is replaced per source module
   with its percent-encoded absolute `file://` URL; Node-compatible
   `import.meta.filename` and `.dirname` expose unescaped absolute paths. Static relative/absolute
+  `import.meta.main` is `true` only in the executable entry module.
   `import.meta.resolve(specifier)` uses lexical path normalization and preserves
   queries/fragments. Bare registry packages and subpaths resolve to their
   selected `bundle.js`, `native.node` or `native.a` artifact, while `node:`
