@@ -43,6 +43,10 @@ method戻り値の双方を検証した。終了時drainにはdefault libuv loop
 constructor等の先行async workをdrainし、各complete境界で例外を回収して後続callへ
 漏らさない。これにより公式sqlite3の実`Database`を構築し、registry削除後の単一実行
 ファイルで`close(callback)`の完了通知まで検証できた。overload解決が次の対象である。
+同名instance methodは対応可能な全signatureへ固有symbolを生成し、source rewrite時に
+実引数個数と末尾callbackの有無で選択するよう拡張した。inline callbackに加えて、
+local変数へ代入したarrow/functionも追跡する。同じ引数個数を持つ非callback overloadの
+型による選択とoptional/rest parameterは引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
