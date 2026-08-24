@@ -515,7 +515,10 @@ object keys such as `{ ["value"]: 1 }` are supported. Object spreads from a
 statically typed local variable, nested object literal, or typed function call
 preserve their fields and allow later properties to override them. A call used
 as a spread source is bound through an internal closure so it executes exactly
-once. Dynamic computed keys and dynamically typed spread sources remain outside
+once. Multiple expression spreads retain left-to-right evaluation order, and
+matching-type conditional expressions can also supply an object. Conditional
+expressions are supported generally when both branches have the same native
+type. Dynamic computed keys and dynamically typed spread sources remain outside
 this path. `if/else`
 branches are analyzed from the same incoming state and retain
 only value, class-instance, and callback facts that agree on every outgoing

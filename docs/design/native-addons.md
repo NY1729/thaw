@@ -64,7 +64,9 @@ structural object overloadを選択する。直線的な`=`代入はlocal変数�
 computed object keyは扱う。静的なobject型を持つlocal変数、入れ子のobject
 literal、型付きfunction callのspreadを展開し、後続propによる上書きを保持する。
 callは内部closureの引数へ束縛して一度だけ評価する。動的computed keyと動的型の
-spread元は引き続き残課題である。
+spread元は引き続き残課題である。複数のspread expressionは左から右の順に
+一度ずつ評価する。両branchが同じnative型の条件式も一般HIR式として扱い、
+object spread元にも利用できる。
 `if/else`は同じ入力状態から両branchを解析し、全ての出口で一致する
 value、class instance、callback情報だけを保持する。`else`省略時は未変更の入力経路と
 joinする。`while`とclassic `for`はbody／update後の状態を0回実行経路とjoinし、iteration
