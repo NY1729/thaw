@@ -11883,6 +11883,33 @@ mod tests {
     }
 
     #[test]
+    fn compiles_object_keys_for_fixed_objects() {
+        let source = r#"
+            interface Config { first: number; second: string; }
+            function config(): Config {
+                console.log("receiver");
+                return { first: 1, second: "two" };
+            }
+            async function delayed(): Promise<Config> {
+                console.log("awaited");
+                await sleep(1);
+                return { first: 3, second: "four" };
+            }
+            async function main(): Promise<void> {
+                console.log(Object.keys(config()).join(","));
+                console.log(Object.keys({ first: 1, second: 2, first: 3 }).join("-"));
+                console.log(Object.keys(await delayed()).join("|"));
+                const empty: {} = {};
+                console.log(Object.keys(empty).length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_keys"),
+            "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\n0\n"
+        );
+    }
+
+    #[test]
     fn compiles_utf16_string_search_methods() {
         let source = r#"
             function text(): string {

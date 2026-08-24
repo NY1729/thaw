@@ -449,6 +449,9 @@ The workspace crates have narrow responsibilities:
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
+- `Object.keys` returns an arena-owned string array for fixed-layout objects,
+  preserving declaration/insertion order across property overrides and
+  evaluating synchronous or awaited receivers exactly once
 - Native strings implement `.indexOf()`, `.includes()`, `.startsWith()` and
   `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
   byte offsets. Search values and positions are coerced left-to-right, clamped
