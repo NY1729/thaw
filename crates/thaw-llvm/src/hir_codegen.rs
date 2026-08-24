@@ -3732,6 +3732,7 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             self.variables
                 .insert(name.clone(), (slot, self.basic_type(ty)?));
+            self.variable_hir_types.insert(name.clone(), ty.clone());
         }
         Ok(())
     }
@@ -12630,10 +12631,10 @@ mod tests {
                 let value: number | undefined = undefined;
                 console.log(value ??= fallback());
                 console.log(value ??= fallback());
-                console.log(value ?? 0);
+                console.log(value);
                 value = undefined;
                 console.log(value ??= await delayedFallback());
-                console.log(value ?? 0);
+                console.log(value);
 
                 const box: Box = { value: undefined };
                 console.log(box.value ??= 5);
