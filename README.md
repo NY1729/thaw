@@ -367,6 +367,11 @@ The workspace crates have narrow responsibilities:
 - Zero-argument `.toString()` is available on native numbers, booleans,
   strings, fixed objects, typed arrays and heterogeneous tuples, including
   receivers produced by side-effecting calls or `await`
+- `Number.isNaN`/`Number.isFinite` perform non-coercing checks, while global
+  `isNaN`/`isFinite` apply native numeric conversion first. Aggregate numeric
+  conversion follows each value's native string form, so empty/single/multiple
+  element arrays match JavaScript behavior; arguments may suspend and are
+  evaluated once
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
