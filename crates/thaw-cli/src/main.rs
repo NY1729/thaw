@@ -2537,6 +2537,18 @@ fn parse_ffi_aggregate_layout(
                                 path.display()
                             )
                         })?;
+                    let bit_width = match bitfield.get("bitWidth") {
+                        Some(value) => value
+                            .as_u64()
+                            .and_then(|value| u8::try_from(value).ok())
+                            .ok_or_else(|| {
+                                format!(
+                                    "FFI metadata for `{symbol}` in `{}` requires an 8-bit integer `bitWidth`",
+                                    path.display()
+                                )
+                            })?,
+                        None => 1,
+                    };
                     let storage_bytes = bitfield
                         .get("storageBytes")
                         .and_then(|value| value.as_u64())
@@ -2547,9 +2559,23 @@ fn parse_ffi_aggregate_layout(
                                 path.display()
                             )
                         })?;
+                    let signed = bitfield
+                        .get("signed")
+                        .map(|value| {
+                            value.as_bool().ok_or_else(|| {
+                                format!(
+                                    "FFI metadata for `{symbol}` in `{}` requires bitfield `signed` to be a boolean",
+                                    path.display()
+                                )
+                            })
+                        })
+                        .transpose()?
+                        .unwrap_or(false);
                     Ok(Some(thaw_hir::FfiBitFieldLayout {
                         bit_offset,
+                        bit_width,
                         storage_bytes,
+                        signed,
                     }))
                 })
                 .collect::<Result<Vec<_>, String>>()
@@ -4372,7 +4398,7 @@ mod tests {
         let path = dir.join("ffi.json");
         std::fs::write(
             &path,
-            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"storageBytes":1},null],"size":32,"alignment":32,"indirect":true}}}}"#,
+            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"bitFields":[{"bitOffset":2,"bitWidth":5,"storageBytes":1,"signed":true},null],"size":32,"alignment":32,"indirect":true}}}}"#,
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
@@ -4394,7 +4420,9 @@ mod tests {
                 field_bitfields: vec![
                     Some(thaw_hir::FfiBitFieldLayout {
                         bit_offset: 2,
+                        bit_width: 5,
                         storage_bytes: 1,
+                        signed: true,
                     }),
                     None,
                 ],
