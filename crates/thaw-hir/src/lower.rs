@@ -6230,6 +6230,143 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
+    fn lower_array_flat_one(
+        &mut self,
+        receiver: HirExpr,
+        nested_array_type: HirType,
+        element_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let receiver_name = format!("__thaw_flat_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope
+            .insert(receiver_name.clone(), nested_array_type.clone());
+        let outer_length_name = format!("__thaw_flat_outer_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let total_length_name = format!("__thaw_flat_total_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let outer_index_name = format!("__thaw_flat_outer_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let inner_array_name = format!("__thaw_flat_inner_array_{}", self.next_binding);
+        self.next_binding += 1;
+        let inner_length_name = format!("__thaw_flat_inner_length_{}", self.next_binding);
+        self.next_binding += 1;
+        let inner_index_name = format!("__thaw_flat_inner_index_{}", self.next_binding);
+        self.next_binding += 1;
+        let destination_name = format!("__thaw_flat_destination_{}", self.next_binding);
+        self.next_binding += 1;
+        let result_name = format!("__thaw_flat_result_{}", self.next_binding);
+        self.next_binding += 1;
+        for name in [
+            &outer_length_name,
+            &total_length_name,
+            &outer_index_name,
+            &inner_length_name,
+            &inner_index_name,
+            &destination_name,
+        ] {
+            self.scope.insert(name.clone(), HirType::F64);
+        }
+        let inner_array_type = HirType::Array(Box::new(element_type.clone()));
+        let result_type = inner_array_type.clone();
+        self.scope
+            .insert(inner_array_name.clone(), inner_array_type.clone());
+        self.scope.insert(result_name.clone(), result_type.clone());
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let var = |name: &str| HirExpr::Var(name.into());
+        let add = |left, right| HirExpr::BinOp(BinOp::Add, Box::new(left), Box::new(right));
+        let assign =
+            |name: &str, value| HirStmt::Expr(HirExpr::Assign(name.into(), Box::new(value)));
+        let increment = |name: &str| assign(name, add(var(name), number(1.0)));
+        let load_inner = || {
+            HirExpr::TypedIndex(
+                Box::new(var(&receiver_name)),
+                Box::new(var(&outer_index_name)),
+                inner_array_type.clone(),
+            )
+        };
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(
+                outer_length_name.clone(),
+                HirType::F64,
+                HirExpr::ArrayLen(Box::new(var(&receiver_name))),
+            ),
+            HirStmt::Let(total_length_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(outer_index_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&outer_index_name)),
+                    Box::new(var(&outer_length_name)),
+                ),
+                vec![
+                    HirStmt::Let(
+                        inner_array_name.clone(),
+                        inner_array_type.clone(),
+                        load_inner(),
+                    ),
+                    assign(
+                        &total_length_name,
+                        add(
+                            var(&total_length_name),
+                            HirExpr::ArrayLen(Box::new(var(&inner_array_name))),
+                        ),
+                    ),
+                    increment(&outer_index_name),
+                ],
+            ),
+            HirStmt::Let(
+                result_name.clone(),
+                result_type,
+                HirExpr::ArrayAlloc(Box::new(var(&total_length_name)), element_type.clone()),
+            ),
+            assign(&outer_index_name, number(0.0)),
+            HirStmt::Let(destination_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var(&outer_index_name)),
+                    Box::new(var(&outer_length_name)),
+                ),
+                vec![
+                    HirStmt::Let(
+                        inner_array_name.clone(),
+                        inner_array_type.clone(),
+                        load_inner(),
+                    ),
+                    HirStmt::Let(
+                        inner_length_name.clone(),
+                        HirType::F64,
+                        HirExpr::ArrayLen(Box::new(var(&inner_array_name))),
+                    ),
+                    HirStmt::Let(inner_index_name.clone(), HirType::F64, number(0.0)),
+                    HirStmt::While(
+                        HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(var(&inner_index_name)),
+                            Box::new(var(&inner_length_name)),
+                        ),
+                        vec![
+                            HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(var(&result_name)),
+                                Box::new(var(&destination_name)),
+                                Box::new(HirExpr::TypedIndex(
+                                    Box::new(var(&inner_array_name)),
+                                    Box::new(var(&inner_index_name)),
+                                    element_type.clone(),
+                                )),
+                            )),
+                            increment(&inner_index_name),
+                            increment(&destination_name),
+                        ],
+                    ),
+                    increment(&outer_index_name),
+                ],
+            ),
+            HirStmt::Return(Some(var(&result_name))),
+        ]);
+        self.wrap_call_argument_bindings(body, &[(receiver_name, nested_array_type, receiver)])
+    }
+
     fn lower_array_with(
         &mut self,
         receiver: HirExpr,
@@ -7723,6 +7860,52 @@ impl<'a> FnLowerer<'a> {
                     let value = self.lower_expr(&value.expr)?;
                     self.expect_type(&element_type, &value, "array with value")?;
                     return self.lower_array_with(receiver, array_type, element_type, index, value);
+                }
+                if property.sym == *"flatMap" {
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.flatMap()` expects a callback and optional thisArg".into(),
+                        );
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array flatMap spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let array_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &array_type else {
+                        return Err(format!(
+                            "`.flatMap()` requires a homogeneous array, got {array_type:?}"
+                        ));
+                    };
+                    let element_type = element.as_ref().clone();
+                    let callback = self.lower_array_mapping_callback(
+                        &call.args[0].expr,
+                        &element_type,
+                        &array_type,
+                    )?;
+                    let this_arg = call
+                        .args
+                        .get(1)
+                        .map(|argument| self.lower_expr(&argument.expr))
+                        .transpose()?;
+                    let mapped = self.lower_array_map(
+                        receiver,
+                        array_type,
+                        element_type,
+                        callback,
+                        this_arg,
+                    )?;
+                    let mapped_type = self.infer_expr_type(&mapped)?;
+                    let HirType::Array(mapped_element) = &mapped_type else {
+                        unreachable!("array map always returns an array")
+                    };
+                    let HirType::Array(flat_element) = mapped_element.as_ref() else {
+                        return Err(format!(
+                            "native `.flatMap()` callback must return a homogeneous array, got {mapped_element:?}"
+                        ));
+                    };
+                    let flat_element = flat_element.as_ref().clone();
+                    return self.lower_array_flat_one(mapped, mapped_type, flat_element);
                 }
                 if property.sym == *"map" {
                     if !(1..=2).contains(&call.args.len()) {
