@@ -2630,6 +2630,41 @@ pub unsafe extern "C" fn napi_instanceof(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_get_prototype(
+    env: NapiEnv,
+    object: NapiValue,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let prototype = env
+        .instances
+        .get(&(object as usize))
+        .and_then(|constructor| value_ref(*constructor as NapiValue).ok())
+        .and_then(|constructor| match constructor {
+            Value::Function(function) => function
+                .properties
+                .get(&PropertyKey::String("prototype".into()))
+                .copied(),
+            _ => None,
+        });
+    match prototype {
+        Some(prototype) => write_value(result, prototype),
+        None => {
+            let undefined = env.alloc(Value::Undefined);
+            write_value(result, undefined)
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_strict_equals(
     _env: NapiEnv,
     left: NapiValue,
@@ -4917,6 +4952,46 @@ mod tests {
             };
             assert!(matches!(value_ref(names[0]), Ok(Value::Number(0.0))));
             assert!(matches!(value_ref(names[1]), Ok(Value::Number(1.0))));
+        }
+    }
+
+    #[test]
+    fn class_instances_expose_their_prototype() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut constructor = ptr::null_mut();
+            assert_eq!(
+                napi_define_class(
+                    env_ptr,
+                    c"Box".as_ptr(),
+                    3,
+                    Some(thaw_compiled_callback),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null(),
+                    &mut constructor,
+                ),
+                NAPI_OK
+            );
+            let mut expected = ptr::null_mut();
+            assert_eq!(
+                napi_get_named_property(env_ptr, constructor, c"prototype".as_ptr(), &mut expected),
+                NAPI_OK
+            );
+            let mut instance = ptr::null_mut();
+            assert_eq!(
+                napi_new_instance(env_ptr, constructor, 0, ptr::null(), &mut instance),
+                NAPI_OK
+            );
+            let mut actual = ptr::null_mut();
+            assert_eq!(napi_get_prototype(env_ptr, instance, &mut actual), NAPI_OK);
+            assert_eq!(actual, expected);
+
+            let mut plain = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
+            assert_eq!(napi_get_prototype(env_ptr, plain, &mut actual), NAPI_OK);
+            assert!(matches!(value_ref(actual), Ok(Value::Undefined)));
         }
     }
 
