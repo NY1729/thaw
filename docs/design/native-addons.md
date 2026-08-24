@@ -711,6 +711,8 @@ offsetは0になり、backing identityは維持する。
 Error／TypeError／RangeError／SyntaxError生成は`message`をwritable・非enumerable・configurableなown
 property、optional `code`を通常のown propertyとして保持する。`name`は継承metadataとして参照でき、
 own `name`でshadow可能である。ToStringは現在のname／messageから`Name: message`を構成する。
+`napi_strict_equals`は別handleのBigIntも符号と正規化済みlittle-endian wordsで値比較する一方、Objectは
+identity比較を維持する。DateのToNumberは保存したmillisecond値を返す。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending

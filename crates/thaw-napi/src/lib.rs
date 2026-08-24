@@ -3818,12 +3818,12 @@ pub unsafe extern "C" fn napi_get_prototype(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_strict_equals(
-    _env: NapiEnv,
+    env: NapiEnv,
     left: NapiValue,
     right: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
-    if left.is_null() || right.is_null() || result.is_null() {
+    if env.is_null() || left.is_null() || right.is_null() || result.is_null() {
         return NAPI_INVALID_ARG;
     }
     *result = match (value_ref(left), value_ref(right)) {
@@ -3832,6 +3832,16 @@ pub unsafe extern "C" fn napi_strict_equals(
         (Ok(Value::Number(left)), Ok(Value::Number(right))) => left == right,
         (Ok(Value::String(left)), Ok(Value::String(right))) => left == right,
         (Ok(Value::Symbol { id: left, .. }), Ok(Value::Symbol { id: right, .. })) => left == right,
+        (
+            Ok(Value::BigInt {
+                negative: left_negative,
+                words: left_words,
+            }),
+            Ok(Value::BigInt {
+                negative: right_negative,
+                words: right_words,
+            }),
+        ) => left_negative == right_negative && left_words == right_words,
         (Ok(_), Ok(_)) => left == right,
         _ => false,
     };
@@ -4058,6 +4068,7 @@ pub unsafe extern "C" fn napi_coerce_to_number(
         Ok(Value::Null) => 0.0,
         Ok(Value::Bool(value)) => u8::from(*value) as f64,
         Ok(Value::Number(value)) => *value,
+        Ok(Value::Date(value)) => *value,
         Ok(Value::String(value)) => javascript_number_from_string(value),
         Ok(Value::BigInt { .. } | Value::Symbol { .. }) => {
             return coercion_type_error(env, "value cannot be converted to a number");
@@ -7765,6 +7776,51 @@ mod tests {
             );
             assert_eq!(sign, 0);
             assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn strict_equality_compares_bigint_values_and_date_coercion_uses_milliseconds() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let words = [7_u64, 9];
+            let mut left = ptr::null_mut();
+            let mut right = ptr::null_mut();
+            assert_eq!(
+                napi_create_bigint_words(env_ptr, 1, words.len(), words.as_ptr(), &mut left),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_create_bigint_words(env_ptr, 1, words.len(), words.as_ptr(), &mut right),
+                NAPI_OK
+            );
+            assert_ne!(left, right);
+            let mut equal = false;
+            assert_eq!(
+                napi_strict_equals(env_ptr, left, right, &mut equal),
+                NAPI_OK
+            );
+            assert!(equal);
+            let positive = env.alloc(Value::BigInt {
+                negative: false,
+                words: words.to_vec(),
+            });
+            assert_eq!(
+                napi_strict_equals(env_ptr, left, positive, &mut equal),
+                NAPI_OK
+            );
+            assert!(!equal);
+
+            let mut date = ptr::null_mut();
+            assert_eq!(napi_create_date(env_ptr, 1234.5, &mut date), NAPI_OK);
+            let mut number = ptr::null_mut();
+            assert_eq!(napi_coerce_to_number(env_ptr, date, &mut number), NAPI_OK);
+            assert!(matches!(value_ref(number), Ok(Value::Number(1234.5))));
+            assert_eq!(
+                napi_strict_equals(ptr::null_mut(), left, right, &mut equal),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
