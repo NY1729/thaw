@@ -841,6 +841,8 @@ Property and element deletion accepts an omitted result and distinguishes own
 sealed properties from inherited or missing keys.
 Buffer index properties share owned, external, or ArrayBuffer-view backing bytes,
 including JavaScript Uint8 conversion, offsets, enumeration, and fixed-index deletion.
+All eleven TypedArray kinds expose backing-memory index properties with numeric,
+clamped, floating-point, and BigInt conversions plus offset and detach semantics.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
