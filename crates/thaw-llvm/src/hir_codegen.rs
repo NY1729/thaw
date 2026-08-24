@@ -4658,6 +4658,97 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| format!("`{fn_name}` did not return a value"))
     }
 
+    fn compile_string_concat(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [left, right] = args else {
+            return Err("string concatenation expects two operands".to_string());
+        };
+        let left = self.compile_expr(left)?.into_pointer_value();
+        let right = self.compile_expr(right)?.into_pointer_value();
+        let strlen = self.module.get_function("strlen").unwrap();
+        let left_len = self
+            .builder
+            .build_call(strlen, &[left.into()], "left_len")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("strlen returned no value")?
+            .into_int_value();
+        let right_len = self
+            .builder
+            .build_call(strlen, &[right.into()], "right_len")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("strlen returned no value")?
+            .into_int_value();
+        let total = self
+            .builder
+            .build_int_add(left_len, right_len, "concat_len")
+            .map_err(|error| error.to_string())?;
+        let size = self
+            .builder
+            .build_int_add(
+                total,
+                self.context.i64_type().const_int(1, false),
+                "concat_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let allocation = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    size.into(),
+                    self.context.i64_type().const_int(1, false).into(),
+                ],
+                "string_concat",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("arena allocator returned no string")?
+            .into_pointer_value();
+        let memcpy = self.module.get_function("memcpy").unwrap();
+        self.builder
+            .build_call(
+                memcpy,
+                &[allocation.into(), left.into(), left_len.into()],
+                "copy_left",
+            )
+            .map_err(|error| error.to_string())?;
+        let right_destination = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    allocation,
+                    &[left_len],
+                    "right_destination",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_call(
+                memcpy,
+                &[right_destination.into(), right.into(), right_len.into()],
+                "copy_right",
+            )
+            .map_err(|error| error.to_string())?;
+        let terminator = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    allocation,
+                    &[total],
+                    "concat_terminator",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(terminator, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        Ok(allocation.into())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -6798,6 +6889,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         match name.as_str() {
             "console.log" => return self.compile_console_log(args),
+            "__thaw_string_concat" => return self.compile_string_concat(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10120,6 +10212,31 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_logical_truthiness"),
             "number-rhs\n5\n3\n7\nstring-rhs\nfallback\nkept\n0\nobject-rhs\n9\n0\nawaited-rhs\n11\n"
+        );
+    }
+
+    #[test]
+    fn compiles_string_template_literals_with_ordered_and_awaited_interpolation() {
+        let source = r#"
+            function word(label: string, value: string): string {
+                console.log(label);
+                return value;
+            }
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(`plain`);
+                console.log(`A:${word("first", "x")}:${word("second", "y")}:Z`);
+                console.log(`before:${await delayed("done")}:after`);
+                console.log(``);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_templates"),
+            "plain\nfirst\nsecond\nA:x:y:Z\nawaited\nbefore:done:after\n\n"
         );
     }
 

@@ -334,6 +334,9 @@ The workspace crates have narrow responsibilities:
   JavaScript truthiness to booleans, numbers (including `NaN`), strings,
   JSON and reference values, evaluate the left side once, and short-circuit
   synchronous or awaited right sides
+- Template literals with string interpolations concatenate into arena-owned
+  native strings, preserve left-to-right evaluation, and allow interpolations
+  that suspend with `await`
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
