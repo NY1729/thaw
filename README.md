@@ -154,7 +154,8 @@ The workspace crates have narrow responsibilities:
 - Compound assignments evaluate array/object references and computed indexes
   once before evaluating the right-hand side, including awaited components
 - Typed array literals support multiple spreads and ordinary elements with
-  single, left-to-right evaluation, including awaited spread sources
+  single, left-to-right evaluation, including synchronous elements before and
+  after direct or nested awaited spread sources
 - `Promise.all`, `allSettled`, `race`, and `any` accept homogeneous array
   literal spreads while retaining dynamic `Promise<T>[]` sources and order
 - Named function calls support fixed-length argument spreads from array
@@ -708,7 +709,9 @@ statically typed local variable, nested object literal, or typed function call
 preserve their fields and allow later properties to override them. A call used
 as a spread source is bound through an internal closure so it executes exactly
 once. Multiple expression spreads retain left-to-right evaluation order, and
-matching-type conditional expressions can also supply an object. Conditional
+ordinary properties, awaited spread sources, later overrides and awaited
+values share that same source order. Replacing an existing key preserves its
+original field position. Matching-type conditional expressions can also supply an object. Conditional
 expressions are supported generally when both branches have the same native
 type. Dynamic computed keys and dynamically typed spread sources remain outside
 this path. `if/else`

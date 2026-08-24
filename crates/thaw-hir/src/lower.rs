@@ -27,12 +27,14 @@ use std::fmt;
 
 use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
-    ArrowFunctionBody, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl,
-    Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
-    ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat, Prop, PropName, PropOrSpread,
-    SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind,
-    TsType, TsTypeElement, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
+    ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee,
+    ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp,
+    Module, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat, Prop,
+    PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam,
+    TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, UnaryOp, UpdateOp, VarDecl,
+    VarDeclOrExpr,
 };
+use swc_ecma_visit::{Visit, VisitWith};
 
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
@@ -4261,10 +4263,34 @@ impl<'a> FnLowerer<'a> {
                 if !pending.is_empty() {
                     parts.push(HirExpr::ArrayLit(pending));
                 }
-                Ok(HirExpr::ArrayConcat(
-                    parts,
-                    element_type.unwrap_or(HirType::F64),
-                ))
+                let element_type = element_type.unwrap_or(HirType::F64);
+                if !parts.iter().any(contains_await) {
+                    return Ok(HirExpr::ArrayConcat(parts, element_type));
+                }
+                let parts = parts
+                    .into_iter()
+                    .flat_map(|part| match part {
+                        HirExpr::ArrayLit(values) => values
+                            .into_iter()
+                            .map(|value| HirExpr::ArrayLit(vec![value]))
+                            .collect(),
+                        other => vec![other],
+                    })
+                    .collect::<Vec<_>>();
+                let mut bindings = Vec::with_capacity(parts.len());
+                let mut ordered = Vec::with_capacity(parts.len());
+                for (position, part) in parts.into_iter().enumerate() {
+                    let ty = self.infer_expr_type(&part)?;
+                    let name = format!("__thaw_array_part_{}_{}", position, self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, part));
+                    ordered.push(HirExpr::Var(name));
+                }
+                self.wrap_call_argument_bindings(
+                    HirExpr::ArrayConcat(ordered, element_type),
+                    &bindings,
+                )
             }
 
             Expr::Object(obj_lit) => self.lower_object_lit(obj_lit),
@@ -4697,6 +4723,17 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
+        struct AwaitFinder(bool);
+        impl Visit for AwaitFinder {
+            fn visit_await_expr(&mut self, _: &AwaitExpr) {
+                self.0 = true;
+            }
+        }
+        let mut finder = AwaitFinder(false);
+        obj_lit.visit_with(&mut finder);
+        if finder.0 {
+            return self.lower_ordered_await_object_lit(obj_lit);
+        }
         let mut fields = Vec::new();
         let mut evaluated_spreads: Vec<(Symbol, HirType, HirExpr)> = Vec::new();
         for property in &obj_lit.props {
@@ -4777,8 +4814,13 @@ impl<'a> FnLowerer<'a> {
                 },
             };
             for (name, value) in additions {
-                fields.retain(|(existing, _)| existing != &name);
-                fields.push((name, value));
+                if let Some((_, existing)) =
+                    fields.iter_mut().find(|(existing, _)| existing == &name)
+                {
+                    *existing = value;
+                } else {
+                    fields.push((name, value));
+                }
             }
         }
         let mut property_bindings = Vec::new();
@@ -4818,6 +4860,92 @@ impl<'a> FnLowerer<'a> {
             );
         }
         self.wrap_call_argument_bindings(result, &property_bindings)
+    }
+
+    fn lower_ordered_await_object_lit(
+        &mut self,
+        obj_lit: &SwcObjectLit,
+    ) -> Result<HirExpr, String> {
+        let mut fields = Vec::new();
+        let mut bindings = Vec::new();
+        for (position, property) in obj_lit.props.iter().enumerate() {
+            let additions = match property {
+                PropOrSpread::Spread(spread) => {
+                    let source = self.lower_expr(&spread.expr)?;
+                    let source_type = self.infer_expr_type(&source)?;
+                    let HirType::Object(source_fields) = &source_type else {
+                        return Err(format!(
+                            "cannot spread a value of type {source_type:?} into an object literal"
+                        ));
+                    };
+                    let name = format!("__thaw_object_source_{}_{}", position, self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), source_type.clone());
+                    bindings.push((name.clone(), source_type.clone(), source));
+                    source_fields
+                        .iter()
+                        .map(|(field, _)| {
+                            (
+                                field.clone(),
+                                HirExpr::PropAccess(
+                                    Box::new(HirExpr::Var(name.clone())),
+                                    source_type.clone(),
+                                    field.clone(),
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }
+                PropOrSpread::Prop(prop) => {
+                    let (field, source) = match prop.as_ref() {
+                        Prop::KeyValue(KeyValueProp { key, value }) => {
+                            let field = match key {
+                                PropName::Ident(ident) => ident.sym.to_string(),
+                                PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                                PropName::Computed(computed) => {
+                                    match computed.expr.as_ref() {
+                                        Expr::Lit(Lit::Str(value)) => {
+                                            value.value.to_string_lossy().into_owned()
+                                        }
+                                        _ => return Err(
+                                            "computed object literal keys must be string literals"
+                                                .into(),
+                                        ),
+                                    }
+                                }
+                                _ => return Err("unsupported object literal key".into()),
+                            };
+                            (field, self.lower_expr(value)?)
+                        }
+                        Prop::Shorthand(ident) => (
+                            ident.sym.to_string(),
+                            self.lower_expr(&Expr::Ident(ident.clone()))?,
+                        ),
+                        _ => {
+                            return Err(
+                                "only data properties are supported in object literals".into()
+                            )
+                        }
+                    };
+                    let ty = self.infer_expr_type(&source)?;
+                    let name = format!("__thaw_object_value_{}_{}", position, self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, source));
+                    vec![(field, HirExpr::Var(name))]
+                }
+            };
+            for (name, value) in additions {
+                if let Some((_, existing)) =
+                    fields.iter_mut().find(|(existing, _)| existing == &name)
+                {
+                    *existing = value;
+                } else {
+                    fields.push((name, value));
+                }
+            }
+        }
+        self.wrap_call_argument_bindings(HirExpr::ObjectLit(fields), &bindings)
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
