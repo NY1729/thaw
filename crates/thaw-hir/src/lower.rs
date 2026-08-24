@@ -5913,17 +5913,34 @@ impl<'a> FnLowerer<'a> {
                             &bindings,
                         );
                     }
-                    let mut result = receiver;
-                    self.expect_type(&HirType::Str, &result, "string concat receiver")?;
+                    self.expect_type(&HirType::Str, &receiver, "string concat receiver")?;
+                    let mut sources = vec![receiver];
                     for argument in &call.args {
                         let value = self.lower_expr(&argument.expr)?;
                         let value = self.coerce_primitive_to_string(value)?;
+                        sources.push(value);
+                    }
+                    let mut bindings = Vec::with_capacity(sources.len());
+                    let mut values = Vec::with_capacity(sources.len());
+                    for (position, source) in sources.into_iter().enumerate() {
+                        let name = format!(
+                            "__thaw_string_concat_part_{}_{}",
+                            position, self.next_binding
+                        );
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Str);
+                        bindings.push((name.clone(), HirType::Str, source));
+                        values.push(HirExpr::Var(name));
+                    }
+                    let mut values = values.into_iter();
+                    let mut result = values.next().expect("concat always has a receiver");
+                    for value in values {
                         result = HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
                             vec![result, value],
                         );
                     }
-                    return Ok(result);
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if matches!(property.sym.as_ref(), "trim" | "trimStart" | "trimEnd") {
                     if !call.args.is_empty() {

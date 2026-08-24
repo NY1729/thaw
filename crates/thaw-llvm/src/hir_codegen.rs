@@ -12092,11 +12092,12 @@ mod tests {
                 console.log(receiver().concat(argument(), ";values=", values, ";object=", { x: 1 }));
                 console.log("empty".concat());
                 console.log("flag=".concat(await delayed()));
+                console.log(receiver().concat(argument(), await delayed()));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "string_concat_method"),
-            "receiver\nargument\nvalue=42;values=1,2;object=[object Object]\nempty\nawaited-concat\nflag=true\n"
+            "receiver\nargument\nvalue=42;values=1,2;object=[object Object]\nempty\nawaited-concat\nflag=true\nreceiver\nargument\nawaited-concat\nvalue=42true\n"
         );
     }
 
