@@ -669,3 +669,8 @@ worker側から変更せず取得できる。
 hookが`napi_remove_async_cleanup_hook`でhandleを完了するまでactive cleanup countを保持し、addon
 libraryの`dlclose`を延期する。開始前のremoveはhookを解除し、同期完了と後続threadでの非同期完了を
 同じhandle state machineで扱う。
+`napi_run_script`は既存のper-thread QuickJS contextを再利用し、global stateを後続evalへ保持する。
+JSON表現可能なprimitive／Array／ObjectはN-API host Valueへ変換し、undefined／function／Symbolなど
+JSON.stringifyが値を返さない結果はundefinedとする。syntax error／throw／stringify例外はError Valueを
+pending exceptionへ設定して`napi_pending_exception`を返す。これによりNode 22文書のNode-API v8
+runtime function一覧はすべてhost symbolとして公開される。

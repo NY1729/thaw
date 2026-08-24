@@ -3258,6 +3258,44 @@ pub unsafe extern "C" fn napi_get_global(env: NapiEnv, out: *mut NapiValue) -> N
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_run_script(
+    env: NapiEnv,
+    script: NapiValue,
+    result: *mut NapiValue,
+) -> NapiStatus {
+    if result.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let source = match value_ref(script) {
+        Ok(Value::String(source)) => source.clone(),
+        _ => return NAPI_STRING_EXPECTED,
+    };
+    let evaluated = thaw_quickjs::eval_json(&source);
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    match evaluated {
+        Ok(Some(json)) => match serde_json::from_str::<JsonValue>(&json) {
+            Ok(json) => write_value(result, value_from_json(env, &json)),
+            Err(error) => {
+                env.exception = Some(env.alloc(Value::Error(format!(
+                    "failed to decode script result: {error}"
+                ))));
+                NAPI_PENDING_EXCEPTION
+            }
+        },
+        Ok(None) => {
+            let undefined = env.alloc(Value::Undefined);
+            write_value(result, undefined)
+        }
+        Err(error) => {
+            env.exception = Some(env.alloc(Value::Error(error)));
+            NAPI_PENDING_EXCEPTION
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_get_property_names(
     env: NapiEnv,
     object: NapiValue,
@@ -6232,6 +6270,66 @@ mod tests {
             assert_eq!(napi_is_promise(env_ptr, array, &mut present), NAPI_OK);
             assert!(!present);
             assert_eq!(napi_resolve_deferred(env_ptr, deferred, value), NAPI_OK);
+        }
+    }
+
+    #[test]
+    fn run_script_evaluates_values_and_reports_exceptions() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut script = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_utf8(
+                    env_ptr,
+                    c"globalThis.__thawNapiProbe = 40; ({ answer: __thawNapiProbe + 2 })".as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    &mut script,
+                ),
+                NAPI_OK
+            );
+            let mut result = ptr::null_mut();
+            assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
+            assert_eq!(
+                json_from_value(result).unwrap(),
+                serde_json::json!({"answer": 42.0})
+            );
+
+            assert_eq!(
+                napi_create_string_utf8(
+                    env_ptr,
+                    c"__thawNapiProbe + 2".as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    &mut script,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
+            assert!(matches!(value_ref(result), Ok(Value::Number(42.0))));
+
+            assert_eq!(
+                napi_create_string_utf8(
+                    env_ptr,
+                    c"throw new Error('script failed')".as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    &mut script,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_run_script(env_ptr, script, &mut result),
+                NAPI_PENDING_EXCEPTION
+            );
+            let mut pending = false;
+            assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
+            assert!(pending);
+            assert_eq!(
+                napi_get_and_clear_last_exception(env_ptr, &mut result),
+                NAPI_OK
+            );
+            assert!(
+                matches!(value_ref(result), Ok(Value::Error(message)) if message.contains("script failed"))
+            );
         }
     }
 

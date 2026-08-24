@@ -15453,7 +15453,7 @@ mod tests {
             .arg(&std)
             .arg(&runtime)
             .arg(&napi)
-            .args(["-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
+            .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"])
             .arg(&exe)
             .status()
             .unwrap()
