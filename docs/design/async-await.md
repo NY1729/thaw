@@ -455,6 +455,8 @@ async呼び出しだけでなく任意のtyped Promise式をサスペンド境�
 array/object literal内のawaitは左から右へ抽出され、ネストしたif/while/tryとblock scopeを
 またぐreturnもframe guardとtyped slotを通じて保持される。HIR/LLVM E2Eに加え、複数の
 TypeScript moduleを束ねたLambda実行テストでPromiseのfield保持とimport境界を検証する。
+`do/while`は末尾条件guardを持つ無条件whileへlowerし、`continue`の直前にも同じguardを
+挿入するため、同期・suspendする本体のどちらでも条件評価順を維持する。
 
 ## 12. Promise constructorとcontinuation chain
 
