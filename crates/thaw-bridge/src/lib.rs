@@ -63,6 +63,9 @@ pub struct DtsMethod {
     /// Number of parameters that must be present at a call site. Any
     /// remaining trailing parameters were marked optional in the `.d.ts`.
     pub required_params: usize,
+    /// A trailing rest parameter, stored as its element type rather than
+    /// the array type written in TypeScript.
+    pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
     pub is_static: bool,
     pub kind: DtsMethodKind,
@@ -255,9 +258,39 @@ fn lower_dts_class(
                     interfaces,
                     generic_interfaces,
                 );
+                let rest_param = method.function.params.last().and_then(|param| {
+                    let Pat::Rest(rest) = &param.pat else {
+                        return None;
+                    };
+                    let name = match rest.arg.as_ref() {
+                        Pat::Ident(binding) => binding.id.sym.to_string(),
+                        _ => "rest".to_string(),
+                    };
+                    let ty = match rest.type_ann.as_ref() {
+                        Some(annotation) => match classify_ts_type(
+                            &annotation.type_ann,
+                            interfaces,
+                            generic_interfaces,
+                        ) {
+                            DtsType::Native(HirType::Array(element)) => DtsType::Native(*element),
+                            DtsType::Native(other) => DtsType::Unsupported(format!(
+                                "rest parameter must have an array type, found {other:?}"
+                            )),
+                            unsupported => unsupported,
+                        },
+                        None => {
+                            DtsType::Unsupported("missing rest parameter type annotation".into())
+                        }
+                    };
+                    Some((name, ty))
+                });
+                let mut params = function.params;
+                if rest_param.is_some() {
+                    params.pop();
+                }
                 methods.push(DtsMethod {
                     name: function.name,
-                    params: function.params,
+                    params,
                     required_params: method
                         .function
                         .params
@@ -268,6 +301,7 @@ fn lower_dts_class(
                             _ => true,
                         })
                         .count(),
+                    rest_param,
                     ret: function.ret,
                     is_static: method.is_static,
                     kind: match method.kind {
@@ -2713,6 +2747,7 @@ mod tests {
                 constructor(filename: string);
                 constructor(filename: string, mode: number);
                 close(callback?: (error: Error | null) => void): void;
+                sum(...values: number[]): number;
                 run(sql: string): this;
                 run(sql: string, params: any[]): this;
                 static verbose(): Database;
@@ -2753,6 +2788,16 @@ mod tests {
         assert!(runs
             .iter()
             .all(|method| method.required_params == method.params.len()));
+        let sum = database
+            .methods
+            .iter()
+            .find(|method| method.name == "sum")
+            .unwrap();
+        assert!(sum.params.is_empty());
+        assert_eq!(
+            sum.rest_param,
+            Some(("values".into(), DtsType::Native(HirType::F64)))
+        );
         assert!(database
             .methods
             .iter()

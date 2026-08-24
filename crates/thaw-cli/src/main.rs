@@ -459,6 +459,39 @@ fn is_native_builtin(package: &str) -> bool {
     matches!(package, "node:fs" | "node:http")
 }
 
+fn observed_member_call_arities(
+    source: &str,
+) -> Result<std::collections::HashMap<String, std::collections::BTreeSet<usize>>, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp};
+
+    #[derive(Default)]
+    struct Finder {
+        arities: std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    }
+
+    impl Visit for Finder {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let MemberProp::Ident(method) = &member.prop {
+                        self.arities
+                            .entry(method.sym.to_string())
+                            .or_default()
+                            .insert(call.args.len());
+                    }
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let module = thaw_parser::parse_typescript(source)?;
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    Ok(finder.arities)
+}
+
 /// Resolves each `--use`d package against the local registry
 /// (thaw-registry; `registry_dir` defaults to `thaw_modules/`),
 /// generating its callable surface exactly like `generate_bridge_shims`
@@ -473,7 +506,9 @@ fn is_native_builtin(package: &str) -> bool {
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
+    user_source: &str,
 ) -> Result<RegistryShims, String> {
+    let observed_arities = observed_member_call_arities(user_source)?;
     let mut resolved = Vec::new();
     for name in use_packages {
         let package = if name.starts_with("node:") {
@@ -678,7 +713,11 @@ fn generate_registry_shims(
                         .filter(|candidate| {
                             candidate.params.iter().enumerate().all(|(index, (_, ty))| {
                                 supported_class_method_param(ty, index, candidate.params.len())
-                            }) && supported_class_method_return(&candidate.ret)
+                            }) && candidate
+                                .rest_param
+                                .as_ref()
+                                .is_none_or(|(_, ty)| supported_class_method_param(ty, 0, 1))
+                                && supported_class_method_return(&candidate.ret)
                         })
                         .collect::<Vec<_>>();
                     for (overload_index, overload) in overloads.into_iter().enumerate() {
@@ -692,24 +731,51 @@ fn generate_registry_shims(
                         }) else {
                             continue;
                         };
-                        for argument_count in overload.required_params..=overload.params.len() {
-                            let included_params = &overload.params[..argument_count];
+                        let argument_counts = if overload.rest_param.is_some() {
+                            observed_arities
+                                .get(&method.name)
+                                .into_iter()
+                                .flatten()
+                                .copied()
+                                .filter(|count| *count >= overload.required_params)
+                                .collect::<Vec<_>>()
+                        } else {
+                            (overload.required_params..=overload.params.len()).collect()
+                        };
+                        for argument_count in argument_counts {
+                            let fixed_count = argument_count.min(overload.params.len());
+                            let mut included_params = overload.params[..fixed_count]
+                                .iter()
+                                .filter_map(|(name, ty)| match ty {
+                                    thaw_bridge::DtsType::Native(ty) => {
+                                        Some((name.clone(), ty.clone()))
+                                    }
+                                    thaw_bridge::DtsType::Unsupported(_) => None,
+                                })
+                                .collect::<Vec<_>>();
+                            if argument_count > overload.params.len() {
+                                let Some((name, thaw_bridge::DtsType::Native(rest_type))) =
+                                    &overload.rest_param
+                                else {
+                                    continue;
+                                };
+                                included_params
+                                    .extend((overload.params.len()..argument_count).map(|index| {
+                                        (format!("{name}{index}"), rest_type.clone())
+                                    }));
+                            }
                             let params = std::iter::once("receiver: JsValue".to_string())
-                                .chain(included_params.iter().map(|(name, ty)| match ty {
-                                    thaw_bridge::DtsType::Native(native) => format!(
+                                .chain(included_params.iter().map(|(name, ty)| {
+                                    format!(
                                         "{name}: {}",
-                                        render_dynamic_type(native).expect("filtered above")
-                                    ),
-                                    thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                                        render_dynamic_type(ty).expect("filtered above")
+                                    )
                                 }))
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             let has_callback = matches!(
                                 included_params.last(),
-                                Some((
-                                    _,
-                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(_, _))
-                                ))
+                                Some((_, thaw_hir::HirType::Function(_, _)))
                             );
                             let runtime_key = format!(
                                 "{}{}${}$overload{overload_index}$arity{argument_count}",
@@ -739,13 +805,7 @@ fn generate_registry_shims(
                                 symbol,
                                 argument_count,
                                 has_callback,
-                                included_params
-                                    .iter()
-                                    .filter_map(|(_, ty)| match ty {
-                                        thaw_bridge::DtsType::Native(ty) => Some(ty.clone()),
-                                        thaw_bridge::DtsType::Unsupported(_) => None,
-                                    })
-                                    .collect(),
+                                included_params.into_iter().map(|(_, ty)| ty).collect(),
                             ));
                         }
                     }
@@ -1505,7 +1565,7 @@ fn build_with_link_mode(
         class_constructor_rewrites,
         class_method_rewrites,
         external_exports,
-    ) = generate_registry_shims(registry_dir, &resolved_packages)?;
+    ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
         .iter()
         .map(|package| qualifier_identifier(package))
@@ -2926,7 +2986,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); get(): number; add(delta?: number): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
+            "export declare class NativeBox { constructor(value: number); get(): number; add(delta?: number): number; sum(...values: number[]): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -2970,6 +3030,14 @@ mod tests {
                 if (argc == 1) napi_get_value_double(env, arg, &delta);
                 napi_create_double(env, box->value + delta, &result); return result;
             }
+            static napi_value box_sum(napi_env env, napi_callback_info info) {
+                size_t argc = 8; napi_value args[8], self, result; double sum = 0, value;
+                napi_get_cb_info(env, info, &argc, args, &self, 0);
+                for (size_t index = 0; index < argc; index++) {
+                    napi_get_value_double(env, args[index], &value); sum += value;
+                }
+                napi_create_double(env, sum, &result); return result;
+            }
             static napi_value box_get_later(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value callback, self, callback_args[2], ignored, queued; native_box* box;
                 napi_get_cb_info(env, info, &argc, &callback, &self, 0);
@@ -2981,12 +3049,13 @@ mod tests {
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value constructor;
-                napi_property_descriptor properties[3] = {
+                napi_property_descriptor properties[4] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
                     { "add", 0, box_add, 0, 0, 0, 0, 0 },
+                    { "sum", 0, box_sum, 0, 0, 0, 0, 0 },
                     { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 }
                 };
-                napi_define_class(env, "NativeBox", 9, box_new, 0, 3, properties, &constructor);
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 4, properties, &constructor);
                 napi_set_named_property(env, exports, "NativeBox", constructor);
                 return exports;
             }
@@ -3005,7 +3074,7 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -3018,7 +3087,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\n42\n50\n42\n1\n"
+            "42\n42\n50\n0\n6\n42\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

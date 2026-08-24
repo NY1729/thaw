@@ -495,8 +495,11 @@ the final argument is an inline or locally-bound callback. Non-callback
 overloads with the same arity are also selected from number, string, boolean,
 number-array, and object literals or local variables initialized from those
 values. Trailing optional method parameters generate every callable arity from
-the required prefix through the complete signature. Richer expression
-inference and rest parameters remain explicit gaps.
+the required prefix through the complete signature. Number-typed rest
+parameters are expanded only for the argument counts observed at compiled call
+sites, so they do not impose an arbitrary maximum arity. Richer expression
+inference and rest element types beyond the currently native-representable
+surface remain explicit gaps.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
