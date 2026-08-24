@@ -1372,7 +1372,9 @@ impl<'ctx> HirCompiler<'ctx> {
                                         &mut next_guard,
                                     )?;
                                     for segment in &mut segments[first_new..] {
-                                        segment.rejection_handler = Some(inner_handler.clone());
+                                        if segment.rejection_handler.is_none() {
+                                            segment.rejection_handler = Some(inner_handler.clone());
+                                        }
                                     }
                                 }
                             }
@@ -1433,7 +1435,9 @@ impl<'ctx> HirCompiler<'ctx> {
                                 for segment in &mut segments[first_new..] {
                                     let mut handler = outer_handler.clone();
                                     handler.disable_guards.push(inner_catch_guard.clone());
-                                    segment.rejection_handler = Some(handler);
+                                    if segment.rejection_handler.is_none() {
+                                        segment.rejection_handler = Some(handler);
+                                    }
                                 }
                             }
                             continue;
@@ -1473,7 +1477,9 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &mut next_guard,
                             )?;
                             for segment in &mut segments[first_new_segment..] {
-                                segment.rejection_handler = Some(outer_handler.clone());
+                                if segment.rejection_handler.is_none() {
+                                    segment.rejection_handler = Some(outer_handler.clone());
+                                }
                             }
                         }
                     }
@@ -2388,7 +2394,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 next_guard,
             )?;
             for segment in &mut segments[first_new..] {
-                segment.rejection_handler = Some(handler.clone());
+                if segment.rejection_handler.is_none() {
+                    segment.rejection_handler = Some(handler.clone());
+                }
             }
         }
 
@@ -2440,7 +2448,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             if let Some(outer) = &catch_enclosing {
                 for segment in &mut segments[first_new..] {
-                    segment.rejection_handler = Some(outer.clone());
+                    if segment.rejection_handler.is_none() {
+                        segment.rejection_handler = Some(outer.clone());
+                    }
                 }
             }
         }
@@ -2469,6 +2479,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let enabled_guard = format!("__thaw_nested_loop_enabled_{suffix}");
         let loop_guard = format!("__thaw_nested_loop_{suffix}");
         let body_guard = format!("__thaw_nested_loop_body_{suffix}");
+        let loop_rejection_handler = rejection_handler.clone().map(|mut handler| {
+            handler.disable_guards.extend([
+                enabled_guard.clone(),
+                loop_guard.clone(),
+                body_guard.clone(),
+            ]);
+            handler
+        });
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
             enabled_guard.clone(),
@@ -2563,7 +2581,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 frame_names,
                 extra_locals,
                 guarded_rethrow_handlers,
-                rejection_handler.clone(),
+                loop_rejection_handler.clone(),
                 next_temporary,
                 next_guard,
             )?;
@@ -2581,6 +2599,13 @@ impl<'ctx> HirCompiler<'ctx> {
             resume_target: None,
             rejection_handler: None,
         });
+        if let Some(handler) = loop_rejection_handler {
+            for segment in &mut segments[condition_state..] {
+                if segment.rejection_handler.is_none() {
+                    segment.rejection_handler = Some(handler.clone());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2822,7 +2847,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 });
                 if let Some(handler) = rejection_handler {
                     for segment in &mut segments[first_new_segment..] {
-                        segment.rejection_handler = Some(handler.clone());
+                        if segment.rejection_handler.is_none() {
+                            segment.rejection_handler = Some(handler.clone());
+                        }
                     }
                 }
                 return Ok(());
@@ -2864,7 +2891,9 @@ impl<'ctx> HirCompiler<'ctx> {
         ));
         if let Some(handler) = rejection_handler {
             for segment in &mut segments[first_new_segment..] {
-                segment.rejection_handler = Some(handler.clone());
+                if segment.rejection_handler.is_none() {
+                    segment.rejection_handler = Some(handler.clone());
+                }
             }
         }
         Ok(())
@@ -10971,6 +11000,48 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "await_for_of"),
             "first\nlast\ndone\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_supports_for_await_of_and_rejection_catch() {
+        let source = r#"
+            async function main(): Promise<void> {
+                const values: Promise<number>[] = [
+                    new Promise<number>((resolve, reject) => resolve(1)),
+                    new Promise<number>((resolve, reject) => resolve(2)),
+                    new Promise<number>((resolve, reject) => resolve(3))
+                ];
+                for await (const value of values) {
+                    if (value === 2) continue;
+                    console.log(value);
+                }
+                let last = 0;
+                const assigned: Promise<number>[] = [
+                    new Promise<number>((resolve, reject) => resolve(4)),
+                    new Promise<number>((resolve, reject) => resolve(5))
+                ];
+                for await (last of assigned) {}
+                console.log(last);
+                for await (const immediate of [6, 7]) {
+                    console.log(immediate);
+                }
+                try {
+                    const failures: Promise<number>[] = [
+                        new Promise<number>((resolve, reject) => reject("for await failure"))
+                    ];
+                    for await (const value of failures) {
+                        console.log(value);
+                    }
+                } catch (error) {
+                    console.log(error);
+                }
+                console.log("done");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "for_await_of"),
+            "1\n3\n5\n6\n7\nfor await failure\ndone\n"
         );
     }
 

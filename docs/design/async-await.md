@@ -461,6 +461,9 @@ typed arrayの`for...of`はiterableを一度だけ内部localへ保存し、inde
 loop bindingは各反復でtyped indexから更新し、continueではindex更新を先に実行するため、
 async bodyでも通常のfor-of順序を保つ。宣言bindingに加え、既存の同型localを指定する
 assignment headも同じloweringを共有し、ループ終了後に最後の要素を保持する。
+`for await...of`は`Promise<T>[]`のtyped indexを各反復で`AwaitPromise<T>`へ変換し、
+逐次settlement順、break/continue、既存localへの代入、最寄りのtry/catchへのreject伝播を
+frame splitter上で維持する。同期typed arrayは通常値として同じループを通る。
 
 ## 12. Promise constructorとcontinuation chain
 

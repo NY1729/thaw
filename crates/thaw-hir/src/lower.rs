@@ -1978,9 +1978,6 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::ForOf(for_of) => {
-                if for_of.is_await {
-                    return Err("`for await...of` is not supported yet".into());
-                }
                 let saved = self.bindings.clone();
                 let saved_scope = self.scope.clone();
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
@@ -1988,17 +1985,34 @@ impl<'a> FnLowerer<'a> {
                     let HirType::Array(element) = self.infer_expr_type(&values)? else {
                         return Err("`for...of` currently requires a typed array".into());
                     };
-                    let values_name = self.bind_local(
-                        "__thaw_for_of_values",
+                    let (item_type, await_item) = if for_of.is_await {
+                        match element.as_ref() {
+                            HirType::Promise(resolved) => (resolved.as_ref().clone(), true),
+                            synchronous => (synchronous.clone(), false),
+                        }
+                    } else {
+                        (element.as_ref().clone(), false)
+                    };
+                    let values_name = format!("__thaw_for_of_values_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(
+                        values_name.clone(),
                         HirType::Array(element.clone()),
                     );
-                    let index_name = self.bind_local("__thaw_for_of_index", HirType::F64);
-                    let indexed_value = |item_ty: HirType| {
-                        HirExpr::TypedIndex(
+                    let index_name = format!("__thaw_for_of_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    let item_value = || {
+                        let indexed = HirExpr::TypedIndex(
                             Box::new(HirExpr::Var(values_name.clone())),
                             Box::new(HirExpr::Var(index_name.clone())),
-                            item_ty,
-                        )
+                            element.as_ref().clone(),
+                        );
+                        if await_item {
+                            HirExpr::AwaitPromise(Box::new(indexed), item_type.clone())
+                        } else {
+                            indexed
+                        }
                     };
                     let item_stmt = match &for_of.left {
                         ForHead::VarDecl(decl) => {
@@ -2022,19 +2036,26 @@ impl<'a> FnLowerer<'a> {
                                         self.interfaces,
                                         self.generic_interfaces,
                                     )?;
-                                    if declared != *element {
+                                    if declared != item_type {
                                         return Err(format!(
                                             "`for...of` binding has type {declared:?}, expected {:?}",
-                                            element
+                                            item_type
                                         ));
                                     }
                                     declared
                                 }
-                                None => element.as_ref().clone(),
+                                None => item_type.clone(),
                             };
+                            let source_name = binding.id.sym.to_string();
                             let item_name =
-                                self.bind_local(binding.id.sym.as_ref(), item_ty.clone());
-                            HirStmt::Let(item_name, item_ty.clone(), indexed_value(item_ty))
+                                format!("{source_name}__thaw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(item_name.clone(), item_ty.clone());
+                            self.bindings
+                                .entry(source_name)
+                                .or_default()
+                                .push(item_name.clone());
+                            HirStmt::Let(item_name, item_ty, item_value())
                         }
                         ForHead::Pat(pattern) => {
                             let Pat::Ident(binding) = pattern.as_ref() else {
@@ -2046,15 +2067,15 @@ impl<'a> FnLowerer<'a> {
                             let item_ty = self.scope.get(&item_name).cloned().ok_or_else(|| {
                                 format!("unknown `for...of` assignment target `{item_name}`")
                             })?;
-                            if item_ty != *element {
+                            if item_ty != item_type {
                                 return Err(format!(
                                     "`for...of` assignment target has type {item_ty:?}, expected {:?}",
-                                    element
+                                    item_type
                                 ));
                             }
                             HirStmt::Expr(HirExpr::Assign(
                                 item_name,
-                                Box::new(indexed_value(item_ty)),
+                                Box::new(item_value()),
                             ))
                         }
                         ForHead::UsingDecl(_) => {
@@ -4545,6 +4566,29 @@ mod tests {
             &loop_body[0],
             HirStmt::Expr(HirExpr::Assign(name, value))
                 if name == "value" && matches!(value.as_ref(), HirExpr::TypedIndex(_, _, HirType::F64))
+        ));
+    }
+
+    #[test]
+    fn desugars_for_await_of_promise_array_to_awaited_items() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                const values: Promise<number>[] = [
+                    new Promise<number>((resolve, reject) => resolve(1))
+                ];
+                for await (const value of values) { console.log(value); }
+            }"#,
+        );
+        let HirStmt::While(_, loop_body) = &program.functions[0].body[3] else {
+            panic!("expected indexed while loop");
+        };
+        assert!(matches!(
+            &loop_body[0],
+            HirStmt::Let(
+                _,
+                HirType::F64,
+                HirExpr::AwaitPromise(indexed, HirType::F64)
+            ) if matches!(indexed.as_ref(), HirExpr::TypedIndex(_, _, HirType::Promise(inner)) if inner.as_ref() == &HirType::F64)
         ));
     }
 
