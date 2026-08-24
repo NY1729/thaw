@@ -716,7 +716,8 @@ The workspace crates have narrow responsibilities:
   Async contexts validate resource names and Env ownership and are released by
   the matching `napi_async_destroy` call.
   Object seal/freeze integrity levels apply consistently to named properties,
-  generic property keys, deletion, functions and array elements.
+  generic property keys, deletion, functions and array elements. Descriptor
+  writable/enumerable/configurable bits are retained for defined properties.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
