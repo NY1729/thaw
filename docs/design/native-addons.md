@@ -681,6 +681,9 @@ pending exceptionへ設定して`napi_pending_exception`を返す。これによ
 runtime function一覧はすべてhost symbolとして公開される。
 `napi_coerce_to_object`はprimitiveだけをwrapper objectへ変換し、Array／Buffer／ArrayBuffer／view／
 Function／Promise／Error／Dateを含む既存objectは同一handleのまま返す。
+coercion APIは空文字列、Infinity、2／8／16進文字列、負のzero、BigIntの任意精度decimal文字列、
+hole／null／undefined／nested Arrayのjoin規則を扱う。SymbolのToStringとBigInt／SymbolのToNumberは
+TypeErrorをpending exceptionへ設定する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
 exception経路へ統合する。`node_api_symbol_for`はprocess-wide description→identity registryを持ち、
 同じEnvでは同じhandle、Envをまたいでも同じSymbol identityを割り当てる。通常の
