@@ -255,6 +255,7 @@ pub enum Value {
         bytes: Vec<u8>,
         detached: bool,
     },
+    SharedArrayBuffer(Vec<u8>),
     ExternalArrayBuffer {
         data: *mut u8,
         length: usize,
@@ -552,6 +553,7 @@ fn is_object_value(value: &Value) -> bool {
             | Value::ExternalBuffer { .. }
             | Value::BufferView { .. }
             | Value::ArrayBuffer { .. }
+            | Value::SharedArrayBuffer(_)
             | Value::ExternalArrayBuffer { .. }
             | Value::TypedArray { .. }
             | Value::DataView { .. }
@@ -1042,6 +1044,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
             JsonValue::Array(bytes.iter().map(|value| JsonValue::from(*value)).collect())
         }
         Value::ArrayBuffer { .. }
+        | Value::SharedArrayBuffer(_)
         | Value::ExternalArrayBuffer { .. }
         | Value::TypedArray { .. }
         | Value::DataView { .. } => {
@@ -4067,6 +4070,7 @@ unsafe fn arraybuffer_parts(value: NapiValue) -> Result<(*mut u8, usize, bool), 
         Some(Value::ArrayBuffer { bytes, detached }) => {
             Ok((bytes.as_mut_ptr(), bytes.len(), *detached))
         }
+        Some(Value::SharedArrayBuffer(bytes)) => Ok((bytes.as_mut_ptr(), bytes.len(), false)),
         Some(Value::ExternalArrayBuffer {
             data,
             length,
@@ -4137,6 +4141,42 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
         });
     }
     write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_create_sharedarraybuffer(
+    env: NapiEnv,
+    length: usize,
+    data: *mut *mut c_void,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::SharedArrayBuffer(vec![0; length]));
+    if let Some(data) = data.as_mut() {
+        let Some(Value::SharedArrayBuffer(bytes)) = value.as_mut() else {
+            unreachable!();
+        };
+        *data = bytes.as_mut_ptr().cast();
+    }
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_is_sharedarraybuffer(
+    _env: NapiEnv,
+    value: NapiValue,
+    result: *mut bool,
+) -> NapiStatus {
+    let Some(result) = result.as_mut() else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = matches!(value_ref(value), Ok(Value::SharedArrayBuffer(_)));
+    NAPI_OK
 }
 
 #[no_mangle]
@@ -6314,6 +6354,73 @@ mod tests {
             );
             assert!(view_data.is_null());
             assert_eq!(length, 0);
+        }
+    }
+
+    #[test]
+    fn sharedarraybuffers_back_views_but_cannot_be_detached() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut data = ptr::null_mut();
+            let mut shared = ptr::null_mut();
+            assert_eq!(
+                node_api_create_sharedarraybuffer(env_ptr, 16, &mut data, &mut shared),
+                NAPI_OK
+            );
+            assert!(!data.is_null());
+            let mut is_shared = false;
+            assert_eq!(
+                node_api_is_sharedarraybuffer(env_ptr, shared, &mut is_shared),
+                NAPI_OK
+            );
+            assert!(is_shared);
+            let mut is_arraybuffer = true;
+            assert_eq!(
+                napi_is_arraybuffer(env_ptr, shared, &mut is_arraybuffer),
+                NAPI_OK
+            );
+            assert!(!is_arraybuffer);
+
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 1, 4, shared, 3, &mut view),
+                NAPI_OK
+            );
+            let mut view_data = ptr::null_mut();
+            let mut length = 0;
+            let mut backing = ptr::null_mut();
+            let mut offset = 0;
+            assert_eq!(
+                napi_get_typedarray_info(
+                    env_ptr,
+                    view,
+                    ptr::null_mut(),
+                    &mut length,
+                    &mut view_data,
+                    &mut backing,
+                    &mut offset,
+                ),
+                NAPI_OK
+            );
+            assert_eq!((length, backing, offset), (4, shared, 3));
+            *view_data.cast::<u8>() = 42;
+            assert_eq!(*(data as *mut u8).add(3), 42);
+
+            let mut buffer = ptr::null_mut();
+            assert_eq!(
+                node_api_create_buffer_from_arraybuffer(env_ptr, shared, 2, 5, &mut buffer),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_detach_arraybuffer(env_ptr, shared),
+                NAPI_ARRAYBUFFER_EXPECTED
+            );
+            assert_eq!(
+                napi_get_buffer_info(env_ptr, buffer, &mut view_data, &mut length),
+                NAPI_OK
+            );
+            assert_eq!(length, 5);
         }
     }
 

@@ -686,3 +686,7 @@ intern tableから同じ文字列handleを再利用する。生成keyは通常�
 `node_api_create_external_string_latin1`／`utf16`はhostのowned UTF-8 String表現へ変換するため常に
 `copied=true`を返す。仕様どおりcopy完了時にfinalizerを即時かつ一度だけ呼び、Env teardownでは
 再実行しない。NUL終端と明示lengthの両方を通常のstring APIと同じ変換規則で扱う。
+experimental `node_api_create_sharedarraybuffer`／`node_api_is_sharedarraybuffer`は固定長のowned
+backingを確保し、通常ArrayBufferとは別の型identityを返す。TypedArray／DataView／Buffer viewは
+同じbacking pointerを共有できる一方、SharedArrayBufferはdetach対象にせず、viewは常に有効なまま
+維持する。
