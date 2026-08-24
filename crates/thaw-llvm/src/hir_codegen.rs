@@ -12169,6 +12169,51 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_reduce_and_reduce_right() {
+        let source = r#"
+            interface Box { value: number; }
+            function sum(accumulator: number, value: number, index: number, array: number[]): number {
+                console.log(index);
+                return accumulator + value + array.length - 3;
+            }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function initial(): number {
+                console.log("initial");
+                return 10;
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b", "c"];
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3].reduce(sum));
+                console.log(receiver().reduce((accumulator, value) => accumulator + value, initial()));
+                console.log(["a", "b", "c"].reduceRight((accumulator, value) => accumulator + value, ""));
+                console.log([1, 2].reduce((accumulator, value) => accumulator + String(value), ""));
+                const empty: number[] = [];
+                console.log(empty.reduce((accumulator, value) => accumulator + value, 7));
+                const first: Box = { value: 1 };
+                const second: Box = { value: 2 };
+                console.log([first, second].reduce((accumulator, value) => value).value);
+                console.log((await delayed()).reduceRight((accumulator, value) => accumulator + value));
+                try {
+                    empty.reduce((accumulator, value) => accumulator + value);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_reduce"),
+            "1\n2\n6\nreceiver\ninitial\n16\ncba\n12\n7\n2\nawaited\ncba\nReduce of empty array with no initial value\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
