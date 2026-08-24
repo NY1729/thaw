@@ -4023,6 +4023,30 @@ impl<'a> FnLowerer<'a> {
         Ok(result)
     }
 
+    fn lower_promise_array_value(
+        &mut self,
+        expr: &Expr,
+        combinator: &str,
+    ) -> Result<(HirExpr, HirType), String> {
+        let values = self.lower_expr(expr)?;
+        let HirType::Array(element) = self.infer_expr_type(&values)? else {
+            return Err(format!(
+                "`Promise.{combinator}` expects an array of promises"
+            ));
+        };
+        let HirType::Promise(element) = *element else {
+            return Err(format!(
+                "`Promise.{combinator}` expects an array of promises"
+            ));
+        };
+        if *element == HirType::Void {
+            return Err(format!(
+                "`Promise.{combinator}` elements must not resolve to void"
+            ));
+        }
+        Ok((values, *element))
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
@@ -4208,18 +4232,18 @@ impl<'a> FnLowerer<'a> {
                 return Err("spread arguments are not supported in `Promise.all`".into());
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let values = self.lower_expr(&arg.expr)?;
-                let HirType::Array(element) = self.infer_expr_type(&values)? else {
-                    return Err("`Promise.all` expects an array of promises".into());
-                };
-                let HirType::Promise(element) = *element else {
-                    return Err("`Promise.all` expects an array of promises".into());
-                };
-                if *element == HirType::Void {
-                    return Err("`Promise.all` elements must not resolve to void".into());
-                }
-                return Ok(HirExpr::PromiseAllArray(Box::new(values), *element));
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "all")?;
+                return Ok(HirExpr::PromiseAllArray(Box::new(values), element));
             };
+            if array
+                .elems
+                .iter()
+                .flatten()
+                .any(|element| element.spread.is_some())
+            {
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "all")?;
+                return Ok(HirExpr::PromiseAllArray(Box::new(values), element));
+            }
             let mut element_types = Vec::new();
             let promises = array
                 .elems
@@ -4265,18 +4289,18 @@ impl<'a> FnLowerer<'a> {
                 return Err("spread arguments are not supported in `Promise.allSettled`".into());
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let values = self.lower_expr(&arg.expr)?;
-                let HirType::Array(element) = self.infer_expr_type(&values)? else {
-                    return Err("`Promise.allSettled` expects an array of promises".into());
-                };
-                let HirType::Promise(element) = *element else {
-                    return Err("`Promise.allSettled` expects an array of promises".into());
-                };
-                if *element == HirType::Void {
-                    return Err("`Promise.allSettled` elements must not resolve to void".into());
-                }
-                return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), *element));
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "allSettled")?;
+                return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), element));
             };
+            if array
+                .elems
+                .iter()
+                .flatten()
+                .any(|element| element.spread.is_some())
+            {
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "allSettled")?;
+                return Ok(HirExpr::PromiseAllSettledArray(Box::new(values), element));
+            }
             let mut element_type = None;
             let promises = array
                 .elems
@@ -4333,18 +4357,18 @@ impl<'a> FnLowerer<'a> {
                 return Err("spread arguments are not supported in `Promise.race`".into());
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let values = self.lower_expr(&arg.expr)?;
-                let HirType::Array(element) = self.infer_expr_type(&values)? else {
-                    return Err("`Promise.race` expects an array of promises".into());
-                };
-                let HirType::Promise(element) = *element else {
-                    return Err("`Promise.race` expects an array of promises".into());
-                };
-                if *element == HirType::Void {
-                    return Err("`Promise.race` elements must not resolve to void".into());
-                }
-                return Ok(HirExpr::PromiseRaceArray(Box::new(values), *element));
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "race")?;
+                return Ok(HirExpr::PromiseRaceArray(Box::new(values), element));
             };
+            if array
+                .elems
+                .iter()
+                .flatten()
+                .any(|element| element.spread.is_some())
+            {
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "race")?;
+                return Ok(HirExpr::PromiseRaceArray(Box::new(values), element));
+            }
             if array.elems.is_empty() {
                 return Err("`Promise.race` requires at least one promise".into());
             }
@@ -4400,18 +4424,18 @@ impl<'a> FnLowerer<'a> {
                 return Err("spread arguments are not supported in `Promise.any`".into());
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
-                let values = self.lower_expr(&arg.expr)?;
-                let HirType::Array(element) = self.infer_expr_type(&values)? else {
-                    return Err("`Promise.any` expects an array of promises".into());
-                };
-                let HirType::Promise(element) = *element else {
-                    return Err("`Promise.any` expects an array of promises".into());
-                };
-                if *element == HirType::Void {
-                    return Err("`Promise.any` elements must not resolve to void".into());
-                }
-                return Ok(HirExpr::PromiseAnyArray(Box::new(values), *element));
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "any")?;
+                return Ok(HirExpr::PromiseAnyArray(Box::new(values), element));
             };
+            if array
+                .elems
+                .iter()
+                .flatten()
+                .any(|element| element.spread.is_some())
+            {
+                let (values, element) = self.lower_promise_array_value(&arg.expr, "any")?;
+                return Ok(HirExpr::PromiseAnyArray(Box::new(values), element));
+            }
             if array.elems.is_empty() {
                 return Err("`Promise.any` requires at least one promise".into());
             }
@@ -6299,6 +6323,49 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("Promise.all element 1 resolves to void"));
+    }
+
+    #[test]
+    fn promise_combinators_accept_homogeneous_array_spreads() {
+        let program = lower(
+            r#"async function value(input: number): Promise<number> { return input; }
+            function pending(): Promise<number>[] { return [value(2), value(3)]; }
+            async function main(): Promise<void> {
+                await Promise.all([value(1), ...pending()]);
+                await Promise.allSettled([...pending(), value(4)]);
+                await Promise.race([value(1), ...pending()]);
+                await Promise.any([...pending(), value(4)]);
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[0],
+            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
+                if matches!(inner.as_ref(), HirExpr::PromiseAllArray(array, _)
+                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
+        ));
+        assert!(matches!(
+            &main.body[1],
+            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
+                if matches!(inner.as_ref(), HirExpr::PromiseAllSettledArray(array, _)
+                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
+        ));
+        assert!(matches!(
+            &main.body[2],
+            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
+                if matches!(inner.as_ref(), HirExpr::PromiseRaceArray(array, _)
+                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
+        ));
+        assert!(matches!(
+            &main.body[3],
+            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
+                if matches!(inner.as_ref(), HirExpr::PromiseAnyArray(array, _)
+                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
+        ));
     }
 
     #[test]
