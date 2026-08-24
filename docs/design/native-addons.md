@@ -691,6 +691,7 @@ TypeErrorをpending exceptionへ設定する。
 `napi_wrap`／`napi_unwrap`／`napi_remove_wrap`／`napi_add_finalizer`はclass instanceだけでなく、
 Array／Buffer／ArrayBuffer／view／Function／Promise／Error／Dateを含む全JavaScript Objectを受理する。
 `napi_create_external`はdataと任意のfinalizer／hintをEnvに保持し、Env破棄時に一度だけ実行する。
+Promise deferred handleもEnv終了まで保持し、別Env・foreign value・二重resolve／rejectを安全に拒否する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
