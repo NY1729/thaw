@@ -11745,6 +11745,47 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_concat() {
+        let source = r#"
+            interface Item { value: number; }
+            function first(): number[] {
+                console.log("receiver");
+                return [1];
+            }
+            function second(): number[] {
+                console.log("argument");
+                return [2, 3];
+            }
+            async function delayed(): Promise<number[]> {
+                console.log("awaited");
+                await sleep(1);
+                return [5, 6];
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = first().concat(second(), 4, await delayed());
+                console.log(numbers.join(","));
+                const source: number[] = [7, 8];
+                const copy: number[] = source.concat();
+                copy[0] = 9;
+                console.log(source.join(","));
+                console.log(copy.join(","));
+                console.log(["a"].concat(["b", "c"], "d").join(""));
+                console.log([true].concat(false, [true]).join("-"));
+                const item: Item = { value: 1 };
+                const objects: Item[] = [item].concat([{ value: 2 }]);
+                item.value = 9;
+                console.log(objects[0].value);
+                const empty: number[] = [];
+                console.log(empty.concat([]).length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_concat"),
+            "receiver\nargument\nawaited\n1,2,3,4,5,6\n7,8\n9,8\nabcd\ntrue-false-true\n9\n0\n"
+        );
+    }
+
+    #[test]
     fn compiles_non_mutating_native_array_slice() {
         let source = r#"
             function values(): number[] {

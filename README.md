@@ -437,6 +437,9 @@ The workspace crates have narrow responsibilities:
 - Homogeneous native arrays implement in-place `.fill()` for numbers, strings,
   booleans and fixed objects, with negative/clamped bounds, shallow reference
   assignment and left-to-right awaited argument evaluation
+- Homogeneous native arrays implement `.concat()` with one-level flattening of
+  same-element arrays, scalar element arguments, arena-owned shallow copies,
+  empty inputs and left-to-right awaited receiver/argument evaluation
 - Homogeneous arrays implement arena-owned shallow `.slice()` copies with
   omitted/negative/clamped indices, empty ranges, unchanged source arrays,
   shared object elements, ordered coercion and awaited bounds
