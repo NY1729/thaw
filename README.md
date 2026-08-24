@@ -129,6 +129,8 @@ The workspace crates have narrow responsibilities:
 - `let`/`const`, assignment, arithmetic, comparison, `if`, `while`, classic
   `for`, `do/while`, and typed-array `for...of`
 - Object fields and array indexing/mutation
+- Typed array literals support multiple spreads and ordinary elements with
+  single, left-to-right evaluation, including awaited spread sources
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
 - `process.env`, `console.log`, JSON operations, and both legacy blocking and

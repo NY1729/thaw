@@ -1553,6 +1553,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::FfiCall(_, args)
         | HirExpr::DynamicCall(_, args)
         | HirExpr::ArrayLit(args)
+        | HirExpr::ArrayConcat(args, _)
         | HirExpr::PromiseAll(args, _)
         | HirExpr::PromiseAllTuple(args, _)
         | HirExpr::PromiseRace(args, _)
@@ -2499,6 +2500,7 @@ impl<'a> FnLowerer<'a> {
                     Ok(HirType::Tuple(elements))
                 }
             }
+            HirExpr::ArrayConcat(_, element) => Ok(HirType::Array(Box::new(element.clone()))),
             HirExpr::Index(arr, index) => {
                 self.expect_type(&HirType::F64, index, "array index")?;
                 match self.infer_expr_type(arr)? {
@@ -2627,20 +2629,71 @@ impl<'a> FnLowerer<'a> {
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
 
             Expr::Array(array_lit) => {
-                let elems = array_lit
+                if array_lit
                     .elems
                     .iter()
-                    .map(|elem| match elem {
-                        Some(e) if e.spread.is_none() => self.lower_expr(&e.expr),
-                        Some(_) => {
-                            Err("spread elements are not supported in array literals".to_string())
+                    .all(|element| element.as_ref().is_some_and(|element| element.spread.is_none()))
+                {
+                    let values = array_lit
+                        .elems
+                        .iter()
+                        .map(|element| {
+                            self.lower_expr(
+                                &element.as_ref().expect("checked array element").expr,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let value = HirExpr::ArrayLit(values);
+                    self.infer_expr_type(&value)?;
+                    return Ok(value);
+                }
+                let mut parts = Vec::new();
+                let mut pending = Vec::new();
+                let mut element_type: Option<HirType> = None;
+                for element in &array_lit.elems {
+                    let Some(element) = element else {
+                        return Err("elisions are not supported in array literals".into());
+                    };
+                    let value = self.lower_expr(&element.expr)?;
+                    if element.spread.is_some() {
+                        if !pending.is_empty() {
+                            parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
                         }
-                        None => Err("elisions are not supported in array literals".to_string()),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let value = HirExpr::ArrayLit(elems);
-                self.infer_expr_type(&value)?;
-                Ok(value)
+                        let HirType::Array(spread_element) = self.infer_expr_type(&value)? else {
+                            return Err("array spread source must be a typed array".into());
+                        };
+                        if let Some(expected) = &element_type {
+                            if expected != spread_element.as_ref() {
+                                return Err(format!(
+                                    "array spread element type {:?} does not match {expected:?}",
+                                    spread_element
+                                ));
+                            }
+                        } else {
+                            element_type = Some(spread_element.as_ref().clone());
+                        }
+                        parts.push(value);
+                    } else {
+                        let actual = self.infer_expr_type(&value)?;
+                        if let Some(expected) = &element_type {
+                            if expected != &actual {
+                                return Err(format!(
+                                    "array element type {actual:?} does not match {expected:?}"
+                                ));
+                            }
+                        } else {
+                            element_type = Some(actual);
+                        }
+                        pending.push(value);
+                    }
+                }
+                if !pending.is_empty() {
+                    parts.push(HirExpr::ArrayLit(pending));
+                }
+                Ok(HirExpr::ArrayConcat(
+                    parts,
+                    element_type.unwrap_or(HirType::F64),
+                ))
             }
 
             Expr::Object(obj_lit) => self.lower_object_lit(obj_lit),
@@ -4628,6 +4681,30 @@ mod tests {
                 vec![HirExpr::ArrayLen(Box::new(HirExpr::Var("xs".into())))],
             ))
         );
+    }
+
+    #[test]
+    fn lowers_typed_array_spreads_in_source_order() {
+        let program = lower(
+            r#"function part(): number[] { return [2, 3]; }
+               function main(): void {
+                   const tail: number[] = [4, 5];
+                   const values: number[] = [1, ...part(), ...tail, 6];
+                   console.log(values.length);
+               }"#,
+        );
+        let HirStmt::Let(_, HirType::Array(element), HirExpr::ArrayConcat(parts, spread_element)) =
+            &program.functions[1].body[1]
+        else {
+            panic!("expected typed array concat");
+        };
+        assert_eq!(element.as_ref(), &HirType::F64);
+        assert_eq!(spread_element, &HirType::F64);
+        assert_eq!(parts.len(), 4);
+        assert!(matches!(&parts[0], HirExpr::ArrayLit(values) if values.len() == 1));
+        assert!(matches!(&parts[1], HirExpr::Call(_, _)));
+        assert!(matches!(&parts[2], HirExpr::Var(name) if name == "tail"));
+        assert!(matches!(&parts[3], HirExpr::ArrayLit(values) if values.len() == 1));
     }
 
     #[test]
