@@ -11210,6 +11210,31 @@ mod tests {
     }
 
     #[test]
+    fn frame_split_supports_fixed_object_for_in() {
+        let source = r#"
+            function source() {
+                console.log("source");
+                return { first: 1, skip: 2, last: 3 };
+            }
+            async function main(): Promise<void> {
+                for (const key in source()) {
+                    await sleep(1);
+                    if (key === "skip") continue;
+                    console.log(key);
+                    if (key === "last") break;
+                }
+                let retained = "";
+                for (retained in { alpha: 1, omega: 2 }) {}
+                console.log(retained);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_for_in"),
+            "source\nfirst\nlast\nomega\n"
+        );
+    }
+
+    #[test]
     fn frame_split_supports_await_in_string_for_of_loop() {
         let source = r#"
             async function main(): Promise<void> {
