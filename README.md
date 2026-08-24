@@ -357,6 +357,10 @@ The workspace crates have narrow responsibilities:
 - Primitive `<`, `>`, `<=` and `>=` compare two strings in JavaScript UTF-16
   code-unit order; other number/string/boolean combinations use numeric
   conversion, preserve `NaN`'s unordered result, and support awaited operands
+- `String(...)`, template interpolation and string addition convert fixed
+  objects to `[object Object]` and homogeneous number/string/boolean/object
+  arrays with JavaScript comma-join semantics, using arena-owned results and
+  evaluating aggregate expressions once
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

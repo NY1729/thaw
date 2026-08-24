@@ -247,6 +247,88 @@ pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const 
     }
 }
 
+unsafe fn native_array_length(array: *const u8) -> Option<usize> {
+    (!array.is_null()).then(|| unsafe { array.cast::<u64>().read() as usize })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `array` must point to a Thaw array containing `f64` element slots.
+pub unsafe extern "C" fn thaw_number_array_to_string(array: *const u8) -> *const c_char {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null();
+    };
+    let mut result = String::new();
+    for index in 0..length {
+        if index != 0 {
+            result.push(',');
+        }
+        let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+        result.push_str(&javascript_number_string(slot));
+    }
+    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `array` must point to a Thaw array containing C-string pointer slots.
+pub unsafe extern "C" fn thaw_string_array_to_string(array: *const u8) -> *const c_char {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null();
+    };
+    let mut result = String::new();
+    for index in 0..length {
+        if index != 0 {
+            result.push(',');
+        }
+        let slot = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const c_char>()
+                .read_unaligned()
+        };
+        if !slot.is_null() {
+            result.push_str(&unsafe { CStr::from_ptr(slot) }.to_string_lossy());
+        }
+    }
+    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `array` must point to a Thaw array containing boolean element slots.
+pub unsafe extern "C" fn thaw_bool_array_to_string(array: *const u8) -> *const c_char {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null();
+    };
+    let mut result = String::new();
+    for index in 0..length {
+        if index != 0 {
+            result.push(',');
+        }
+        let slot = unsafe { array.add(8 + index * 8).read() };
+        result.push_str(if slot == 0 { "false" } else { "true" });
+    }
+    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `array` must point to any valid Thaw array. Elements are fixed objects.
+pub unsafe extern "C" fn thaw_object_array_to_string(array: *const u8) -> *const c_char {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null();
+    };
+    let result = std::iter::repeat_n("[object Object]", length)
+        .collect::<Vec<_>>()
+        .join(",");
+    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 
