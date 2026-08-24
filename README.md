@@ -627,12 +627,15 @@ The workspace crates have narrow responsibilities:
   fixed-object fields, array/tuple elements, native `.length`, function-value
   calls and receiver-bound methods. Native `null` and tagged `T | null` have
   distinct display, `typeof`, equality, assignment, narrowing, `??`/`??=` and
-  optional-chain semantics. Optional chains also preserve all three outcomes
+  optional-chain semantics. Native `T | null | undefined` uses a dedicated
+  three-state tag across locals, parameters, returns, object fields and async
+  frames, with distinct display, `typeof`, strict/loose nullish equality,
+  `??`/`??=`, loose-nullish guard narrowing and optional-chain behavior.
+  Optional chains also preserve all three outcomes
   when a nullable field, method result or function result is reached: a value,
-  `null`, or receiver-produced `undefined`. Explicitly declared three-way
-  `T | null | undefined` unions and non-literal dynamically computed method
-  names still require broader lowering; bracketed string-literal methods are
-  resolved statically, including through optional chains
+  `null`, or receiver-produced `undefined`. Non-literal dynamically computed
+  method names still require broader lowering; bracketed string-literal
+  methods are resolved statically, including through optional chains
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows

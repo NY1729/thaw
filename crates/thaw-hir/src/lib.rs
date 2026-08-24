@@ -38,6 +38,9 @@ pub enum HirType {
     /// A native `T | null` value with the same tagged physical layout as an
     /// optional, but a distinct absence kind for equality/typeof/display.
     Nullable(Box<HirType>),
+    /// A native `T | null | undefined` value. Its tag distinguishes a
+    /// payload, `null`, and `undefined` without relying on sentinels.
+    Nullish(Box<HirType>),
     /// Type inference failed / not yet supported for this expression ->
     /// falls back to QuickJS-NG at runtime (see design doc section 3.1).
     Dynamic,
@@ -156,6 +159,13 @@ pub enum HirExpr {
     NullableNone(HirType),
     NullableIsNone(Box<HirExpr>, HirType),
     NullableValue(Box<HirExpr>, HirType),
+    NullishSome(Box<HirExpr>, HirType),
+    NullishNull(HirType),
+    NullishUndefined(HirType),
+    NullishIsNull(Box<HirExpr>, HirType),
+    NullishIsUndefined(Box<HirExpr>, HirType),
+    NullishIsNone(Box<HirExpr>, HirType),
+    NullishValue(Box<HirExpr>, HirType),
     Call(Box<HirExpr>, Vec<HirExpr>),
     /// A homogeneous `Promise.all` join. The element type is retained so
     /// codegen can copy and later load non-number result slots correctly.
@@ -379,7 +389,12 @@ pub fn set_ffi_error_abi(
             | HirExpr::OptionalValue(inner, _)
             | HirExpr::NullableSome(inner, _)
             | HirExpr::NullableIsNone(inner, _)
-            | HirExpr::NullableValue(inner, _) => visit_expr(inner, symbol, abi, found),
+            | HirExpr::NullableValue(inner, _)
+            | HirExpr::NullishSome(inner, _)
+            | HirExpr::NullishIsNull(inner, _)
+            | HirExpr::NullishIsUndefined(inner, _)
+            | HirExpr::NullishIsNone(inner, _)
+            | HirExpr::NullishValue(inner, _) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -422,6 +437,8 @@ pub fn set_ffi_error_abi(
             HirExpr::Lit(_)
             | HirExpr::OptionalNone(_)
             | HirExpr::NullableNone(_)
+            | HirExpr::NullishNull(_)
+            | HirExpr::NullishUndefined(_)
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::FunctionRef(..) => {}
@@ -537,9 +554,12 @@ pub fn set_ffi_ownership(
             | HirExpr::OptionalValue(inner, _)
             | HirExpr::NullableSome(inner, _)
             | HirExpr::NullableIsNone(inner, _)
-            | HirExpr::NullableValue(inner, _) => {
-                update_expr(inner, symbol, returns, errors, found)
-            }
+            | HirExpr::NullableValue(inner, _)
+            | HirExpr::NullishSome(inner, _)
+            | HirExpr::NullishIsNull(inner, _)
+            | HirExpr::NullishIsUndefined(inner, _)
+            | HirExpr::NullishIsNone(inner, _)
+            | HirExpr::NullishValue(inner, _) => update_expr(inner, symbol, returns, errors, found),
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
             HirExpr::PromiseNew(executor, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
@@ -573,6 +593,8 @@ pub fn set_ffi_ownership(
             HirExpr::Lit(_)
             | HirExpr::OptionalNone(_)
             | HirExpr::NullableNone(_)
+            | HirExpr::NullishNull(_)
+            | HirExpr::NullishUndefined(_)
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::FunctionRef(..) => {}
@@ -710,7 +732,12 @@ pub fn set_ffi_string_abi(
             | HirExpr::OptionalValue(inner, _)
             | HirExpr::NullableSome(inner, _)
             | HirExpr::NullableIsNone(inner, _)
-            | HirExpr::NullableValue(inner, _) => {
+            | HirExpr::NullableValue(inner, _)
+            | HirExpr::NullishSome(inner, _)
+            | HirExpr::NullishIsNull(inner, _)
+            | HirExpr::NullishIsUndefined(inner, _)
+            | HirExpr::NullishIsNone(inner, _)
+            | HirExpr::NullishValue(inner, _) => {
                 update_expr(inner, symbol, params, returns, calling_convention, found)
             }
             HirExpr::Lambda(_, _, _, body) => {
@@ -750,6 +777,8 @@ pub fn set_ffi_string_abi(
             HirExpr::Lit(_)
             | HirExpr::OptionalNone(_)
             | HirExpr::NullableNone(_)
+            | HirExpr::NullishNull(_)
+            | HirExpr::NullishUndefined(_)
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::FunctionRef(..) => {}
