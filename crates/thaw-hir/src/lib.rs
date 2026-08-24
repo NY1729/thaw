@@ -113,6 +113,15 @@ pub enum FfiCallingConvention {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiVariadicAbi {
+    Native,
+    I32,
+    I64,
+    U32,
+    U64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FfiAggregateAbi {
     Internal,
     Portable,
@@ -151,6 +160,7 @@ pub struct FfiSignature {
     /// Element type of a trailing C varargs sequence. Lowering accepts
     /// TypeScript rest declarations of number, boolean, or string arrays.
     pub variadic: Option<HirType>,
+    pub variadic_abi: FfiVariadicAbi,
     pub ret: HirType,
     pub error_abi: FfiErrorAbi,
     pub return_ownership: FfiOwnership,
@@ -1287,5 +1297,28 @@ pub fn set_ffi_aggregate_layout(
     }
     validate_layout(symbol, "return", fields, &layout, true)?;
     signature.aggregate_return_layout = Some(layout);
+    Ok(())
+}
+
+pub fn set_ffi_variadic_abi(
+    program: &mut HirProgram,
+    symbol: &str,
+    abi: FfiVariadicAbi,
+) -> Result<(), String> {
+    let Some(signature) = program
+        .extern_functions
+        .iter_mut()
+        .find(|signature| signature.symbol == symbol)
+    else {
+        return Err(format!(
+            "FFI variadic ABI metadata references unknown ambient function `{symbol}`"
+        ));
+    };
+    if abi != FfiVariadicAbi::Native && signature.variadic != Some(HirType::F64) {
+        return Err(format!(
+            "FFI integer variadic ABI for `{symbol}` requires a number[] rest parameter"
+        ));
+    }
+    signature.variadic_abi = abi;
     Ok(())
 }
