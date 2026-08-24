@@ -643,3 +643,5 @@ Envからの破棄だけを受理してcontextを一度解放する。callback s
 `napi_object_seal`は新規propertyとdeleteを禁止し、既存data property更新を許す。
 `napi_object_freeze`はさらに既存data property更新も禁止する。named／generic property、function、
 array elementへ同じintegrity levelを適用し、accessor setter呼び出しはJavaScript規約どおり維持する。
+`napi_define_properties`のwritable／enumerable／configurable bitはEnv metadataへ保持し、通常の
+set／deleteもdescriptor制約を迂回できない。seal／freeze時には既存propertyのbitを更新する。
