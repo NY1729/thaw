@@ -661,8 +661,11 @@ prototype更新が既存instanceへ反映され、own-only列挙・own-property�
 一度だけ関連付ける。照合はcall用Envとmodule Envをまたいで行い、異なるtagはfalse、二重tag付けは
 invalid-arg、非objectはobject-expectedとしてnative classの安全な型検査を提供する。
 Arrayは各indexをoptional slotとして保持し、初期lengthのhole、明示的undefined、削除済み要素を
-区別する。`napi_has_element`／`napi_delete_element`はこの存在状態を操作し、delete後もlengthを維持、
-property列挙からholeを除外、JSON変換ではholeをnullとして扱う。sealは既存要素の更新だけを許す。
+区別する。`napi_get_element`／`napi_set_element`／`napi_has_element`／`napi_delete_element`は
+Node-APIどおりArrayだけでなくObject／Functionの数値名propertyにも対応し、prototype探索、accessor、
+configurable属性、deleteの省略可能なresultをgeneric property APIと同じ規則で扱う。Arrayのdelete後も
+lengthを維持し、property列挙からholeを除外、JSON変換ではholeをnullとして扱う。sealは既存要素の
+更新だけを許す。
 `napi_is_promise`はhost Promise値を判定し、`napi_get_threadsafe_function_context`は作成時contextを
 worker側から変更せず取得できる。
 `napi_add_async_cleanup_hook`はopaque handleをEnvへ登録し、teardown時に逆順でhookを開始する。
