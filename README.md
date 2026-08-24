@@ -346,6 +346,10 @@ The workspace crates have narrow responsibilities:
 - `Boolean(...)` applies the same JavaScript truthiness rules to native
   booleans, numbers, strings, JSON and reference values, evaluating its
   synchronous or awaited argument exactly once
+- `Number(...)` accepts native numbers, booleans and strings. String parsing
+  covers ECMAScript whitespace, signs, decimal/exponent syntax, arbitrary-size
+  hexadecimal/octal/binary input, infinities and `NaN` for invalid input, and
+  works after an awaited string expression
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

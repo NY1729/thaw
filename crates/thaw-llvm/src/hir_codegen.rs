@@ -496,6 +496,12 @@ impl<'ctx> HirCompiler<'ctx> {
             number_to_string_type,
             Some(Linkage::External),
         );
+        let string_to_number_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_string_to_number",
+            string_to_number_type,
+            Some(Linkage::External),
+        );
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -4775,6 +4781,21 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_bool_to_number(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("boolean number conversion expects one operand".to_string());
+        };
+        let value = self.compile_expr(value)?.into_int_value();
+        self.builder
+            .build_select(
+                value,
+                self.context.f64_type().const_float(1.0),
+                self.context.f64_type().const_zero(),
+                "bool_number",
+            )
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -6922,6 +6943,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_number_to_string",
                     args,
                     "String(number)",
+                )
+            }
+            "__thaw_bool_to_number" => return self.compile_bool_to_number(args),
+            "__thaw_string_to_number" => {
+                return self.compile_single_arg_call(
+                    "thaw_string_to_number",
+                    args,
+                    "Number(string)",
                 )
             }
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
@@ -10342,6 +10371,33 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_boolean_conversion"),
             "zero\nfalse\nnonzero\ntrue\nfalse\nfalse\ntrue\ntrue\ntrue\nawaited-boolean\nfalse\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_number_conversion_and_awaited_strings() {
+        let source = r#"
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited-number-input");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(Number(true));
+                console.log(Number(false));
+                console.log(Number(7));
+                console.log(Number(" 42.5 "));
+                console.log(Number("0xff"));
+                console.log(Number("0o10"));
+                console.log(Number("0b101"));
+                console.log(Number(""));
+                console.log(Number("bad") === Number("bad"));
+                console.log(Number(await delayed("12")));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_number_conversion"),
+            "1\n0\n7\n42.5\n255\n8\n5\n0\nfalse\nawaited-number-input\n12\n"
         );
     }
 

@@ -3058,6 +3058,20 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "number string conversion")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_bool_to_number" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("boolean number conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Bool, argument, "boolean number conversion")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_string_to_number" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("string number conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "string number conversion")?;
+                        return Ok(HirType::F64);
+                    }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -5411,6 +5425,21 @@ impl<'a> FnLowerer<'a> {
                 let converted = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
                 return self.wrap_call_argument_bindings(converted, &[(name, ty, value)]);
             }
+            if callee_name == "Number" && ty == HirType::F64 {
+                return Ok(value);
+            }
+            if callee_name == "Number" && ty == HirType::Bool {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "Number" && ty == HirType::Str {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                    vec![value],
+                ));
+            }
             if ty != HirType::Json {
                 return Err(format!(
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
@@ -7741,12 +7770,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_number_conversion_on_a_non_json_value() {
-        let module =
-            thaw_parser::parse_typescript("function main(): void { const x: number = Number(1); }")
-                .unwrap();
+    fn rejects_number_conversion_on_an_unsupported_native_object() {
+        let module = thaw_parser::parse_typescript(
+            "function main(): void { const x: number = Number({ value: 1 }); }",
+        )
+        .unwrap();
         let err = lower_module(&module).unwrap_err();
-        assert!(err.contains("JSON"), "unexpected error: {err}");
+        assert!(
+            err.contains("only supported on a JSON value"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
