@@ -2809,22 +2809,35 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     out.push_str("};\n");
 
     out.push_str(
-        "function __thaw_bundle_require(key) {\n\
+        "function __thaw_bundle_target(map, spec) {\n\
+         \x20\x20if (Object.prototype.hasOwnProperty.call(map, spec)) return { key: map[spec], factory: map[spec] };\n\
+         \x20\x20var query = spec.indexOf('?');\n\
+         \x20\x20var fragment = spec.indexOf('#', 1);\n\
+         \x20\x20var suffixAt = query < 0 ? fragment : (fragment < 0 ? query : Math.min(query, fragment));\n\
+         \x20\x20if (suffixAt < 0) return null;\n\
+         \x20\x20var base = spec.slice(0, suffixAt);\n\
+         \x20\x20if (!Object.prototype.hasOwnProperty.call(map, base)) return null;\n\
+         \x20\x20var factory = map[base];\n\
+         \x20\x20return { key: factory + spec.slice(suffixAt), factory: factory };\n\
+         }\n\
+         function __thaw_bundle_require(key, factoryKey) {\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
+         \x20\x20\x20\x20factoryKey = factoryKey || key;\n\
          \x20\x20\x20\x20var mod = { exports: {} };\n\
          \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
-         \x20\x20\x20\x20var map = __thaw_bundle_require_maps[key] || {};\n\
+         \x20\x20\x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
          \x20\x20\x20\x20var localRequire = function(spec) {\n\
-         \x20\x20\x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(map, spec)) return __thaw_bundle_require(map[spec]);\n\
+         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
+         \x20\x20\x20\x20\x20\x20if (target) return __thaw_bundle_require(target.key, target.factory);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
          \x20\x20\x20\x20};\n\
          \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
-         \x20\x20\x20\x20\x20\x20if (!Object.prototype.hasOwnProperty.call(map, spec)) return Promise.resolve().then(function() { return require(spec); });\n\
-         \x20\x20\x20\x20\x20\x20var target = map[spec];\n\
-         \x20\x20\x20\x20\x20\x20var value = __thaw_bundle_require(target);\n\
-         \x20\x20\x20\x20\x20\x20return __thaw_bundle_cache[target].ready.then(function() { return value; });\n\
+         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
+         \x20\x20\x20\x20\x20\x20if (!target) return Promise.resolve().then(function() { return require(spec); });\n\
+         \x20\x20\x20\x20\x20\x20var value = __thaw_bundle_require(target.key, target.factory);\n\
+         \x20\x20\x20\x20\x20\x20return __thaw_bundle_cache[target.key].ready.then(function() { return value; });\n\
          \x20\x20\x20\x20};\n\
-         \x20\x20\x20\x20var initialized = __thaw_bundle_factories[key](mod, mod.exports, localRequire, localRequireAsync);\n\
+         \x20\x20\x20\x20var initialized = __thaw_bundle_factories[factoryKey](mod, mod.exports, localRequire, localRequireAsync);\n\
          \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
@@ -4475,7 +4488,11 @@ mod tests {
                 fs::write(dependency.join("features/math.js"), "exports.value = 44;").unwrap();
             } else {
                 fs::create_dir_all(dependency.join("lib/tools")).unwrap();
-                fs::write(dependency.join("lib/tool.js"), "exports.value = 45;").unwrap();
+                fs::write(
+                    dependency.join("lib/tool.js"),
+                    "globalThis.__thawDeepIdentity = (globalThis.__thawDeepIdentity || 44) + 1; exports.value = globalThis.__thawDeepIdentity;",
+                )
+                .unwrap();
                 fs::write(dependency.join("lib/tools/index.js"), "exports.value = 46;").unwrap();
             }
         }
@@ -4500,6 +4517,9 @@ mod tests {
             (r#"["dep-a/feature"]"#, "43"),
             (r#"["dep-a/features/math"]"#, "44"),
             (r#"["dep-b/lib/tool"]"#, "45"),
+            (r#"["dep-b/lib/tool?raw"]"#, "46"),
+            (r#"["dep-b/lib/tool?raw"]"#, "46"),
+            (r#"["dep-b/lib/tool#part"]"#, "47"),
             (r#"["dep-b/lib/tools"]"#, "46"),
         ] {
             let args = CString::new(args).unwrap();

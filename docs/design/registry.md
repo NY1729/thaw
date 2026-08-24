@@ -1030,7 +1030,8 @@ attributeを明示エラーにする。dynamic importの第2引数も`{with:{typ
 実際にinstallされたpackage rootも候補mapへ収録する。各依存のconditional exportsから
 exact subpathと実fileへ展開できるwildcard subpathも同じmapへ加える。`exports` fieldを
 持たない依存はinstall済みJS/JSON fileを走査し、拡張子省略とdirectory indexを含むdeep
-subpathも候補mapへ加える。user moduleの
+subpathも候補mapへ加える。実行時のquery/fragmentはbase候補を解決した上でsuffix込みの
+cache keyを作り、同じURLは再利用しつつ異なるURLを別instanceとして初期化する。user moduleの
 `import.meta.url`はsourceごとの絶対`file://` URLへ変換する。star exportは明示exportを
 優先し、異なるbindingの曖昧性をbarrel越しに伝播してimport時に診断する。未宣言packageや
 exportsに現れず実行時に組み立てる未知のdeep subpathはまだ対象外である。user moduleの静的なrelative/absolute
