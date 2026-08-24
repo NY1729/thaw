@@ -14,7 +14,7 @@ use std::io::Write;
 use std::os::fd::FromRawFd;
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -77,6 +77,7 @@ static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
+static NEXT_SYMBOL_ID: AtomicU64 = AtomicU64::new(1);
 static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 
 pub struct ThreadsafeFunction {
@@ -183,8 +184,26 @@ fn async_worker(pool: Arc<AsyncPool>) {
 pub struct Function {
     callback: NapiCallback,
     data: *mut c_void,
-    properties: HashMap<String, NapiValue>,
+    properties: HashMap<PropertyKey, NapiValue>,
     _thaw_bridge: Option<Arc<ThawCallbackBridge>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum PropertyKey {
+    String(String),
+    Symbol(u64),
+}
+
+impl From<String> for PropertyKey {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for PropertyKey {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
 }
 
 struct ThawCallbackBridge {
@@ -203,7 +222,7 @@ pub enum Value {
         words: Vec<u64>,
     },
     String(String),
-    Object(HashMap<String, NapiValue>),
+    Object(HashMap<PropertyKey, NapiValue>),
     Array(Vec<NapiValue>),
     Buffer(Vec<u8>),
     ExternalBuffer {
@@ -231,7 +250,10 @@ pub enum Value {
         byte_offset: usize,
     },
     External(*mut c_void),
-    Symbol(String),
+    Symbol {
+        id: u64,
+        description: String,
+    },
     Function(Function),
     Promise(Rc<RefCell<PromiseState>>),
     Error(String),
@@ -293,14 +315,14 @@ pub struct Env {
     exception: Option<NapiValue>,
     wraps: HashMap<usize, WrapRecord>,
     instances: HashMap<usize, usize>,
-    accessors: HashMap<(usize, String), Accessor>,
+    accessors: HashMap<(usize, PropertyKey), Accessor>,
     finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
     external_memory: i64,
     sealed_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
-    property_attributes: HashMap<(usize, String), u32>,
+    property_attributes: HashMap<(usize, PropertyKey), u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -484,25 +506,24 @@ fn is_object_value(value: &Value) -> bool {
     )
 }
 
-unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &str) -> Option<Accessor> {
-    if let Some(accessor) = env.as_ref().and_then(|env| {
-        env.accessors
-            .get(&(object as usize, name.to_string()))
-            .copied()
-    }) {
+unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &PropertyKey) -> Option<Accessor> {
+    if let Some(accessor) = env
+        .as_ref()
+        .and_then(|env| env.accessors.get(&(object as usize, name.clone())).copied())
+    {
         return Some(accessor);
     }
     HOST.with(|host| {
         host.borrow().module_envs.iter().find_map(|module_env| {
             module_env
                 .accessors
-                .get(&(object as usize, name.to_string()))
+                .get(&(object as usize, name.clone()))
                 .copied()
         })
     })
 }
 
-unsafe fn find_accessors(env: NapiEnv, object: NapiValue) -> Vec<(String, Accessor)> {
+unsafe fn find_accessors(env: NapiEnv, object: NapiValue) -> Vec<(PropertyKey, Accessor)> {
     let from = |env: &Env| {
         env.accessors
             .iter()
@@ -598,8 +619,10 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
                 if let Value::Function(function) =
                     value_ref(*value).map_err(|_| "invalid export value")?
                 {
-                    functions.push((name.clone(), function.clone()));
-                    exported_values.push((name.clone(), *value));
+                    if let PropertyKey::String(name) = name {
+                        functions.push((name.clone(), function.clone()));
+                        exported_values.push((name.clone(), *value));
+                    }
                 }
             }
         }
@@ -774,7 +797,7 @@ fn value_from_json(env: &mut Env, json: &JsonValue) -> NapiValue {
             }
             let values = values
                 .iter()
-                .map(|(key, value)| (key.clone(), value_from_json(env, value)))
+                .map(|(key, value)| (key.clone().into(), value_from_json(env, value)))
                 .collect();
             env.alloc(Value::Object(values))
         }
@@ -789,9 +812,8 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         Value::Number(value) | Value::Date(value) => serde_json::Number::from_f64(*value)
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),
-        Value::String(value) | Value::Error(value) | Value::Symbol(value) => {
-            JsonValue::String(value.clone())
-        }
+        Value::String(value) | Value::Error(value) => JsonValue::String(value.clone()),
+        Value::Symbol { .. } => return Err("cannot JSON-encode a Symbol".into()),
         Value::Array(values) => JsonValue::Array(
             values
                 .iter()
@@ -801,7 +823,12 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         Value::Object(values) => JsonValue::Object(
             values
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), json_from_value(*value)?)))
+                .filter_map(|(key, value)| match key {
+                    PropertyKey::String(key) => {
+                        Some(json_from_value(*value).map(|value| (key.clone(), value)))
+                    }
+                    PropertyKey::Symbol(_) => None,
+                })
                 .collect::<Result<_, String>>()?,
         ),
         Value::Buffer(values) => {
@@ -1734,7 +1761,10 @@ pub unsafe extern "C" fn napi_create_symbol(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env.alloc(Value::Symbol(description));
+    let value = env.alloc(Value::Symbol {
+        id: NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed),
+        description,
+    });
     write_value(out, value)
 }
 
@@ -1875,6 +1905,7 @@ pub unsafe extern "C" fn napi_set_named_property(
     let Ok(name) = text(name) else {
         return NAPI_INVALID_ARG;
     };
+    let name = PropertyKey::String(name);
     let accessor = find_accessor(env, object, &name);
     if let Some(setter) = accessor.and_then(|accessor| accessor.setter) {
         let mut info = CallbackInfo {
@@ -1944,6 +1975,7 @@ pub unsafe extern "C" fn napi_get_named_property(
     let Ok(name) = text(name) else {
         return NAPI_INVALID_ARG;
     };
+    let name = PropertyKey::String(name);
     let value = match value_ref(object) {
         Ok(Value::Object(values)) => values.get(&name).copied(),
         Ok(Value::Function(function)) => function.properties.get(&name).copied(),
@@ -1974,10 +2006,83 @@ pub unsafe extern "C" fn napi_get_named_property(
     }
 }
 
-unsafe fn property_key(value: NapiValue) -> Result<String, NapiStatus> {
+unsafe fn property_key(value: NapiValue) -> Result<PropertyKey, NapiStatus> {
     match value_ref(value) {
-        Ok(Value::String(value) | Value::Symbol(value)) => Ok(value.clone()),
+        Ok(Value::String(value)) => Ok(PropertyKey::String(value.clone())),
+        Ok(Value::Symbol { id, .. }) => Ok(PropertyKey::Symbol(*id)),
         _ => Err(NAPI_STRING_EXPECTED),
+    }
+}
+
+unsafe fn set_property_key(
+    env: NapiEnv,
+    object: NapiValue,
+    key: PropertyKey,
+    value: NapiValue,
+) -> NapiStatus {
+    if let PropertyKey::String(name) = &key {
+        let Ok(name) = CString::new(name.as_str()) else {
+            return NAPI_INVALID_ARG;
+        };
+        return napi_set_named_property(env, object, name.as_ptr(), value);
+    }
+    let exists = match value_ref(object) {
+        Ok(Value::Object(values)) => values.contains_key(&key),
+        Ok(Value::Function(function)) => function.properties.contains_key(&key),
+        _ => return NAPI_INVALID_ARG,
+    };
+    let Some(env_ref) = env.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    let writable = env_ref
+        .property_attributes
+        .get(&(object as usize, key.clone()))
+        .map(|attributes| attributes & NAPI_WRITABLE != 0)
+        .unwrap_or(true);
+    if env_ref.frozen_objects.contains(&(object as usize))
+        || (exists && !writable)
+        || (env_ref.sealed_objects.contains(&(object as usize)) && !exists)
+    {
+        return NAPI_GENERIC_FAILURE;
+    }
+    match object.as_mut() {
+        Some(Value::Object(values)) => {
+            values.insert(key.clone(), value);
+        }
+        Some(Value::Function(function)) => {
+            function.properties.insert(key.clone(), value);
+        }
+        _ => return NAPI_INVALID_ARG,
+    }
+    if !exists {
+        if let Ok(env) = env_mut(env) {
+            env.property_attributes
+                .insert((object as usize, key), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+        }
+    }
+    NAPI_OK
+}
+
+unsafe fn get_property_key(
+    env: NapiEnv,
+    object: NapiValue,
+    key: &PropertyKey,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if let PropertyKey::String(name) = key {
+        let Ok(name) = CString::new(name.as_str()) else {
+            return NAPI_INVALID_ARG;
+        };
+        return napi_get_named_property(env, object, name.as_ptr(), out);
+    }
+    let value = match value_ref(object) {
+        Ok(Value::Object(values)) => values.get(key).copied(),
+        Ok(Value::Function(function)) => function.properties.get(key).copied(),
+        _ => return NAPI_INVALID_ARG,
+    };
+    match value {
+        Some(value) => write_value(out, value),
+        None => napi_get_undefined(env, out),
     }
 }
 
@@ -1991,11 +2096,7 @@ pub unsafe extern "C" fn napi_set_property(
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
-    let key = match CString::new(key) {
-        Ok(key) => key,
-        Err(_) => return NAPI_INVALID_ARG,
-    };
-    napi_set_named_property(env, object, key.as_ptr(), value)
+    set_property_key(env, object, key, value)
 }
 
 #[no_mangle]
@@ -2008,11 +2109,7 @@ pub unsafe extern "C" fn napi_get_property(
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
-    let key = match CString::new(key) {
-        Ok(key) => key,
-        Err(_) => return NAPI_INVALID_ARG,
-    };
-    napi_get_named_property(env, object, key.as_ptr(), out)
+    get_property_key(env, object, &key, out)
 }
 
 #[no_mangle]
@@ -2119,6 +2216,7 @@ pub unsafe extern "C" fn napi_has_named_property(
     let Ok(name) = text(name) else {
         return NAPI_INVALID_ARG;
     };
+    let name = PropertyKey::String(name);
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -2459,7 +2557,10 @@ pub unsafe extern "C" fn napi_new_instance(
     let Ok(host_env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let prototype = function.properties.get("prototype").copied();
+    let prototype = function
+        .properties
+        .get(&PropertyKey::String("prototype".into()))
+        .copied();
     let properties = prototype
         .and_then(|value| match value_ref(value) {
             Ok(Value::Object(properties)) => Some(properties.clone()),
@@ -2658,7 +2759,8 @@ pub unsafe extern "C" fn napi_coerce_to_string(
         Ok(Value::Null) => "null".into(),
         Ok(Value::Bool(value)) => value.to_string(),
         Ok(Value::Number(value)) => value.to_string(),
-        Ok(Value::String(value) | Value::Symbol(value) | Value::Error(value)) => value.clone(),
+        Ok(Value::String(value) | Value::Error(value)) => value.clone(),
+        Ok(Value::Symbol { description, .. }) => description.clone(),
         Ok(Value::Array(_)) => "".into(),
         Ok(_) => "[object Object]".into(),
         Err(status) => return status,
@@ -2880,8 +2982,21 @@ pub unsafe extern "C" fn napi_get_property_names(
         return NAPI_INVALID_ARG;
     }
     let mut names = match value_ref(object) {
-        Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
-        Ok(Value::Function(function)) => function.properties.keys().cloned().collect::<Vec<_>>(),
+        Ok(Value::Object(properties)) => properties
+            .keys()
+            .filter_map(|key| match key {
+                PropertyKey::String(name) => Some(name.clone()),
+                PropertyKey::Symbol(_) => None,
+            })
+            .collect::<Vec<_>>(),
+        Ok(Value::Function(function)) => function
+            .properties
+            .keys()
+            .filter_map(|key| match key {
+                PropertyKey::String(name) => Some(name.clone()),
+                PropertyKey::Symbol(_) => None,
+            })
+            .collect::<Vec<_>>(),
         Ok(Value::Array(values)) => (0..values.len()).map(|index| index.to_string()).collect(),
         _ => return NAPI_INVALID_ARG,
     };
@@ -2905,7 +3020,9 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
     let mut names = match value_ref(object) {
         Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
         Ok(Value::Function(function)) => function.properties.keys().cloned().collect(),
-        Ok(Value::Array(values)) => (0..values.len()).map(|index| index.to_string()).collect(),
+        Ok(Value::Array(values)) => (0..values.len())
+            .map(|index| PropertyKey::String(index.to_string()))
+            .collect(),
         _ => Vec::new(),
     };
     names.extend(
@@ -2986,7 +3103,7 @@ pub unsafe extern "C" fn napi_typeof(_env: NapiEnv, value: NapiValue, out: *mut 
         Ok(Value::Bool(_)) => 2,
         Ok(Value::Number(_)) => 3,
         Ok(Value::String(_)) => 4,
-        Ok(Value::Symbol(_)) => 5,
+        Ok(Value::Symbol { .. }) => 5,
         Ok(Value::Function(_)) => 7,
         Ok(Value::BigInt { .. }) => 9,
         Ok(_) => 6,
@@ -4539,6 +4656,74 @@ mod tests {
         EXTERNAL_MEMORY_FINALIZED.fetch_add(1, Ordering::AcqRel);
     }
 
+    #[test]
+    fn symbols_have_unique_identity_and_property_namespace() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut description = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, c"same".as_ptr(), 4, &mut description),
+                NAPI_OK
+            );
+            let mut first = ptr::null_mut();
+            let mut second = ptr::null_mut();
+            assert_eq!(
+                napi_create_symbol(env_ptr, description, &mut first),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_create_symbol(env_ptr, description, &mut second),
+                NAPI_OK
+            );
+            let mut equal = false;
+            assert_eq!(
+                napi_strict_equals(env_ptr, first, first, &mut equal),
+                NAPI_OK
+            );
+            assert!(equal);
+            assert_eq!(
+                napi_strict_equals(env_ptr, first, second, &mut equal),
+                NAPI_OK
+            );
+            assert!(!equal);
+
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            let string_value = env.alloc(Value::Number(1.0));
+            let first_value = env.alloc(Value::Number(2.0));
+            let second_value = env.alloc(Value::Number(3.0));
+            assert_eq!(
+                napi_set_named_property(env_ptr, object, c"same".as_ptr(), string_value),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_set_property(env_ptr, object, first, first_value),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_set_property(env_ptr, object, second, second_value),
+                NAPI_OK
+            );
+            for (key, expected) in [(first, first_value), (second, second_value)] {
+                let mut actual = ptr::null_mut();
+                assert_eq!(
+                    napi_get_property(env_ptr, object, key, &mut actual),
+                    NAPI_OK
+                );
+                assert_eq!(actual, expected);
+                let mut present = false;
+                assert_eq!(
+                    napi_has_own_property(env_ptr, object, key, &mut present),
+                    NAPI_OK
+                );
+                assert!(present);
+            }
+            let json = json_from_value(object).unwrap();
+            assert_eq!(json, serde_json::json!({"same": 1.0}));
+        }
+    }
+
     fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
         ASYNC_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -5400,13 +5585,13 @@ mod tests {
                     continue;
                 };
                 let path = fields
-                    .get("path")
+                    .get(&PropertyKey::String("path".into()))
                     .and_then(|value| match value_ref(*value) {
                         Ok(Value::String(value)) => Some(value.clone()),
                         _ => None,
                     });
                 let kind = fields
-                    .get("type")
+                    .get(&PropertyKey::String("type".into()))
                     .and_then(|value| match value_ref(*value) {
                         Ok(Value::String(value)) => Some(value.clone()),
                         _ => None,

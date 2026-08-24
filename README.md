@@ -718,6 +718,9 @@ The workspace crates have narrow responsibilities:
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
+  Symbol values have identity independent of their descriptions and occupy a
+  property-key namespace distinct from strings; JSON conversion omits Symbol
+  keys in the same way as JavaScript.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
