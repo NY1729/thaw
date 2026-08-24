@@ -492,6 +492,19 @@ pub fn bundle(
                         _ => return Err("default class exports are not supported yet".to_string()),
                     }
                 }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(export)) => {
+                    let Expr::Ident(ident) = export.expr.as_ref() else {
+                        return Err(
+                            "default export expressions must reference a top-level declaration"
+                                .to_string(),
+                        );
+                    };
+                    let original = ident.sym.to_string();
+                    let target = names.get(&original).ok_or_else(|| {
+                        format!("cannot default-export unknown name `{original}`")
+                    })?;
+                    public.insert("default".to_string(), target.clone());
+                }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
                     let specifier = export.src.value.as_str().ok_or("invalid export-all")?;
                     let dependency_exports = modules[index]
