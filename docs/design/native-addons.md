@@ -64,7 +64,9 @@ structural object overloadを選択する。直線的な`=`代入はlocal変数�
 value、class instance、callback情報だけを保持する。`else`省略時は未変更の入力経路と
 joinする。`while`とclassic `for`はbody／update後の状態を0回実行経路とjoinし、iteration
 で変化しない情報だけを保持する。`do/while`、`for-in`、`for-of`、switch、exception flowの
-joinは引き続き残課題である。
+うち前3構文はHIR lowering自体が未対応である。`try/catch`はtryの入口と通常出口で一致する
+情報だけをcatch入口へ渡し、通常／catch出口をjoinする。`finally`はjoin後の全継続経路へ
+適用し、新しい情報を確立できる。switch flowのjoinは引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
