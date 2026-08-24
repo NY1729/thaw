@@ -3214,8 +3214,13 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         input.as_ref().clone()
                     };
+                    let callback_params = if !on_rejected && callback_input == HirType::Void {
+                        Vec::new()
+                    } else {
+                        vec![callback_input]
+                    };
                     let callback =
-                        self.lower_promise_callback(&callback.expr, &[callback_input], None)?;
+                        self.lower_promise_callback(&callback.expr, &callback_params, None)?;
                     let HirType::Function(_, callback_output) = self.infer_expr_type(&callback)?
                     else {
                         unreachable!()
@@ -3224,9 +3229,6 @@ impl<'a> FnLowerer<'a> {
                         HirType::Promise(inner) => (inner.as_ref().clone(), true),
                         output => (output.clone(), false),
                     };
-                    if output == HirType::Void {
-                        return Err("Promise continuations must return a value".into());
-                    }
                     if on_rejected && output != *input {
                         return Err(format!(
                             "`.catch` callback resolves to {output:?}, expected {:?}",
@@ -4806,6 +4808,28 @@ mod tests {
             HirType::Function(resolve_params, ret)
                 if resolve_params.is_empty() && ret.as_ref() == &HirType::Void
         ));
+    }
+
+    #[test]
+    fn lowers_void_promise_continuations() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                await new Promise<void>((resolve, reject) => resolve()).then(() => {});
+                await new Promise<void>((resolve, reject) => reject("failure")).catch(error => {
+                    console.log(error);
+                });
+            }"#,
+        );
+        assert_eq!(program.functions[0].body.len(), 2);
+        for stmt in &program.functions[0].body {
+            let HirStmt::Expr(HirExpr::Await(inner)) = stmt else {
+                panic!("expected awaited continuation");
+            };
+            assert!(matches!(
+                inner.as_ref(),
+                HirExpr::PromiseThen(_, _, HirType::Void, HirType::Void, _, false)
+            ));
+        }
     }
 
     #[test]
