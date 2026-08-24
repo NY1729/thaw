@@ -837,6 +837,8 @@ Generic named and Symbol properties now work across arrays, buffers, array-buffe
 views, promises, errors, and dates with descriptors, enumeration, and integrity levels.
 Numeric property descriptors participate in the same writable, enumerable, and
 configurable name filters as string and Symbol properties.
+Property and element deletion accepts an omitted result and distinguishes own
+sealed properties from inherited or missing keys.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
