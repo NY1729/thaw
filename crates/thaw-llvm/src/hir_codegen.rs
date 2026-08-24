@@ -7199,7 +7199,29 @@ impl<'ctx> HirCompiler<'ctx> {
                 .any(|(name, ty)| name == field && ty == &HirType::Str),
             HirExpr::Assign(_, value) => self.expr_is_string(value),
             HirExpr::Call(callee, _) => match callee.as_ref() {
-                HirExpr::Var(name) => self.function_return_types.get(name) == Some(&HirType::Str),
+                HirExpr::Var(name) => {
+                    self.function_return_types.get(name) == Some(&HirType::Str)
+                        || matches!(
+                            name.as_str(),
+                            "__thaw_string_concat"
+                                | "__thaw_bool_to_string"
+                                | "__thaw_number_to_string"
+                                | "__thaw_number_array_to_string"
+                                | "__thaw_string_array_to_string"
+                                | "__thaw_bool_array_to_string"
+                                | "__thaw_object_array_to_string"
+                                | "__thaw_object_to_string"
+                                | "__thaw_number_array_join"
+                                | "__thaw_string_array_join"
+                                | "__thaw_bool_array_join"
+                                | "__thaw_object_array_join"
+                                | "__thaw_string_trim"
+                                | "__thaw_string_trim_start"
+                                | "__thaw_string_trim_end"
+                                | "fetch"
+                                | "JSON.stringify"
+                        )
+                }
                 HirExpr::Lambda(_, _, ret, _) => ret == &HirType::Str,
                 _ => false,
             },
@@ -11456,6 +11478,26 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "string_trim"),
             "receiver-evaluated\nthaw\ntrue\ntrue\ntrue\nawaited-trim\ndone\n"
+        );
+    }
+
+    #[test]
+    fn compares_builtin_string_results_by_contents() {
+        let source = r#"
+            function main(): void {
+                console.log(" x ".trim() === "x");
+                console.log(" x ".trim() !== "x");
+                console.log(String(42) === "42");
+                console.log(("a" + "b") === "ab");
+                const values: number[] = [1, 2];
+                console.log(values.join("-") === "1-2");
+                console.log(values.toString() === "1,2");
+                console.log(JSON.stringify(JSON.parse("{\"x\":1}")) === "{\"x\":1}");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "builtin_string_equality"),
+            "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\n"
         );
     }
 
