@@ -58,6 +58,8 @@ pub enum BinOp {
     ZeroFillRShift,
     Lt,
     Gt,
+    LtEq,
+    GtEq,
     EqEqEq,
 }
 

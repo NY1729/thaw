@@ -354,6 +354,9 @@ The workspace crates have narrow responsibilities:
   across number, string and boolean operands, including `NaN`, while preserving
   left-to-right single evaluation and awaited operands; same-typed values keep
   the existing strict-layout comparison
+- Primitive `<`, `>`, `<=` and `>=` compare two strings in JavaScript UTF-16
+  code-unit order; other number/string/boolean combinations use numeric
+  conversion, preserve `NaN`'s unordered result, and support awaited operands
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements

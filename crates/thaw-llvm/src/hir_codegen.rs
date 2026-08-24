@@ -428,6 +428,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let strcmp_type = i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         self.module
             .add_function("strcmp", strcmp_type, Some(Linkage::External));
+        self.module
+            .add_function("thaw_string_compare", strcmp_type, Some(Linkage::External));
         let memcpy_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false);
         self.module
             .add_function("memcpy", memcpy_type, Some(Linkage::External));
@@ -4796,6 +4798,39 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn compile_string_comparison(
+        &mut self,
+        args: &[HirExpr],
+        predicate: IntPredicate,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [left, right] = args else {
+            return Err("string comparison expects two operands".to_string());
+        };
+        let left = self.compile_expr(left)?.into_pointer_value();
+        let right = self.compile_expr(right)?.into_pointer_value();
+        let compared = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_string_compare").unwrap(),
+                &[left.into(), right.into()],
+                "string_compare",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("strcmp returned no value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                predicate,
+                compared,
+                self.context.i32_type().const_zero(),
+                "string_relation",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -6895,6 +6930,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_float_compare(FloatPredicate::OGT, lhs_val, rhs_val, "gttmp")
                 .map(Into::into)
                 .map_err(|e| e.to_string()),
+            BinOp::LtEq => self
+                .builder
+                .build_float_compare(FloatPredicate::OLE, lhs_val, rhs_val, "letmp")
+                .map(Into::into)
+                .map_err(|e| e.to_string()),
+            BinOp::GtEq => self
+                .builder
+                .build_float_compare(FloatPredicate::OGE, lhs_val, rhs_val, "getmp")
+                .map(Into::into)
+                .map_err(|e| e.to_string()),
             BinOp::EqEqEq => unreachable!(),
         }
     }
@@ -6953,6 +6998,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     "Number(string)",
                 )
             }
+            "__thaw_string_lt" => return self.compile_string_comparison(args, IntPredicate::SLT),
+            "__thaw_string_gt" => return self.compile_string_comparison(args, IntPredicate::SGT),
+            "__thaw_string_lte" => return self.compile_string_comparison(args, IntPredicate::SLE),
+            "__thaw_string_gte" => return self.compile_string_comparison(args, IntPredicate::SGE),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10430,6 +10479,31 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "primitive_abstract_equality"),
             "left\nright\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\nawaited-equality\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_primitive_relational_comparisons_with_utf16_order() {
+        let source = r#"
+            async function delayed(value: string): Promise<string> {
+                await sleep(1);
+                console.log("awaited-relation");
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log("apple" < "banana");
+                console.log("same" <= "same");
+                console.log("z" > "a");
+                console.log("\u{10000}" < "\u{e000}");
+                console.log("10" < 2);
+                console.log(true >= "1");
+                console.log((0 / 0) <= 1);
+                console.log((await delayed("20")) > 3);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "primitive_relational"),
+            "true\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nawaited-relation\ntrue\n"
         );
     }
 
