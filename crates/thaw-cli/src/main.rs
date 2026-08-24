@@ -944,7 +944,9 @@ fn rewrite_external_class_methods(
     methods: &[ClassMethodRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{CallExpr, Callee, Expr, Lit, MemberProp, Pat, VarDeclarator};
+    use thaw_parser::ast::{
+        BinaryOp, CallExpr, Callee, Expr, Lit, MemberProp, Pat, UnaryOp, VarDeclarator,
+    };
     use thaw_parser::common::Spanned;
 
     if methods.is_empty() {
@@ -996,6 +998,74 @@ fn rewrite_external_class_methods(
             }
             Expr::Object(_) => Some(thaw_hir::HirType::Object(Vec::new())),
             Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
+            Expr::Paren(parenthesized) => source_expr_type(&parenthesized.expr, variables),
+            Expr::TsAs(assertion) => source_expr_type(&assertion.expr, variables),
+            Expr::TsTypeAssertion(assertion) => source_expr_type(&assertion.expr, variables),
+            Expr::Tpl(_) => Some(thaw_hir::HirType::Str),
+            Expr::Unary(unary) => match unary.op {
+                UnaryOp::Plus | UnaryOp::Minus
+                    if source_expr_type(&unary.arg, variables) == Some(thaw_hir::HirType::F64) =>
+                {
+                    Some(thaw_hir::HirType::F64)
+                }
+                UnaryOp::Bang => Some(thaw_hir::HirType::Bool),
+                _ => None,
+            },
+            Expr::Bin(binary) => {
+                let left = source_expr_type(&binary.left, variables);
+                let right = source_expr_type(&binary.right, variables);
+                match binary.op {
+                    BinaryOp::Add
+                        if left == Some(thaw_hir::HirType::Str)
+                            && right == Some(thaw_hir::HirType::Str) =>
+                    {
+                        Some(thaw_hir::HirType::Str)
+                    }
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Exp
+                        if left == Some(thaw_hir::HirType::F64)
+                            && right == Some(thaw_hir::HirType::F64) =>
+                    {
+                        Some(thaw_hir::HirType::F64)
+                    }
+                    BinaryOp::EqEq
+                    | BinaryOp::NotEq
+                    | BinaryOp::EqEqEq
+                    | BinaryOp::NotEqEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq => Some(thaw_hir::HirType::Bool),
+                    _ => None,
+                }
+            }
+            Expr::Cond(conditional) => {
+                let consequent = source_expr_type(&conditional.cons, variables);
+                let alternate = source_expr_type(&conditional.alt, variables);
+                (consequent == alternate).then_some(consequent).flatten()
+            }
+            Expr::Call(call) => match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(identifier) if identifier.sym == *"Number" => {
+                        Some(thaw_hir::HirType::F64)
+                    }
+                    Expr::Ident(identifier) if identifier.sym == *"String" => {
+                        Some(thaw_hir::HirType::Str)
+                    }
+                    Expr::Ident(identifier) if identifier.sym == *"Boolean" => {
+                        Some(thaw_hir::HirType::Bool)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            Expr::Member(member) if matches!(&member.prop, MemberProp::Ident(name) if name.sym == *"length") => {
+                Some(thaw_hir::HirType::F64)
+            }
             _ => None,
         }
     }
@@ -3796,5 +3866,47 @@ mod tests {
             rewritten,
             "const box = new NativeBox(1); const n = 42; const s = \"hello\"; __set_number(box, n); __set_string(box, s); __set_number(box, 7); __set_string(box, \"world\");"
         );
+    }
+
+    #[test]
+    fn infers_external_overload_types_from_composed_expressions() {
+        let source = r#"const box = new NativeBox(1); const n = 20 + 22; const s = "hel" + "lo"; const b = n > 0; box.set(n); box.set(s); box.set(b); box.set(Number("7")); box.set(`value-${s}`); box.set(true ? "yes" : "no");"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_boolean".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Bool],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("__set_number(box, n)"));
+        assert!(rewritten.contains("__set_string(box, s)"));
+        assert!(rewritten.contains("__set_boolean(box, b)"));
+        assert!(rewritten.contains("__set_number(box, Number(\"7\"))"));
+        assert!(rewritten.contains("__set_string(box, `value-${s}`)"));
+        assert!(rewritten.contains("__set_string(box, true ? \"yes\" : \"no\")"));
     }
 }
