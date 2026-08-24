@@ -3256,6 +3256,10 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"
                     | "__thaw_object_array_index_of"
+                    | "__thaw_number_array_last_index_of"
+                    | "__thaw_string_array_last_index_of"
+                    | "__thaw_bool_array_last_index_of"
+                    | "__thaw_object_array_last_index_of"
                     | "__thaw_number_array_includes"
                     | "__thaw_string_array_includes"
                     | "__thaw_bool_array_includes"
@@ -6145,7 +6149,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if matches!(
                     property.sym.as_ref(),
-                    "indexOf" | "includes" | "startsWith" | "endsWith"
+                    "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith"
                 ) {
                     if !(1..=2).contains(&call.args.len()) {
                         return Err(format!(
@@ -6159,12 +6163,15 @@ impl<'a> FnLowerer<'a> {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == HirType::Str {
+                        if property.sym == *"lastIndexOf" {
+                            return Err("string `.lastIndexOf()` is not implemented yet".into());
+                        }
                         let needle = self.lower_expr(&call.args[0].expr)?;
                         let needle = self.coerce_primitive_to_string(needle)?;
                         let position = if let Some(argument) = call.args.get(1) {
                             let value = self.lower_expr(&argument.expr)?;
                             self.coerce_primitive_to_number(value)?
-                        } else if property.sym == *"endsWith" {
+                        } else if property.sym == *"endsWith" || property.sym == *"lastIndexOf" {
                             HirExpr::Lit(HirLit::F64(f64::INFINITY))
                         } else {
                             HirExpr::Lit(HirLit::F64(0.0))
@@ -6198,6 +6205,8 @@ impl<'a> FnLowerer<'a> {
                     let from_index = if let Some(argument) = call.args.get(1) {
                         let value = self.lower_expr(&argument.expr)?;
                         self.coerce_primitive_to_number(value)?
+                    } else if property.sym == *"lastIndexOf" {
+                        HirExpr::Lit(HirLit::F64(f64::INFINITY))
                     } else {
                         HirExpr::Lit(HirLit::F64(0.0))
                     };
@@ -6237,10 +6246,10 @@ impl<'a> FnLowerer<'a> {
                             ))
                         }
                     };
-                    let suffix = if property.sym == *"includes" {
-                        "includes"
-                    } else {
-                        "index_of"
+                    let suffix = match property.sym.as_ref() {
+                        "includes" => "includes",
+                        "lastIndexOf" => "last_index_of",
+                        _ => "index_of",
                     };
                     let receiver_name = format!("__thaw_search_array_{}", self.next_binding);
                     self.next_binding += 1;

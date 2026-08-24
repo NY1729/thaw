@@ -730,6 +730,26 @@ fn array_search_start(length: usize, from_index: f64) -> usize {
     }
 }
 
+fn array_search_end(length: usize, from_index: f64) -> Option<usize> {
+    if length == 0 || from_index == f64::NEG_INFINITY {
+        return None;
+    }
+    if from_index == f64::INFINITY {
+        return Some(length - 1);
+    }
+    let index = if from_index.is_nan() {
+        0.0
+    } else {
+        from_index.trunc()
+    };
+    if index >= 0.0 {
+        Some((index as usize).min(length - 1))
+    } else {
+        let relative = length as f64 + index;
+        (relative >= 0.0).then_some(relative as usize)
+    }
+}
+
 unsafe fn number_array_search(
     array: *const u8,
     needle: f64,
@@ -770,6 +790,29 @@ pub unsafe extern "C" fn thaw_number_array_includes(
     from_index: f64,
 ) -> u8 {
     (unsafe { number_array_search(array, needle, from_index, true) } >= 0.0).into()
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing `f64` element slots.
+pub unsafe extern "C" fn thaw_number_array_last_index_of(
+    array: *const u8,
+    needle: f64,
+    from_index: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let Some(start) = array_search_end(length, from_index) else {
+        return -1.0;
+    };
+    for index in (0..=start).rev() {
+        let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
+        if slot == needle {
+            return index as f64;
+        }
+    }
+    -1.0
 }
 
 unsafe fn string_array_search(array: *const u8, needle: *const c_char, from_index: f64) -> f64 {
@@ -820,6 +863,39 @@ pub unsafe extern "C" fn thaw_string_array_includes(
     (unsafe { string_array_search(array, needle, from_index) } >= 0.0).into()
 }
 
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing C-string pointer slots and
+/// `needle` must point to a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_array_last_index_of(
+    array: *const u8,
+    needle: *const c_char,
+    from_index: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    if needle.is_null() {
+        return -1.0;
+    }
+    let Some(start) = array_search_end(length, from_index) else {
+        return -1.0;
+    };
+    let needle = unsafe { CStr::from_ptr(needle) }.to_bytes();
+    for index in (0..=start).rev() {
+        let slot = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const c_char>()
+                .read_unaligned()
+        };
+        if !slot.is_null() && unsafe { CStr::from_ptr(slot) }.to_bytes() == needle {
+            return index as f64;
+        }
+    }
+    -1.0
+}
+
 unsafe fn bool_array_search(array: *const u8, needle: u8, from_index: f64) -> f64 {
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return -1.0;
@@ -855,6 +931,29 @@ pub unsafe extern "C" fn thaw_bool_array_includes(
     from_index: f64,
 ) -> u8 {
     (unsafe { bool_array_search(array, needle, from_index) } >= 0.0).into()
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing boolean element slots.
+pub unsafe extern "C" fn thaw_bool_array_last_index_of(
+    array: *const u8,
+    needle: u8,
+    from_index: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let Some(start) = array_search_end(length, from_index) else {
+        return -1.0;
+    };
+    for index in (0..=start).rev() {
+        let slot = unsafe { array.add(8 + index * 8).read() };
+        if (slot != 0) == (needle != 0) {
+            return index as f64;
+        }
+    }
+    -1.0
 }
 
 unsafe fn object_array_search(array: *const u8, needle: *const u8, from_index: f64) -> f64 {
@@ -895,6 +994,34 @@ pub unsafe extern "C" fn thaw_object_array_includes(
     from_index: f64,
 ) -> u8 {
     (unsafe { object_array_search(array, needle, from_index) } >= 0.0).into()
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing fixed-object pointer slots.
+pub unsafe extern "C" fn thaw_object_array_last_index_of(
+    array: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    let Some(start) = array_search_end(length, from_index) else {
+        return -1.0;
+    };
+    for index in (0..=start).rev() {
+        let slot = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const u8>()
+                .read_unaligned()
+        };
+        if slot == needle {
+            return index as f64;
+        }
+    }
+    -1.0
 }
 
 fn clamped_string_position(position: f64, length: usize) -> usize {
