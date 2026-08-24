@@ -12131,6 +12131,44 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_find_last_index() {
+        let source = r#"
+            interface Item { value: number; }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3, 2];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b", "a"];
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3, 2].findLastIndex((value, index, array) => {
+                    console.log(index);
+                    return value === 2 && array.length === 4;
+                }));
+                console.log([1, 2].findLastIndex(value => value === 9));
+                const empty: number[] = [];
+                console.log(empty.findLastIndex(() => true));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 2 };
+                console.log([first, second].findLastIndex(item => item.value < 3));
+                console.log(receiver().findLastIndex(value => value === 2, thisValue()));
+                console.log((await delayed()).findLastIndex(value => value === "a"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_find_last_index"),
+            "3\n3\n-1\n-1\n1\nreceiver\nthisArg\n3\nawaited\n2\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
