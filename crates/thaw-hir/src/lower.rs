@@ -5707,18 +5707,22 @@ impl<'a> FnLowerer<'a> {
                             &[(name, ty, value)],
                         );
                     }
-                    if object.sym == *"Object" && property.sym == *"keys" {
+                    if (object.sym == *"Object"
+                        && matches!(property.sym.as_ref(), "keys" | "getOwnPropertyNames"))
+                        || (object.sym == *"Reflect" && property.sym == *"ownKeys")
+                    {
+                        let label = format!("{}.{}", object.sym, property.sym);
                         let [argument] = call.args.as_slice() else {
-                            return Err("`Object.keys` expects exactly one argument".into());
+                            return Err(format!("`{label}` expects exactly one argument"));
                         };
                         if argument.spread.is_some() {
-                            return Err("Object.keys spread is not supported".into());
+                            return Err(format!("{label} spread is not supported"));
                         }
                         let value = self.lower_expr(&argument.expr)?;
                         let ty = self.infer_expr_type(&value)?;
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
-                                "`Object.keys` currently requires a fixed object, got {ty:?}"
+                                "`{label}` currently requires a fixed object, got {ty:?}"
                             ));
                         };
                         let keys = HirExpr::ArrayLit(
