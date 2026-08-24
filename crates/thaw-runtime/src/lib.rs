@@ -509,6 +509,21 @@ pub unsafe extern "C" fn thaw_array_slice(array: *const u8, start: f64, end: f64
 }
 
 #[no_mangle]
+/// Returns an arena-owned reversed shallow copy of a native array.
+///
+/// # Safety
+///
+/// `array` must point to a readable Thaw array whose elements occupy
+/// eight-byte slots.
+pub unsafe extern "C" fn thaw_array_to_reversed(array: *const u8) -> *mut u8 {
+    let output = unsafe { thaw_array_slice(array, 0.0, f64::INFINITY) };
+    if output.is_null() {
+        return output;
+    }
+    unsafe { thaw_array_reverse(output) }
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing `f64` element slots.
