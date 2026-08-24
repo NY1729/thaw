@@ -3802,16 +3802,16 @@ pub unsafe extern "C" fn napi_type_tag_object(
     type_tag: *const NapiTypeTag,
 ) -> NapiStatus {
     let Some(type_tag) = type_tag.as_ref().copied() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     if type_tag_for(env, object).is_some() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -3828,13 +3828,13 @@ pub unsafe extern "C" fn napi_check_object_type_tag(
     result: *mut bool,
 ) -> NapiStatus {
     let (Some(type_tag), Some(result)) = (type_tag.as_ref(), result.as_mut()) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     if env.is_null() {
         return NAPI_INVALID_ARG;
@@ -3855,14 +3855,15 @@ pub unsafe extern "C" fn napi_wrap(
     if !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env_ptr, NAPI_OBJECT_EXPECTED);
     }
     if env.wraps.contains_key(&(object as usize)) {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env_ptr, NAPI_GENERIC_FAILURE);
     }
     env.wraps.insert(
         object as usize,
@@ -3885,16 +3886,17 @@ pub unsafe extern "C" fn napi_unwrap(
     result: *mut *mut c_void,
 ) -> NapiStatus {
     if result.is_null() || !value_belongs_to_environment(env, object) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env_ptr, NAPI_OBJECT_EXPECTED);
     }
     let Some(wrap) = env.wraps.get(&(object as usize)) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     *result = wrap.data;
     NAPI_OK
@@ -3909,14 +3911,15 @@ pub unsafe extern "C" fn napi_remove_wrap(
     if !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env_ptr, NAPI_OBJECT_EXPECTED);
     }
     let Some(wrap) = env.wraps.remove(&(object as usize)) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     if !result.is_null() {
         *result = wrap.data;
@@ -3937,10 +3940,10 @@ pub unsafe extern "C" fn napi_add_finalizer(
         return NAPI_INVALID_ARG;
     }
     if !matches!(object.as_ref(), Some(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     if finalize.is_none() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -3963,8 +3966,9 @@ pub unsafe extern "C" fn node_api_post_finalizer(
     data: *mut c_void,
     hint: *mut c_void,
 ) -> NapiStatus {
+    let env_ptr = env;
     let (Ok(env), Some(finalize)) = (env_mut(env), finalize) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     env.posted_finalizers.push(FinalizeRecord {
         data,
@@ -3981,11 +3985,12 @@ pub unsafe extern "C" fn napi_set_instance_data(
     finalize: Option<NapiFinalize>,
     hint: *mut c_void,
 ) -> NapiStatus {
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if env.instance_data.is_some() {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env_ptr, NAPI_GENERIC_FAILURE);
     }
     env.instance_data = Some(FinalizeRecord {
         data,
@@ -4001,7 +4006,7 @@ pub unsafe extern "C" fn napi_get_instance_data(
     result: *mut *mut c_void,
 ) -> NapiStatus {
     if result.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -4019,15 +4024,16 @@ pub unsafe extern "C" fn napi_add_env_cleanup_hook(
     hook: Option<NapiCleanupHook>,
     data: *mut c_void,
 ) -> NapiStatus {
+    let env_ptr = env;
     let (Ok(env), Some(hook)) = (env_mut(env), hook) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     if env
         .cleanup_hooks
         .iter()
         .any(|record| record.hook as usize == hook as usize && record.data == data)
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     }
     env.cleanup_hooks.push(CleanupHookRecord { hook, data });
     NAPI_OK
@@ -4039,15 +4045,16 @@ pub unsafe extern "C" fn napi_remove_env_cleanup_hook(
     hook: Option<NapiCleanupHook>,
     data: *mut c_void,
 ) -> NapiStatus {
+    let env_ptr = env;
     let (Ok(env), Some(hook)) = (env_mut(env), hook) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     let Some(index) = env
         .cleanup_hooks
         .iter()
         .position(|record| record.hook as usize == hook as usize && record.data == data)
     else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     env.cleanup_hooks.remove(index);
     NAPI_OK
@@ -4060,8 +4067,9 @@ pub unsafe extern "C" fn napi_add_async_cleanup_hook(
     data: *mut c_void,
     result: *mut *mut AsyncCleanupHookHandle,
 ) -> NapiStatus {
+    let env_ptr = env;
     let (Ok(env_ref), Some(hook)) = (env_mut(env), hook) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env_ptr, NAPI_INVALID_ARG);
     };
     let mut handle = Box::new(AsyncCleanupHookHandle {
         env: env as usize,
@@ -4107,7 +4115,9 @@ pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
         1 => {
             ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_sub(1, Ordering::AcqRel);
         }
-        _ => return NAPI_INVALID_ARG,
+        _ => {
+            return record_status(handle_ref.env as NapiEnv, NAPI_INVALID_ARG);
+        }
     }
     NAPI_OK
 }
@@ -8700,12 +8710,17 @@ mod tests {
                 napi_type_tag_object(env_ptr, object, &other),
                 NAPI_INVALID_ARG
             );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
 
             let number = env.alloc(Value::Number(1.0));
             assert_eq!(
                 napi_type_tag_object(env_ptr, number, &tag),
                 NAPI_OBJECT_EXPECTED
             );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_OBJECT_EXPECTED);
             assert_eq!(
                 napi_check_object_type_tag(env_ptr, number, &tag, &mut matches),
                 NAPI_OBJECT_EXPECTED
@@ -9371,6 +9386,9 @@ mod tests {
                 ),
                 NAPI_OBJECT_EXPECTED
             );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_OBJECT_EXPECTED);
             let mut foreign_env = Env::new();
             let foreign = foreign_env.alloc(Value::Object(HashMap::new()));
             let mut actual = ptr::null_mut();
