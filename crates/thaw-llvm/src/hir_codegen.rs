@@ -8749,6 +8749,57 @@ mod tests {
     }
 
     #[test]
+    fn runs_multiple_object_spreads_once_in_source_order() {
+        let source = r#"
+            function makeX(): { x: number } {
+                console.log("left");
+                return { x: 7 };
+            }
+            function makeLabel(): { label: string } {
+                console.log("right");
+                return { label: "point" };
+            }
+            function main(): void {
+                const point: { x: number; label: string } = {
+                    ...makeX(),
+                    ...makeLabel()
+                };
+                console.log(point.x);
+                console.log(point.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "multiple_object_spreads"),
+            "left\nright\n7\npoint\n"
+        );
+    }
+
+    #[test]
+    fn runs_conditional_object_spread_once() {
+        let source = r#"
+            function left(): { value: number } {
+                console.log("left");
+                return { value: 7 };
+            }
+            function right(): { value: number } {
+                console.log("right");
+                return { value: 9 };
+            }
+            function main(): void {
+                const chooseLeft: boolean = true;
+                const config: { value: number } = {
+                    ...(chooseLeft ? left() : right())
+                };
+                console.log(config.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "conditional_object_spread"),
+            "left\n7\n"
+        );
+    }
+
+    #[test]
     fn compiles_interface_typed_object() {
         let source = r#"
             interface Point {
