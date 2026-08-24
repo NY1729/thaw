@@ -383,6 +383,10 @@ The workspace crates have narrow responsibilities:
 - `Math.round` implements JavaScript's ties-toward-positive-infinity rule,
   including negative-zero results between `-0.5` and zero, numeric coercion,
   non-finite values, single evaluation and awaited arguments
+- Global `parseFloat` and `parseInt` coerce native values before scanning the
+  longest valid numeric prefix. They support whitespace/sign handling,
+  incomplete exponents, infinity, radix inference and validation, signed zero,
+  trailing text, single evaluation and awaited arguments
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited

@@ -529,6 +529,14 @@ impl<'ctx> HirCompiler<'ctx> {
             string_to_number_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_parse_float",
+            string_to_number_type,
+            Some(Linkage::External),
+        );
+        let parse_int_type = f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false);
+        self.module
+            .add_function("thaw_parse_int", parse_int_type, Some(Linkage::External));
         let array_to_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         for name in [
             "thaw_number_array_to_string",
@@ -7308,6 +7316,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     "Number(string)",
                 )
             }
+            "__thaw_parse_float" => {
+                return self.compile_single_arg_call("thaw_parse_float", args, "parseFloat")
+            }
+            "__thaw_parse_int" => {
+                let [text, radix] = args else {
+                    return Err("parseInt expects text and radix operands".to_string());
+                };
+                let text = self.compile_expr(text)?;
+                let radix = self.compile_expr(radix)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_parse_int").unwrap(),
+                        &[text.into(), radix.into()],
+                        "parseInt",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("parseInt returned no value".to_string());
+            }
             "__thaw_string_lt" => return self.compile_string_comparison(args, IntPredicate::SLT),
             "__thaw_string_gt" => return self.compile_string_comparison(args, IntPredicate::SGT),
             "__thaw_string_lte" => return self.compile_string_comparison(args, IntPredicate::SLE),
@@ -11138,6 +11167,32 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "math_round"),
             "1\n2\n-1\n-2\ntrue\ntrue\ntrue\ntrue\nfalse\nawaited-round\n5\n"
+        );
+    }
+
+    #[test]
+    fn compiles_parse_float_and_parse_int() {
+        let source = r#"
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-parse");
+                return "101tail";
+            }
+            async function main(): Promise<void> {
+                console.log(parseFloat("  -12.5px"));
+                console.log(parseFloat("1e+"));
+                console.log(parseFloat(true));
+                console.log(parseInt("0x20"));
+                console.log(parseInt("11", 2));
+                console.log(parseInt("15px", "10"));
+                console.log(Number.isNaN(parseInt("10", 1)));
+                console.log((1 / parseInt("-0", 10)) < 0);
+                console.log(parseInt(await delayed(), 2));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "parse_float_int"),
+            "-12.5\n1\nnan\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n"
         );
     }
 

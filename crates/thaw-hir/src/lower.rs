@@ -3072,6 +3072,21 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string number conversion")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_parse_float" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("parseFloat expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "parseFloat operand")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_parse_int" => {
+                        let [text, radix] = args.as_slice() else {
+                            return Err("parseInt expects text and radix operands".into());
+                        };
+                        self.expect_type(&HirType::Str, text, "parseInt text")?;
+                        self.expect_type(&HirType::F64, radix, "parseInt radix")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_string_lt" | "__thaw_string_gt" | "__thaw_string_lte"
                     | "__thaw_string_gte" => {
                         if args.len() != 2 {
@@ -5647,6 +5662,48 @@ impl<'a> FnLowerer<'a> {
         // `Number`/`String`/`Boolean` convert a `Json` leaf to a concrete
         // value. Unlike `console.log` (whose codegen can disambiguate its
         // argument by LLVM value shape -- f64 vs. pointer), `Str`/`Array`/
+        if matches!(callee_name.as_str(), "parseFloat" | "parseInt") {
+            let expected = if callee_name == "parseFloat" {
+                1..=1
+            } else {
+                1..=2
+            };
+            if !expected.contains(&call.args.len()) {
+                return Err(format!(
+                    "`{callee_name}` expects one{} argument",
+                    if callee_name == "parseInt" {
+                        " or two"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if call.args.iter().any(|argument| argument.spread.is_some()) {
+                return Err("parse function spread is not supported".into());
+            }
+            let text = self.lower_expr(&call.args[0].expr)?;
+            let text = self.coerce_primitive_to_string(text)?;
+            let mut arguments = vec![text];
+            if callee_name == "parseInt" {
+                let radix = if let Some(argument) = call.args.get(1) {
+                    let value = self.lower_expr(&argument.expr)?;
+                    self.coerce_primitive_to_number(value)?
+                } else {
+                    HirExpr::Lit(HirLit::F64(0.0))
+                };
+                arguments.push(radix);
+            }
+            let builtin = if callee_name == "parseFloat" {
+                "__thaw_parse_float"
+            } else {
+                "__thaw_parse_int"
+            };
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var(builtin.to_string())),
+                arguments,
+            ));
+        }
+
         // `Object`/`Json` all share the same pointer representation, so
         // this has to be resolved here at lowering time using the
         // argument's inferred type, not deferred to codegen.
