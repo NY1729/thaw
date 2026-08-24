@@ -12488,6 +12488,52 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_flat_map() {
+        let source = r#"
+            interface Item { value: number; }
+            function expand(value: number, index: number, array: number[]): number[] {
+                console.log(index);
+                return [value, array.length];
+            }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["a", "b"];
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2].flatMap(expand).join(","));
+                const suffix: string = "!";
+                console.log(["a", "b"].flatMap(value => [value, value + suffix]).join("|"));
+                console.log([true, false].flatMap(value => [value, value]).join("-"));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 2 };
+                const items: Item[] = [first, second];
+                const copied: Item[] = items.flatMap(item => [item]);
+                copied[0].value = 9;
+                console.log(items[0].value);
+                const nested: number[][] = [1, 2].flatMap(value => [[value], [value + 10]]);
+                console.log(nested[2][0]);
+                const empty: number[] = [];
+                console.log(empty.flatMap(value => [value]).length);
+                console.log(receiver().flatMap(value => [value, value + 1], thisValue()).join(","));
+                console.log((await delayed()).flatMap(value => [value + value]).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_flat_map"),
+            "0\n1\n1,2,2,2\na|a!|b|b!\ntrue-true-false-false\n9\n2\n0\nreceiver\nthisArg\n1,2,2,3\nawaited\naa,bb\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
