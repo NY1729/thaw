@@ -523,6 +523,8 @@ nested/rest patternを保ったままnative closure ABIとasync continuationへ�
 static型がnull/undefinedを含まないnative valueのoptional member/computed accessとoptional callは、
 通常のaccess/callへ正規化する。awaited receiverも同じframe extractionを通る。nullish
 short-circuitはnative null/undefined表現の導入後に別途扱う。
+string literalを左辺とするfixed objectの`in`は静的field shapeからbooleanを決め、左右値を
+nested closureへ順に渡して副作用を保持する。awaited右辺も一度だけ評価する。
 
 ## 12. Promise constructorとcontinuation chain
 

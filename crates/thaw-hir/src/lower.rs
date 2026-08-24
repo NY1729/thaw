@@ -3180,6 +3180,29 @@ impl<'a> FnLowerer<'a> {
                 let lhs = self.lower_expr(&bin.left)?;
                 let rhs = self.lower_expr(&bin.right)?;
                 let value = match bin.op {
+                    BinaryOp::In => {
+                        let HirExpr::Lit(HirLit::Str(key)) = &lhs else {
+                            return Err("fixed object `in` keys must be string literals".into());
+                        };
+                        let HirType::Object(fields) = self.infer_expr_type(&rhs)? else {
+                            return Err("`in` currently requires a fixed-shape object".into());
+                        };
+                        let exists = fields.iter().any(|(name, _)| name == key);
+                        let left_name = format!("__thaw_in_key_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(left_name.clone(), HirType::Str);
+                        let right_type = HirType::Object(fields);
+                        let right_name = format!("__thaw_in_object_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(right_name.clone(), right_type.clone());
+                        self.wrap_call_argument_bindings(
+                            HirExpr::Lit(HirLit::Bool(exists)),
+                            &[
+                                (left_name, HirType::Str, lhs),
+                                (right_name, right_type, rhs),
+                            ],
+                        )?
+                    }
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
                         self.expect_type(&HirType::Bool, &lhs, "logical left operand")?;
                         self.expect_type(&HirType::Bool, &rhs, "logical right operand")?;
@@ -6132,6 +6155,27 @@ mod tests {
             &invoke.body[0],
             HirStmt::Return(Some(HirExpr::Call(_, _)))
         ));
+    }
+
+    #[test]
+    fn lowers_fixed_object_in_checks_with_operand_evaluation() {
+        let program = lower(
+            r#"function object(): { value: number } { return { value: 1 }; }
+            function main(): void {
+                console.log("value" in object());
+                console.log("missing" in object());
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(main.body.iter().all(|statement| matches!(
+            statement,
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::Call(_, _))
+        )));
     }
 
     #[test]

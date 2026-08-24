@@ -144,6 +144,8 @@ The workspace crates have narrow responsibilities:
   assignments, compound assignments, and updates; JSON accepts string keys
 - Optional member, computed-member, and function calls are accepted for native
   types whose static layout excludes `null`/`undefined`
+- String-literal `in` checks use fixed object shapes while still evaluating
+  both operands once in source order
 - Prefix and postfix `++`/`--` return the correct expression value and evaluate
   computed array and numeric object-field targets once, including awaited
   indexes and object expressions
