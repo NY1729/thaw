@@ -346,6 +346,9 @@ The workspace crates have narrow responsibilities:
 - Function calls evaluate direct synchronous and awaited arguments once in
   left-to-right order, including calls returning `void`; argument temporaries
   survive async frame suspension and resume before later arguments run
+- Eager binary operators preserve their left operand before a direct or nested
+  awaited right operand suspends, including arithmetic, comparison and nested
+  parenthesized expressions
 - `Boolean(...)` applies the same JavaScript truthiness rules to native
   booleans, numbers, strings, JSON and reference values, evaluating its
   synchronous or awaited argument exactly once

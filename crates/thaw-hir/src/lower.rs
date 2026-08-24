@@ -1603,6 +1603,80 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
     }
 }
 
+fn contains_await(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Await(_) | HirExpr::AwaitPromise(_, _) => true,
+        HirExpr::BinOp(_, left, right)
+        | HirExpr::Index(left, right)
+        | HirExpr::TypedIndex(left, right, _)
+        | HirExpr::JsonIndex(left, right) => contains_await(left) || contains_await(right),
+        HirExpr::Call(callee, args) => contains_await(callee) || args.iter().any(contains_await),
+        HirExpr::PromiseAll(values, _)
+        | HirExpr::PromiseAllTuple(values, _)
+        | HirExpr::PromiseRace(values, _)
+        | HirExpr::PromiseAny(values, _)
+        | HirExpr::PromiseAllSettled(values, _)
+        | HirExpr::FfiCall(_, values)
+        | HirExpr::DynamicCall(_, values)
+        | HirExpr::ArrayLit(values)
+        | HirExpr::ArrayConcat(values, _) => values.iter().any(contains_await),
+        HirExpr::PromiseAllArray(value, _)
+        | HirExpr::PromiseRaceArray(value, _)
+        | HirExpr::PromiseAnyArray(value, _)
+        | HirExpr::PromiseAllSettledArray(value, _)
+        | HirExpr::PromiseNew(value, _, _)
+        | HirExpr::Assign(_, value)
+        | HirExpr::ArrayLen(value)
+        | HirExpr::PropAccess(value, _, _)
+        | HirExpr::JsonGet(value, _)
+        | HirExpr::JsonAsNumber(value)
+        | HirExpr::JsonAsString(value)
+        | HirExpr::JsonAsBool(value) => contains_await(value),
+        HirExpr::PromiseThen(source, callback, _, _, _, _)
+        | HirExpr::PromiseFinally(source, callback, _, _) => {
+            contains_await(source) || contains_await(callback)
+        }
+        HirExpr::IndexAssign(array, index, value) => {
+            contains_await(array) || contains_await(index) || contains_await(value)
+        }
+        HirExpr::PropAssign(object, _, _, value) => contains_await(object) || contains_await(value),
+        HirExpr::ObjectLit(fields) => fields.iter().any(|(_, value)| contains_await(value)),
+        HirExpr::Block(stmts) => stmts.iter().any(stmt_contains_await),
+        // A closure body runs only when the closure is invoked, not when the
+        // function value is evaluated at this expression boundary.
+        HirExpr::Lambda(..)
+        | HirExpr::FunctionRef(..)
+        | HirExpr::Lit(_)
+        | HirExpr::Var(_)
+        | HirExpr::EnvVar(_) => false,
+    }
+}
+
+fn stmt_contains_await(stmt: &HirStmt) -> bool {
+    match stmt {
+        HirStmt::Expr(value)
+        | HirStmt::Return(Some(value))
+        | HirStmt::Let(_, _, value)
+        | HirStmt::Throw(value) => contains_await(value),
+        HirStmt::If(condition, then_body, else_body) => {
+            contains_await(condition)
+                || then_body.iter().any(stmt_contains_await)
+                || else_body.iter().any(stmt_contains_await)
+        }
+        HirStmt::While(condition, body) => {
+            contains_await(condition) || body.iter().any(stmt_contains_await)
+        }
+        HirStmt::Try(body, _, catch) => {
+            body.iter().any(stmt_contains_await) || catch.iter().any(stmt_contains_await)
+        }
+        HirStmt::Return(None)
+        | HirStmt::Break
+        | HirStmt::Continue
+        | HirStmt::BreakDepth(_)
+        | HirStmt::ContinueDepth(_) => false,
+    }
+}
+
 fn collect_stmt_bindings(stmts: &[HirStmt], names: &mut BTreeSet<Symbol>) {
     for stmt in stmts {
         match stmt {
@@ -3857,8 +3931,28 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Bin(bin) => {
-                let lhs = self.lower_expr(&bin.left)?;
-                let rhs = self.lower_expr(&bin.right)?;
+                let mut lhs = self.lower_expr(&bin.left)?;
+                let mut rhs = self.lower_expr(&bin.right)?;
+                let mut bindings = Vec::new();
+                if !matches!(
+                    bin.op,
+                    BinaryOp::In | BinaryOp::LogicalAnd | BinaryOp::LogicalOr
+                ) && contains_await(&rhs)
+                {
+                    let lhs_type = self.infer_expr_type(&lhs)?;
+                    let lhs_name = format!("__thaw_binary_left_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(lhs_name.clone(), lhs_type.clone());
+                    bindings.push((lhs_name.clone(), lhs_type, lhs));
+                    lhs = HirExpr::Var(lhs_name);
+
+                    let rhs_type = self.infer_expr_type(&rhs)?;
+                    let rhs_name = format!("__thaw_binary_right_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(rhs_name.clone(), rhs_type.clone());
+                    bindings.push((rhs_name.clone(), rhs_type, rhs));
+                    rhs = HirExpr::Var(rhs_name);
+                }
                 let value = match bin.op {
                     BinaryOp::In => {
                         let HirExpr::Lit(HirLit::Str(key)) = &lhs else {
@@ -3928,7 +4022,7 @@ impl<'a> FnLowerer<'a> {
                     ),
                 };
                 self.infer_expr_type(&value)?;
-                Ok(value)
+                self.wrap_call_argument_bindings(value, &bindings)
             }
 
             Expr::Unary(unary) => {
@@ -6487,10 +6581,8 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|arg| self.lower_expr(&arg.expr))
             .collect::<Result<Vec<_>, _>>()?;
-        let preserve_argument_order = call.args.iter().any(|arg| arg.spread.is_some())
-            || lowered
-                .iter()
-                .any(|value| matches!(value, HirExpr::Await(_) | HirExpr::AwaitPromise(_, _)));
+        let preserve_argument_order =
+            call.args.iter().any(|arg| arg.spread.is_some()) || lowered.iter().any(contains_await);
         for (arg, value) in call.args.iter().zip(lowered) {
             if !preserve_argument_order {
                 lowered_arguments.push(value);
