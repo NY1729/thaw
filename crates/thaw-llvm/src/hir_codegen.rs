@@ -327,7 +327,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
-            | HirExpr::TypedIndex(left, right, _) => {
+            | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _) => {
                 Self::expr_awaits_frame_source(left, frame_functions)
                     || Self::expr_awaits_frame_source(right, frame_functions)
             }
@@ -2774,7 +2775,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
-            | HirExpr::TypedIndex(left, right, _) => {
+            | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _) => {
                 Self::expr_awaits_named_async(left, frame_names)
                     || Self::expr_awaits_named_async(right, frame_names)
             }
@@ -2887,7 +2889,8 @@ impl<'ctx> HirCompiler<'ctx> {
         match expr {
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
-            | HirExpr::TypedIndex(left, right, _) => {
+            | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _) => {
                 if let Some(found) = self.extract_first_frame_await(left, temporary)? {
                     Ok(Some(found))
                 } else {
@@ -4896,6 +4899,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(llvm_ty, field_ptr, "field")
                     .map_err(|e| e.to_string())
             }
+            HirExpr::DynamicPropAccess(obj, key, fields, payload) => {
+                self.compile_dynamic_prop_access(obj, key, fields, payload)
+            }
             HirExpr::PropAssign(obj, object_ty, field, value) => {
                 let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
                 let val = self.compile_expr(value)?;
@@ -4907,6 +4913,107 @@ impl<'ctx> HirCompiler<'ctx> {
 
             other => Err(format!("Phase 1/2 codegen does not support {other:?} yet")),
         }
+    }
+
+    fn compile_dynamic_prop_access(
+        &mut self,
+        object: &HirExpr,
+        key: &HirExpr,
+        fields: &[(String, HirType)],
+        payload: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let object = self.compile_expr(object)?.into_pointer_value();
+        let key = self.compile_expr(key)?.into_pointer_value();
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or("dynamic property access is outside a function")?;
+        let optional_type = self.basic_type(&HirType::Optional(Box::new(payload.clone())))?;
+        let result_slot = self
+            .builder
+            .build_alloca(optional_type, "dynamic_property_result")
+            .map_err(|error| error.to_string())?;
+        let none = self.compile_optional_none(payload)?;
+        self.builder
+            .build_store(result_slot, none)
+            .map_err(|error| error.to_string())?;
+        let merge = self
+            .context
+            .append_basic_block(function, "dynamic_property_merge");
+        for (index, (name, _)) in fields.iter().enumerate() {
+            let matched = self
+                .context
+                .append_basic_block(function, "dynamic_property_match");
+            let next = self
+                .context
+                .append_basic_block(function, "dynamic_property_next");
+            let expected = self
+                .compile_expr(&HirExpr::Lit(HirLit::Str(name.clone())))?
+                .into_pointer_value();
+            let comparison = self
+                .builder
+                .build_call(
+                    self.module.get_function("strcmp").unwrap(),
+                    &[key.into(), expected.into()],
+                    "dynamic_property_compare",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("strcmp returned no value")?
+                .into_int_value();
+            let is_match = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    comparison,
+                    comparison.get_type().const_zero(),
+                    "dynamic_property_is_match",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_match, matched, next)
+                .map_err(|error| error.to_string())?;
+
+            self.builder.position_at_end(matched);
+            let field_pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        object,
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(object_field_offset(fields, index), false)],
+                        "dynamic_property_field",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let value = self
+                .builder
+                .build_load(
+                    self.basic_type(payload)?,
+                    field_pointer,
+                    "dynamic_property_value",
+                )
+                .map_err(|error| error.to_string())?;
+            let some = self.build_optional_value(value, payload, true)?;
+            self.builder
+                .build_store(result_slot, some)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(next);
+        }
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge);
+        self.builder
+            .build_load(optional_type, result_slot, "dynamic_property_optional")
+            .map_err(|error| error.to_string())
     }
 
     fn compile_optional(
@@ -8025,6 +8132,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .iter()
                 .find(|(name, _)| name == field)
                 .map(|(_, ty)| ty.clone()),
+            HirExpr::DynamicPropAccess(_, _, _, payload) => {
+                Some(HirType::Optional(Box::new(payload.clone())))
+            }
             HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::Lambda(_, params, ret, _) => Some(HirType::Function(
@@ -12583,6 +12693,36 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "static_computed_properties"),
             "1\n5\n6\nobject\n6\n5\nthaw\n"
+        );
+    }
+
+    #[test]
+    fn compiles_dynamic_uniform_object_reads_as_optional_values() {
+        let source = r#"
+            function makePoint(): { a: number; b: number } {
+                console.log("object");
+                return { a: 1, b: 2 };
+            }
+            function selectedKey(): string {
+                console.log("key");
+                return "b";
+            }
+            function missingKey(): string { return "missing"; }
+            async function asyncKey(): Promise<string> {
+                await sleep(1);
+                console.log("async-key");
+                return "a";
+            }
+            async function main(): Promise<void> {
+                console.log(makePoint()[selectedKey()]);
+                const point = { a: 1, b: 2 };
+                console.log(point[missingKey()]);
+                console.log(point[await asyncKey()]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "dynamic_computed_properties"),
+            "object\nkey\n2\nundefined\nasync-key\n1\n"
         );
     }
 
