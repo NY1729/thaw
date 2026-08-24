@@ -2832,6 +2832,17 @@ impl<'a> FnLowerer<'a> {
                         let name = match key {
                             PropName::Ident(ident) => ident.sym.to_string(),
                             PropName::Str(s) => s.value.to_string_lossy().into_owned(),
+                            PropName::Computed(computed) => match computed.expr.as_ref() {
+                                Expr::Lit(Lit::Str(value)) => {
+                                    value.value.to_string_lossy().into_owned()
+                                }
+                                _ => {
+                                    return Err(
+                                        "computed object literal keys must be string literals"
+                                            .to_string(),
+                                    )
+                                }
+                            },
                             _ => return Err("unsupported object literal key".to_string()),
                         };
                         Ok((name, self.lower_expr(value)?))
@@ -4346,6 +4357,34 @@ mod tests {
                 HirExpr::ObjectLit(vec![
                     ("x".into(), HirExpr::Var("x".into())),
                     ("label".into(), HirExpr::Var("label".into())),
+                ]),
+            )
+        );
+    }
+
+    #[test]
+    fn lowers_static_computed_object_literal_properties() {
+        let program = lower(
+            r#"function main(): void {
+                const point: { x: number; label: string } = {
+                    ["x"]: 1,
+                    ["label"]: "point"
+                };
+                console.log(point.label);
+            }"#,
+        );
+
+        assert_eq!(
+            program.functions[0].body[0],
+            HirStmt::Let(
+                "point".into(),
+                HirType::Object(vec![
+                    ("x".into(), HirType::F64),
+                    ("label".into(), HirType::Str),
+                ]),
+                HirExpr::ObjectLit(vec![
+                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
+                    ("label".into(), HirExpr::Lit(HirLit::Str("point".into()))),
                 ]),
             )
         );
