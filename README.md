@@ -164,6 +164,12 @@ The workspace crates have narrow responsibilities:
   wildcard substitutions in their targets are resolved in declaration order
 - Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
   modules backed by the same QuickJS polyfills used by npm dependencies
+- QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
+  `setInterval`/`clearInterval`, and `queueMicrotask`. Promise waits drive the
+  timer queue after pending microtasks, preserve timer registration order, and
+  forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
+  `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM
+  removal, and fatal decoding errors
 - `node:fs` exposes native synchronous UTF-8 `existsSync`, `readFileSync`,
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
 - `node:http` exposes native `serveOnce(port, body)` and

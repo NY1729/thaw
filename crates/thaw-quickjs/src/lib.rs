@@ -28,6 +28,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::time::Duration;
 
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
@@ -48,11 +49,147 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
         let (_, context) = slot.get_or_insert_with(|| {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
+            context.with(|ctx| {
+                ctx.eval::<(), _>(PLATFORM_GLOBALS)
+                    .expect("failed to install JavaScript platform globals");
+            });
             (runtime, context)
         });
         context.with(f)
     })
 }
+
+const PLATFORM_GLOBALS: &str = r#"
+(() => {
+  let nextTimerId = 1;
+  const timers = new Map();
+  const normalizeDelay = value => {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return 0;
+    return Math.min(Math.trunc(number), 2147483647);
+  };
+  const schedule = (callback, delay, repeat, args) => {
+    if (typeof callback !== 'function') {
+      throw new TypeError('timer callback must be a function');
+    }
+    const id = nextTimerId++;
+    const milliseconds = normalizeDelay(delay);
+    timers.set(id, { callback, args, repeat, milliseconds,
+                     due: Date.now() + milliseconds });
+    return id;
+  };
+  globalThis.setTimeout = (callback, delay = 0, ...args) =>
+    schedule(callback, delay, false, args);
+  globalThis.clearTimeout = id => { timers.delete(Number(id)); };
+  globalThis.setInterval = (callback, delay = 0, ...args) =>
+    schedule(callback, delay, true, args);
+  globalThis.clearInterval = globalThis.clearTimeout;
+  globalThis.queueMicrotask = callback => {
+    if (typeof callback !== 'function') {
+      throw new TypeError('microtask callback must be a function');
+    }
+    Promise.resolve().then(callback);
+  };
+  globalThis.__thaw_next_timer_delay = () => {
+    let due = Infinity;
+    for (const timer of timers.values()) due = Math.min(due, timer.due);
+    return due === Infinity ? -1 : Math.max(0, due - Date.now());
+  };
+  globalThis.__thaw_run_due_timers = () => {
+    const now = Date.now();
+    const due = [...timers.entries()]
+      .filter(([, timer]) => timer.due <= now)
+      .sort((a, b) => a[1].due - b[1].due || a[0] - b[0]);
+    for (const [id, timer] of due) {
+      if (!timers.has(id)) continue;
+      if (timer.repeat) timer.due = Date.now() + timer.milliseconds;
+      else timers.delete(id);
+      timer.callback(...timer.args);
+    }
+    return due.length;
+  };
+
+  const encodeUtf8 = input => {
+    const bytes = [];
+    for (const character of String(input)) {
+      const code = character.codePointAt(0);
+      if (code <= 0x7f) bytes.push(code);
+      else if (code <= 0x7ff) bytes.push(0xc0 | code >> 6, 0x80 | code & 0x3f);
+      else if (code <= 0xffff) bytes.push(0xe0 | code >> 12,
+        0x80 | code >> 6 & 0x3f, 0x80 | code & 0x3f);
+      else bytes.push(0xf0 | code >> 18, 0x80 | code >> 12 & 0x3f,
+        0x80 | code >> 6 & 0x3f, 0x80 | code & 0x3f);
+    }
+    return bytes;
+  };
+  globalThis.TextEncoder = class TextEncoder {
+    get encoding() { return 'utf-8'; }
+    encode(input = '') { return Uint8Array.from(encodeUtf8(input)); }
+    encodeInto(input, destination) {
+      if (!(destination instanceof Uint8Array)) {
+        throw new TypeError('destination must be a Uint8Array');
+      }
+      let read = 0;
+      let written = 0;
+      for (const character of String(input)) {
+        const bytes = encodeUtf8(character);
+        if (written + bytes.length > destination.length) break;
+        destination.set(bytes, written);
+        written += bytes.length;
+        read += character.length;
+      }
+      return { read, written };
+    }
+  };
+
+  const replacement = '\ufffd';
+  globalThis.TextDecoder = class TextDecoder {
+    constructor(label = 'utf-8', options = {}) {
+      const normalized = String(label).trim().toLowerCase().replace(/[_\s]/g, '-');
+      if (!['utf-8', 'utf8', 'unicode-1-1-utf-8'].includes(normalized)) {
+        throw new RangeError(`unsupported encoding: ${label}`);
+      }
+      this.fatal = Boolean(options.fatal);
+      this.ignoreBOM = Boolean(options.ignoreBOM);
+      this.encoding = 'utf-8';
+    }
+    decode(input = new Uint8Array(), options = {}) {
+      if (options.stream) throw new TypeError('streaming TextDecoder is not supported');
+      const bytes = input instanceof ArrayBuffer
+        ? new Uint8Array(input)
+        : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      let output = '';
+      let index = 0;
+      const invalid = () => {
+        if (this.fatal) throw new TypeError('invalid UTF-8 data');
+        output += replacement;
+      };
+      while (index < bytes.length) {
+        const first = bytes[index++];
+        if (first <= 0x7f) { output += String.fromCodePoint(first); continue; }
+        let length, code, minimum;
+        if (first >= 0xc2 && first <= 0xdf) { length = 1; code = first & 0x1f; minimum = 0x80; }
+        else if (first >= 0xe0 && first <= 0xef) { length = 2; code = first & 0x0f; minimum = 0x800; }
+        else if (first >= 0xf0 && first <= 0xf4) { length = 3; code = first & 7; minimum = 0x10000; }
+        else { invalid(); continue; }
+        if (index + length > bytes.length) { invalid(); break; }
+        let valid = true;
+        for (let offset = 0; offset < length; offset++) {
+          const continuation = bytes[index + offset];
+          if ((continuation & 0xc0) !== 0x80) { valid = false; break; }
+          code = code << 6 | continuation & 0x3f;
+        }
+        if (!valid || code < minimum || code > 0x10ffff ||
+            (code >= 0xd800 && code <= 0xdfff)) { invalid(); continue; }
+        index += length;
+        output += String.fromCodePoint(code);
+      }
+      if (!this.ignoreBOM && output.charCodeAt(0) === 0xfeff) output = output.slice(1);
+      return output;
+    }
+  };
+})();
+"#;
 
 /// Evaluates `source` in the (per-thread) global QuickJS context. Top-level
 /// function declarations become callable afterwards via `thaw_js_call`.
@@ -188,7 +325,7 @@ fn resolve_value_impl<'js>(
         }
         e => format!("`{label}` could not resolve its result: {e}"),
     })?;
-    let result = promise.finish::<Value>().map_err(|e| match e {
+    let result = finish_with_platform_events(&ctx, &promise).map_err(|e| match e {
         rquickjs::Error::Exception => {
             format!("`{label}`'s promise rejected: {}", describe_exception(&ctx))
         }
@@ -198,6 +335,31 @@ fn resolve_value_impl<'js>(
     stringify
         .call((result,))
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))
+}
+
+fn finish_with_platform_events<'js>(
+    ctx: &Ctx<'js>,
+    promise: &rquickjs::Promise<'js>,
+) -> rquickjs::Result<Value<'js>> {
+    loop {
+        if let Some(result) = promise.result() {
+            return result;
+        }
+        if ctx.execute_pending_job() {
+            continue;
+        }
+
+        let next_delay: Function = ctx.globals().get("__thaw_next_timer_delay")?;
+        let delay: i64 = next_delay.call(())?;
+        if delay < 0 {
+            return Err(rquickjs::Error::WouldBlock);
+        }
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay as u64));
+        }
+        let run_due: Function = ctx.globals().get("__thaw_run_due_timers")?;
+        run_due.call::<_, usize>(())?;
+    }
 }
 
 /// Retains a global JavaScript value in the realm and returns a stable opaque
@@ -749,6 +911,97 @@ mod tests {
             1
         );
         assert_eq!(call("later", "[21]"), "42");
+    }
+
+    #[test]
+    fn timeout_resolves_promises_and_forwards_arguments() {
+        assert_eq!(
+            load(
+                "function timed(value) { return new Promise(resolve => {\n\
+                   setTimeout((left, right) => resolve(left + right), 2, value, 2);\n\
+                 }); }"
+            ),
+            1
+        );
+        assert_eq!(call("timed", "[40]"), "42");
+    }
+
+    #[test]
+    fn timeout_can_be_cancelled() {
+        assert_eq!(
+            load(
+                "function cancelled() { return new Promise(resolve => {\n\
+                   const id = setTimeout(() => resolve('wrong'), 0);\n\
+                   clearTimeout(id);\n\
+                   setTimeout(() => resolve('right'), 1);\n\
+                 }); }"
+            ),
+            1
+        );
+        assert_eq!(call("cancelled", "[]"), r#""right""#);
+    }
+
+    #[test]
+    fn interval_repeats_and_can_cancel_itself() {
+        assert_eq!(
+            load(
+                "function countIntervals() { return new Promise(resolve => {\n\
+                   let count = 0;\n\
+                   const id = setInterval(() => {\n\
+                     if (++count === 3) { clearInterval(id); resolve(count); }\n\
+                   }, 1);\n\
+                 }); }"
+            ),
+            1
+        );
+        assert_eq!(call("countIntervals", "[]"), "3");
+    }
+
+    #[test]
+    fn microtasks_run_before_zero_delay_timers() {
+        assert_eq!(
+            load(
+                "function eventOrder() { return new Promise(resolve => {\n\
+                   const events = [];\n\
+                   setTimeout(() => { events.push('timer'); resolve(events); }, 0);\n\
+                   queueMicrotask(() => events.push('microtask'));\n\
+                   events.push('sync');\n\
+                 }); }"
+            ),
+            1
+        );
+        assert_eq!(call("eventOrder", "[]"), r#"["sync","microtask","timer"]"#);
+    }
+
+    #[test]
+    fn text_encoder_and_decoder_support_utf8() {
+        assert_eq!(
+            load(
+                "function utf8RoundTrip(value) {\n\
+                   const encoder = new TextEncoder();\n\
+                   const encoded = encoder.encode(value);\n\
+                   return { bytes: Array.from(encoded), text: new TextDecoder().decode(encoded) };\n\
+                 }\n\
+                 function encodeInto() {\n\
+                   const output = new Uint8Array(5);\n\
+                   const result = new TextEncoder().encodeInto('A😀B', output);\n\
+                   return { result, bytes: Array.from(output) };\n\
+                 }\n\
+                 function decodeInvalid() {\n\
+                   return new TextDecoder().decode(Uint8Array.from([0x61, 0xff, 0x62]));\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("utf8RoundTrip", r#"["A😀"]"#),
+            r#"{"bytes":[65,240,159,152,128],"text":"A😀"}"#
+        );
+        assert_eq!(
+            call("encodeInto", "[]"),
+            r#"{"result":{"read":3,"written":5},"bytes":[65,240,159,152,128]}"#
+        );
+        assert_eq!(call("decodeInvalid", "[]"), r#""a�b""#);
     }
 
     #[test]
