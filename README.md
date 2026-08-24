@@ -483,10 +483,12 @@ embeds it into an executable that starts after the registry is removed
 (`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
 registry_add_fetches_and_loads_sqlite3_when_enabled -- --nocapture`). Typed
 construction is integrated, callback-free instance methods are supported, and
-dynamic error-first callbacks work on instance methods. The default libuv loop
-is drained, but sqlite3's `close` callback still exposes a deeper host-API or
-lifecycle incompatibility; its overloaded method selection also remains outside
-that path.
+dynamic error-first callbacks work on instance methods. The host drains pending
+constructor work before a callback method and consumes exceptions at their
+async-completion boundary, preventing an earlier completion error from poisoning
+the next call. The official sqlite3 E2E now constructs a real `Database`, calls
+`close(callback)`, and receives the callback after the registry is removed.
+Full overloaded method selection remains outside that path.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back

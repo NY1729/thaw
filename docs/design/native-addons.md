@@ -39,9 +39,10 @@ callback ABIについてはinstance methodにも接続し、0〜2個の動的引
 receiverと同じ永続`napi_env`内にcallback functionを作り、`this`を維持してmethodを
 呼ぶ。自作addonの`box.getLater(callback)`を通常構文から実行し、callback結果と
 method戻り値の双方を検証した。終了時drainにはdefault libuv loopの`UV_RUN_NOWAIT`も
-統合し、実timerの発火とhandle closeを回帰testで確認した。sqlite3の`close`はmethod
-開始まで到達するが、このloop統合後もcallbackが未達のため、残る原因はN-API host API
-またはlifecycle互換性として切り分けた。sqlite3固有の不足とoverload解決が次の対象である。
+統合し、実timerの発火とhandle closeを回帰testで確認した。callback methodの直前には
+constructor等の先行async workをdrainし、各complete境界で例外を回収して後続callへ
+漏らさない。これにより公式sqlite3の実`Database`を構築し、registry削除後の単一実行
+ファイルで`close(callback)`の完了通知まで検証できた。overload解決が次の対象である。
 
 ## 1. 何が難しいのか（おさらい）
 
