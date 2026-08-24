@@ -3102,6 +3102,16 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bool_array_to_string"
                     | "__thaw_object_array_to_string"
                     | "__thaw_object_to_string" => return Ok(HirType::Str),
+                    "__thaw_number_array_join"
+                    | "__thaw_string_array_join"
+                    | "__thaw_bool_array_join"
+                    | "__thaw_object_array_join" => {
+                        if args.len() != 2 {
+                            return Err("array join expects two operands".into());
+                        }
+                        self.expect_type(&HirType::Str, &args[1], "array join separator")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
@@ -3479,6 +3489,48 @@ impl<'a> FnLowerer<'a> {
                 "string concatenation cannot convert native type {other:?}"
             )),
         }
+    }
+
+    fn join_tuple(
+        &mut self,
+        value: HirExpr,
+        elements: Vec<HirType>,
+        separator: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let tuple_type = HirType::Tuple(elements.clone());
+        let tuple_name = format!("__thaw_join_tuple_{}", self.next_binding);
+        self.next_binding += 1;
+        let separator_name = format!("__thaw_join_separator_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(tuple_name.clone(), tuple_type.clone());
+        self.scope.insert(separator_name.clone(), HirType::Str);
+        let tuple = HirExpr::Var(tuple_name.clone());
+        let separator_var = HirExpr::Var(separator_name.clone());
+        let mut result = HirExpr::Lit(HirLit::Str(String::new()));
+        for (index, element) in elements.into_iter().enumerate() {
+            if index != 0 {
+                result = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                    vec![result, separator_var.clone()],
+                );
+            }
+            let part = self.coerce_primitive_to_string(HirExpr::TypedIndex(
+                Box::new(tuple.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                element,
+            ))?;
+            result = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                vec![result, part],
+            );
+        }
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (tuple_name, tuple_type, value),
+                (separator_name, HirType::Str, separator),
+            ],
+        )
     }
 
     fn lower_loose_equality(
@@ -5200,6 +5252,45 @@ impl<'a> FnLowerer<'a> {
                             &[(name, ty, value)],
                         );
                     }
+                }
+                if property.sym == *"join" {
+                    if call.args.len() > 1 {
+                        return Err("native `.join()` expects zero or one argument".into());
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array join spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let separator = if let Some(argument) = call.args.first() {
+                        let value = self.lower_expr(&argument.expr)?;
+                        self.coerce_primitive_to_string(value)?
+                    } else {
+                        HirExpr::Lit(HirLit::Str(",".to_string()))
+                    };
+                    return match receiver_type {
+                        HirType::Array(element) => {
+                            let builtin = match element.as_ref() {
+                                HirType::F64 => "__thaw_number_array_join",
+                                HirType::Str => "__thaw_string_array_join",
+                                HirType::Bool => "__thaw_bool_array_join",
+                                HirType::Object(_) => "__thaw_object_array_join",
+                                other => {
+                                    return Err(format!(
+                                        "array join does not support element type {other:?}"
+                                    ))
+                                }
+                            };
+                            Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var(builtin.to_string())),
+                                vec![receiver, separator],
+                            ))
+                        }
+                        HirType::Tuple(elements) => self.join_tuple(receiver, elements, separator),
+                        other => Err(format!(
+                            "`.join()` requires an array receiver, got {other:?}"
+                        )),
+                    };
                 }
                 if property.sym == *"toString" {
                     if !call.args.is_empty() {
