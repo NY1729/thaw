@@ -9811,6 +9811,41 @@ mod tests {
     }
 
     #[test]
+    fn compiles_for_of_and_for_await_destructuring() {
+        let source = r#"
+            async function pair(value: number, label: string): Promise<[number, string]> {
+                await sleep(1); return [value, label];
+            }
+            async function main(): Promise<void> {
+                const rows = [
+                    { x: 1, nested: { flag: true } },
+                    { x: 2, nested: { flag: false } },
+                    { x: 3, nested: { flag: true } }
+                ];
+                for (const { x, nested: { flag } } of rows) {
+                    if (x === 2) continue;
+                    console.log(x); console.log(flag);
+                }
+                let assigned = 0;
+                for ({ x: assigned } of rows) {
+                    if (assigned === 2) break;
+                    console.log(assigned);
+                }
+                const pending: Promise<[number, string]>[] = [
+                    pair(4, "four"), pair(5, "five")
+                ];
+                for await (const [value, label] of pending) {
+                    console.log(value); console.log(label);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "for_of_destructuring"),
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
