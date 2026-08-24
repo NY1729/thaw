@@ -3575,7 +3575,7 @@ pub unsafe extern "C" fn napi_unwrap(
     object: NapiValue,
     result: *mut *mut c_void,
 ) -> NapiStatus {
-    if result.is_null() {
+    if result.is_null() || !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
     let Ok(env) = env_mut(env) else {
@@ -3974,7 +3974,7 @@ pub unsafe extern "C" fn napi_get_prototype(
     object: NapiValue,
     result: *mut NapiValue,
 ) -> NapiStatus {
-    if result.is_null() {
+    if result.is_null() || !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
@@ -4002,7 +4002,10 @@ pub unsafe extern "C" fn napi_strict_equals(
     right: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
-    if env.is_null() || left.is_null() || right.is_null() || result.is_null() {
+    if result.is_null()
+        || !value_belongs_to_environment(env, left)
+        || !value_belongs_to_environment(env, right)
+    {
         return NAPI_INVALID_ARG;
     }
     *result = match (value_ref(left), value_ref(right)) {
@@ -4104,6 +4107,9 @@ pub unsafe extern "C" fn napi_coerce_to_bool(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
     let boolean = match value_ref(value) {
         Ok(Value::Undefined | Value::Null) => false,
         Ok(Value::Bool(value)) => *value,
@@ -4242,6 +4248,9 @@ pub unsafe extern "C" fn napi_coerce_to_number(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
     let number = match value_ref(value) {
         Ok(Value::Undefined) => f64::NAN,
         Ok(Value::Null) => 0.0,
@@ -4268,6 +4277,9 @@ pub unsafe extern "C" fn napi_coerce_to_string(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
     let string = match javascript_string(env, value, &mut HashSet::new()) {
         Ok(string) => string,
         Err(()) => return coercion_type_error(env, "a Symbol cannot be converted to a string"),
@@ -4285,7 +4297,7 @@ pub unsafe extern "C" fn napi_coerce_to_object(
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    if env.is_null() || out.is_null() {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
     if matches!(value_ref(value), Ok(value) if is_object_value(value)) {
@@ -4751,6 +4763,9 @@ pub unsafe extern "C" fn napi_get_all_property_names(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
@@ -4793,6 +4808,9 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
@@ -4813,11 +4831,8 @@ pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn napi_get_uv_event_loop(
-    _env: NapiEnv,
-    out: *mut *mut c_void,
-) -> NapiStatus {
-    if out.is_null() {
+pub unsafe extern "C" fn napi_get_uv_event_loop(env: NapiEnv, out: *mut *mut c_void) -> NapiStatus {
+    if env.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     #[cfg(target_os = "linux")]
@@ -4843,7 +4858,7 @@ pub unsafe extern "C" fn napi_get_uv_event_loop(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_typeof(env: NapiEnv, value: NapiValue, out: *mut i32) -> NapiStatus {
-    if env.is_null() || value.is_null() || out.is_null() {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
     *out = match value_ref(value) {
@@ -5317,7 +5332,7 @@ pub unsafe extern "C" fn node_api_is_sharedarraybuffer(
     value: NapiValue,
     result: *mut bool,
 ) -> NapiStatus {
-    if env.is_null() || value.is_null() {
+    if !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
     let Some(result) = result.as_mut() else {
@@ -5962,7 +5977,7 @@ pub unsafe extern "C" fn napi_is_error(
     value: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if env.is_null() || value.is_null() || out.is_null() {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
     *out = matches!(value_ref(value), Ok(Value::Error(_)));
@@ -5971,22 +5986,22 @@ pub unsafe extern "C" fn napi_is_error(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_throw(env: NapiEnv, error: NapiValue) -> NapiStatus {
+    if !value_belongs_to_environment(env, error) {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    if error.is_null() {
-        return NAPI_INVALID_ARG;
-    }
     env.exception = Some(error);
     NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_last_error_info(
-    _env: NapiEnv,
+    env: NapiEnv,
     out: *mut *const NapiExtendedErrorInfo,
 ) -> NapiStatus {
-    if out.is_null() {
+    if env.is_null() || out.is_null() {
         return NAPI_INVALID_ARG;
     }
     *out = &LAST_ERROR_INFO;
@@ -9125,6 +9140,9 @@ mod tests {
             });
             let promise =
                 foreign_env.alloc(Value::Promise(Rc::new(RefCell::new(PromiseState::Pending))));
+            let object = foreign_env.alloc(Value::Object(HashMap::new()));
+            let error = foreign_env.alloc(Value::Error("foreign".into()));
+            let shared = foreign_env.alloc(Value::SharedArrayBuffer(vec![0; 4]));
 
             let mut float = 0.0;
             let mut integer = 0_i64;
@@ -9238,6 +9256,47 @@ mod tests {
                     &mut value_out,
                     &mut count
                 ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_typeof(env_ptr, number, &mut kind), NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_strict_equals(env_ptr, number, number, &mut boolean_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_coerce_to_number(env_ptr, number, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_coerce_to_string(env_ptr, string, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_coerce_to_object(env_ptr, boolean, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_prototype(env_ptr, object, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_object_seal(env_ptr, object), NAPI_INVALID_ARG);
+            assert_eq!(napi_object_freeze(env_ptr, object), NAPI_INVALID_ARG);
+            assert_eq!(
+                napi_is_error(env_ptr, error, &mut boolean_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_throw(env_ptr, error), NAPI_INVALID_ARG);
+            assert_eq!(
+                node_api_is_sharedarraybuffer(env_ptr, shared, &mut boolean_out),
+                NAPI_INVALID_ARG
+            );
+            let mut error_info = ptr::null();
+            assert_eq!(
+                napi_get_last_error_info(ptr::null_mut(), &mut error_info),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_uv_event_loop(ptr::null_mut(), &mut pointer),
                 NAPI_INVALID_ARG
             );
         }
