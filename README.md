@@ -831,6 +831,8 @@ N-API coercion covers JavaScript radix strings, infinities, negative zero,
 arbitrary-width BigInt strings, array joins, and Symbol/BigInt conversion errors.
 Native wrapping and finalizers accept every JavaScript object kind rather than
 being limited to plain objects and class functions.
+Value classification distinguishes N-API externals from objects and validates
+environment, value, and result handles consistently across type predicates.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
