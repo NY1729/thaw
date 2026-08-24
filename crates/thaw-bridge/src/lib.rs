@@ -1218,6 +1218,7 @@ fn render_ts_type(ty: &HirType) -> String {
         HirType::F64 | HirType::I64 => "number".to_string(),
         HirType::Bool => "boolean".to_string(),
         HirType::Undefined => "undefined".to_string(),
+        HirType::Null => "null".to_string(),
         HirType::Void => "void".to_string(),
         HirType::Str => "string".to_string(),
         HirType::Json => "Json".to_string(),
