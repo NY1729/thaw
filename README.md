@@ -610,8 +610,9 @@ The workspace crates have narrow responsibilities:
   object fields. Direct strict/loose comparisons with `undefined` narrow local
   variables in the corresponding `if` branch, including negated comparisons;
   terminating guard clauses and subsequent assignments update the narrowed
-  state. General optional-chain short-circuiting still requires native `null`
-  plus broader control-flow unwrapping
+  state. Logical `&&`/`||` propagate safe narrowing into their short-circuited
+  RHS and the implied `if` branch. General optional-chain short-circuiting
+  still requires native `null` plus broader control-flow unwrapping
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
