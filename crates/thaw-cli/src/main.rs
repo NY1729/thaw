@@ -3160,6 +3160,56 @@ mod tests {
     }
 
     #[test]
+    fn resolves_and_reports_star_export_ambiguity() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-star-export-ambiguity-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("left.ts"),
+            "export function left(): number { return 1; } export function shared(): number { return 10; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("right.ts"),
+            "export function right(): number { return 2; } export function shared(): number { return 20; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.ts"),
+            "export * from './left'; export * from './right'; export { shared } from './left';",
+        )
+        .unwrap();
+        std::fs::write(dir.join("barrel.ts"), "export * from './index';").unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            "import { left, right, shared } from './barrel'; function main(): void { console.log(left() + right() + shared()); }",
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "13\n");
+
+        std::fs::write(
+            dir.join("index.ts"),
+            "export * from './left'; export * from './right';",
+        )
+        .unwrap();
+        let source = std::fs::read_to_string(&entry).unwrap();
+        let error =
+            module_graph::bundle(&entry, &source, &std::collections::HashMap::new()).unwrap_err();
+        assert!(
+            error.contains("ambiguous star export named `shared`"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn rejects_relative_typescript_import_cycles_with_the_full_chain() {
         let dir =
             std::env::temp_dir().join(format!("thaw-cli-user-module-cycle-{}", std::process::id()));
