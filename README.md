@@ -418,6 +418,9 @@ The workspace crates have narrow responsibilities:
   `.includes()` with positive/negative starting positions. Numeric searches
   distinguish strict equality from SameValueZero (`NaN`), treat signed zeros
   equally, preserve receiver/argument evaluation order and accept `await`
+- Homogeneous native arrays implement in-place `.reverse()` for every existing
+  eight-byte element layout, returning the same receiver and supporting empty,
+  side-effecting and awaited arrays
 - Native strings implement `.indexOf()`, `.includes()`, `.startsWith()` and
   `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
   byte offsets. Search values and positions are coerced left-to-right, clamped

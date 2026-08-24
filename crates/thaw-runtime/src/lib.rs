@@ -415,6 +415,26 @@ unsafe fn native_array_length(array: *const u8) -> Option<usize> {
 }
 
 #[no_mangle]
+/// Reverses an eight-byte-slot native array in place and returns the receiver.
+///
+/// # Safety
+///
+/// `array` must point to a writable Thaw array whose elements occupy
+/// eight-byte slots.
+pub unsafe extern "C" fn thaw_array_reverse(array: *mut u8) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    for left in 0..length / 2 {
+        let right = length - left - 1;
+        unsafe {
+            std::ptr::swap_nonoverlapping(array.add(8 + left * 8), array.add(8 + right * 8), 8);
+        }
+    }
+    array
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `array` must point to a Thaw array containing `f64` element slots.
