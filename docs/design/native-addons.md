@@ -704,6 +704,10 @@ Arrayのown `length`は非列挙・非configurable・writable propertyとしてr
 ArrayBuffer／SharedArrayBufferの`byteLength`、TypedArray／DataViewの`length`／`byteLength`／
 `byteOffset`／`buffer`は読み取り専用metadataとしてgeneric get／hasから取得できる。detach後のview長と
 offsetは0になり、backing identityは維持する。
+`napi_create_function`は明示length／NUL終端の両方からfunction `name`を保持し、`name`／`length`を
+非writable・非enumerable・configurableなown propertyとして公開する。`napi_define_class`の`prototype`は
+非writable・非enumerable・非configurableとし、prototype側の`constructor` backlinkはclass identityを
+保持するwritable・非enumerable・configurable propertyにする。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
