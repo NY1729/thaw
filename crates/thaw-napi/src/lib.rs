@@ -27,6 +27,7 @@ type NapiAsyncExecuteCallback = unsafe extern "C" fn(NapiEnv, *mut c_void);
 type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut c_void);
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
 type NapiFinalize = unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void);
+type NodeApiNoEnvFinalize = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type NapiCleanupHook = unsafe extern "C" fn(*mut c_void);
 type NapiAsyncCleanupHook = unsafe extern "C" fn(*mut AsyncCleanupHookHandle, *mut c_void);
 type NapiThreadsafeFunctionCallJs =
@@ -294,6 +295,10 @@ pub enum Value {
         detached: bool,
     },
     SharedArrayBuffer(Vec<u8>),
+    ExternalSharedArrayBuffer {
+        data: *mut u8,
+        length: usize,
+    },
     ExternalArrayBuffer {
         data: *mut u8,
         length: usize,
@@ -416,6 +421,7 @@ pub struct Env {
     prototypes: HashMap<usize, usize>,
     accessors: HashMap<(usize, PropertyKey), Accessor>,
     finalizers: Vec<FinalizeRecord>,
+    noenv_finalizers: Vec<NoEnvFinalizeRecord>,
     posted_finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
@@ -475,6 +481,12 @@ struct FinalizeRecord {
     hint: *mut c_void,
 }
 
+struct NoEnvFinalizeRecord {
+    data: *mut c_void,
+    finalize: Option<NodeApiNoEnvFinalize>,
+    hint: *mut c_void,
+}
+
 struct WrapRecord {
     data: *mut c_void,
     finalize: Option<NapiFinalize>,
@@ -499,6 +511,7 @@ impl Env {
             prototypes: HashMap::new(),
             accessors: HashMap::new(),
             finalizers: Vec::new(),
+            noenv_finalizers: Vec::new(),
             posted_finalizers: Vec::new(),
             instance_data: None,
             cleanup_hooks: Vec::new(),
@@ -680,6 +693,11 @@ impl Drop for Env {
                 unsafe { finalize(self, record.data, record.hint) };
             }
         }
+        for record in std::mem::take(&mut self.noenv_finalizers) {
+            if let Some(finalize) = record.finalize {
+                unsafe { finalize(record.data, record.hint) };
+            }
+        }
         let wraps = std::mem::take(&mut self.wraps);
         for wrap in wraps.into_values() {
             if let Some(finalize) = wrap.finalize {
@@ -818,6 +836,7 @@ fn is_object_value(value: &Value) -> bool {
             | Value::BufferView { .. }
             | Value::ArrayBuffer { .. }
             | Value::SharedArrayBuffer(_)
+            | Value::ExternalSharedArrayBuffer { .. }
             | Value::ExternalArrayBuffer { .. }
             | Value::TypedArray { .. }
             | Value::DataView { .. }
@@ -1118,6 +1137,9 @@ unsafe fn intrinsic_property_value(
         Value::SharedArrayBuffer(bytes) if name == "byteLength" => {
             Some(env.alloc(Value::Number(bytes.len() as f64)))
         }
+        Value::ExternalSharedArrayBuffer { length, .. } if name == "byteLength" => {
+            Some(env.alloc(Value::Number(*length as f64)))
+        }
         Value::TypedArray {
             array_type,
             length,
@@ -1181,7 +1203,8 @@ unsafe fn intrinsic_property_keys(object: NapiValue) -> &'static [&'static str] 
         Ok(
             Value::ArrayBuffer { .. }
             | Value::ExternalArrayBuffer { .. }
-            | Value::SharedArrayBuffer(_),
+            | Value::SharedArrayBuffer(_)
+            | Value::ExternalSharedArrayBuffer { .. },
         ) => &["byteLength"],
         Ok(Value::TypedArray { .. }) => &["length", "byteLength", "byteOffset", "buffer"],
         Ok(Value::DataView { .. }) => &["byteLength", "byteOffset", "buffer"],
@@ -1916,6 +1939,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         }
         Value::ArrayBuffer { .. }
         | Value::SharedArrayBuffer(_)
+        | Value::ExternalSharedArrayBuffer { .. }
         | Value::ExternalArrayBuffer { .. }
         | Value::TypedArray { .. }
         | Value::DataView { .. } => {
@@ -5550,6 +5574,7 @@ unsafe fn arraybuffer_parts(value: NapiValue) -> Result<(*mut u8, usize, bool), 
             Ok((bytes.as_mut_ptr(), bytes.len(), *detached))
         }
         Some(Value::SharedArrayBuffer(bytes)) => Ok((bytes.as_mut_ptr(), bytes.len(), false)),
+        Some(Value::ExternalSharedArrayBuffer { data, length }) => Ok((*data, *length, false)),
         Some(Value::ExternalArrayBuffer {
             data,
             length,
@@ -5623,6 +5648,35 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_create_external_sharedarraybuffer(
+    env: NapiEnv,
+    data: *mut c_void,
+    length: usize,
+    finalize: Option<NodeApiNoEnvFinalize>,
+    hint: *mut c_void,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null() || (length != 0 && data.is_null()) {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::ExternalSharedArrayBuffer {
+        data: data.cast(),
+        length,
+    });
+    if finalize.is_some() {
+        env.noenv_finalizers.push(NoEnvFinalizeRecord {
+            data,
+            finalize,
+            hint,
+        });
+    }
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn node_api_create_sharedarraybuffer(
     env: NapiEnv,
     length: usize,
@@ -5657,7 +5711,10 @@ pub unsafe extern "C" fn node_api_is_sharedarraybuffer(
     let Some(result) = result.as_mut() else {
         return NAPI_INVALID_ARG;
     };
-    *result = matches!(value_ref(value), Ok(Value::SharedArrayBuffer(_)));
+    *result = matches!(
+        value_ref(value),
+        Ok(Value::SharedArrayBuffer(_) | Value::ExternalSharedArrayBuffer { .. })
+    );
     NAPI_OK
 }
 
@@ -7171,6 +7228,7 @@ mod tests {
     static BCRYPT_ASYNC_RESULT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static EXTERNAL_MEMORY_FINALIZED: AtomicUsize = AtomicUsize::new(0);
+    static EXTERNAL_SHARED_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static PLAIN_EXTERNAL_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
@@ -7199,6 +7257,11 @@ mod tests {
         _hint: *mut c_void,
     ) {
         EXTERNAL_MEMORY_FINALIZED.fetch_add(1, Ordering::AcqRel);
+    }
+
+    unsafe extern "C" fn external_shared_finalize(data: *mut c_void, hint: *mut c_void) {
+        assert!(!data.is_null());
+        EXTERNAL_SHARED_FINALIZED.fetch_add(*(hint as *const usize), Ordering::AcqRel);
     }
 
     unsafe extern "C" fn external_string_finalize(
@@ -9744,6 +9807,47 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!(length, 5);
+        }
+    }
+
+    #[test]
+    fn external_sharedarraybuffers_share_memory_and_finalize_without_an_env() {
+        unsafe {
+            EXTERNAL_SHARED_FINALIZED.store(0, Ordering::Release);
+            let mut storage = [1_u8, 2, 3, 4];
+            let increment = 3_usize;
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut shared = ptr::null_mut();
+            assert_eq!(
+                node_api_create_external_sharedarraybuffer(
+                    env_ptr,
+                    storage.as_mut_ptr().cast(),
+                    storage.len(),
+                    Some(external_shared_finalize),
+                    (&increment as *const usize).cast_mut().cast(),
+                    &mut shared,
+                ),
+                NAPI_OK
+            );
+            let mut is_shared = false;
+            assert_eq!(
+                node_api_is_sharedarraybuffer(env_ptr, shared, &mut is_shared),
+                NAPI_OK
+            );
+            assert!(is_shared);
+
+            let mut view = ptr::null_mut();
+            assert_eq!(
+                napi_create_typedarray(env_ptr, 1, storage.len(), shared, 0, &mut view),
+                NAPI_OK
+            );
+            let seven = env.alloc(Value::Number(7.0));
+            assert_eq!(napi_set_element(env_ptr, view, 2, seven), NAPI_OK);
+            assert_eq!(storage[2], 7);
+            assert_eq!(EXTERNAL_SHARED_FINALIZED.load(Ordering::Acquire), 0);
+            drop(env);
+            assert_eq!(EXTERNAL_SHARED_FINALIZED.load(Ordering::Acquire), 3);
         }
     }
 
