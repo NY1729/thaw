@@ -387,8 +387,8 @@ fn typed_dynamic_declaration(
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
 type ClassConstructorRewrite = (String, String);
-/// `(class, method, helper, argument_count, has_callback)`.
-type ClassMethodRewrite = (String, String, String, usize, bool);
+/// `(class, method, helper, argument_count, has_callback, parameter_types)`.
+type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
 
 fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: usize) -> bool {
     matches!(
@@ -737,6 +737,14 @@ fn generate_registry_shims(
                             symbol,
                             overload.params.len(),
                             has_callback,
+                            overload
+                                .params
+                                .iter()
+                                .filter_map(|(_, ty)| match ty {
+                                    thaw_bridge::DtsType::Native(ty) => Some(ty.clone()),
+                                    thaw_bridge::DtsType::Unsupported(_) => None,
+                                })
+                                .collect(),
                         ));
                     }
                 }
@@ -874,7 +882,7 @@ fn rewrite_external_class_methods(
     methods: &[ClassMethodRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{CallExpr, Callee, Expr, MemberProp, Pat, VarDeclarator};
+    use thaw_parser::ast::{CallExpr, Callee, Expr, Lit, MemberProp, Pat, VarDeclarator};
     use thaw_parser::common::Spanned;
 
     if methods.is_empty() {
@@ -906,10 +914,44 @@ fn rewrite_external_class_methods(
         }
     }
 
+    fn source_expr_type(
+        expression: &Expr,
+        variables: &std::collections::HashMap<String, thaw_hir::HirType>,
+    ) -> Option<thaw_hir::HirType> {
+        match expression {
+            Expr::Lit(Lit::Num(_)) => Some(thaw_hir::HirType::F64),
+            Expr::Lit(Lit::Str(_)) => Some(thaw_hir::HirType::Str),
+            Expr::Lit(Lit::Bool(_)) => Some(thaw_hir::HirType::Bool),
+            Expr::Array(array)
+                if array.elems.iter().all(|element| {
+                    element.as_ref().is_some_and(|element| {
+                        source_expr_type(element.expr.as_ref(), variables)
+                            == Some(thaw_hir::HirType::F64)
+                    })
+                }) =>
+            {
+                Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))
+            }
+            Expr::Object(_) => Some(thaw_hir::HirType::Object(Vec::new())),
+            Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
+            _ => None,
+        }
+    }
+
+    fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
+        match (declared, actual) {
+            (thaw_hir::HirType::Json, _) => Some(0),
+            (thaw_hir::HirType::Object(_), thaw_hir::HirType::Object(_)) => Some(2),
+            (left, right) if left == right => Some(2),
+            _ => None,
+        }
+    }
+
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
         methods: &'a [ClassMethodRewrite],
         variables: std::collections::HashMap<String, String>,
+        value_types: std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
     }
@@ -923,6 +965,9 @@ fn rewrite_external_class_methods(
                 }
                 if matches!(initializer.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
                     self.callbacks.insert(binding.id.sym.to_string());
+                }
+                if let Some(ty) = source_expr_type(initializer, &self.value_types) {
+                    self.value_types.insert(binding.id.sym.to_string(), ty);
                 }
             }
             declaration.visit_children_with(self);
@@ -939,20 +984,48 @@ fn rewrite_external_class_methods(
                                 matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
                                     || matches!(argument.expr.as_ref(), Expr::Ident(identifier) if self.callbacks.contains(identifier.sym.as_str()))
                             });
-                            if let Some((_, _, helper, _, _)) = self.methods.iter().find(
-                                |(
-                                    candidate_class,
-                                    candidate_method,
-                                    _,
-                                    argument_count,
-                                    candidate_callback,
-                                )| {
-                                    candidate_class == class
-                                        && candidate_method == method.sym.as_str()
-                                        && *argument_count == call.args.len()
-                                        && *candidate_callback == has_callback
-                                },
-                            ) {
+                            let selected = self
+                                .methods
+                                .iter()
+                                .filter(
+                                    |(
+                                        candidate_class,
+                                        candidate_method,
+                                        _,
+                                        argument_count,
+                                        candidate_callback,
+                                        _,
+                                    )| {
+                                        candidate_class == class
+                                            && candidate_method == method.sym.as_str()
+                                            && *argument_count == call.args.len()
+                                            && *candidate_callback == has_callback
+                                    },
+                                )
+                                .filter_map(|candidate| {
+                                    let mut score = 0u16;
+                                    for (argument, declared) in
+                                        call.args.iter().zip(candidate.5.iter())
+                                    {
+                                        if let Some(actual) = source_expr_type(
+                                            argument.expr.as_ref(),
+                                            &self.value_types,
+                                        ) {
+                                            score +=
+                                                u16::from(overload_type_score(declared, &actual)?);
+                                        }
+                                    }
+                                    Some((score, candidate))
+                                })
+                                .reduce(|best, candidate| {
+                                    if candidate.0 > best.0 {
+                                        candidate
+                                    } else {
+                                        best
+                                    }
+                                })
+                                .map(|(_, candidate)| candidate);
+                            if let Some((_, _, helper, _, _, _)) = selected {
                                 let span = member.span();
                                 self.edits.push((span.lo.0, span.hi.0, helper.clone()));
                                 let insertion = if call.args.is_empty() {
@@ -975,6 +1048,7 @@ fn rewrite_external_class_methods(
         classes,
         methods,
         variables: std::collections::HashMap::new(),
+        value_types: std::collections::HashMap::new(),
         callbacks: std::collections::HashSet::new(),
         edits: Vec::new(),
     };
@@ -3540,6 +3614,7 @@ mod tests {
                 "__thaw_configure".into(),
                 2,
                 false,
+                vec![thaw_hir::HirType::Str, thaw_hir::HirType::F64],
             )],
         )
         .unwrap();
@@ -3561,6 +3636,7 @@ mod tests {
                 "__thaw_get".into(),
                 0,
                 false,
+                vec![],
             )],
         )
         .unwrap();
@@ -3583,6 +3659,7 @@ mod tests {
                     "__run_sync".into(),
                     1,
                     false,
+                    vec![thaw_hir::HirType::Str],
                 ),
                 (
                     "Database".into(),
@@ -3590,6 +3667,13 @@ mod tests {
                     "__run_callback".into(),
                     2,
                     true,
+                    vec![
+                        thaw_hir::HirType::Str,
+                        thaw_hir::HirType::Function(
+                            vec![thaw_hir::HirType::Json],
+                            Box::new(thaw_hir::HirType::Void),
+                        ),
+                    ],
                 ),
             ],
         )
@@ -3597,6 +3681,38 @@ mod tests {
         assert_eq!(
             rewritten,
             "const db = new Database(\":memory:\"); const done = (error: Json): void => {}; __run_sync(db, \"select 1\"); __run_callback(db, \"select 1\", done);"
+        );
+    }
+
+    #[test]
+    fn selects_same_arity_external_method_overloads_by_argument_type() {
+        let source = "const box = new NativeBox(1); const n = 42; const s = \"hello\"; box.set(n); box.set(s); box.set(7); box.set(\"world\");";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const box = new NativeBox(1); const n = 42; const s = \"hello\"; __set_number(box, n); __set_string(box, s); __set_number(box, 7); __set_string(box, \"world\");"
         );
     }
 }
