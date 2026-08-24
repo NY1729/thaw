@@ -11627,6 +11627,15 @@ mod tests {
                 console.log("array-awaited");
                 return [4, 5, 6];
             }
+            function orderedValues(): number[] {
+                console.log("join-receiver");
+                return [1, 2];
+            }
+            async function delayedSeparator(): Promise<string> {
+                console.log("join-separator");
+                await sleep(1);
+                return "|";
+            }
             async function main(): Promise<void> {
                 const numbers: number[] = [1, -0, 2.5];
                 const words: string[] = ["a", "", "c"];
@@ -11640,11 +11649,12 @@ mod tests {
                 console.log(tupleValue().join(separator()));
                 console.log(empty.join("ignored"));
                 console.log((await delayed()).join("+"));
+                console.log(orderedValues().join(await delayedSeparator()));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "array_join"),
-            "1,0,2.5\na--c\ntruefalse\n[object Object] / [object Object]\nreceiver-evaluated\nseparator-evaluated\n7 | x | false | 8,9\n\narray-awaited\n4+5+6\n"
+            "1,0,2.5\na--c\ntruefalse\n[object Object] / [object Object]\nreceiver-evaluated\nseparator-evaluated\n7 | x | false | 8,9\n\narray-awaited\n4+5+6\njoin-receiver\njoin-separator\n1|2\n"
         );
     }
 
