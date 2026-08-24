@@ -469,6 +469,9 @@ array literalのspreadは各sourceをtyped array partとして保持し、await�
 `switch`は一度だけ評価したdiscriminantと選択case indexへlowerする。case testは未選択時だけ
 順に評価し、case bodyは選択indexを次へ送ってfallthroughする。breakはexit indexへ変換し、
 awaitを含むcase test/bodyも通常のnested-if frame guardとして分割する。
+fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
+index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
+loop loweringを使う。
 
 ## 12. Promise constructorとcontinuation chain
 

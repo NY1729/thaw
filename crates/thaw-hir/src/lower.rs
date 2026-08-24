@@ -2165,6 +2165,144 @@ impl<'a> FnLowerer<'a> {
                 lowered
             }
 
+            Stmt::ForIn(for_in) => {
+                let saved = self.bindings.clone();
+                let saved_scope = self.scope.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let object = self.lower_expr(&for_in.right)?;
+                    let object_type = self.infer_expr_type(&object)?;
+                    let keys = match &object_type {
+                        HirType::Object(fields) => fields
+                            .iter()
+                            .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
+                            .collect::<Vec<_>>(),
+                        _ => {
+                            return Err(
+                                "`for...in` currently requires a fixed-shape object".into(),
+                            )
+                        }
+                    };
+                    let object_name = format!("__thaw_for_in_object_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(object_name.clone(), object_type.clone());
+                    let keys_name = format!("__thaw_for_in_keys_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(
+                        keys_name.clone(),
+                        HirType::Array(Box::new(HirType::Str)),
+                    );
+                    let index_name = format!("__thaw_for_in_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    let key_value = || {
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(keys_name.clone())),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            HirType::Str,
+                        )
+                    };
+                    let binding_stmt = match &for_in.left {
+                        ForHead::VarDecl(decl) => {
+                            let [declarator] = decl.decls.as_slice() else {
+                                return Err("`for...in` requires exactly one loop binding".into());
+                            };
+                            if declarator.init.is_some() {
+                                return Err(
+                                    "`for...in` loop bindings cannot have an initializer".into(),
+                                );
+                            }
+                            let Pat::Ident(binding) = &declarator.name else {
+                                return Err(
+                                    "`for...in` requires an identifier loop binding".into(),
+                                );
+                            };
+                            if let Some(annotation) = &binding.type_ann {
+                                let declared = lower_ts_type(
+                                    &annotation.type_ann,
+                                    self.interfaces,
+                                    self.generic_interfaces,
+                                )?;
+                                if declared != HirType::Str {
+                                    return Err(format!(
+                                        "`for...in` binding must be Str, got {declared:?}"
+                                    ));
+                                }
+                            }
+                            let source_name = binding.id.sym.to_string();
+                            let binding_name =
+                                format!("{source_name}__thaw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(binding_name.clone(), HirType::Str);
+                            self.bindings
+                                .entry(source_name)
+                                .or_default()
+                                .push(binding_name.clone());
+                            HirStmt::Let(binding_name, HirType::Str, key_value())
+                        }
+                        ForHead::Pat(pattern) => {
+                            let Pat::Ident(binding) = pattern.as_ref() else {
+                                return Err(
+                                    "`for...in` assignment requires an identifier target".into(),
+                                );
+                            };
+                            let binding_name = self.resolve_binding(binding.id.sym.as_ref());
+                            let binding_type = self.scope.get(&binding_name).ok_or_else(|| {
+                                format!("unknown `for...in` assignment target `{binding_name}`")
+                            })?;
+                            if binding_type != &HirType::Str {
+                                return Err(format!(
+                                    "`for...in` assignment target must be Str, got {binding_type:?}"
+                                ));
+                            }
+                            HirStmt::Expr(HirExpr::Assign(
+                                binding_name,
+                                Box::new(key_value()),
+                            ))
+                        }
+                        ForHead::UsingDecl(_) => {
+                            return Err("`using` bindings in `for...in` are not supported".into())
+                        }
+                    };
+                    let update = HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    );
+                    let mut body = vec![binding_stmt];
+                    body.extend(self.lower_body(&for_in.body)?);
+                    body = inject_for_update_before_continue(body, &update);
+                    body.push(HirStmt::Expr(update));
+                    Ok(vec![
+                        HirStmt::Let(object_name, object_type, object),
+                        HirStmt::Let(
+                            keys_name.clone(),
+                            HirType::Array(Box::new(HirType::Str)),
+                            HirExpr::ArrayLit(keys),
+                        ),
+                        HirStmt::Let(
+                            index_name.clone(),
+                            HirType::F64,
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ),
+                        HirStmt::While(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(HirExpr::Var(index_name)),
+                                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(keys_name)))),
+                            ),
+                            body,
+                        ),
+                    ])
+                })();
+                self.bindings = saved;
+                self.scope = saved_scope;
+                lowered
+            }
+
             Stmt::Switch(switch_stmt) => {
                 let saved = self.bindings.clone();
                 let saved_scope = self.scope.clone();
@@ -4826,6 +4964,28 @@ mod tests {
             HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))
                 if name.starts_with("__thaw_switch_value_")
         ));
+    }
+
+    #[test]
+    fn lowers_fixed_object_for_in_to_key_array_loop() {
+        let program = lower(
+            r#"function main(): void {
+                const object = { first: 1, second: 2 };
+                for (const key in object) { console.log(key); }
+            }"#,
+        );
+        let body = &program.functions[0].body;
+        assert_eq!(body.len(), 5);
+        assert!(matches!(
+            &body[2],
+            HirStmt::Let(_, HirType::Array(element), HirExpr::ArrayLit(keys))
+                if element.as_ref() == &HirType::Str
+                    && keys == &[
+                        HirExpr::Lit(HirLit::Str("first".into())),
+                        HirExpr::Lit(HirLit::Str("second".into()))
+                    ]
+        ));
+        assert!(matches!(&body[4], HirStmt::While(_, _)));
     }
 
     #[test]
