@@ -481,6 +481,54 @@ pub unsafe extern "C" fn thaw_array_copy_within(
     array
 }
 
+unsafe fn fill_array_slots<T: Copy>(array: *mut u8, value: T, start: f64, end: f64) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    let start = relative_array_index(start, length);
+    let end = relative_array_index(end, length);
+    for index in start..end {
+        unsafe { array.add(8 + index * 8).cast::<T>().write_unaligned(value) };
+    }
+    array
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw number array.
+pub unsafe extern "C" fn thaw_number_array_fill(
+    array: *mut u8,
+    value: f64,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    unsafe { fill_array_slots(array, value, start, end) }
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw pointer-slot array.
+pub unsafe extern "C" fn thaw_pointer_array_fill(
+    array: *mut u8,
+    value: *const u8,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    unsafe { fill_array_slots(array, value, start, end) }
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a writable Thaw boolean array.
+pub unsafe extern "C" fn thaw_bool_array_fill(
+    array: *mut u8,
+    value: u8,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    unsafe { fill_array_slots(array, value, start, end) }
+}
+
 #[no_mangle]
 /// Returns an arena-owned shallow copy of a native array range.
 ///
