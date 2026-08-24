@@ -3087,6 +3087,13 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_bool_array_to_string"
                     | "__thaw_object_array_to_string"
                     | "__thaw_object_to_string" => return Ok(HirType::Str),
+                    "__thaw_number_is_nan" | "__thaw_number_is_finite" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("number predicate expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, argument, "number predicate")?;
+                        return Ok(HirType::Bool);
+                    }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -3432,7 +3439,11 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    fn lower_loose_equality(&self, mut lhs: HirExpr, mut rhs: HirExpr) -> Result<HirExpr, String> {
+    fn lower_loose_equality(
+        &mut self,
+        mut lhs: HirExpr,
+        mut rhs: HirExpr,
+    ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
         if lhs_type == rhs_type {
@@ -3443,7 +3454,7 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
     }
 
-    fn coerce_primitive_to_number(&self, value: HirExpr) -> Result<HirExpr, String> {
+    fn coerce_primitive_to_number(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::F64 => Ok(value),
             HirType::Bool => Ok(HirExpr::Call(
@@ -3454,13 +3465,25 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                 vec![value],
             )),
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+                let string = self.coerce_primitive_to_string(value)?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                    vec![string],
+                ))
+            }
             other => Err(format!(
                 "numeric conversion is not defined for native type {other:?}"
             )),
         }
     }
 
-    fn lower_relational(&self, lhs: HirExpr, rhs: HirExpr, op: BinOp) -> Result<HirExpr, String> {
+    fn lower_relational(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        op: BinOp,
+    ) -> Result<HirExpr, String> {
         if self.infer_expr_type(&lhs)? == HirType::Str
             && self.infer_expr_type(&rhs)? == HirType::Str
         {
@@ -5042,6 +5065,43 @@ impl<'a> FnLowerer<'a> {
 
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
+                if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"Number"
+                        && matches!(property.sym.as_ref(), "isNaN" | "isFinite")
+                    {
+                        let [argument] = call.args.as_slice() else {
+                            return Err(format!(
+                                "`Number.{}` expects exactly one argument",
+                                property.sym
+                            ));
+                        };
+                        if argument.spread.is_some() {
+                            return Err("number predicate spread is not supported".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        let ty = self.infer_expr_type(&value)?;
+                        if ty == HirType::F64 {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var(
+                                    if property.sym == *"isNaN" {
+                                        "__thaw_number_is_nan"
+                                    } else {
+                                        "__thaw_number_is_finite"
+                                    }
+                                    .to_string(),
+                                )),
+                                vec![value],
+                            ));
+                        }
+                        let name = format!("__thaw_number_predicate_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Lit(HirLit::Bool(false)),
+                            &[(name, ty, value)],
+                        );
+                    }
+                }
                 if property.sym == *"toString" {
                     if !call.args.is_empty() {
                         return Err("native `.toString()` does not accept arguments yet".into());
@@ -5218,6 +5278,28 @@ impl<'a> FnLowerer<'a> {
                     .into(),
             ),
         };
+
+        if matches!(callee_name.as_str(), "isNaN" | "isFinite") {
+            let [argument] = call.args.as_slice() else {
+                return Err(format!("`{callee_name}` expects exactly one argument"));
+            };
+            if argument.spread.is_some() {
+                return Err("number predicate spread is not supported".into());
+            }
+            let value = self.lower_expr(&argument.expr)?;
+            let value = self.coerce_primitive_to_number(value)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var(
+                    if callee_name == "isNaN" {
+                        "__thaw_number_is_nan"
+                    } else {
+                        "__thaw_number_is_finite"
+                    }
+                    .to_string(),
+                )),
+                vec![value],
+            ));
+        }
 
         if callee_name == "Promise.all" {
             let [arg] = call.args.as_slice() else {
@@ -5537,6 +5619,14 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                     vec![value],
                 ));
+            }
+            if callee_name == "Number"
+                && matches!(
+                    ty,
+                    HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+                )
+            {
+                return self.coerce_primitive_to_number(value);
             }
             if ty != HirType::Json {
                 return Err(format!(
@@ -7864,16 +7954,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_number_conversion_on_an_unsupported_native_object() {
-        let module = thaw_parser::parse_typescript(
-            "function main(): void { const x: number = Number({ value: 1 }); }",
-        )
-        .unwrap();
-        let err = lower_module(&module).unwrap_err();
-        assert!(
-            err.contains("only supported on a JSON value"),
-            "unexpected error: {err}"
-        );
+    fn lowers_number_conversion_through_native_object_stringification() {
+        let program = lower("function main(): void { const x: number = Number({ value: 1 }); }");
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Let(_, HirType::F64, HirExpr::Call(callee, _))
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_string_to_number")
+        ));
     }
 
     #[test]
