@@ -1523,6 +1523,7 @@ fn resolve_ts_type_with_substitution(
 
 /// An assignment target, resolved down to one of the three shapes
 /// `lower_assign`/`lower_update` support.
+#[derive(Clone)]
 enum Target {
     Var(Symbol),
     Index(HirExpr, HirExpr),
@@ -3078,13 +3079,10 @@ impl<'a> FnLowerer<'a> {
                     .iter()
                     .find(|(n, _)| n == name)
                     .ok_or_else(|| format!("object literal is missing field `{name}`"))?;
-                let actual_ty = self.infer_expr_type(field_value)?;
-                if *expected_ty != HirType::Dynamic && actual_ty != *expected_ty {
-                    return Err(format!(
-                        "field `{name}` has type {actual_ty:?}, expected {expected_ty:?}"
-                    ));
-                }
-                Ok((name.clone(), field_value.clone()))
+                let field_value = self
+                    .coerce_to_declared(expected_ty, field_value.clone())
+                    .map_err(|error| format!("field `{name}`: {error}"))?;
+                Ok((name.clone(), field_value))
             })
             .collect::<Result<Vec<_>, String>>()?;
 
@@ -5467,6 +5465,51 @@ impl<'a> FnLowerer<'a> {
                     Target::Prop(HirExpr::Var(object_name), object_type, field)
                 }
             };
+        }
+
+        if assign.op == AssignOp::NullishAssign {
+            let current = target_to_read_expr(&target);
+            let current_type = self.infer_expr_type(&current)?;
+            let HirType::Optional(payload) = current_type.clone() else {
+                // A native non-optional value can never be nullish. Preserve
+                // evaluation of the assignment target while omitting the RHS.
+                return self.wrap_call_argument_bindings(current, &bindings);
+            };
+            let rhs = self.coerce_to_declared(payload.as_ref(), rhs)?;
+            let current_name = format!("__thaw_nullish_assign_current_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope
+                .insert(current_name.clone(), current_type.clone());
+            let rhs_name = format!("__thaw_nullish_assign_rhs_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope
+                .insert(rhs_name.clone(), payload.as_ref().clone());
+
+            let assigned = HirExpr::Block(vec![
+                HirStmt::Expr(build_assign(
+                    target,
+                    HirExpr::OptionalSome(
+                        Box::new(HirExpr::Var(rhs_name.clone())),
+                        payload.as_ref().clone(),
+                    ),
+                )),
+                HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
+            ]);
+            let assigned = self.wrap_call_argument_bindings(
+                assigned,
+                &[(rhs_name, payload.as_ref().clone(), rhs)],
+            )?;
+            let current_value = HirExpr::Var(current_name.clone());
+            let result = HirExpr::Block(vec![HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(current_value.clone()), payload.as_ref().clone()),
+                vec![HirStmt::Return(Some(assigned))],
+                vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                    Box::new(current_value),
+                    payload.as_ref().clone(),
+                )))],
+            )]);
+            bindings.push((current_name, current_type, current));
+            return self.wrap_call_argument_bindings(result, &bindings);
         }
 
         let value = if assign.op == AssignOp::Assign {
