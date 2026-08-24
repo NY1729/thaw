@@ -670,6 +670,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_get_property_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_call_method_with_callback_result",
             result_type.fn_type(
                 &[
@@ -5022,6 +5027,9 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$getter$") {
+            return self.compile_typed_napi_getter(signature, args);
+        }
         if signature.backend == DynamicBackend::Napi
             && (signature.symbol.starts_with("$method$")
                 || signature.symbol.starts_with("$methodvoid$")
@@ -5235,6 +5243,86 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed dynamic return does not support {other:?} yet"
+            )),
+        }
+    }
+
+    fn compile_typed_napi_getter(
+        &mut self,
+        signature: &DynamicSignature,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver] = args else {
+            return Err("typed N-API getter expects one receiver".into());
+        };
+        let receiver = self.compile_expr(receiver)?;
+        let property = signature
+            .symbol
+            .split('$')
+            .nth(3)
+            .ok_or("invalid typed N-API getter symbol")?;
+        let property = self
+            .builder
+            .build_global_string_ptr(property, "napi_getter_name")
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_get_property_result")
+                    .unwrap(),
+                &[receiver.into(), property.as_pointer_value().into()],
+                "napi_getter_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_struct_value();
+        let value = self
+            .builder
+            .build_extract_value(result, 0, "napi_getter_json")
+            .map_err(|error| error.to_string())?;
+        let error = self
+            .builder
+            .build_extract_value(result, 1, "napi_getter_error")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_parse").unwrap(),
+                &[value.into()],
+                "napi_getter_parsed",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_parse returned no getter value".to_string())?;
+        match signature.ret {
+            HirType::Json => Ok(json),
+            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
+            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
+            HirType::Bool => self.compile_json_as_bool_value(json),
+            HirType::Array(ref element) if **element == HirType::F64 => self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_to_number_array")
+                        .unwrap(),
+                    &[json.into()],
+                    "napi_getter_number_array_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
+            ref other => Err(format!(
+                "typed N-API getter return does not support {other:?} yet"
             )),
         }
     }
