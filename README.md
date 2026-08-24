@@ -695,8 +695,11 @@ The workspace crates have narrow responsibilities:
   number-array result ownership and common LLVM calling conventions, but
   target-specific struct packing, variadics and nested aggregate ownership
   are not yet described
-- The broader N-API surface beyond the current number/string/boolean/JSON/
-  Buffer and async-work host. The async-work lifecycle, including
+- Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
+  exports the complete Node-API v10 symbol surface used by the current headers,
+  plus the implemented experimental SharedArrayBuffer/finalizer/module-file
+  entry points, but provides its own value model, worker pool, event polling and
+  request-scoped lifetime rules rather than embedding Node. The async-work lifecycle, including
   `napi_cancel_async_work`, is supported by a bounded shared worker pool.
   UTF-8, Latin-1 and UTF-16 string creation/extraction follow N-API length,
   truncation and null-termination rules. Signed/unsigned 32-bit and signed
@@ -783,6 +786,9 @@ The workspace crates have narrow responsibilities:
   poller while retaining a live environment for ordinary Node-API calls.
   Addons can query their stable absolute `file://` load URL through
   `node_api_get_module_file_name`, including from generated top-level calls.
+  Per-environment extended error information records failed argument, type,
+  lifecycle and queue operations with stable status messages; successful calls
+  do not erase the preceding error.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
@@ -813,8 +819,8 @@ allows loopback networking before treating that result as a product failure.
   dependency bundling, compatibility discoveries and version locking
 - [`docs/design/async-await.md`](docs/design/async-await.md): synchronous V1 and
   the proposed LLVM-coroutine V2
-- [`docs/design/native-addons.md`](docs/design/native-addons.md): proposed
-  minimal N-API host for `.node` addons
+- [`docs/design/native-addons.md`](docs/design/native-addons.md): chronological
+  N-API host design and implementation record for `.node` addons
 
 Some design documents are chronological implementation journals. Later
 sections supersede earlier statements marked as unimplemented. This README is
