@@ -12117,6 +12117,11 @@ mod tests {
                 console.log("awaited-string");
                 return "😀";
             }
+            async function delayedIndex(): Promise<number> {
+                console.log("awaited-index");
+                await sleep(1);
+                return 1;
+            }
             async function main(): Promise<void> {
                 const unicode: string = "😀a";
                 console.log(unicode.length);
@@ -12128,12 +12133,13 @@ mod tests {
                 console.log(Number.isNaN(unicode.charCodeAt(-1)));
                 console.log(Number.isNaN(unicode.charCodeAt(Infinity)));
                 console.log(text().charCodeAt(index()));
+                console.log(text().charCodeAt(await delayedIndex()));
                 console.log((await delayed()).length);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "string_utf16_access"),
-            "3\n55357\n56832\n97\n97\n97\ntrue\ntrue\nreceiver\nindex\n99\nawaited-string\n2\n"
+            "3\n55357\n56832\n97\n97\n97\ntrue\ntrue\nreceiver\nindex\n99\nreceiver\nawaited-index\n98\nawaited-string\n2\n"
         );
     }
 
