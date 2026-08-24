@@ -631,3 +631,5 @@ Bufferは従来どおりUint8Array互換viewとして扱う。
 非整列byte offsetを許可しながらoffset＋lengthの範囲を検証する。
 `napi_create_range_error`／`napi_throw_range_error`と`napi_is_error`を既存のError Value、pending
 exception、get-and-clear処理へ統合する。
+`napi_create_external_arraybuffer`／`napi_create_external_buffer`はcaller-owned pointerをcopyせず
+保持し、通常のview／Buffer APIへ参加させる。登録finalizerはEnv破棄時に一度だけ実行する。
