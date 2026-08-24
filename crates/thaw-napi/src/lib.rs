@@ -342,6 +342,7 @@ pub struct CallbackInfo {
 
 struct Host {
     functions: HashMap<String, Function>,
+    exports: HashMap<String, (usize, NapiValue)>,
     compiled_callbacks: HashMap<(usize, usize), NapiValue>,
     libraries: Vec<*mut c_void>,
     // Addons retain `napi_env` pointers, so moving an Env during Vec growth
@@ -359,6 +360,7 @@ impl Host {
     fn new() -> Self {
         Self {
             functions: HashMap::new(),
+            exports: HashMap::new(),
             compiled_callbacks: HashMap::new(),
             libraries: Vec::new(),
             module_envs: Vec::new(),
@@ -388,6 +390,12 @@ pub struct NapiModule {
 #[repr(C)]
 pub struct ThawResult {
     pub value: *mut c_char,
+    pub error: *mut c_char,
+}
+
+#[repr(C)]
+pub struct ThawNapiHandleResult {
+    pub value: u64,
     pub error: *mut c_char,
 }
 
@@ -513,6 +521,7 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
         return Err(format!("addon initialization threw: {message}"));
     }
     let mut functions = Vec::new();
+    let mut exported_values = Vec::new();
     match value_ref(exports).map_err(|_| "invalid exports value")? {
         Value::Object(object) => {
             for (name, value) in object {
@@ -520,17 +529,25 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
                     value_ref(*value).map_err(|_| "invalid export value")?
                 {
                     functions.push((name.clone(), function.clone()));
+                    exported_values.push((name.clone(), *value));
                 }
             }
         }
         Value::Function(function) => {
-            functions.push((root_name.unwrap_or("default").to_string(), function.clone()))
+            let name = root_name.unwrap_or("default").to_string();
+            functions.push((name.clone(), function.clone()));
+            exported_values.push((name, exports));
         }
         _ => return Err("addon initialization returned neither an object nor a function".into()),
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.functions.extend(functions);
+        host.exports.extend(
+            exported_values
+                .into_iter()
+                .map(|(name, value)| (name, (env_ptr as usize, value))),
+        );
         #[cfg(target_os = "linux")]
         if !uv_handle.is_null() {
             host.libraries.push(uv_handle);
@@ -806,6 +823,150 @@ pub unsafe extern "C" fn thaw_napi_call_result(
     match result {
         Ok(value) => ThawResult {
             value: CString::new(value).unwrap().into_raw(),
+            error: ptr::null_mut(),
+        },
+        Err(error) => ThawResult {
+            value: ptr::null_mut(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_get_export(name: *const c_char) -> u64 {
+    let Ok(name) = text(name) else {
+        return 0;
+    };
+    HOST.with(|host| {
+        host.borrow()
+            .exports
+            .get(&name)
+            .map(|(_, value)| *value as u64)
+            .unwrap_or(0)
+    })
+}
+
+fn handle_error(error: impl Into<String>) -> ThawNapiHandleResult {
+    ThawNapiHandleResult {
+        value: 0,
+        error: CString::new(error.into()).unwrap_or_default().into_raw(),
+    }
+}
+
+unsafe fn module_env_for_handle(handle: u64) -> Result<NapiEnv, String> {
+    if handle == 0 {
+        return Err("invalid native addon handle 0".into());
+    }
+    HOST.with(|host| {
+        host.borrow()
+            .module_envs
+            .iter()
+            .find(|env| env.values.contains(&(handle as NapiValue)))
+            .map(|env| (&**env as *const Env).cast_mut())
+            .ok_or_else(|| format!("unknown native addon handle {handle}"))
+    })
+}
+
+unsafe fn module_arguments(env: NapiEnv, args: *const c_char) -> Result<Vec<NapiValue>, String> {
+    let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
+        .map_err(|error| format!("invalid argument JSON: {error}"))?;
+    let env = env_mut(env).map_err(|_| "invalid native addon environment")?;
+    Ok(args
+        .iter()
+        .map(|value| value_from_json(env, value))
+        .collect())
+}
+
+unsafe fn take_env_exception(env: NapiEnv) -> Result<(), String> {
+    let Some(exception) = env_mut(env)
+        .map_err(|_| "invalid native addon environment")?
+        .exception
+        .take()
+    else {
+        return Ok(());
+    };
+    let message = match value_ref(exception).map_err(|_| "invalid exception")? {
+        Value::Error(message) | Value::String(message) => message.clone(),
+        _ => json_from_value(exception)?.to_string(),
+    };
+    Err(message)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_construct_handle_result(
+    constructor: u64,
+    args: *const c_char,
+) -> ThawNapiHandleResult {
+    let result = (|| -> Result<u64, String> {
+        let env = module_env_for_handle(constructor)?;
+        let values = module_arguments(env, args)?;
+        let mut instance = ptr::null_mut();
+        let status = napi_new_instance(
+            env,
+            constructor as NapiValue,
+            values.len(),
+            values.as_ptr(),
+            &mut instance,
+        );
+        take_env_exception(env)?;
+        if status != NAPI_OK || instance.is_null() {
+            return Err(format!(
+                "native addon constructor failed with status {status}"
+            ));
+        }
+        Ok(instance as u64)
+    })();
+    match result {
+        Ok(value) => ThawNapiHandleResult {
+            value,
+            error: ptr::null_mut(),
+        },
+        Err(error) => handle_error(error),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_method_result(
+    receiver: u64,
+    method: *const c_char,
+    args: *const c_char,
+) -> ThawResult {
+    let result = (|| -> Result<String, String> {
+        let env = module_env_for_handle(receiver)?;
+        let method_name = text(method)?;
+        let values = module_arguments(env, args)?;
+        let mut callable = ptr::null_mut();
+        let method_name_c = CString::new(method_name.clone()).map_err(|_| "method contains NUL")?;
+        let status = napi_get_named_property(
+            env,
+            receiver as NapiValue,
+            method_name_c.as_ptr(),
+            &mut callable,
+        );
+        if status != NAPI_OK {
+            take_env_exception(env)?;
+            return Err(format!(
+                "failed to get native method `{method_name}`: status {status}"
+            ));
+        }
+        let function = match value_ref(callable).map_err(|_| "invalid native method")? {
+            Value::Function(function) => function.clone(),
+            _ => return Err(format!("native property `{method_name}` is not callable")),
+        };
+        let mut info = CallbackInfo {
+            args: values,
+            this_arg: receiver as NapiValue,
+            new_target: ptr::null_mut(),
+            data: function.data,
+        };
+        let value = (function.callback)(env, &mut info);
+        take_env_exception(env)?;
+        let value = wait_for_promise(value)?;
+        serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
             error: ptr::null_mut(),
         },
         Err(error) => ThawResult {
@@ -3818,6 +3979,15 @@ mod tests {
             let result = thaw_napi_call_result(c"finalized".as_ptr(), c"[]".as_ptr());
             assert!(result.error.is_null());
             assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "1.0");
+            let constructor = thaw_napi_get_export(c"NativeBox".as_ptr());
+            assert_ne!(constructor, 0);
+            let instance = thaw_napi_construct_handle_result(constructor, c"[21]".as_ptr());
+            assert!(instance.error.is_null());
+            assert_ne!(instance.value, 0);
+            let result =
+                thaw_napi_call_method_result(instance.value, c"get".as_ptr(), c"[]".as_ptr());
+            assert!(result.error.is_null());
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "21.0");
         }
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4028,6 +4198,25 @@ mod tests {
             assert!(host.functions.contains_key("Statement"));
             assert!(host.functions.contains_key("Backup"));
         });
+        unsafe {
+            let constructor = thaw_napi_get_export(c"Database".as_ptr());
+            assert_ne!(constructor, 0);
+            let database =
+                thaw_napi_construct_handle_result(constructor, c"[\":memory:\",6]".as_ptr());
+            assert!(
+                database.error.is_null(),
+                "{}",
+                if database.error.is_null() {
+                    "unknown constructor error".into()
+                } else {
+                    CStr::from_ptr(database.error)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            );
+            assert_ne!(database.value, 0);
+            thaw_napi_run_async_work();
+        }
     }
 
     #[test]
