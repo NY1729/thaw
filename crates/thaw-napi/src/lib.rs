@@ -3155,6 +3155,9 @@ pub unsafe extern "C" fn napi_set_named_property(
     name: *const c_char,
     value: NapiValue,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(name) = text(name) else {
         return NAPI_INVALID_ARG;
     };
@@ -3220,6 +3223,9 @@ pub unsafe extern "C" fn napi_get_named_property(
     name: *const c_char,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() || !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(name) = text(name) else {
         return NAPI_INVALID_ARG;
     };
@@ -3373,6 +3379,12 @@ pub unsafe extern "C" fn napi_set_property(
     key: NapiValue,
     value: NapiValue,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object)
+        || !value_belongs_to_environment(env, key)
+        || !value_belongs_to_environment(env, value)
+    {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
@@ -3386,6 +3398,12 @@ pub unsafe extern "C" fn napi_get_property(
     key: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null()
+        || !value_belongs_to_environment(env, object)
+        || !value_belongs_to_environment(env, key)
+    {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(key) = property_key(key) else {
         return NAPI_INVALID_ARG;
     };
@@ -3399,7 +3417,10 @@ pub unsafe extern "C" fn napi_has_property(
     key: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if out.is_null()
+        || !value_belongs_to_environment(env, object)
+        || !value_belongs_to_environment(env, key)
+    {
         return NAPI_INVALID_ARG;
     }
     let Ok(key) = property_key(key) else {
@@ -3417,7 +3438,10 @@ pub unsafe extern "C" fn napi_has_own_property(
     key: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if out.is_null() {
+    if out.is_null()
+        || !value_belongs_to_environment(env, object)
+        || !value_belongs_to_environment(env, key)
+    {
         return NAPI_INVALID_ARG;
     }
     let Ok(key) = property_key(key) else {
@@ -3439,7 +3463,7 @@ pub unsafe extern "C" fn napi_delete_property(
     key: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
-    if env.is_null() {
+    if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, key) {
         return NAPI_INVALID_ARG;
     }
     let Ok(key) = property_key(key) else {
@@ -3490,7 +3514,7 @@ pub unsafe extern "C" fn napi_has_named_property(
     name: *const c_char,
     result: *mut bool,
 ) -> NapiStatus {
-    if name.is_null() || result.is_null() {
+    if name.is_null() || result.is_null() || !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
     let Ok(name) = text(name) else {
@@ -3512,6 +3536,12 @@ pub unsafe extern "C" fn napi_define_properties(
     count: usize,
     descriptors: *const NapiPropertyDescriptor,
 ) -> NapiStatus {
+    if !value_belongs_to_environment(env, object) {
+        return NAPI_INVALID_ARG;
+    }
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return NAPI_OBJECT_EXPECTED;
+    }
     if count == 0 {
         return NAPI_OK;
     }
@@ -3519,6 +3549,17 @@ pub unsafe extern "C" fn napi_define_properties(
         return NAPI_INVALID_ARG;
     }
     for descriptor in std::slice::from_raw_parts(descriptors, count) {
+        if descriptor.utf8name.is_null() && !value_belongs_to_environment(env, descriptor.name) {
+            return NAPI_INVALID_ARG;
+        }
+        if descriptor.method.is_none()
+            && descriptor.getter.is_none()
+            && descriptor.setter.is_none()
+            && !descriptor.value.is_null()
+            && !value_belongs_to_environment(env, descriptor.value)
+        {
+            return NAPI_INVALID_ARG;
+        }
         let key = if !descriptor.utf8name.is_null() {
             env_mut(env).map(|env| {
                 env.alloc(Value::String(
@@ -7475,6 +7516,92 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!(actual, value);
+        }
+    }
+
+    #[test]
+    fn property_apis_reject_foreign_objects_keys_and_values() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let object = env.alloc(Value::Object(HashMap::new()));
+            let key = env.alloc(Value::String("key".into()));
+            let value = env.alloc(Value::Number(1.0));
+            let mut foreign_env = Env::new();
+            let foreign_object = foreign_env.alloc(Value::Object(HashMap::new()));
+            let foreign_key = foreign_env.alloc(Value::String("foreign".into()));
+            let foreign_value = foreign_env.alloc(Value::Number(2.0));
+            let mut value_out = ptr::null_mut();
+            let mut present = false;
+
+            assert_eq!(
+                napi_set_named_property(env_ptr, foreign_object, c"key".as_ptr(), value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_set_named_property(env_ptr, object, c"key".as_ptr(), foreign_value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, foreign_object, c"key".as_ptr(), &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_has_named_property(env_ptr, foreign_object, c"key".as_ptr(), &mut present),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_set_property(env_ptr, object, foreign_key, value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_set_property(env_ptr, object, key, foreign_value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_property(env_ptr, foreign_object, key, &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_has_property(env_ptr, object, foreign_key, &mut present),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_has_own_property(env_ptr, foreign_object, key, &mut present),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_delete_property(env_ptr, object, foreign_key, &mut present),
+                NAPI_INVALID_ARG
+            );
+
+            let descriptor = NapiPropertyDescriptor {
+                utf8name: ptr::null(),
+                name: foreign_key,
+                method: None,
+                getter: None,
+                setter: None,
+                value,
+                attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+                data: ptr::null_mut(),
+            };
+            assert_eq!(
+                napi_define_properties(env_ptr, object, 1, &descriptor),
+                NAPI_INVALID_ARG
+            );
+            let descriptor = NapiPropertyDescriptor {
+                name: key,
+                value: foreign_value,
+                ..descriptor
+            };
+            assert_eq!(
+                napi_define_properties(env_ptr, object, 1, &descriptor),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_define_properties(env_ptr, foreign_object, 0, ptr::null()),
+                NAPI_INVALID_ARG
+            );
         }
     }
 
