@@ -9108,6 +9108,45 @@ mod tests {
     }
 
     #[test]
+    fn compiles_switch_selection_default_fallthrough_and_break() {
+        let source = r#"
+            function probe(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            function main(): void {
+                switch (2) {
+                    case probe("first", 1): console.log("wrong"); break;
+                    default: console.log("default-before");
+                    case probe("second", 2):
+                        console.log("two");
+                    case 3:
+                        console.log("three");
+                        break;
+                    case probe("never", 4): console.log("unreachable");
+                }
+                switch ("missing") {
+                    case "x": console.log("x"); break;
+                    default: console.log("fallback");
+                    case "later": console.log("after-default");
+                }
+                switch (1) {
+                    case 1:
+                        let i = 0;
+                        while (i < 1) { i++; break; }
+                        console.log(i);
+                        break;
+                    default: console.log("wrong-default");
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "switch_flow"),
+            "first\nsecond\ntwo\nthree\nfallback\nafter-default\n1\n"
+        );
+    }
+
+    #[test]
     fn compiles_for_of_with_single_source_evaluation_continue_and_break() {
         let source = r#"
             function values(): number[] {
@@ -11137,6 +11176,37 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "await_do_while"), "2\n3\ndone\n");
+    }
+
+    #[test]
+    fn frame_split_supports_await_in_switch_tests_and_cases() {
+        let source = r#"
+            async function selected(): Promise<string> {
+                await sleep(1);
+                console.log("selected");
+                return "b";
+            }
+            async function main(): Promise<void> {
+                let result = 0;
+                switch ("b") {
+                    case "a": console.log("wrong-a"); break;
+                    case await selected():
+                        console.log("matched");
+                        await sleep(1);
+                        result = 2;
+                    default:
+                        console.log("fallthrough-default");
+                        result = result + 1;
+                        break;
+                    case "never": console.log("wrong-never");
+                }
+                console.log(result);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "await_switch"),
+            "selected\nmatched\nfallthrough-default\n3\n"
+        );
     }
 
     #[test]

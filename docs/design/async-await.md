@@ -466,6 +466,9 @@ assignment headも同じloweringを共有し、ループ終了後に最後の要
 frame splitter上で維持する。同期typed arrayは通常値として同じループを通る。
 array literalのspreadは各sourceをtyped array partとして保持し、awaitを含むpart/elementを
 左から右へframe temporaryへ抽出してから、LLVMが合計長を計算してarena配列へ連結する。
+`switch`は一度だけ評価したdiscriminantと選択case indexへlowerする。case testは未選択時だけ
+順に評価し、case bodyは選択indexを次へ送ってfallthroughする。breakはexit indexへ変換し、
+awaitを含むcase test/bodyも通常のnested-if frame guardとして分割する。
 
 ## 12. Promise constructorとcontinuation chain
 
