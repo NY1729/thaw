@@ -813,13 +813,38 @@ unsafe fn env_mut<'a>(env: NapiEnv) -> Result<&'a mut Env, NapiStatus> {
     env.as_mut().ok_or(NAPI_INVALID_ARG)
 }
 
+fn status_message(status: NapiStatus) -> *const c_char {
+    let message: &'static [u8] = match status {
+        NAPI_INVALID_ARG => b"Invalid argument\0",
+        NAPI_OBJECT_EXPECTED => b"Object expected\0",
+        NAPI_STRING_EXPECTED => b"String expected\0",
+        NAPI_FUNCTION_EXPECTED => b"Function expected\0",
+        NAPI_NUMBER_EXPECTED => b"Number expected\0",
+        NAPI_BOOLEAN_EXPECTED => b"Boolean expected\0",
+        NAPI_ARRAY_EXPECTED => b"Array expected\0",
+        NAPI_GENERIC_FAILURE => b"Generic failure\0",
+        NAPI_PENDING_EXCEPTION => b"An exception is pending\0",
+        NAPI_CANCELLED => b"Operation cancelled\0",
+        NAPI_ESCAPE_CALLED_TWICE => b"Escape called twice\0",
+        NAPI_HANDLE_SCOPE_MISMATCH => b"Handle scope mismatch\0",
+        NAPI_QUEUE_FULL => b"Queue full\0",
+        NAPI_CLOSING => b"Resource is closing\0",
+        NAPI_BIGINT_EXPECTED => b"BigInt expected\0",
+        NAPI_DATE_EXPECTED => b"Date expected\0",
+        NAPI_ARRAYBUFFER_EXPECTED => b"ArrayBuffer expected\0",
+        NAPI_WOULD_DEADLOCK => b"Operation would deadlock\0",
+        _ => b"N-API error\0",
+    };
+    message.as_ptr().cast()
+}
+
 unsafe fn record_status(env: NapiEnv, status: NapiStatus) -> NapiStatus {
     if status != NAPI_OK {
         if let Some(env) = env.as_mut() {
             env.last_error_info.error_code = status;
             env.last_error_info.engine_error_code = 0;
             env.last_error_info.engine_reserved = ptr::null_mut();
-            env.last_error_info.error_message = ptr::null();
+            env.last_error_info.error_message = status_message(status);
         }
     }
     status
@@ -6453,6 +6478,7 @@ pub unsafe extern "C" fn napi_get_last_error_info(
     };
     if out.is_null() {
         env.last_error_info.error_code = NAPI_INVALID_ARG;
+        env.last_error_info.error_message = status_message(NAPI_INVALID_ARG);
         return NAPI_INVALID_ARG;
     }
     *out = &env.last_error_info;
@@ -8998,6 +9024,10 @@ mod tests {
             let mut info = ptr::null();
             assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
             assert_eq!((*info).error_code, NAPI_NUMBER_EXPECTED);
+            assert_eq!(
+                CStr::from_ptr((*info).error_message).to_bytes(),
+                b"Number expected"
+            );
             assert_eq!((*info).engine_error_code, 0);
             assert!((*info).engine_reserved.is_null());
 
@@ -9015,6 +9045,10 @@ mod tests {
             );
             assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
             assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+            assert_eq!(
+                CStr::from_ptr((*info).error_message).to_bytes(),
+                b"Invalid argument"
+            );
 
             let mut other_info = ptr::null();
             assert_eq!(
@@ -9022,6 +9056,7 @@ mod tests {
                 NAPI_OK
             );
             assert_eq!((*other_info).error_code, NAPI_OK);
+            assert!((*other_info).error_message.is_null());
 
             let foreign = other_env.alloc(Value::Object(HashMap::new()));
             let mut value_type = 0;
