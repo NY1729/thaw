@@ -7144,6 +7144,73 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"Array" && property.sym == *"of" {
+                        let explicit_type = if let Some(type_args) = &call.type_args {
+                            let [element] = type_args.params.as_slice() else {
+                                return Err("`Array.of` expects zero or one type argument".into());
+                            };
+                            Some(lower_ts_type(
+                                element,
+                                self.interfaces,
+                                self.generic_interfaces,
+                            )?)
+                        } else {
+                            None
+                        };
+                        let mut element_type = explicit_type;
+                        let mut parts = Vec::new();
+                        let mut pending = Vec::new();
+                        for argument in &call.args {
+                            let value = self.lower_expr(&argument.expr)?;
+                            if argument.spread.is_some() {
+                                if !pending.is_empty() {
+                                    parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
+                                }
+                                let ty = self.infer_expr_type(&value)?;
+                                let HirType::Array(element) = ty else {
+                                    return Err(
+                                        "`Array.of` spread requires a homogeneous array".into()
+                                    );
+                                };
+                                if let Some(expected) = &element_type {
+                                    if expected != element.as_ref() {
+                                        return Err(format!(
+                                            "`Array.of` spread element has type {element:?}, expected {expected:?}"
+                                        ));
+                                    }
+                                } else {
+                                    element_type = Some(element.as_ref().clone());
+                                }
+                                parts.push(value);
+                            } else {
+                                let ty = self.infer_expr_type(&value)?;
+                                if let Some(expected) = &element_type {
+                                    if expected != &ty {
+                                        return Err(format!(
+                                            "`Array.of` element has type {ty:?}, expected {expected:?}"
+                                        ));
+                                    }
+                                } else {
+                                    element_type = Some(ty);
+                                }
+                                pending.push(value);
+                            }
+                        }
+                        if !pending.is_empty() {
+                            parts.push(HirExpr::ArrayLit(pending));
+                        }
+                        let element_type = element_type.ok_or(
+                            "empty `Array.of()` requires an explicit element type argument",
+                        )?;
+                        return Ok(match parts.len() {
+                            0 => HirExpr::ArrayAlloc(
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                element_type,
+                            ),
+                            1 => parts.pop().unwrap(),
+                            _ => HirExpr::ArrayConcat(parts, element_type),
+                        });
+                    }
                     if object.sym == *"Array" && property.sym == *"isArray" {
                         let [argument] = call.args.as_slice() else {
                             return Err("`Array.isArray` expects exactly one argument".into());
