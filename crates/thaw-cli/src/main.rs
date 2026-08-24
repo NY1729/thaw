@@ -2581,6 +2581,7 @@ fn read_ffi_metadata(
                     {
                         "internal" => thaw_hir::FfiAggregateAbi::Internal,
                         "portable" => thaw_hir::FfiAggregateAbi::Portable,
+                        "packed" => thaw_hir::FfiAggregateAbi::Packed,
                         other => {
                             return Err(format!(
                                 "unknown aggregate return ABI `{other}` for `{symbol}` in `{}`",
@@ -4172,7 +4173,7 @@ mod tests {
         let path = dir.join("ffi.json");
         std::fs::write(
             &path,
-            r#"{"version":3,"functions":{"slice":{"errorAbi":"direct","parameterStringAbis":["pointer-length"],"returnStringAbi":"pointer-length","callingConvention":"fast","aggregateReturnAbi":"portable"}}}"#,
+            r#"{"version":3,"functions":{"slice":{"errorAbi":"direct","parameterStringAbis":["pointer-length"],"returnStringAbi":"pointer-length","callingConvention":"fast","aggregateReturnAbi":"portable"},"record":{"errorAbi":"direct","aggregateReturnAbi":"packed"}}}"#,
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
@@ -4187,6 +4188,10 @@ mod tests {
                 calling_convention: thaw_hir::FfiCallingConvention::Fast,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Portable,
             }
+        );
+        assert_eq!(
+            metadata["record"].aggregate_return_abi,
+            thaw_hir::FfiAggregateAbi::Packed
         );
         let _ = std::fs::remove_dir_all(dir);
     }

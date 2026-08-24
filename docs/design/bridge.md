@@ -350,7 +350,8 @@ extern "C" fn thaw_dynamic_call(
   単位への展開に加え、`Array`/`Object`のportable struct戻り値、文字列の
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
-  target固有struct packing、variadic、nested aggregate ownershipは未対応。
+  packed C struct戻り値も明示指定できる。任意のfield offset／alignment、
+  bitfield、variadic、nested aggregate ownershipは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -380,15 +381,18 @@ pointer-length return is `struct { const char *data; int64_t len; }` and is
 copied with an added terminator before an optional ownership destructor runs.
 Array and fixed object direct returns use portable value structs when
 `aggregateReturnAbi` is `portable`, and are reconstructed into Thaw's arena
-layout after the native call. The default `internal` preserves the legacy
-pointer ABI for existing builtins and native archives.
+layout after the native call. `packed` describes a packed C aggregate; LLVM
+uses the target C ABI's hidden return-storage pointer and then reconstructs the
+value from that storage. This applies to direct and `thaw-result` returns. The
+default `internal` preserves the legacy pointer ABI for existing builtins and
+native archives.
 
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
-Versions 1 and 2 remain backward-compatible. Target-specific packing, variadics
-and nested aggregate ownership remain future extensions. Void declarations use
-an ordinary C `void` return with the direct
+Versions 1 and 2 remain backward-compatible. Explicit field offsets/alignment,
+bitfields, variadics and nested aggregate ownership remain future extensions.
+Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
 rules as value-bearing results.
