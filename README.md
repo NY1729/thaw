@@ -446,8 +446,10 @@ both `Json` and `void` callback returns are supported. The same E2E exercises
 loop alongside N-API async work; a real libuv timer regression test verifies
 delivery. Instance facts also follow statically named nested object properties,
 property assignments, and control-flow joins; overwriting a parent invalidates
-all descendant facts. Getters, static methods, and private non-default event
-loops remain explicit gaps.
+all descendant facts. Typed static class methods use the exported constructor
+as their N-API receiver and share the same arity, overload, callback, and native
+value marshalling rules as instance methods; named and namespace calls are
+rewritten. Getters and private non-default event loops remain explicit gaps.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to

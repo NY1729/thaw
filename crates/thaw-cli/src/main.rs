@@ -389,6 +389,16 @@ type QualifiedCallRewrite = (String, String, String);
 type ClassConstructorRewrite = (String, String);
 /// `(class, method, helper, argument_count, has_callback, parameter_types)`.
 type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
+/// `(qualifier, class, method, helper, argument_count, has_callback, parameter_types)`.
+type StaticClassMethodRewrite = (
+    String,
+    String,
+    String,
+    String,
+    usize,
+    bool,
+    Vec<thaw_hir::HirType>,
+);
 
 fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: usize) -> bool {
     matches!(
@@ -431,6 +441,136 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
             if **element == thaw_hir::HirType::F64
     )
 }
+
+fn generate_napi_class_method_overloads(
+    class: &thaw_bridge::DtsClass,
+    is_static: bool,
+    observed_arities: &std::collections::HashMap<String, std::collections::BTreeSet<usize>>,
+    shim: &mut String,
+) -> Vec<(String, String, usize, bool, Vec<thaw_hir::HirType>)> {
+    let mut generated = Vec::new();
+    let mut method_names = std::collections::HashSet::new();
+    for method in &class.methods {
+        if method.is_static != is_static
+            || method.kind != thaw_bridge::DtsMethodKind::Method
+            || !method_names.insert(method.name.clone())
+        {
+            continue;
+        }
+        let overloads = class
+            .methods
+            .iter()
+            .filter(|candidate| {
+                candidate.name == method.name
+                    && candidate.is_static == is_static
+                    && candidate.kind == thaw_bridge::DtsMethodKind::Method
+            })
+            .filter(|candidate| {
+                candidate.params.iter().enumerate().all(|(index, (_, ty))| {
+                    supported_class_method_param(ty, index, candidate.params.len())
+                }) && candidate
+                    .rest_param
+                    .as_ref()
+                    .is_none_or(|(_, ty)| supported_class_method_param(ty, 0, 1))
+                    && supported_class_method_return(&candidate.ret)
+            })
+            .collect::<Vec<_>>();
+        for (overload_index, overload) in overloads.into_iter().enumerate() {
+            let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
+                continue;
+            };
+            let Some(return_type) = (if *return_type == thaw_hir::HirType::Void {
+                Some("Json".to_string())
+            } else {
+                render_dynamic_type(return_type)
+            }) else {
+                continue;
+            };
+            let argument_counts = if overload.rest_param.is_some() {
+                observed_arities
+                    .get(&method.name)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|count| *count >= overload.required_params)
+                    .collect::<Vec<_>>()
+            } else {
+                (overload.required_params..=overload.params.len()).collect()
+            };
+            for argument_count in argument_counts {
+                let fixed_count = argument_count.min(overload.params.len());
+                let mut included_params = overload.params[..fixed_count]
+                    .iter()
+                    .filter_map(|(name, ty)| match ty {
+                        thaw_bridge::DtsType::Native(ty) => Some((name.clone(), ty.clone())),
+                        thaw_bridge::DtsType::Unsupported(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                if argument_count > overload.params.len() {
+                    let Some((name, thaw_bridge::DtsType::Native(rest_type))) =
+                        &overload.rest_param
+                    else {
+                        continue;
+                    };
+                    included_params.extend(
+                        (overload.params.len()..argument_count)
+                            .map(|index| (format!("{name}{index}"), rest_type.clone())),
+                    );
+                }
+                let params = (if is_static {
+                    Vec::new()
+                } else {
+                    vec!["receiver: JsValue".to_string()]
+                })
+                .into_iter()
+                .chain(included_params.iter().map(|(name, ty)| {
+                    format!(
+                        "{name}: {}",
+                        render_dynamic_type(ty).expect("filtered above")
+                    )
+                }))
+                .collect::<Vec<_>>()
+                .join(", ");
+                let has_callback = matches!(
+                    included_params.last(),
+                    Some((_, thaw_hir::HirType::Function(_, _)))
+                );
+                let runtime_key = format!(
+                    "{}{}${}$overload{overload_index}$arity{argument_count}",
+                    match (is_static, &overload.ret) {
+                        (true, thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)) => {
+                            "$staticmethodvoid$"
+                        }
+                        (true, _) => "$staticmethod$",
+                        (false, thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)) => {
+                            "$methodvoid$"
+                        }
+                        (false, _) => "$method$",
+                    },
+                    class.name,
+                    method.name
+                );
+                let encoded = runtime_key
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                let symbol = format!("__thaw_typed_napi_{encoded}");
+                shim.push_str(&format!(
+                    "declare function {symbol}({params}): {return_type};\n"
+                ));
+                generated.push((
+                    method.name.clone(),
+                    symbol,
+                    argument_count,
+                    has_callback,
+                    included_params.into_iter().map(|(_, ty)| ty).collect(),
+                ));
+            }
+        }
+    }
+    generated
+}
 type ExternalExports = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
 type RegistryShims = (
     String,
@@ -438,6 +578,7 @@ type RegistryShims = (
     Vec<QualifiedCallRewrite>,
     Vec<ClassConstructorRewrite>,
     Vec<ClassMethodRewrite>,
+    Vec<StaticClassMethodRewrite>,
     ExternalExports,
 );
 
@@ -641,6 +782,7 @@ fn generate_registry_shims(
         std::collections::HashMap::new();
     let mut class_rewrites = Vec::new();
     let mut class_method_rewrites = Vec::new();
+    let mut static_class_method_rewrites = Vec::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -694,121 +836,30 @@ fn generate_registry_shims(
                     class.name.clone(),
                 ));
 
-                let mut method_names = std::collections::HashSet::new();
-                for method in &class.methods {
-                    if method.is_static
-                        || method.kind != thaw_bridge::DtsMethodKind::Method
-                        || !method_names.insert(method.name.clone())
-                    {
-                        continue;
-                    }
-                    let overloads = class
-                        .methods
-                        .iter()
-                        .filter(|candidate| {
-                            candidate.name == method.name
-                                && !candidate.is_static
-                                && candidate.kind == thaw_bridge::DtsMethodKind::Method
-                        })
-                        .filter(|candidate| {
-                            candidate.params.iter().enumerate().all(|(index, (_, ty))| {
-                                supported_class_method_param(ty, index, candidate.params.len())
-                            }) && candidate
-                                .rest_param
-                                .as_ref()
-                                .is_none_or(|(_, ty)| supported_class_method_param(ty, 0, 1))
-                                && supported_class_method_return(&candidate.ret)
-                        })
-                        .collect::<Vec<_>>();
-                    for (overload_index, overload) in overloads.into_iter().enumerate() {
-                        let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
-                            continue;
-                        };
-                        let Some(return_type) = (if *return_type == thaw_hir::HirType::Void {
-                            Some("Json".to_string())
-                        } else {
-                            render_dynamic_type(return_type)
-                        }) else {
-                            continue;
-                        };
-                        let argument_counts = if overload.rest_param.is_some() {
-                            observed_arities
-                                .get(&method.name)
-                                .into_iter()
-                                .flatten()
-                                .copied()
-                                .filter(|count| *count >= overload.required_params)
-                                .collect::<Vec<_>>()
-                        } else {
-                            (overload.required_params..=overload.params.len()).collect()
-                        };
-                        for argument_count in argument_counts {
-                            let fixed_count = argument_count.min(overload.params.len());
-                            let mut included_params = overload.params[..fixed_count]
-                                .iter()
-                                .filter_map(|(name, ty)| match ty {
-                                    thaw_bridge::DtsType::Native(ty) => {
-                                        Some((name.clone(), ty.clone()))
-                                    }
-                                    thaw_bridge::DtsType::Unsupported(_) => None,
-                                })
-                                .collect::<Vec<_>>();
-                            if argument_count > overload.params.len() {
-                                let Some((name, thaw_bridge::DtsType::Native(rest_type))) =
-                                    &overload.rest_param
-                                else {
-                                    continue;
-                                };
-                                included_params
-                                    .extend((overload.params.len()..argument_count).map(|index| {
-                                        (format!("{name}{index}"), rest_type.clone())
-                                    }));
-                            }
-                            let params = std::iter::once("receiver: JsValue".to_string())
-                                .chain(included_params.iter().map(|(name, ty)| {
-                                    format!(
-                                        "{name}: {}",
-                                        render_dynamic_type(ty).expect("filtered above")
-                                    )
-                                }))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let has_callback = matches!(
-                                included_params.last(),
-                                Some((_, thaw_hir::HirType::Function(_, _)))
-                            );
-                            let runtime_key = format!(
-                                "{}{}${}$overload{overload_index}$arity{argument_count}",
-                                if matches!(
-                                    overload.ret,
-                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)
-                                ) {
-                                    "$methodvoid$"
-                                } else {
-                                    "$method$"
-                                },
-                                class.name,
-                                method.name
-                            );
-                            let encoded = runtime_key
-                                .as_bytes()
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>();
-                            let symbol = format!("__thaw_typed_napi_{encoded}");
-                            shim.push_str(&format!(
-                                "declare function {symbol}({params}): {return_type};\n"
-                            ));
-                            class_method_rewrites.push((
-                                class.name.clone(),
-                                method.name.clone(),
-                                symbol,
-                                argument_count,
-                                has_callback,
-                                included_params.into_iter().map(|(_, ty)| ty).collect(),
-                            ));
-                        }
-                    }
+                for (method, symbol, argument_count, has_callback, parameter_types) in
+                    generate_napi_class_method_overloads(class, false, &observed_arities, &mut shim)
+                {
+                    class_method_rewrites.push((
+                        class.name.clone(),
+                        method,
+                        symbol,
+                        argument_count,
+                        has_callback,
+                        parameter_types,
+                    ));
+                }
+                for (method, symbol, argument_count, has_callback, parameter_types) in
+                    generate_napi_class_method_overloads(class, true, &observed_arities, &mut shim)
+                {
+                    static_class_method_rewrites.push((
+                        qualifier_identifier(&pkg.name).to_string(),
+                        class.name.clone(),
+                        method,
+                        symbol,
+                        argument_count,
+                        has_callback,
+                        parameter_types,
+                    ));
                 }
             }
         }
@@ -934,14 +985,25 @@ fn generate_registry_shims(
         rewrites,
         class_rewrites,
         class_method_rewrites,
+        static_class_method_rewrites,
         external_exports,
     ))
 }
 
+#[cfg(test)]
 fn rewrite_external_class_methods(
     source: &str,
     classes: &[ClassConstructorRewrite],
     methods: &[ClassMethodRewrite],
+) -> Result<String, String> {
+    rewrite_external_class_methods_with_static(source, classes, methods, &[])
+}
+
+fn rewrite_external_class_methods_with_static(
+    source: &str,
+    classes: &[ClassConstructorRewrite],
+    methods: &[ClassMethodRewrite],
+    static_methods: &[StaticClassMethodRewrite],
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
@@ -952,7 +1014,7 @@ fn rewrite_external_class_methods(
     };
     use thaw_parser::common::Spanned;
 
-    if methods.is_empty() {
+    if methods.is_empty() && static_methods.is_empty() {
         return Ok(source.to_string());
     }
 
@@ -1495,6 +1557,7 @@ fn rewrite_external_class_methods(
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
         methods: &'a [ClassMethodRewrite],
+        static_methods: &'a [StaticClassMethodRewrite],
         variables: std::collections::HashMap<String, String>,
         value_types: std::collections::HashMap<String, thaw_hir::HirType>,
         function_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
@@ -1640,6 +1703,63 @@ fn rewrite_external_class_methods(
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(member) = callee.as_ref() {
+                    let static_target = match member.obj.as_ref() {
+                        Expr::Ident(class) => Some((None, class.sym.as_str())),
+                        Expr::Member(class_member) => {
+                            match (class_member.obj.as_ref(), &class_member.prop) {
+                                (Expr::Ident(qualifier), MemberProp::Ident(class)) => {
+                                    Some((Some(qualifier.sym.as_str()), class.sym.as_str()))
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let (Some((qualifier, class)), MemberProp::Ident(method)) =
+                        (static_target, &member.prop)
+                    {
+                        let has_callback = call.args.last().is_some_and(|argument| {
+                            matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
+                                || matches!(argument.expr.as_ref(), Expr::Ident(identifier) if self.callbacks.contains(identifier.sym.as_str()))
+                        });
+                        let selected = self
+                            .static_methods
+                            .iter()
+                            .filter(|candidate| {
+                                candidate.1 == class
+                                    && candidate.2 == method.sym.as_str()
+                                    && candidate.4 == call.args.len()
+                                    && candidate.5 == has_callback
+                                    && qualifier.is_none_or(|qualifier| candidate.0 == qualifier)
+                            })
+                            .filter_map(|candidate| {
+                                let mut score = 0u16;
+                                for (argument, declared) in call.args.iter().zip(&candidate.6) {
+                                    if let Some(actual) = source_expr_type(
+                                        argument.expr.as_ref(),
+                                        &self.value_types,
+                                        self.function_types,
+                                    ) {
+                                        score += u16::from(overload_type_score(declared, &actual)?);
+                                    }
+                                }
+                                Some((score, candidate))
+                            })
+                            .reduce(|best, candidate| {
+                                if candidate.0 > best.0 {
+                                    candidate
+                                } else {
+                                    best
+                                }
+                            })
+                            .map(|(_, candidate)| candidate);
+                        if let Some(candidate) = selected {
+                            let span = member.span();
+                            self.edits.push((span.lo.0, span.hi.0, candidate.3.clone()));
+                            call.visit_children_with(self);
+                            return;
+                        }
+                    }
                     if let (Some((receiver_key, receiver_source)), MemberProp::Ident(method)) =
                         (instance_receiver(&member.obj), &member.prop)
                     {
@@ -1788,6 +1908,7 @@ fn rewrite_external_class_methods(
     let mut finder = Finder {
         classes,
         methods,
+        static_methods,
         variables: std::collections::HashMap::new(),
         value_types: std::collections::HashMap::new(),
         function_types: &function_types.types,
@@ -2244,6 +2365,7 @@ fn build_with_link_mode(
         mut qualified_call_rewrites,
         class_constructor_rewrites,
         class_method_rewrites,
+        static_class_method_rewrites,
         external_exports,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
@@ -2257,10 +2379,11 @@ fn build_with_link_mode(
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
-    let user_source = rewrite_external_class_methods(
+    let user_source = rewrite_external_class_methods_with_static(
         &user_source,
         &class_constructor_rewrites,
         &class_method_rewrites,
+        &static_class_method_rewrites,
     )?;
     let user_source =
         rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;
@@ -3666,7 +3789,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); get(): number; add(delta?: number): number; sum(...values: number[]): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
+            "export declare class NativeBox { constructor(value: number); static twice(value: number): number; get(): number; add(delta?: number): number; sum(...values: number[]): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -3703,6 +3826,12 @@ mod tests {
                 napi_unwrap(env, self, (void**)&box);
                 napi_create_double(env, box->value, &result); return result;
             }
+            static napi_value box_twice(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, result; double value;
+                napi_get_cb_info(env, info, &argc, &arg, 0, 0);
+                napi_get_value_double(env, arg, &value);
+                napi_create_double(env, value * 2, &result); return result;
+            }
             static napi_value box_add(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value arg, self, result; native_box* box; double delta = 0;
                 napi_get_cb_info(env, info, &argc, &arg, &self, 0);
@@ -3729,13 +3858,14 @@ mod tests {
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value constructor;
-                napi_property_descriptor properties[4] = {
+                napi_property_descriptor properties[5] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
                     { "add", 0, box_add, 0, 0, 0, 0, 0 },
                     { "sum", 0, box_sum, 0, 0, 0, 0, 0 },
-                    { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 }
+                    { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 },
+                    { "twice", 0, box_twice, 0, 0, 0, 1024, 0 }
                 };
-                napi_define_class(env, "NativeBox", 9, box_new, 0, 4, properties, &constructor);
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 5, properties, &constructor);
                 napi_set_named_property(env, exports, "NativeBox", constructor);
                 return exports;
             }
@@ -3754,7 +3884,7 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { console.log(NativeBox.twice(21)); const box: JsValue = new NativeBox(42); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); console.log(box.sum()); console.log(box.sum(1, 2, 3)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -3767,7 +3897,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\n42\n50\n0\n6\n42\n1\n"
+            "42\n42\n42\n50\n0\n6\n42\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4384,6 +4514,75 @@ mod tests {
             rewritten,
             "const db = new Database(\":memory:\"); __thaw_configure(db, \"busyTimeout\", 1000); const local = new LocalBox(1); local.configure(2);"
         );
+    }
+
+    #[test]
+    fn rewrites_named_and_namespace_static_class_methods() {
+        let source = "NativeBox.create(1); addon.NativeBox.create(\"text\"); LocalBox.create(2);";
+        let rewritten = rewrite_external_class_methods_with_static(
+            source,
+            &[],
+            &[],
+            &[
+                (
+                    "addon".into(),
+                    "NativeBox".into(),
+                    "create".into(),
+                    "__thaw_create_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "addon".into(),
+                    "NativeBox".into(),
+                    "create".into(),
+                    "__thaw_create_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "__thaw_create_number(1); __thaw_create_string(\"text\"); LocalBox.create(2);"
+        );
+    }
+
+    #[test]
+    fn generates_typed_napi_static_method_shims_without_instance_receivers() {
+        let class = thaw_bridge::DtsClass {
+            name: "NativeBox".into(),
+            extends: None,
+            constructors: vec![],
+            methods: vec![thaw_bridge::DtsMethod {
+                name: "create".into(),
+                params: vec![(
+                    "value".into(),
+                    thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                )],
+                required_params: 1,
+                rest_param: None,
+                ret: thaw_bridge::DtsType::Native(thaw_hir::HirType::F64),
+                is_static: true,
+                kind: thaw_bridge::DtsMethodKind::Method,
+                overloaded: false,
+            }],
+            properties: vec![],
+        };
+        let mut shim = String::new();
+        let generated = generate_napi_class_method_overloads(
+            &class,
+            true,
+            &std::collections::HashMap::new(),
+            &mut shim,
+        );
+        assert_eq!(generated.len(), 1);
+        assert_eq!(generated[0].0, "create");
+        assert!(shim.contains("(value: number): number;"));
+        assert!(!shim.contains("receiver"));
     }
 
     #[test]
