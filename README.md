@@ -134,6 +134,9 @@ The workspace crates have narrow responsibilities:
 - Object fields and array indexing/mutation
 - Typed array literals support multiple spreads and ordinary elements with
   single, left-to-right evaluation, including awaited spread sources
+- Named function calls support fixed-length argument spreads from array
+  literals and typed tuples, preserving single left-to-right evaluation across
+  ordinary, spread, and awaited arguments
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
 - `process.env`, `console.log`, JSON operations, and both legacy blocking and
