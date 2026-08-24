@@ -50,6 +50,13 @@ const NAPI_WRITABLE: u32 = 1;
 const NAPI_ENUMERABLE: u32 = 2;
 const NAPI_CONFIGURABLE: u32 = 4;
 const NAPI_DEFAULT_PROPERTY_ATTRIBUTES: u32 = NAPI_WRITABLE | NAPI_ENUMERABLE | NAPI_CONFIGURABLE;
+const NAPI_KEY_INCLUDE_PROTOTYPES: i32 = 0;
+const NAPI_KEY_OWN_ONLY: i32 = 1;
+const NAPI_KEY_ALL_PROPERTIES: u32 = 0;
+const NAPI_KEY_SKIP_STRINGS: u32 = 1 << 3;
+const NAPI_KEY_SKIP_SYMBOLS: u32 = 1 << 4;
+const NAPI_KEY_KEEP_NUMBERS: i32 = 0;
+const NAPI_KEY_NUMBERS_TO_STRINGS: i32 = 1;
 
 const ASYNC_CREATED: u8 = 0;
 const ASYNC_QUEUED: u8 = 1;
@@ -323,6 +330,7 @@ pub struct Env {
     sealed_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
     property_attributes: HashMap<(usize, PropertyKey), u32>,
+    symbols: HashMap<u64, NapiValue>,
 }
 
 #[derive(Clone, Copy)]
@@ -366,6 +374,7 @@ impl Env {
             sealed_objects: HashSet::new(),
             frozen_objects: HashSet::new(),
             property_attributes: HashMap::new(),
+            symbols: HashMap::new(),
         }
     }
 
@@ -1761,10 +1770,9 @@ pub unsafe extern "C" fn napi_create_symbol(
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env.alloc(Value::Symbol {
-        id: NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed),
-        description,
-    });
+    let id = NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed);
+    let value = env.alloc(Value::Symbol { id, description });
+    env.symbols.insert(id, value);
     write_value(out, value)
 }
 
@@ -2975,37 +2983,126 @@ pub unsafe extern "C" fn napi_get_property_names(
     object: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    napi_get_all_property_names(
+        env,
+        object,
+        NAPI_KEY_INCLUDE_PROTOTYPES,
+        NAPI_ENUMERABLE | NAPI_KEY_SKIP_SYMBOLS,
+        NAPI_KEY_NUMBERS_TO_STRINGS,
+        out,
+    )
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EnumeratedPropertyKey {
+    Number(usize),
+    Property(PropertyKey),
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_all_property_names(
+    env: NapiEnv,
+    object: NapiValue,
+    key_mode: i32,
+    key_filter: u32,
+    key_conversion: i32,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if out.is_null()
+        || !matches!(key_mode, NAPI_KEY_INCLUDE_PROTOTYPES | NAPI_KEY_OWN_ONLY)
+        || !matches!(
+            key_conversion,
+            NAPI_KEY_KEEP_NUMBERS | NAPI_KEY_NUMBERS_TO_STRINGS
+        )
+    {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    if out.is_null() {
-        return NAPI_INVALID_ARG;
-    }
-    let mut names = match value_ref(object) {
+    let mut keys = match value_ref(object) {
         Ok(Value::Object(properties)) => properties
             .keys()
-            .filter_map(|key| match key {
-                PropertyKey::String(name) => Some(name.clone()),
-                PropertyKey::Symbol(_) => None,
-            })
+            .cloned()
+            .map(EnumeratedPropertyKey::Property)
             .collect::<Vec<_>>(),
         Ok(Value::Function(function)) => function
             .properties
             .keys()
-            .filter_map(|key| match key {
-                PropertyKey::String(name) => Some(name.clone()),
-                PropertyKey::Symbol(_) => None,
-            })
+            .cloned()
+            .map(EnumeratedPropertyKey::Property)
             .collect::<Vec<_>>(),
-        Ok(Value::Array(values)) => (0..values.len()).map(|index| index.to_string()).collect(),
-        _ => return NAPI_INVALID_ARG,
+        Ok(Value::Array(values)) => (0..values.len())
+            .map(EnumeratedPropertyKey::Number)
+            .collect(),
+        _ => return NAPI_OBJECT_EXPECTED,
     };
-    names.sort();
-    let names = names
-        .into_iter()
-        .map(|name| env.alloc(Value::String(name)))
-        .collect();
-    let result = env.alloc(Value::Array(names));
+    keys.extend(
+        env.accessors
+            .keys()
+            .filter(|(owner, _)| *owner == object as usize)
+            .map(|(_, key)| EnumeratedPropertyKey::Property(key.clone())),
+    );
+    let attribute_filter = key_filter & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
+    keys.retain(|key| match key {
+        EnumeratedPropertyKey::Number(_) => key_filter & NAPI_KEY_SKIP_STRINGS == 0,
+        EnumeratedPropertyKey::Property(PropertyKey::String(_)) => {
+            key_filter & NAPI_KEY_SKIP_STRINGS == 0
+                && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
+                    || env
+                        .property_attributes
+                        .get(&(
+                            object as usize,
+                            match key {
+                                EnumeratedPropertyKey::Property(key) => key.clone(),
+                                _ => unreachable!(),
+                            },
+                        ))
+                        .copied()
+                        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
+                        & attribute_filter
+                        == attribute_filter)
+        }
+        EnumeratedPropertyKey::Property(PropertyKey::Symbol(_)) => {
+            key_filter & NAPI_KEY_SKIP_SYMBOLS == 0
+                && (attribute_filter == NAPI_KEY_ALL_PROPERTIES
+                    || env
+                        .property_attributes
+                        .get(&(
+                            object as usize,
+                            match key {
+                                EnumeratedPropertyKey::Property(key) => key.clone(),
+                                _ => unreachable!(),
+                            },
+                        ))
+                        .copied()
+                        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
+                        & attribute_filter
+                        == attribute_filter)
+        }
+    });
+    keys.sort();
+    keys.dedup();
+    let mut values = Vec::with_capacity(keys.len());
+    for key in keys {
+        let value = match key {
+            EnumeratedPropertyKey::Number(index) if key_conversion == NAPI_KEY_KEEP_NUMBERS => {
+                env.alloc(Value::Number(index as f64))
+            }
+            EnumeratedPropertyKey::Number(index) => env.alloc(Value::String(index.to_string())),
+            EnumeratedPropertyKey::Property(PropertyKey::String(name)) => {
+                env.alloc(Value::String(name))
+            }
+            EnumeratedPropertyKey::Property(PropertyKey::Symbol(id)) => {
+                let Some(value) = env.symbols.get(&id).copied() else {
+                    return NAPI_GENERIC_FAILURE;
+                };
+                value
+            }
+        };
+        values.push(value);
+    }
+    let result = env.alloc(Value::Array(values));
     write_value(out, result)
 }
 
@@ -4721,6 +4818,105 @@ mod tests {
             }
             let json = json_from_value(object).unwrap();
             assert_eq!(json, serde_json::json!({"same": 1.0}));
+        }
+    }
+
+    #[test]
+    fn all_property_names_filter_strings_symbols_and_attributes() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut object = ptr::null_mut();
+            assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
+            let value = env.alloc(Value::Number(1.0));
+            let descriptors = [
+                NapiPropertyDescriptor {
+                    utf8name: c"visible".as_ptr(),
+                    name: ptr::null_mut(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value,
+                    attributes: NAPI_ENUMERABLE,
+                    data: ptr::null_mut(),
+                },
+                NapiPropertyDescriptor {
+                    utf8name: c"hidden".as_ptr(),
+                    name: ptr::null_mut(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value,
+                    attributes: 0,
+                    data: ptr::null_mut(),
+                },
+            ];
+            assert_eq!(
+                napi_define_properties(env_ptr, object, descriptors.len(), descriptors.as_ptr()),
+                NAPI_OK
+            );
+            let mut symbol = ptr::null_mut();
+            assert_eq!(
+                napi_create_symbol(env_ptr, ptr::null_mut(), &mut symbol),
+                NAPI_OK
+            );
+            assert_eq!(napi_set_property(env_ptr, object, symbol, value), NAPI_OK);
+
+            let mut names_value = ptr::null_mut();
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    object,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_ENUMERABLE | NAPI_KEY_SKIP_SYMBOLS,
+                    NAPI_KEY_NUMBERS_TO_STRINGS,
+                    &mut names_value,
+                ),
+                NAPI_OK
+            );
+            let Ok(Value::Array(names)) = value_ref(names_value) else {
+                panic!("property names were not returned as an array");
+            };
+            assert_eq!(names.len(), 1);
+            assert!(matches!(value_ref(names[0]), Ok(Value::String(name)) if name == "visible"));
+
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    object,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_SKIP_STRINGS,
+                    NAPI_KEY_NUMBERS_TO_STRINGS,
+                    &mut names_value,
+                ),
+                NAPI_OK
+            );
+            let Ok(Value::Array(names)) = value_ref(names_value) else {
+                panic!("symbol names were not returned as an array");
+            };
+            assert_eq!(names.as_slice(), &[symbol]);
+
+            let mut array = ptr::null_mut();
+            assert_eq!(
+                napi_create_array_with_length(env_ptr, 2, &mut array),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_all_property_names(
+                    env_ptr,
+                    array,
+                    NAPI_KEY_OWN_ONLY,
+                    NAPI_KEY_ALL_PROPERTIES,
+                    NAPI_KEY_KEEP_NUMBERS,
+                    &mut names_value,
+                ),
+                NAPI_OK
+            );
+            let Ok(Value::Array(names)) = value_ref(names_value) else {
+                panic!("array keys were not returned as an array");
+            };
+            assert!(matches!(value_ref(names[0]), Ok(Value::Number(0.0))));
+            assert!(matches!(value_ref(names[1]), Ok(Value::Number(1.0))));
         }
     }
 
