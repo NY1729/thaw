@@ -13162,6 +13162,33 @@ mod tests {
     }
 
     #[test]
+    fn compiles_well_formed_native_strings() {
+        let source = r#"
+            function text(): string {
+                console.log("receiver");
+                return "A😀é";
+            }
+            async function delayed(): Promise<string> {
+                console.log("awaited");
+                await sleep(1);
+                return "later😀";
+            }
+            async function main(): Promise<void> {
+                console.log("plain".isWellFormed());
+                console.log("😀".toWellFormed());
+                console.log(text().isWellFormed());
+                console.log(text().toWellFormed());
+                console.log((await delayed()).isWellFormed());
+                console.log((await delayed()).toWellFormed());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "well_formed_strings"),
+            "true\n😀\nreceiver\ntrue\nreceiver\nA😀é\nawaited\ntrue\nawaited\nlater😀\n"
+        );
+    }
+
+    #[test]
     fn compiles_utf16_string_length_and_char_code_at() {
         let source = r#"
             function text(): string {
