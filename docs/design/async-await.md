@@ -463,6 +463,9 @@ TypeScript moduleを束ねたLambda実行テストでPromiseのfield保持とimp
 runtime Promise handleを先に作り、handleをcaptureした2つのnative closureをexecutorへ渡す。
 複数回settleは既存のPromise ABIが最初の1回だけを受理する。executor内のthrowはpending
 exception slotから回収し、同じPromiseのrejectへ変換する。
+`new Promise<void>`ではresolveを`() => void`として型付けし、null payloadでfulfillする。
+constructorを直接awaitする式もframe suspension pointとして扱うため、rejectは最寄りの
+async `try/catch`へ伝播する。
 
 `.then(callback)`と`.catch(callback)`は入力Promiseをconsumeし、runtimeの
 `thaw_promise_chain`で新しい出力Promiseを作る。thenはfulfilledだけ、catchはrejectedだけで

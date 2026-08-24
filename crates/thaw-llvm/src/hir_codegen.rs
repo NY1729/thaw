@@ -256,7 +256,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Await(inner) => {
                 matches!(
                     inner.as_ref(),
-                    HirExpr::PromiseAll(_, _)
+                    HirExpr::PromiseNew(_, _, _)
+                        | HirExpr::PromiseAll(_, _)
                         | HirExpr::PromiseAllArray(_, _)
                         | HirExpr::PromiseAllTuple(_, _)
                         | HirExpr::PromiseRace(_, _)
@@ -2106,7 +2107,8 @@ impl<'ctx> HirCompiler<'ctx> {
     fn is_frame_await_source(&self, expr: &HirExpr) -> bool {
         matches!(
             expr,
-            HirExpr::PromiseAll(_, _)
+            HirExpr::PromiseNew(_, _, _)
+                | HirExpr::PromiseAll(_, _)
                 | HirExpr::PromiseAllArray(_, _)
                 | HirExpr::PromiseAllTuple(_, _)
                 | HirExpr::PromiseRace(_, _)
@@ -2158,6 +2160,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                         HirType::Str
                     }
+                    HirExpr::PromiseNew(_, resolved, _) => resolved.clone(),
                     HirExpr::PromiseAll(_, element) | HirExpr::PromiseAllArray(_, element) => {
                         HirType::Array(Box::new(element.clone()))
                     }
@@ -6627,7 +6630,12 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             resolved.clone()
         };
-        let function_type = self.function_type(std::slice::from_ref(&param), &HirType::Void)?;
+        let params = if !reject && !assimilates && resolved == &HirType::Void {
+            &[][..]
+        } else {
+            std::slice::from_ref(&param)
+        };
+        let function_type = self.function_type(params, &HirType::Void)?;
         let function = self
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
@@ -6654,10 +6662,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "promise",
             )
             .map_err(|error| error.to_string())?;
-        let value = function.get_nth_param(1).unwrap();
-        let payload = if reject || assimilates {
-            value.into_pointer_value()
+        let payload = if !reject && !assimilates && resolved == &HirType::Void {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        } else if reject || assimilates {
+            function.get_nth_param(1).unwrap().into_pointer_value()
         } else {
+            let value = function.get_nth_param(1).unwrap();
             let slot = self.allocate_variable_cell(self.basic_type(resolved)?, "promise_result")?;
             self.builder
                 .build_store(slot, value)
@@ -6715,12 +6725,14 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let resolve_value = if assimilates {
-            HirType::Promise(Box::new(resolved.clone()))
+        let resolve_params = if assimilates {
+            vec![HirType::Promise(Box::new(resolved.clone()))]
+        } else if resolved == &HirType::Void {
+            Vec::new()
         } else {
-            resolved.clone()
+            vec![resolved.clone()]
         };
-        let resolve_ty = HirType::Function(vec![resolve_value], Box::new(HirType::Void));
+        let resolve_ty = HirType::Function(resolve_params, Box::new(HirType::Void));
         let reject_ty = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let executor_type = self.function_type(&[resolve_ty, reject_ty], &HirType::Void)?;
         self.builder
@@ -10409,6 +10421,30 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "promise_constructor_chains"),
             "expected failure\nexecutor failure\ncallback failure\n42\n42\n7\n8\n42\n"
+        );
+    }
+
+    #[test]
+    fn promise_void_constructor_resolves_and_rejects() {
+        let source = r#"
+            async function main(): Promise<void> {
+                await new Promise<void>((resolve, reject) => {
+                    console.log("executor");
+                    resolve();
+                });
+                try {
+                    await new Promise<void>((resolve, reject) => {
+                        reject("void failure");
+                    });
+                } catch (error) {
+                    console.log(error);
+                }
+                console.log("done");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_void_constructor"),
+            "executor\nvoid failure\ndone\n"
         );
     }
 

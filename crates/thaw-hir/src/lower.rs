@@ -2719,15 +2719,14 @@ impl<'a> FnLowerer<'a> {
                 resolved => (resolved, false),
             }
         };
-        if resolved == HirType::Void {
-            return Err("`new Promise<void>` is not supported yet".into());
-        }
         let resolve_value = if assimilates {
-            HirType::Promise(Box::new(resolved.clone()))
+            vec![HirType::Promise(Box::new(resolved.clone()))]
+        } else if resolved == HirType::Void {
+            Vec::new()
         } else {
-            resolved.clone()
+            vec![resolved.clone()]
         };
-        let resolve = HirType::Function(vec![resolve_value], Box::new(HirType::Void));
+        let resolve = HirType::Function(resolve_value, Box::new(HirType::Void));
         let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
         let executor =
             self.lower_promise_callback(&executor.expr, &[resolve, reject], Some(&HirType::Void))?;
@@ -4781,6 +4780,31 @@ mod tests {
                 HirType::Promise(_),
                 HirExpr::PromiseThen(_, _, HirType::F64, HirType::F64, true, false)
             )
+        ));
+    }
+
+    #[test]
+    fn lowers_promise_void_constructor_with_zero_argument_resolve() {
+        let program = lower(
+            r#"async function main(): Promise<void> {
+                await new Promise<void>((resolve, reject) => {
+                    resolve();
+                });
+            }"#,
+        );
+        let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
+            panic!("expected awaited Promise<void>");
+        };
+        let HirExpr::PromiseNew(executor, HirType::Void, false) = inner.as_ref() else {
+            panic!("expected Promise<void> constructor");
+        };
+        let HirExpr::Lambda(_, params, HirType::Void, _) = executor.as_ref() else {
+            panic!("expected Promise executor lambda");
+        };
+        assert!(matches!(
+            &params[0].ty,
+            HirType::Function(resolve_params, ret)
+                if resolve_params.is_empty() && ret.as_ref() == &HirType::Void
         ));
     }
 
