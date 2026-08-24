@@ -1586,6 +1586,19 @@ unsafe fn write_value(out: *mut NapiValue, value: NapiValue) -> NapiStatus {
     NAPI_OK
 }
 
+unsafe fn write_callback_value(env: NapiEnv, out: *mut NapiValue, value: NapiValue) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    if value.is_null() {
+        return napi_get_undefined(env, out);
+    }
+    if !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
+    write_value(out, value)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_module_register(module: *mut NapiModule) {
     if let Some(module) = module.as_ref() {
@@ -3289,7 +3302,7 @@ pub unsafe extern "C" fn napi_get_named_property(
             {
                 return NAPI_PENDING_EXCEPTION;
             }
-            return write_value(out, value);
+            return write_callback_value(env, out, value);
         }
     }
     match value {
@@ -3404,7 +3417,7 @@ unsafe fn get_property_key(
                 {
                     return NAPI_PENDING_EXCEPTION;
                 }
-                return write_value(out, value);
+                return write_callback_value(env, out, value);
             }
         }
     }
@@ -5235,7 +5248,7 @@ pub unsafe extern "C" fn napi_get_element(
                 {
                     return NAPI_PENDING_EXCEPTION;
                 }
-                return write_value(out, value);
+                return write_callback_value(env, out, value);
             }
         }
     }
@@ -7880,6 +7893,46 @@ mod tests {
                 napi_new_instance(env_ptr, function, 0, ptr::null(), &mut value_out),
                 NAPI_INVALID_ARG
             );
+            let accessor_descriptors = [
+                NapiPropertyDescriptor {
+                    utf8name: c"foreignGetter".as_ptr(),
+                    name: ptr::null_mut(),
+                    method: None,
+                    getter: Some(return_callback_data),
+                    setter: None,
+                    value: ptr::null_mut(),
+                    attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+                    data: foreign_value.cast(),
+                },
+                NapiPropertyDescriptor {
+                    utf8name: c"nullGetter".as_ptr(),
+                    name: ptr::null_mut(),
+                    method: None,
+                    getter: Some(return_callback_data),
+                    setter: None,
+                    value: ptr::null_mut(),
+                    attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+                    data: ptr::null_mut(),
+                },
+            ];
+            assert_eq!(
+                napi_define_properties(
+                    env_ptr,
+                    object,
+                    accessor_descriptors.len(),
+                    accessor_descriptors.as_ptr()
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, object, c"foreignGetter".as_ptr(), &mut value_out),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, object, c"nullGetter".as_ptr(), &mut value_out),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(value_out), Ok(Value::Undefined)));
         }
     }
 

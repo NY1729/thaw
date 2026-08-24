@@ -706,6 +706,7 @@ Buffer-from-ArrayBuffer、Error作成、fatal-exception、callback／constructor
 作成Envのhandleだけを受理する。
 raw文字列／BigInt word／function nameはEnvとresultの検証後にだけcaller memoryから読み取る。
 property／class descriptorは全件を事前検証し、後半のforeign handleでpropertyやclassが部分生成されない。
+accessor getter戻り値はnullをundefinedへ正規化し、non-null foreign handleをinvalid-argとして拒否する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
