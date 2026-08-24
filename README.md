@@ -713,6 +713,8 @@ The workspace crates have narrow responsibilities:
   External-memory adjustments are tracked per Env with checked signed totals.
   ArrayBuffer detachment zeroes data/length for the backing value and existing
   TypedArray/DataView views while preserving external finalizer ownership.
+  Async contexts validate resource names and Env ownership and are released by
+  the matching `napi_async_destroy` call.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
