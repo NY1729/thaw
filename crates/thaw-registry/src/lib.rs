@@ -1369,9 +1369,10 @@ fn record_package_version(versions: &mut BTreeMap<String, String>, name: &str, d
 }
 
 /// Parses a JavaScript module and collects its statically knowable dependency
-/// edges. This deliberately recognizes only a direct `require("literal")`
-/// call and a literal `import("literal")`; shadowed/member calls, comments,
-/// strings, templates, and computed specifiers are not mistaken for edges.
+/// edges. Direct `require`/`import` arguments are constant-folded when they
+/// consist solely of string literals, expression-free templates, parentheses,
+/// and string concatenation; runtime expressions remain dynamic. Shadowed or
+/// member calls, comments, and strings are not mistaken for edges.
 /// ESM declarations are collected directly from the module AST before they
 /// are lowered to CommonJS.
 #[derive(Default)]
@@ -1438,6 +1439,26 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     struct TopLevelAwait {
         found: bool,
     }
+
+    fn static_module_specifier(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Lit(Lit::Str(specifier)) => Some(specifier.value.to_string_lossy().into_owned()),
+            Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
+                template.quasis[0]
+                    .cooked
+                    .as_ref()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .or_else(|| Some(template.quasis[0].raw.to_string()))
+            }
+            Expr::Paren(parenthesized) => static_module_specifier(&parenthesized.expr),
+            Expr::Bin(binary) if binary.op == thaw_parser::ast::BinaryOp::Add => {
+                let left = static_module_specifier(&binary.left)?;
+                let right = static_module_specifier(&binary.right)?;
+                Some(format!("{left}{right}"))
+            }
+            _ => None,
+        }
+    }
     impl Visit for TopLevelAwait {
         fn visit_await_expr(&mut self, _: &AwaitExpr) {
             self.found = true;
@@ -1456,8 +1477,8 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             if ((is_require && call.args.len() == 1) || (is_import && !call.args.is_empty()))
                 && call.args[0].spread.is_none()
             {
-                if let Expr::Lit(Lit::Str(spec)) = call.args[0].expr.as_ref() {
-                    self.specs.push(spec.value.to_string_lossy().into_owned());
+                if let Some(specifier) = static_module_specifier(&call.args[0].expr) {
+                    self.specs.push(specifier);
                 } else if is_import {
                     self.has_nonliteral_dynamic_import = true;
                 }
@@ -3107,6 +3128,8 @@ mod tests {
                 import main from './main.js';
                 export { value } from "./value.js";
                 export * from './all.js';
+                const package = import(`external-package`);
+                const feature = import(("external-" + "feature"));
                 const later = import('./later.js');
                 const text = "require('./not-real.js')";
                 // require('./also-not-real.js')
@@ -3116,7 +3139,14 @@ mod tests {
         );
         assert_eq!(
             specs,
-            vec!["./later.js", "./main.js", "./value.js", "./all.js"]
+            vec![
+                "external-package",
+                "external-feature",
+                "./later.js",
+                "./main.js",
+                "./value.js",
+                "./all.js"
+            ]
         );
     }
 
@@ -4063,6 +4093,46 @@ mod tests {
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn constant_folded_dynamic_import_resolves_external_package() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("constant_external_dynamic_import");
+        fs::write(
+            dir.join("index.js"),
+            "export default async function run() { const dep = await import((`dep-` + 'pkg')); return dep.value; }",
+        )
+        .unwrap();
+        let node_modules = temp_registry("constant_external_dynamic_modules");
+        let dependency = node_modules.join("dep-pkg");
+        fs::create_dir_all(&dependency).unwrap();
+        fs::write(
+            dependency.join("package.json"),
+            r#"{"name":"dep-pkg","version":"1.0.0","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(dependency.join("index.js"), "exports.value = 42;").unwrap();
+        let (bundle, _, file_count, versions) =
+            bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        assert_eq!(versions.get("dep-pkg").map(String::as_str), Some("1.0.0"));
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(name); }};\n\
+             {bundle}\n\
+             globalThis.runConstantExternalImport = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("runConstantExternalImport").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&node_modules);
     }
 
     #[test]

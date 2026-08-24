@@ -1021,8 +1021,11 @@ export aliasを公開する。async dependency cycleはdeadlockさせず、modul
 JSON moduleは`with { type: "json" }`と旧`assert { type: "json" }`を受理し、その他の
 attributeを明示エラーにする。dynamic importは実行時式を`requireAsync(String(expr))`へ
 変換し、同一package内のJS／JSON候補をbundle mapへ収録する。同じmoduleを複数回import
-しても同じnamespace objectとready Promiseを再利用する。runtime-computedな外部package、
-`import.meta`、star exportの曖昧性解決はまだ対象外である。
+しても同じnamespace objectとready Promiseを再利用する。式なしtemplate、括弧、文字列
+だけの連結はbundle時に畳み込み、外部packageも通常の依存graphへ載せる。user moduleの
+`import.meta.url`はsourceごとの絶対`file://` URLへ変換する。star exportは明示exportを
+優先し、異なるbindingの曖昧性をbarrel越しに伝播してimport時に診断する。任意の実行時
+文字列から決まる外部packageと、`import.meta.url`以外のmeta propertyはまだ対象外である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 
