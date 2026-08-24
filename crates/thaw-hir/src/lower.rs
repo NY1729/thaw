@@ -2956,6 +2956,18 @@ impl<'a> FnLowerer<'a> {
                         )),
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
+                    BinaryOp::EqEq => {
+                        HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs))
+                    }
+                    BinaryOp::NotEq => HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(lhs),
+                            Box::new(rhs),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                    ),
                     other => HirExpr::BinOp(
                         lower_bin_op(other)?,
                         Box::new(lhs),
@@ -4997,6 +5009,40 @@ mod tests {
                 if matches!(&args[0], HirExpr::BinOp(BinOp::BitXor, _, rhs)
                     if matches!(rhs.as_ref(), HirExpr::Lit(HirLit::F64(value)) if *value == -1.0))
         ));
+    }
+
+    #[test]
+    fn lowers_same_type_loose_equality() {
+        let program = lower(
+            r#"function main(): void {
+                console.log(1 == 1);
+                console.log("a" != "b");
+                console.log(true == false);
+            }"#,
+        );
+        assert_eq!(program.functions[0].body.len(), 3);
+        for statement in &program.functions[0].body {
+            assert!(matches!(
+                statement,
+                HirStmt::Expr(HirExpr::Call(_, args))
+                    if matches!(&args[0], HirExpr::BinOp(BinOp::EqEqEq, _, _))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_cross_type_loose_equality() {
+        let module = thaw_parser::parse_typescript(
+            r#"function main(): void {
+                console.log(1 == "1");
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("strict equality compares incompatible types"),
+            "{error}"
+        );
     }
 
     #[test]
