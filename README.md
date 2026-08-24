@@ -424,6 +424,13 @@ subscribe, filesystem mutation, event polling, callback delivery, unsubscribe,
 cleanup and normal process exit.
 Class-style addons can use `napi_define_class`, wrapped native instance data,
 prototype methods/accessors, construction, `instanceof`, and wrap finalizers.
+The declaration bridge now extracts external classes, including inheritance,
+constructor and method overloads, static methods, getters, and properties.
+The N-API host exposes stable export and instance handles with constructor and
+`this`-preserving instance-method calls; a real `NativeBox` addon exercises
+construction plus method invocation, while sqlite3 constructs a real in-memory
+`Database` handle. Automatic source rewriting from ordinary TypeScript `new`
+and method syntax into this handle ABI is the next frontend integration step.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to

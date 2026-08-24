@@ -22,9 +22,10 @@
 use std::collections::HashMap;
 
 use swc_ecma_ast::{
-    Decl, DefaultDecl, Expr, Function, Module, ModuleDecl, ModuleItem, Pat, TsEntityName,
-    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody,
-    TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
+    Class, ClassMember, Decl, DefaultDecl, Expr, Function, MethodKind, Module, ModuleDecl,
+    ModuleItem, ParamOrTsParamProp, Pat, PropName, TsEntityName, TsFnOrConstructorType, TsFnParam,
+    TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody, TsParamPropParam, TsType,
+    TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
 use thaw_hir::{
     FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi,
@@ -38,6 +39,46 @@ pub struct DtsFunction {
     pub name: String,
     pub params: Vec<(String, DtsType)>,
     pub ret: DtsType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DtsClass {
+    pub name: String,
+    pub extends: Option<String>,
+    pub constructors: Vec<DtsConstructor>,
+    pub methods: Vec<DtsMethod>,
+    pub properties: Vec<DtsProperty>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DtsConstructor {
+    pub params: Vec<(String, DtsType)>,
+    pub overloaded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DtsMethod {
+    pub name: String,
+    pub params: Vec<(String, DtsType)>,
+    pub ret: DtsType,
+    pub is_static: bool,
+    pub kind: DtsMethodKind,
+    pub overloaded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtsMethodKind {
+    Method,
+    Getter,
+    Setter,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DtsProperty {
+    pub name: String,
+    pub ty: DtsType,
+    pub is_static: bool,
+    pub readonly: bool,
 }
 
 /// A parameter/return type as written in the `.d.ts`, before deciding
@@ -85,6 +126,173 @@ pub fn parse_dts(source: &str) -> Result<Vec<DtsFunction>, String> {
         .flat_map(extract_fn_decls)
         .map(|(name, func)| lower_dts_function(name, func, &interfaces, &generic_interfaces))
         .collect())
+}
+
+pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
+    let module = thaw_parser::parse_typescript(source)?;
+    let (interfaces, generic_interfaces) = resolve_interfaces(&module);
+    let mut classes = module
+        .body
+        .iter()
+        .filter_map(extract_class_decl)
+        .map(|(name, class)| lower_dts_class(name, class, &interfaces, &generic_interfaces))
+        .collect::<Vec<_>>();
+    for class in &mut classes {
+        let constructor_overloaded = class.constructors.len() > 1;
+        for constructor in &mut class.constructors {
+            constructor.overloaded = constructor_overloaded;
+        }
+        let mut counts = HashMap::<(String, bool), usize>::new();
+        for method in &class.methods {
+            *counts
+                .entry((method.name.clone(), method.is_static))
+                .or_default() += 1;
+        }
+        for method in &mut class.methods {
+            method.overloaded = counts[&(method.name.clone(), method.is_static)] > 1;
+        }
+    }
+    Ok(classes)
+}
+
+fn extract_class_decl(item: &ModuleItem) -> Option<(&str, &Class)> {
+    match item {
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::Class(class))) => {
+            Some((class.ident.sym.as_str(), &class.class))
+        }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            Decl::Class(class) => Some((class.ident.sym.as_str(), &class.class)),
+            _ => None,
+        },
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
+            DefaultDecl::Class(class) => class
+                .ident
+                .as_ref()
+                .map(|ident| (ident.sym.as_str(), class.class.as_ref())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn property_name(key: &PropName) -> Option<String> {
+    match key {
+        PropName::Ident(name) => Some(name.sym.to_string()),
+        PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+        _ => None,
+    }
+}
+
+fn lower_class_params(
+    params: &[ParamOrTsParamProp],
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Vec<(String, DtsType)> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            let binding = match param {
+                ParamOrTsParamProp::Param(param) => match &param.pat {
+                    Pat::Ident(binding) => Some(binding),
+                    _ => None,
+                },
+                ParamOrTsParamProp::TsParamProp(property) => match &property.param {
+                    TsParamPropParam::Ident(binding) => Some(binding),
+                    TsParamPropParam::Assign(_) => None,
+                },
+            };
+            let Some(binding) = binding else {
+                return (
+                    format!("arg{index}"),
+                    DtsType::Unsupported("unsupported constructor parameter pattern".into()),
+                );
+            };
+            let ty = binding
+                .type_ann
+                .as_ref()
+                .map(|annotation| {
+                    classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                })
+                .unwrap_or_else(|| DtsType::Unsupported("missing type annotation".into()));
+            (binding.id.sym.to_string(), ty)
+        })
+        .collect()
+}
+
+fn lower_dts_class(
+    name: &str,
+    class: &Class,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> DtsClass {
+    let extends = class
+        .super_class
+        .as_deref()
+        .and_then(|super_class| match super_class {
+            Expr::Ident(name) => Some(name.sym.to_string()),
+            _ => None,
+        });
+    let mut constructors = Vec::new();
+    let mut methods = Vec::new();
+    let mut properties = Vec::new();
+    for member in &class.body {
+        match member {
+            ClassMember::Constructor(constructor) => constructors.push(DtsConstructor {
+                params: lower_class_params(&constructor.params, interfaces, generic_interfaces),
+                overloaded: false,
+            }),
+            ClassMember::Method(method) => {
+                let Some(method_name) = property_name(&method.key) else {
+                    continue;
+                };
+                let function = lower_dts_function(
+                    &method_name,
+                    &method.function,
+                    interfaces,
+                    generic_interfaces,
+                );
+                methods.push(DtsMethod {
+                    name: function.name,
+                    params: function.params,
+                    ret: function.ret,
+                    is_static: method.is_static,
+                    kind: match method.kind {
+                        MethodKind::Method => DtsMethodKind::Method,
+                        MethodKind::Getter => DtsMethodKind::Getter,
+                        MethodKind::Setter => DtsMethodKind::Setter,
+                    },
+                    overloaded: false,
+                });
+            }
+            ClassMember::ClassProp(property) => {
+                let Some(property_name) = property_name(&property.key) else {
+                    continue;
+                };
+                let ty = property
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                    })
+                    .unwrap_or_else(|| DtsType::Unsupported("missing type annotation".into()));
+                properties.push(DtsProperty {
+                    name: property_name,
+                    ty,
+                    is_static: property.is_static,
+                    readonly: property.readonly,
+                });
+            }
+            _ => {}
+        }
+    }
+    DtsClass {
+        name: name.to_string(),
+        extends,
+        constructors,
+        methods,
+        properties,
+    }
 }
 
 /// A single top-level `declare function`/`export declare function`
@@ -2481,6 +2689,52 @@ mod tests {
             panic!("expected Fallback");
         };
         assert_eq!(reason, "parameter `x`: `any` is not supported");
+    }
+
+    #[test]
+    fn extracts_class_constructors_methods_properties_and_overloads() {
+        let classes = parse_dts_classes(
+            r#"
+            export class Database extends EventEmitter {
+                readonly open: boolean;
+                constructor(filename: string);
+                constructor(filename: string, mode: number);
+                close(callback?: (error: Error | null) => void): void;
+                run(sql: string): this;
+                run(sql: string, params: any[]): this;
+                static verbose(): Database;
+                get name(): string;
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(classes.len(), 1);
+        let database = &classes[0];
+        assert_eq!(database.name, "Database");
+        assert_eq!(database.extends.as_deref(), Some("EventEmitter"));
+        assert_eq!(database.constructors.len(), 2);
+        assert!(database
+            .constructors
+            .iter()
+            .all(|constructor| constructor.overloaded));
+        let runs = database
+            .methods
+            .iter()
+            .filter(|method| method.name == "run")
+            .collect::<Vec<_>>();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|method| method.overloaded));
+        assert!(database
+            .methods
+            .iter()
+            .any(|method| { method.name == "verbose" && method.is_static && !method.overloaded }));
+        assert!(database
+            .methods
+            .iter()
+            .any(|method| method.name == "name" && method.kind == DtsMethodKind::Getter));
+        assert_eq!(database.properties.len(), 1);
+        assert_eq!(database.properties[0].name, "open");
+        assert!(database.properties[0].readonly);
     }
 
     /// The actual regression this was validated against: a real date-fns
