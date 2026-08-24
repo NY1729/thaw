@@ -682,16 +682,6 @@ fn generate_registry_shims(
                         })
                         .collect::<Vec<_>>();
                     for (overload_index, overload) in overloads.into_iter().enumerate() {
-                        let params = std::iter::once("receiver: JsValue".to_string())
-                            .chain(overload.params.iter().map(|(name, ty)| match ty {
-                                thaw_bridge::DtsType::Native(native) => format!(
-                                    "{name}: {}",
-                                    render_dynamic_type(native).expect("filtered above")
-                                ),
-                                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-                            }))
-                            .collect::<Vec<_>>()
-                            .join(", ");
                         let thaw_bridge::DtsType::Native(return_type) = &overload.ret else {
                             continue;
                         };
@@ -702,50 +692,62 @@ fn generate_registry_shims(
                         }) else {
                             continue;
                         };
-                        let has_callback = matches!(
-                            overload.params.last(),
-                            Some((
-                                _,
-                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(_, _))
-                            ))
-                        );
-                        let runtime_key = format!(
-                            "{}{}${}$overload{overload_index}",
-                            if matches!(
-                                overload.ret,
-                                thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)
-                            ) {
-                                "$methodvoid$"
-                            } else {
-                                "$method$"
-                            },
-                            class.name,
-                            method.name
-                        );
-                        let encoded = runtime_key
-                            .as_bytes()
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<String>();
-                        let symbol = format!("__thaw_typed_napi_{encoded}");
-                        shim.push_str(&format!(
-                            "declare function {symbol}({params}): {return_type};\n"
-                        ));
-                        class_method_rewrites.push((
-                            class.name.clone(),
-                            method.name.clone(),
-                            symbol,
-                            overload.params.len(),
-                            has_callback,
-                            overload
-                                .params
+                        for argument_count in overload.required_params..=overload.params.len() {
+                            let included_params = &overload.params[..argument_count];
+                            let params = std::iter::once("receiver: JsValue".to_string())
+                                .chain(included_params.iter().map(|(name, ty)| match ty {
+                                    thaw_bridge::DtsType::Native(native) => format!(
+                                        "{name}: {}",
+                                        render_dynamic_type(native).expect("filtered above")
+                                    ),
+                                    thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                                }))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let has_callback = matches!(
+                                included_params.last(),
+                                Some((
+                                    _,
+                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(_, _))
+                                ))
+                            );
+                            let runtime_key = format!(
+                                "{}{}${}$overload{overload_index}$arity{argument_count}",
+                                if matches!(
+                                    overload.ret,
+                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Void)
+                                ) {
+                                    "$methodvoid$"
+                                } else {
+                                    "$method$"
+                                },
+                                class.name,
+                                method.name
+                            );
+                            let encoded = runtime_key
+                                .as_bytes()
                                 .iter()
-                                .filter_map(|(_, ty)| match ty {
-                                    thaw_bridge::DtsType::Native(ty) => Some(ty.clone()),
-                                    thaw_bridge::DtsType::Unsupported(_) => None,
-                                })
-                                .collect(),
-                        ));
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>();
+                            let symbol = format!("__thaw_typed_napi_{encoded}");
+                            shim.push_str(&format!(
+                                "declare function {symbol}({params}): {return_type};\n"
+                            ));
+                            class_method_rewrites.push((
+                                class.name.clone(),
+                                method.name.clone(),
+                                symbol,
+                                argument_count,
+                                has_callback,
+                                included_params
+                                    .iter()
+                                    .filter_map(|(_, ty)| match ty {
+                                        thaw_bridge::DtsType::Native(ty) => Some(ty.clone()),
+                                        thaw_bridge::DtsType::Unsupported(_) => None,
+                                    })
+                                    .collect(),
+                            ));
+                        }
                     }
                 }
             }
@@ -2924,7 +2926,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); get(): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
+            "export declare class NativeBox { constructor(value: number); get(): number; add(delta?: number): number; getLater(callback: (error: Json, result: Json) => void): number; }\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -2961,6 +2963,13 @@ mod tests {
                 napi_unwrap(env, self, (void**)&box);
                 napi_create_double(env, box->value, &result); return result;
             }
+            static napi_value box_add(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value arg, self, result; native_box* box; double delta = 0;
+                napi_get_cb_info(env, info, &argc, &arg, &self, 0);
+                napi_unwrap(env, self, (void**)&box);
+                if (argc == 1) napi_get_value_double(env, arg, &delta);
+                napi_create_double(env, box->value + delta, &result); return result;
+            }
             static napi_value box_get_later(napi_env env, napi_callback_info info) {
                 size_t argc = 1; napi_value callback, self, callback_args[2], ignored, queued; native_box* box;
                 napi_get_cb_info(env, info, &argc, &callback, &self, 0);
@@ -2972,11 +2981,12 @@ mod tests {
             }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value constructor;
-                napi_property_descriptor properties[2] = {
+                napi_property_descriptor properties[3] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
+                    { "add", 0, box_add, 0, 0, 0, 0, 0 },
                     { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 }
                 };
-                napi_define_class(env, "NativeBox", 9, box_new, 0, 2, properties, &constructor);
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 3, properties, &constructor);
                 napi_set_named_property(env, exports, "NativeBox", constructor);
                 return exports;
             }
@@ -2995,7 +3005,7 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); console.log(box.add()); console.log(box.add(8)); const callback = (error: Json, result: Json): void => { console.log(Number(result)); }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -3006,7 +3016,10 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n1\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "42\n42\n50\n42\n1\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
