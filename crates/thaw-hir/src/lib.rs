@@ -119,6 +119,14 @@ pub enum FfiAggregateAbi {
     Packed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FfiAggregateLayout {
+    pub field_offsets: Vec<u64>,
+    pub size: u64,
+    pub alignment: u32,
+    pub indirect: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FfiSignature {
     pub symbol: Symbol,
@@ -134,6 +142,7 @@ pub struct FfiSignature {
     pub return_string_abi: FfiStringAbi,
     pub calling_convention: FfiCallingConvention,
     pub aggregate_return_abi: FfiAggregateAbi,
+    pub aggregate_return_layout: Option<FfiAggregateLayout>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1104,4 +1113,77 @@ pub fn set_ffi_string_abi(
             "FFI string ABI metadata references unknown ambient function `{symbol}`"
         ))
     }
+}
+
+pub fn set_ffi_aggregate_layout(
+    program: &mut HirProgram,
+    symbol: &str,
+    layout: FfiAggregateLayout,
+) -> Result<(), String> {
+    let Some(signature) = program
+        .extern_functions
+        .iter_mut()
+        .find(|signature| signature.symbol == symbol)
+    else {
+        return Err(format!(
+            "FFI aggregate layout metadata references unknown ambient function `{symbol}`"
+        ));
+    };
+    let HirType::Object(fields) = &signature.ret else {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` requires a fixed object return"
+        ));
+    };
+    if signature.aggregate_return_abi == FfiAggregateAbi::Internal {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` requires a portable or packed aggregate return ABI"
+        ));
+    }
+    if signature.error_abi != FfiErrorAbi::Direct {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` currently supports only the direct error ABI"
+        ));
+    }
+    if layout.field_offsets.len() != fields.len() {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` has {} field offsets, expected {}",
+            layout.field_offsets.len(),
+            fields.len()
+        ));
+    }
+    if layout.alignment == 0 || !layout.alignment.is_power_of_two() {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` needs a non-zero power-of-two alignment"
+        ));
+    }
+    if layout.size == 0 || !layout.size.is_multiple_of(u64::from(layout.alignment)) {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` needs a non-zero size divisible by its alignment"
+        ));
+    }
+    if !layout.indirect {
+        return Err(format!(
+            "FFI aggregate layout for `{symbol}` currently requires `indirect: true`"
+        ));
+    }
+    let mut previous_end = 0;
+    for ((name, ty), offset) in fields.iter().zip(&layout.field_offsets) {
+        let field_size = match ty {
+            HirType::Bool => 1,
+            HirType::F64 | HirType::I64 | HirType::Str => 8,
+            other => {
+                return Err(format!(
+                    "FFI aggregate layout field `{name}` of `{symbol}` has unsupported explicit-layout type {other:?}"
+                ))
+            }
+        };
+        if *offset < previous_end || offset.saturating_add(field_size) > layout.size {
+            return Err(format!(
+                "FFI aggregate layout field `{name}` of `{symbol}` is outside or overlaps the declared size"
+            ));
+        }
+        previous_end = offset + field_size;
+    }
+    signature.aggregate_return_layout = Some(layout);
+    Ok(())
 }

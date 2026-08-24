@@ -188,6 +188,10 @@ The workspace crates have narrow responsibilities:
   per parameter and return, internal/portable aggregate returns, plus
   packed C aggregate returns and C/fast/cold LLVM calling conventions. Packed
   values use the target C ABI's indirect return convention
+- FFI metadata v4 can additionally describe fixed object return layouts with
+  explicit `fieldOffsets`, total `size`, `alignment`, and an `indirect` return
+  convention. LLVM emits exact byte padding, aligns the return storage, and
+  reconstructs the object fields from the declared offsets
 - QuickJS fallback for signatures which cannot use the C ABI path
 - Parser-backed CommonJS/ESM dependency discovery and bundling, including
   literal and same-package runtime dynamic imports, constant-folded external
@@ -702,10 +706,11 @@ The workspace crates have narrow responsibilities:
   release. Callable interfaces and default callable exports are recognized
   from `.d.ts`; generated programs release all remaining handles at shutdown.
   Fine-grained escape-based early release remains future work
-- A fully general ABI-description format. Version 3 covers string layouts,
+- A fully general ABI-description format. Version 4 covers string layouts,
   recursive object/string/number-array result ownership, common LLVM calling
-  conventions and ordinary or packed aggregate returns, but explicit field
-  offsets/alignment, bitfields and other vararg types are not yet described
+  conventions, ordinary or packed aggregate returns, and explicit scalar
+  object-return field offsets/alignment. Bitfields, nested explicit layouts,
+  direct register-class overrides and other vararg types are not yet described
 - Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
   exports the complete Node-API v10 symbol surface used by the current headers,
   plus the implemented experimental SharedArrayBuffer/finalizer/module-file

@@ -2396,6 +2396,7 @@ struct FfiMetadata {
     return_string_abi: thaw_hir::FfiStringAbi,
     calling_convention: thaw_hir::FfiCallingConvention,
     aggregate_return_abi: thaw_hir::FfiAggregateAbi,
+    aggregate_return_layout: Option<thaw_hir::FfiAggregateLayout>,
 }
 
 fn parse_string_abi(
@@ -2458,9 +2459,9 @@ fn read_ffi_metadata(
         let document: serde_json::Value = serde_json::from_str(&source)
             .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
         let version = document.get("version").and_then(|value| value.as_u64());
-        if !matches!(version, Some(1..=3)) {
+        if !matches!(version, Some(1..=4)) {
             return Err(format!(
-                "`{}` must declare FFI metadata version 1, 2 or 3",
+                "`{}` must declare FFI metadata version 1, 2, 3 or 4",
                 path.display()
             ));
         }
@@ -2490,7 +2491,7 @@ fn read_ffi_metadata(
             };
             let metadata = FfiMetadata {
                 error_abi: abi,
-                return_ownership: if matches!(version, Some(2 | 3)) {
+                return_ownership: if matches!(version, Some(2..=4)) {
                     parse_ffi_ownership(
                         entry,
                         "returnOwnership",
@@ -2502,7 +2503,7 @@ fn read_ffi_metadata(
                 } else {
                     thaw_hir::FfiOwnership::Borrowed
                 },
-                error_ownership: if matches!(version, Some(2 | 3)) {
+                error_ownership: if matches!(version, Some(2..=4)) {
                     parse_ffi_ownership(
                         entry,
                         "errorOwnership",
@@ -2514,7 +2515,7 @@ fn read_ffi_metadata(
                 } else {
                     thaw_hir::FfiOwnership::Borrowed
                 },
-                param_string_abis: if version == Some(3) {
+                param_string_abis: if matches!(version, Some(3 | 4)) {
                     entry
                         .get("parameterStringAbis")
                         .map(|value| {
@@ -2542,7 +2543,7 @@ fn read_ffi_metadata(
                 } else {
                     None
                 },
-                return_string_abi: if version == Some(3) {
+                return_string_abi: if matches!(version, Some(3 | 4)) {
                     parse_string_abi(
                         entry
                             .get("returnStringAbi")
@@ -2554,7 +2555,7 @@ fn read_ffi_metadata(
                 } else {
                     thaw_hir::FfiStringAbi::NullTerminated
                 },
-                calling_convention: if version == Some(3) {
+                calling_convention: if matches!(version, Some(3 | 4)) {
                     match entry
                         .get("callingConvention")
                         .and_then(|value| value.as_str())
@@ -2573,7 +2574,7 @@ fn read_ffi_metadata(
                 } else {
                     thaw_hir::FfiCallingConvention::C
                 },
-                aggregate_return_abi: if version == Some(3) {
+                aggregate_return_abi: if matches!(version, Some(3 | 4)) {
                     match entry
                         .get("aggregateReturnAbi")
                         .and_then(|value| value.as_str())
@@ -2591,6 +2592,73 @@ fn read_ffi_metadata(
                     }
                 } else {
                     thaw_hir::FfiAggregateAbi::Internal
+                },
+                aggregate_return_layout: if version == Some(4) {
+                    entry
+                        .get("aggregateReturnLayout")
+                        .map(|value| {
+                            let object = value.as_object().ok_or_else(|| {
+                                format!(
+                                    "FFI metadata for `{symbol}` in `{}` requires `aggregateReturnLayout` to be an object",
+                                    path.display()
+                                )
+                            })?;
+                            let field_offsets = object
+                                .get("fieldOffsets")
+                                .and_then(|value| value.as_array())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "FFI metadata for `{symbol}` in `{}` requires `aggregateReturnLayout.fieldOffsets` to be an array",
+                                        path.display()
+                                    )
+                                })?
+                                .iter()
+                                .map(|value| {
+                                    value.as_u64().ok_or_else(|| {
+                                        format!(
+                                            "FFI metadata for `{symbol}` in `{}` requires non-negative integer field offsets",
+                                            path.display()
+                                        )
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let size = object.get("size").and_then(|value| value.as_u64()).ok_or_else(
+                                || {
+                                    format!(
+                                        "FFI metadata for `{symbol}` in `{}` requires an integer `aggregateReturnLayout.size`",
+                                        path.display()
+                                    )
+                                },
+                            )?;
+                            let alignment = object
+                                .get("alignment")
+                                .and_then(|value| value.as_u64())
+                                .and_then(|value| u32::try_from(value).ok())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "FFI metadata for `{symbol}` in `{}` requires a 32-bit integer `aggregateReturnLayout.alignment`",
+                                        path.display()
+                                    )
+                                })?;
+                            let indirect = object
+                                .get("indirect")
+                                .and_then(|value| value.as_bool())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "FFI metadata for `{symbol}` in `{}` requires a boolean `aggregateReturnLayout.indirect`",
+                                        path.display()
+                                    )
+                                })?;
+                            Ok::<_, String>(thaw_hir::FfiAggregateLayout {
+                                field_offsets,
+                                size,
+                                alignment,
+                                indirect,
+                            })
+                        })
+                        .transpose()?
+                } else {
+                    None
                 },
             };
             if let Some(previous) = configured.insert(symbol.clone(), metadata.clone()) {
@@ -2798,6 +2866,9 @@ fn build_with_link_mode(
             metadata.calling_convention,
             metadata.aggregate_return_abi,
         )?;
+        if let Some(layout) = metadata.aggregate_return_layout {
+            thaw_hir::set_ffi_aggregate_layout(&mut program, &symbol, layout)?;
+        }
     }
 
     let context = Context::create();
@@ -4105,6 +4176,7 @@ mod tests {
                 return_string_abi: thaw_hir::FfiStringAbi::NullTerminated,
                 calling_convention: thaw_hir::FfiCallingConvention::C,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             }
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -4118,7 +4190,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let version = dir.join("version.json");
-        std::fs::write(&version, r#"{"version":4,"functions":{}}"#).unwrap();
+        std::fs::write(&version, r#"{"version":5,"functions":{}}"#).unwrap();
         assert!(read_ffi_metadata(&[version])
             .unwrap_err()
             .contains("version 1"));
@@ -4160,6 +4232,7 @@ mod tests {
                 return_string_abi: thaw_hir::FfiStringAbi::NullTerminated,
                 calling_convention: thaw_hir::FfiCallingConvention::C,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Internal,
+                aggregate_return_layout: None,
             }
         );
         let _ = std::fs::remove_dir_all(dir);
@@ -4187,11 +4260,38 @@ mod tests {
                 return_string_abi: thaw_hir::FfiStringAbi::PointerLength,
                 calling_convention: thaw_hir::FfiCallingConvention::Fast,
                 aggregate_return_abi: thaw_hir::FfiAggregateAbi::Portable,
+                aggregate_return_layout: None,
             }
         );
         assert_eq!(
             metadata["record"].aggregate_return_abi,
             thaw_hir::FfiAggregateAbi::Packed
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reads_version_four_explicit_aggregate_layout() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-ffi-aggregate-layout-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ffi.json");
+        std::fs::write(
+            &path,
+            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"size":32,"alignment":32,"indirect":true}}}}"#,
+        )
+        .unwrap();
+        let metadata = read_ffi_metadata(&[path]).unwrap();
+        assert_eq!(
+            metadata["record"].aggregate_return_layout,
+            Some(thaw_hir::FfiAggregateLayout {
+                field_offsets: vec![0, 16],
+                size: 32,
+                alignment: 32,
+                indirect: true,
+            })
         );
         let _ = std::fs::remove_dir_all(dir);
     }

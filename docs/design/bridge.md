@@ -392,6 +392,18 @@ value from that storage. This applies to direct and `thaw-result` returns. The
 default `internal` preserves the legacy pointer ABI for existing builtins and
 native archives.
 
+Version 4 preserves all version 3 fields and adds `aggregateReturnLayout` for
+fixed object returns. Its `fieldOffsets` array follows TypeScript declaration
+order; `size` and `alignment` describe the complete C object, including tail
+padding; and `indirect: true` selects an explicit hidden return-storage
+pointer. LLVM represents the value as a packed structure with byte-array
+padding at the declared offsets and gives the storage the requested alignment.
+The first implementation accepts direct-error portable/packed object returns
+whose fields are `boolean`, `number`, `bigint`/`i64`, or `string`. Invalid,
+overlapping, out-of-bounds, non-power-of-two, or mismatched layouts are hard
+errors. Nested explicit layouts and explicit `thaw-result` outer layouts remain
+future extensions.
+
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
@@ -399,8 +411,9 @@ Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
 parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
 variadic declaration. Extra values are passed as C `double`, default-promoted
 `int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
-subject to the ordinary marshal rules. Explicit field offsets/alignment,
-bitfields and other vararg types remain future extensions.
+subject to the ordinary marshal rules. Bitfields, nested explicit layouts,
+explicit register-class returns and other vararg types remain future
+extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
