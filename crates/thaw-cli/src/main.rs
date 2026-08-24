@@ -981,6 +981,24 @@ fn rewrite_external_class_methods(
         }
     }
 
+    fn source_instance_class(
+        expression: &Expr,
+        classes: &[ClassConstructorRewrite],
+        variables: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        match expression {
+            Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
+            Expr::Paren(parenthesized) => {
+                source_instance_class(&parenthesized.expr, classes, variables)
+            }
+            Expr::TsAs(assertion) => source_instance_class(&assertion.expr, classes, variables),
+            Expr::TsTypeAssertion(assertion) => {
+                source_instance_class(&assertion.expr, classes, variables)
+            }
+            _ => constructed_class(expression, classes).map(str::to_owned),
+        }
+    }
+
     fn source_expr_type(
         expression: &Expr,
         variables: &std::collections::HashMap<String, thaw_hir::HirType>,
@@ -1491,9 +1509,10 @@ fn rewrite_external_class_methods(
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
-                if let Some(class) = constructed_class(initializer, self.classes) {
-                    self.variables
-                        .insert(binding.id.sym.to_string(), class.to_string());
+                if let Some(class) =
+                    source_instance_class(initializer, self.classes, &self.variables)
+                {
+                    self.variables.insert(binding.id.sym.to_string(), class);
                 }
                 if matches!(initializer.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
                     self.callbacks.insert(binding.id.sym.to_string());
@@ -1595,9 +1614,10 @@ fn rewrite_external_class_methods(
                         self.value_types.remove(binding.id.sym.as_str());
                     }
                     if assignment.op == AssignOp::Assign {
-                        if let Some(class) = constructed_class(&assignment.right, self.classes) {
-                            self.variables
-                                .insert(binding.id.sym.to_string(), class.to_string());
+                        if let Some(class) =
+                            source_instance_class(&assignment.right, self.classes, &self.variables)
+                        {
+                            self.variables.insert(binding.id.sym.to_string(), class);
                         } else {
                             self.variables.remove(binding.id.sym.as_str());
                         }
@@ -4269,6 +4289,28 @@ mod tests {
         assert_eq!(
             rewritten,
             "const box = new NativeBox(42); const value = __thaw_get(box);"
+        );
+    }
+
+    #[test]
+    fn tracks_external_class_instance_aliases_and_invalidates_reassignments() {
+        let source = "const box = new NativeBox(42); const alias = box; alias.get(); let assigned = alias; assigned.get(); assigned = box; assigned.get(); assigned = unknown; assigned.get();";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[(
+                "NativeBox".into(),
+                "get".into(),
+                "__thaw_get".into(),
+                0,
+                false,
+                vec![],
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const box = new NativeBox(42); const alias = box; __thaw_get(alias); let assigned = alias; __thaw_get(assigned); assigned = box; __thaw_get(assigned); assigned = unknown; assigned.get();"
         );
     }
 
