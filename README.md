@@ -428,9 +428,13 @@ The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
 `this`-preserving instance-method calls; a real `NativeBox` addon exercises
-construction plus method invocation, while sqlite3 constructs a real in-memory
-`Database` handle. Automatic source rewriting from ordinary TypeScript `new`
-and method syntax into this handle ABI is the next frontend integration step.
+construction plus method invocation. Registry class exports are mapped to
+typed N-API constructor calls, and ordinary TypeScript named or namespace
+`new` expressions are rewritten only for those external classes. The sqlite3
+CLI E2E now compiles `import { Database } from "sqlite3"` followed by
+`new Database(":memory:")` and constructs the real in-memory database from the
+standalone executable. Automatic instance-method and callback syntax lowering
+is the next frontend integration step.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
