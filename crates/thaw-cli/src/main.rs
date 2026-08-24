@@ -3107,7 +3107,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("lib/values.ts"),
-            "export function value(): number { return 40; }\nexport default function offset(): number { return 2; }\n",
+            "export function value(): number { return 40; }\nexport default function(): number { return 2; }\n",
         )
         .unwrap();
         std::fs::write(

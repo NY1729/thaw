@@ -611,8 +611,9 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes, enums,
-  tuples, broad union/intersection support, multi-capture export keys, anonymous
-  default functions and the complete JavaScript expression/statement set
+  tuples, broad union/intersection support, multi-capture export keys and the
+  complete JavaScript expression/statement set. Anonymous default functions
+  are assigned stable bundle-local symbols
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel
   collisions. Nullish coalescing and `??=` unwrap or update the payload with

@@ -421,19 +421,17 @@ pub fn bundle(
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(mut export)) => {
                     match &mut export.decl {
                         thaw_parser::ast::DefaultDecl::Fn(function) => {
-                            let Some(original) =
-                                function.ident.as_ref().map(|id| id.sym.to_string())
-                            else {
-                                return Err(
-                                    "anonymous default functions are not supported yet".to_string()
-                                );
-                            };
                             function.function.visit_mut_with(&mut RenameReferences {
                                 names: &names,
                                 namespaces: &namespaces,
                             });
-                            let mut ident = function.ident.take().unwrap();
-                            if let Some(replacement) = names.get(&original) {
+                            let mut ident = function.ident.take().unwrap_or_else(|| {
+                                thaw_parser::ast::Ident::new_no_ctxt(
+                                    format!("__thawmod{index}_default").into(),
+                                    function.function.span,
+                                )
+                            });
+                            if let Some(replacement) = names.get(ident.sym.as_ref()) {
                                 ident.sym = replacement.clone().into();
                             }
                             public.insert("default".to_string(), ident.sym.to_string());
