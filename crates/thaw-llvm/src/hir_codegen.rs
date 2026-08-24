@@ -86,7 +86,7 @@ const ASYNC_FRAME_BYTES: u64 = 24;
 const ASYNC_SLOT_BYTES: u64 = 16;
 
 fn object_field_storage_bytes(ty: &HirType) -> u64 {
-    if matches!(ty, HirType::Optional(_)) {
+    if matches!(ty, HirType::Optional(_) | HirType::Nullable(_)) {
         ASYNC_SLOT_BYTES
     } else {
         OBJECT_FIELD_BYTES
@@ -1222,6 +1222,13 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Optional(payload) => {
+                let payload = self.basic_type(payload)?;
+                Ok(self
+                    .context
+                    .struct_type(&[self.context.bool_type().into(), payload], false)
+                    .into())
+            }
+            HirType::Nullable(payload) => {
                 let payload = self.basic_type(payload)?;
                 Ok(self
                     .context
@@ -4357,6 +4364,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 let optional = self.compile_expr(value)?.into_struct_value();
                 self.builder
                     .build_extract_value(optional, 1, "optional_value")
+                    .map_err(|error| error.to_string())
+            }
+            HirExpr::NullableSome(value, payload) => {
+                self.compile_optional(value.as_ref(), payload, true)
+            }
+            HirExpr::NullableNone(payload) => self.compile_optional_none(payload),
+            HirExpr::NullableIsNone(value, _) => {
+                let nullable = self.compile_expr(value)?.into_struct_value();
+                let present = self
+                    .builder
+                    .build_extract_value(nullable, 0, "nullable_present")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_not(present, "nullable_is_none")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string())
+            }
+            HirExpr::NullableValue(value, _) => {
+                let nullable = self.compile_expr(value)?.into_struct_value();
+                self.builder
+                    .build_extract_value(nullable, 1, "nullable_value")
                     .map_err(|error| error.to_string())
             }
 
@@ -7527,6 +7556,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::OptionalIsNone(_, _) => Some(HirType::Bool),
             HirExpr::OptionalValue(_, payload) => Some(payload.clone()),
+            HirExpr::NullableSome(_, payload) | HirExpr::NullableNone(payload) => {
+                Some(HirType::Nullable(Box::new(payload.clone())))
+            }
+            HirExpr::NullableIsNone(_, _) => Some(HirType::Bool),
+            HirExpr::NullableValue(_, payload) => Some(payload.clone()),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
             HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
                 .iter()
@@ -9949,7 +9983,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = self.compile_expr(arg)?;
 
         if let Some(HirType::Optional(payload)) = hir_type {
-            self.compile_console_optional(value.into_struct_value(), &payload)?;
+            self.compile_console_tagged(value.into_struct_value(), &payload, "undefined")?;
+        } else if let Some(HirType::Nullable(payload)) = hir_type {
+            self.compile_console_tagged(value.into_struct_value(), &payload, "null")?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
@@ -10039,10 +10075,11 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i32_type().const_int(0, false).into())
     }
 
-    fn compile_console_optional(
+    fn compile_console_tagged(
         &mut self,
         value: StructValue<'ctx>,
         payload_type: &HirType,
+        absent_text: &str,
     ) -> Result<(), String> {
         let present = self
             .builder
@@ -10066,15 +10103,15 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
 
         self.builder.position_at_end(absent_block);
-        let undefined = self
+        let absent = self
             .builder
-            .build_global_string_ptr("undefined", "undefined_string")
+            .build_global_string_ptr(absent_text, "tagged_absent_string")
             .map_err(|error| error.to_string())?;
         self.builder
             .build_call(
                 self.module.get_function("puts").unwrap(),
-                &[undefined.as_pointer_value().into()],
-                "puts_undefined",
+                &[absent.as_pointer_value().into()],
+                "puts_tagged_absent",
             )
             .map_err(|error| error.to_string())?;
         self.builder
@@ -11381,6 +11418,90 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_null"),
             "null\nobject\ntrue\nfalse\ntrue\nget null\ntrue\nget null\nfalse\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_nullable_values() {
+        let source = r#"
+            interface Box { value: number | null; label: string; }
+            interface Item { value: number; run: (value: number) => number; }
+            function maybe(present: boolean): number | null {
+                if (present) return 4;
+                return null;
+            }
+            function fallback(): number {
+                console.log("fallback");
+                return 9;
+            }
+            function maybeItem(present: boolean): Item | null {
+                if (present) return {
+                    value: 5,
+                    run: (value: number) => value * 2
+                };
+                return null;
+            }
+            function maybeText(present: boolean): string | null {
+                if (present) return "thaw";
+                return null;
+            }
+            function maybeCallback(present: boolean): ((value: number) => number) | null {
+                if (present) return (value: number) => value + 1;
+                return null;
+            }
+            function narrowed(value: number | null): number {
+                if (value !== null) return value + 2;
+                return 0;
+            }
+            function guarded(value: number | null): number {
+                if (value === null) return 1;
+                return value * 2;
+            }
+            async function delayed(present: boolean): Promise<string | null> {
+                await sleep(1);
+                if (present) return "ok";
+                return null;
+            }
+            async function main(): Promise<void> {
+                console.log(maybe(true));
+                console.log(maybe(false));
+                console.log(maybe(true) ?? fallback());
+                console.log(maybe(false) ?? fallback());
+                console.log(maybe(false) === null);
+                console.log(maybe(true) === null);
+                console.log(maybe(false) == undefined);
+                console.log(maybe(true) == undefined);
+                console.log(typeof maybe(true));
+                console.log(typeof maybe(false));
+                let value: number | null = null;
+                console.log(value);
+                value = 6;
+                console.log(value);
+                value = null;
+                console.log(value ??= fallback());
+                console.log(value ??= fallback());
+                const box: Box = { value: null, label: "box" };
+                console.log(box.value);
+                console.log(box.label);
+                console.log(maybeItem(true)?.value);
+                console.log(maybeItem(false)?.value);
+                console.log(maybeItem(true)?.run(3));
+                console.log(maybeItem(false)?.run(fallback()));
+                console.log(maybeText(true)?.length);
+                console.log(maybeText(false)?.toUpperCase());
+                console.log(maybeCallback(true)?.(7));
+                console.log(maybeCallback(false)?.(fallback()));
+                console.log(narrowed(3));
+                console.log(narrowed(null));
+                console.log(guarded(4));
+                console.log(guarded(null));
+                console.log(await delayed(true));
+                console.log(await delayed(false));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_nullable"),
+            "4\nnull\n4\nfallback\n9\ntrue\nfalse\ntrue\nfalse\nnumber\nobject\nnull\n6\nfallback\n9\n9\nnull\nbox\n5\nundefined\n6\nundefined\n4\nundefined\n8\nundefined\n5\n0\n8\n1\nok\nnull\n"
         );
     }
 

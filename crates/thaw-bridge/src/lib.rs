@@ -1234,6 +1234,7 @@ fn render_ts_type(ty: &HirType) -> String {
         ),
         HirType::Promise(inner) => format!("Promise<{}>", render_ts_type(inner)),
         HirType::Optional(inner) => format!("{} | undefined", render_ts_type(inner)),
+        HirType::Nullable(inner) => format!("{} | null", render_ts_type(inner)),
         HirType::Object(fields) => {
             let rendered = fields
                 .iter()

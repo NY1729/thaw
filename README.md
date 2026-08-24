@@ -625,9 +625,10 @@ The workspace crates have narrow responsibilities:
   the tagged runtime state and provides the same branch narrowing. Optional
   chaining now short-circuits tagged
   fixed-object fields, array/tuple elements, native `.length`, function-value
-  calls and receiver-bound methods. Standalone native `null` has distinct
-  display, `typeof` and equality semantics; `T | null` and dynamically computed
-  method names still require broader optional-chain lowering
+  calls and receiver-bound methods. Native `null` and tagged `T | null` have
+  distinct display, `typeof`, equality, assignment, narrowing, `??`/`??=` and
+  optional-chain semantics. Three-way `T | null | undefined` unions and
+  dynamically computed method names still require broader lowering
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
