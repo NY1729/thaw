@@ -9001,6 +9001,20 @@ mod tests {
     }
 
     #[test]
+    fn compiles_for_of_assignment_and_retains_last_value() {
+        let source = r#"
+            function main(): void {
+                let value = 0;
+                for (value of [4, 5, 6]) {
+                    console.log(value);
+                }
+                console.log(value);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "for_of_assignment"), "4\n5\n6\n6\n");
+    }
+
+    #[test]
     fn strict_equality_supports_strings_booleans_and_object_identity() {
         let source = r#"
             interface Box { value: number; }

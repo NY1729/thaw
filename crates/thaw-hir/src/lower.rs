@@ -1988,50 +1988,80 @@ impl<'a> FnLowerer<'a> {
                     let HirType::Array(element) = self.infer_expr_type(&values)? else {
                         return Err("`for...of` currently requires a typed array".into());
                     };
-                    let ForHead::VarDecl(decl) = &for_of.left else {
-                        return Err("`for...of` currently requires a variable declaration".into());
-                    };
-                    let [binding] = decl.decls.as_slice() else {
-                        return Err("`for...of` requires exactly one loop binding".into());
-                    };
-                    if binding.init.is_some() {
-                        return Err("`for...of` loop bindings cannot have an initializer".into());
-                    }
-                    let Pat::Ident(binding) = &binding.name else {
-                        return Err("`for...of` requires an identifier loop binding".into());
-                    };
-                    let item_ty = match &binding.type_ann {
-                        Some(annotation) => {
-                            let declared = lower_ts_type(
-                                &annotation.type_ann,
-                                self.interfaces,
-                                self.generic_interfaces,
-                            )?;
-                            if declared != *element {
-                                return Err(format!(
-                                    "`for...of` binding has type {declared:?}, expected {:?}",
-                                    element
-                                ));
-                            }
-                            declared
-                        }
-                        None => element.as_ref().clone(),
-                    };
                     let values_name = self.bind_local(
                         "__thaw_for_of_values",
                         HirType::Array(element.clone()),
                     );
                     let index_name = self.bind_local("__thaw_for_of_index", HirType::F64);
-                    let item_name = self.bind_local(binding.id.sym.as_ref(), item_ty.clone());
-                    let mut body = vec![HirStmt::Let(
-                        item_name,
-                        item_ty.clone(),
+                    let indexed_value = |item_ty: HirType| {
                         HirExpr::TypedIndex(
                             Box::new(HirExpr::Var(values_name.clone())),
                             Box::new(HirExpr::Var(index_name.clone())),
                             item_ty,
-                        ),
-                    )];
+                        )
+                    };
+                    let item_stmt = match &for_of.left {
+                        ForHead::VarDecl(decl) => {
+                            let [declarator] = decl.decls.as_slice() else {
+                                return Err("`for...of` requires exactly one loop binding".into());
+                            };
+                            if declarator.init.is_some() {
+                                return Err(
+                                    "`for...of` loop bindings cannot have an initializer".into(),
+                                );
+                            }
+                            let Pat::Ident(binding) = &declarator.name else {
+                                return Err(
+                                    "`for...of` requires an identifier loop binding".into(),
+                                );
+                            };
+                            let item_ty = match &binding.type_ann {
+                                Some(annotation) => {
+                                    let declared = lower_ts_type(
+                                        &annotation.type_ann,
+                                        self.interfaces,
+                                        self.generic_interfaces,
+                                    )?;
+                                    if declared != *element {
+                                        return Err(format!(
+                                            "`for...of` binding has type {declared:?}, expected {:?}",
+                                            element
+                                        ));
+                                    }
+                                    declared
+                                }
+                                None => element.as_ref().clone(),
+                            };
+                            let item_name =
+                                self.bind_local(binding.id.sym.as_ref(), item_ty.clone());
+                            HirStmt::Let(item_name, item_ty.clone(), indexed_value(item_ty))
+                        }
+                        ForHead::Pat(pattern) => {
+                            let Pat::Ident(binding) = pattern.as_ref() else {
+                                return Err(
+                                    "`for...of` assignment requires an identifier target".into(),
+                                );
+                            };
+                            let item_name = self.resolve_binding(binding.id.sym.as_ref());
+                            let item_ty = self.scope.get(&item_name).cloned().ok_or_else(|| {
+                                format!("unknown `for...of` assignment target `{item_name}`")
+                            })?;
+                            if item_ty != *element {
+                                return Err(format!(
+                                    "`for...of` assignment target has type {item_ty:?}, expected {:?}",
+                                    element
+                                ));
+                            }
+                            HirStmt::Expr(HirExpr::Assign(
+                                item_name,
+                                Box::new(indexed_value(item_ty)),
+                            ))
+                        }
+                        ForHead::UsingDecl(_) => {
+                            return Err("`using` bindings in `for...of` are not supported".into())
+                        }
+                    };
+                    let mut body = vec![item_stmt];
                     body.extend(self.lower_body(&for_of.body)?);
                     let update = HirExpr::Assign(
                         index_name.clone(),
@@ -4496,6 +4526,25 @@ mod tests {
         assert!(matches!(
             &loop_body[0],
             HirStmt::Let(_, HirType::F64, HirExpr::TypedIndex(_, _, HirType::F64))
+        ));
+    }
+
+    #[test]
+    fn desugars_for_of_assignment_to_existing_variable() {
+        let program = lower(
+            r#"function main(): void {
+                let value = 0;
+                for (value of [1, 2]) { console.log(value); }
+                console.log(value);
+            }"#,
+        );
+        let HirStmt::While(_, loop_body) = &program.functions[0].body[3] else {
+            panic!("expected indexed while loop");
+        };
+        assert!(matches!(
+            &loop_body[0],
+            HirStmt::Expr(HirExpr::Assign(name, value))
+                if name == "value" && matches!(value.as_ref(), HirExpr::TypedIndex(_, _, HirType::F64))
         ));
     }
 
