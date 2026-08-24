@@ -1337,21 +1337,11 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         sig: &FfiSignature,
     ) -> Result<FunctionValue<'ctx>, String> {
-        let supports_owned_return = sig.ret == HirType::Str
-            || matches!(&sig.ret, HirType::Array(element) if **element == HirType::F64)
-            || matches!(
-                &sig.ret,
-                HirType::Object(fields)
-                    if sig.aggregate_return_abi != FfiAggregateAbi::Internal
-                        && fields.iter().any(|(_, ty)| *ty == HirType::Str)
-                        && fields.iter().all(|(_, ty)| matches!(
-                            ty,
-                            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
-                        ))
-            );
+        let supports_owned_return =
+            Self::supports_owned_ffi_return(&sig.ret, sig.aggregate_return_abi);
         if sig.return_ownership != FfiOwnership::Borrowed && !supports_owned_return {
             return Err(format!(
-                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string, number[], and flat portable/packed object returns with string fields",
+                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string, number[], and portable/packed object returns containing supported string or number[] leaves",
                 sig.symbol
             ));
         }
@@ -1408,6 +1398,44 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(function)
     }
 
+    fn supports_owned_ffi_return(ty: &HirType, aggregate_abi: FfiAggregateAbi) -> bool {
+        match ty {
+            HirType::Str => true,
+            HirType::Array(element) => **element == HirType::F64,
+            HirType::Object(fields) if aggregate_abi != FfiAggregateAbi::Internal => {
+                fields
+                    .iter()
+                    .all(|(_, field)| Self::supports_ffi_aggregate_field(field))
+                    && fields
+                        .iter()
+                        .any(|(_, field)| Self::ffi_aggregate_field_has_owned_leaf(field))
+            }
+            _ => false,
+        }
+    }
+
+    fn supports_ffi_aggregate_field(ty: &HirType) -> bool {
+        match ty {
+            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => true,
+            HirType::Array(element) => **element == HirType::F64,
+            HirType::Object(fields) => fields
+                .iter()
+                .all(|(_, field)| Self::supports_ffi_aggregate_field(field)),
+            _ => false,
+        }
+    }
+
+    fn ffi_aggregate_field_has_owned_leaf(ty: &HirType) -> bool {
+        match ty {
+            HirType::Str => true,
+            HirType::Array(element) => **element == HirType::F64,
+            HirType::Object(fields) => fields
+                .iter()
+                .any(|(_, field)| Self::ffi_aggregate_field_has_owned_leaf(field)),
+            _ => false,
+        }
+    }
+
     fn ffi_calling_convention(convention: FfiCallingConvention) -> u32 {
         match convention {
             FfiCallingConvention::C => 0,
@@ -1452,14 +1480,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 if aggregate_abi == FfiAggregateAbi::Packed {
                     let size = fields
                         .iter()
-                        .map(|(_, ty)| Self::ffi_object_field_layout(ty).0)
+                        .map(|(_, ty)| Self::ffi_object_field_layout(ty, aggregate_abi).0)
                         .sum();
                     (size, 1)
                 } else {
                     let mut size = 0;
                     let mut alignment = 1;
                     for (_, ty) in fields {
-                        let (field_size, field_alignment) = Self::ffi_object_field_layout(ty);
+                        let (field_size, field_alignment) =
+                            Self::ffi_object_field_layout(ty, aggregate_abi);
                         size = Self::align_to(size, field_alignment) + field_size;
                         alignment = alignment.max(field_alignment);
                     }
@@ -1470,10 +1499,15 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
-    fn ffi_object_field_layout(ty: &HirType) -> (u64, u64) {
+    fn ffi_object_field_layout(ty: &HirType, aggregate_abi: FfiAggregateAbi) -> (u64, u64) {
         match ty {
             HirType::Bool => (1, 1),
             HirType::F64 | HirType::I64 => (8, 8),
+            HirType::Array(_) | HirType::Object(_)
+                if aggregate_abi != FfiAggregateAbi::Internal =>
+            {
+                Self::ffi_aggregate_storage_layout(ty, aggregate_abi)
+            }
             _ => (8, 8),
         }
     }
@@ -1552,7 +1586,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let fields = fields
                     .iter()
                     .map(|(name, ty)| {
-                        self.basic_type(ty)
+                        self.ffi_return_type(ty, FfiStringAbi::NullTerminated, aggregate_abi)
                             .map_err(|error| format!("FFI object field `{name}`: {error}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -9821,6 +9855,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
         string_abi: FfiStringAbi,
         ownership: &FfiOwnership,
+        aggregate_abi: FfiAggregateAbi,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
             HirType::Str if string_abi == FfiStringAbi::PointerLength => {
@@ -9967,7 +10002,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 Ok(result.into())
             }
-            HirType::Object(fields) if value.is_struct_value() => {
+            HirType::Object(fields)
+                if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
+            {
                 let native = value.into_struct_value();
                 let i64_type = self.context.i64_type();
                 let arena_alloc = self.module.get_function("thaw_arena_alloc").unwrap();
@@ -9993,15 +10030,24 @@ impl<'ctx> HirCompiler<'ctx> {
                         .builder
                         .build_extract_value(native, index as u32, &format!("ffi_{name}"))
                         .map_err(|error| error.to_string())?;
-                    if *field_ty == HirType::Str && *ownership != FfiOwnership::Borrowed {
-                        field = self
+                    field = match field_ty {
+                        HirType::Str if *ownership != FfiOwnership::Borrowed => self
                             .apply_ffi_string_ownership(
                                 field.into_pointer_value(),
                                 ownership,
                                 &format!("ffi_{name}"),
                             )?
-                            .into();
-                    }
+                            .into(),
+                        HirType::Object(_) | HirType::Array(_) if field.is_struct_value() => self
+                            .marshal_ffi_return(
+                            field,
+                            field_ty,
+                            FfiStringAbi::NullTerminated,
+                            ownership,
+                            aggregate_abi,
+                        )?,
+                        _ => field,
+                    };
                     let slot = unsafe {
                         self.builder
                             .build_in_bounds_gep(
@@ -10211,6 +10257,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     &sig.ret,
                     sig.return_string_abi,
                     &sig.return_ownership,
+                    sig.aggregate_return_abi,
                 )
                 .map(Some);
         }
@@ -10245,6 +10292,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &sig.ret,
             sig.return_string_abi,
             &sig.return_ownership,
+            sig.aggregate_return_abi,
         )
         .map(Some)
     }
@@ -18790,6 +18838,125 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "1\ndirect message\nchecked message\n2\nchecked message failed\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
+        let source = r#"
+            declare function native_nested(): { meta: { label: string; ok: boolean }; values: number[] };
+            declare function native_checked_nested(value: number): { meta: { label: string; ok: boolean }; values: number[] };
+            declare function nested_destroy_count(): number;
+
+            function main(): void {
+                const direct = native_nested();
+                console.log(direct.meta.label);
+                console.log(direct.meta.ok);
+                console.log(direct.values[0] + direct.values[1]);
+                console.log(nested_destroy_count());
+                const checked = native_checked_nested(3);
+                console.log(checked.meta.label);
+                console.log(checked.values[0]);
+                console.log(nested_destroy_count());
+                try {
+                    native_checked_nested(0 - 1);
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let mut program = thaw_hir::lower_module(&module).unwrap();
+        for symbol in ["native_nested", "native_checked_nested"] {
+            thaw_hir::set_ffi_ownership(
+                &mut program,
+                symbol,
+                thaw_hir::FfiOwnership::Owned {
+                    destroy: "destroy_nested_leaf".into(),
+                },
+                thaw_hir::FfiOwnership::Borrowed,
+            )
+            .unwrap();
+            thaw_hir::set_ffi_string_abi(
+                &mut program,
+                symbol,
+                if symbol == "native_nested" {
+                    vec![]
+                } else {
+                    vec![thaw_hir::FfiStringAbi::NullTerminated]
+                },
+                thaw_hir::FfiStringAbi::NullTerminated,
+                thaw_hir::FfiCallingConvention::C,
+                thaw_hir::FfiAggregateAbi::Portable,
+            )
+            .unwrap();
+        }
+        thaw_hir::set_ffi_error_abi(
+            &mut program,
+            "native_checked_nested",
+            thaw_hir::FfiErrorAbi::ThawResult,
+        )
+        .unwrap();
+
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "ffi_nested_aggregate");
+        compiler.compile_program(&program).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-hir-codegen-test-ffi-nested-aggregate-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let obj_path = dir.join("out.o");
+        let exe_path = dir.join("out");
+        let native_c_path = dir.join("native.c");
+        let native_obj_path = dir.join("native.o");
+        compiler.write_object_file(&obj_path).unwrap();
+        std::fs::write(
+            &native_c_path,
+            "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\n\
+             typedef struct { double *data; int64_t len; } NumberArray;\n\
+             typedef struct { char *label; _Bool ok; } Meta;\n\
+             typedef struct { Meta meta; NumberArray values; } Nested;\n\
+             typedef struct { Nested value; const char *error; } NestedResult;\n\
+             static int destroys;\n\
+             static char *copy(const char *s) { size_t n = strlen(s) + 1; char *p = malloc(n); memcpy(p, s, n); return p; }\n\
+             static Nested make_nested(const char *label, double first) {\n\
+               double *values = malloc(2 * sizeof(double)); values[0] = first; values[1] = 5;\n\
+               return (Nested){{copy(label), 1}, {values, 2}};\n\
+             }\n\
+             Nested native_nested(void) { return make_nested(\"direct nested\", 2); }\n\
+             NestedResult native_checked_nested(double value) {\n\
+               if (value < 0) return (NestedResult){{{0, 0}, {0, 0}}, \"nested check failed\"};\n\
+               return (NestedResult){make_nested(\"checked nested\", value), 0};\n\
+             }\n\
+             void destroy_nested_leaf(void *p) { ++destroys; free(p); }\n\
+             double nested_destroy_count(void) { return destroys; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg("-c")
+            .arg(&native_c_path)
+            .arg("-o")
+            .arg(&native_obj_path)
+            .status()
+            .unwrap()
+            .success());
+        let arena_lib = build_staticlib("thaw-arena");
+        assert!(Command::new("cc")
+            .arg(&obj_path)
+            .arg(&native_obj_path)
+            .arg(&arena_lib)
+            .arg("-o")
+            .arg(&exe_path)
+            .status()
+            .unwrap()
+            .success());
+        let output = Command::new(&exe_path).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "direct nested\ntrue\n7\n2\nchecked nested\n3\n4\nnested check failed\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
