@@ -122,7 +122,9 @@ pub enum FfiAggregateAbi {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfiBitFieldLayout {
     pub bit_offset: u8,
+    pub bit_width: u8,
     pub storage_bytes: u8,
+    pub signed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1187,13 +1189,20 @@ pub fn set_ffi_aggregate_layout(
             let child = layout.field_layouts[index].as_deref();
             let bitfield = layout.field_bitfields[index].as_ref();
             let field_size = match (ty, child, bitfield) {
-                (HirType::Bool, None, Some(bitfield)) => {
+                (HirType::Bool | HirType::F64, None, Some(bitfield)) => {
+                    let storage_bits = u16::from(bitfield.storage_bytes) * 8;
                     if !matches!(bitfield.storage_bytes, 1 | 2 | 4 | 8)
-                        || u16::from(bitfield.bit_offset)
-                            >= u16::from(bitfield.storage_bytes) * 8
+                        || bitfield.bit_width == 0
+                        || u16::from(bitfield.bit_offset) + u16::from(bitfield.bit_width)
+                            > storage_bits
                     {
                         return Err(format!(
                             "FFI bitfield `{path}.{name}` of `{symbol}` has an invalid bit offset or storage size"
+                        ));
+                    }
+                    if *ty == HirType::Bool && (bitfield.bit_width != 1 || bitfield.signed) {
+                        return Err(format!(
+                            "FFI boolean bitfield `{path}.{name}` of `{symbol}` requires width 1 and `signed: false`"
                         ));
                     }
                     u64::from(bitfield.storage_bytes)
