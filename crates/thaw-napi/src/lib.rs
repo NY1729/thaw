@@ -589,9 +589,11 @@ unsafe fn async_context_mut<'a>(
         .iter_mut()
         .find(|candidate| std::ptr::eq(candidate.as_ref(), context_ptr))
     else {
+        record_status(env, NAPI_INVALID_ARG);
         return Err(NAPI_INVALID_ARG);
     };
     if context_ref.env != env as usize || context_ref.destroyed {
+        record_status(env, NAPI_INVALID_ARG);
         return Err(NAPI_INVALID_ARG);
     }
     Ok(context_ref)
@@ -622,7 +624,7 @@ unsafe fn open_handle_scope(
     kind: HandleScopeKind,
 ) -> NapiStatus {
     let (Ok(env_ref), Some(out)) = (env_mut(env), out.as_mut()) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let mut scope = Box::new(HandleScope {
         env: env as usize,
@@ -651,16 +653,16 @@ unsafe fn close_handle_scope(
         .iter_mut()
         .find(|candidate| std::ptr::eq(candidate.as_ref(), scope_ptr))
     else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if scope_ref.env != env as usize {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if scope_ref.closed
         || scope_ref.kind != kind
         || env_ref.active_handle_scopes.last().copied() != Some(scope_ptr)
     {
-        return NAPI_HANDLE_SCOPE_MISMATCH;
+        return record_status(env, NAPI_HANDLE_SCOPE_MISMATCH);
     }
     scope_ref.closed = true;
     env_ref.active_handle_scopes.pop();
@@ -6279,9 +6281,10 @@ pub unsafe extern "C" fn napi_make_callback(
     result: *mut NapiValue,
 ) -> NapiStatus {
     if !async_context.is_null() && async_context_mut(env, async_context).is_err() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    napi_call_function(env, this_arg, function, argc, argv, result)
+    let status = napi_call_function(env, this_arg, function, argc, argv, result);
+    record_status(env, status)
 }
 
 const NAPI_PENDING_EXCEPTION: NapiStatus = 10;
@@ -6521,9 +6524,10 @@ pub unsafe extern "C" fn napi_open_callback_scope(
         || async_context_mut(env, context).is_err()
         || (!resource.is_null() && !value_belongs_to_environment(env, resource))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    open_handle_scope(env, out, HandleScopeKind::Callback)
+    let status = open_handle_scope(env, out, HandleScopeKind::Callback);
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -6543,14 +6547,14 @@ pub unsafe extern "C" fn napi_async_init(
         || !value_belongs_to_environment(env, resource_name)
         || (!resource.is_null() && !value_belongs_to_environment(env, resource))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     let name = match value_ref(resource_name) {
         Ok(Value::String(name)) => name.clone(),
-        _ => return NAPI_STRING_EXPECTED,
+        _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
     let mut context = Box::new(AsyncContext {
         env: env as usize,
@@ -6567,7 +6571,7 @@ pub unsafe extern "C" fn napi_async_init(
 #[no_mangle]
 pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, context: *mut c_void) -> NapiStatus {
     let Ok(context) = async_context_mut(env, context) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let _ = (context.resource, &context.resource_name);
     context.destroyed = true;
@@ -6811,7 +6815,7 @@ pub unsafe extern "C" fn napi_escape_handle(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -6822,16 +6826,16 @@ pub unsafe extern "C" fn napi_escape_handle(
         .iter_mut()
         .find(|candidate| std::ptr::eq(candidate.as_ref(), scope_ptr))
     else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if scope_ref.closed
         || scope_ref.kind != HandleScopeKind::Escapable
         || env_ref.active_handle_scopes.last().copied() != Some(scope_ptr)
     {
-        return NAPI_HANDLE_SCOPE_MISMATCH;
+        return record_status(env, NAPI_HANDLE_SCOPE_MISMATCH);
     }
     if scope_ref.escaped {
-        return NAPI_ESCAPE_CALLED_TWICE;
+        return record_status(env, NAPI_ESCAPE_CALLED_TWICE);
     }
     scope_ref.escaped = true;
     *out = value;
@@ -7347,6 +7351,9 @@ mod tests {
                 napi_close_handle_scope(env_ptr, outer),
                 NAPI_HANDLE_SCOPE_MISMATCH
             );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_HANDLE_SCOPE_MISMATCH);
             assert_eq!(
                 napi_close_escapable_handle_scope(other_env_ptr, inner),
                 NAPI_INVALID_ARG
@@ -7363,6 +7370,8 @@ mod tests {
                 napi_escape_handle(env_ptr, inner, value, &mut escaped),
                 NAPI_ESCAPE_CALLED_TWICE
             );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_ESCAPE_CALLED_TWICE);
             assert_eq!(
                 napi_close_handle_scope(env_ptr, inner),
                 NAPI_HANDLE_SCOPE_MISMATCH
@@ -10371,6 +10380,9 @@ mod tests {
             );
             assert_eq!(napi_async_destroy(env_ptr, context), NAPI_OK);
             assert_eq!(napi_async_destroy(env_ptr, context), NAPI_INVALID_ARG);
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
             assert_eq!(
                 napi_open_callback_scope(env_ptr, ptr::null_mut(), context, &mut callback_scope),
                 NAPI_INVALID_ARG
