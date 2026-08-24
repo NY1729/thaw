@@ -4823,7 +4823,9 @@ pub unsafe extern "C" fn napi_throw_error(
     code: *const c_char,
     message: *const c_char,
 ) -> NapiStatus {
-    let message = text(message).unwrap_or_else(|_| "native addon error".into());
+    let Ok(message) = text(message) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -4864,7 +4866,9 @@ unsafe fn throw_error_kind(
     code: *const c_char,
     message: *const c_char,
 ) -> NapiStatus {
-    let message = text(message).unwrap_or_else(|_| "native addon error".into());
+    let Ok(message) = text(message) else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -4876,7 +4880,7 @@ unsafe fn throw_error_kind(
 #[no_mangle]
 pub unsafe extern "C" fn napi_is_exception_pending(env: NapiEnv, out: *mut bool) -> NapiStatus {
     if out.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -4889,6 +4893,9 @@ pub unsafe extern "C" fn napi_get_and_clear_last_exception(
     env: NapiEnv,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() {
+        return record_status(env, NAPI_INVALID_ARG);
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
@@ -4901,7 +4908,7 @@ pub unsafe extern "C" fn napi_get_and_clear_last_exception(
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_version(env: NapiEnv, out: *mut u32) -> NapiStatus {
     if env.is_null() || out.is_null() {
-        NAPI_INVALID_ARG
+        record_status(env, NAPI_INVALID_ARG)
     } else {
         *out = 10;
         NAPI_OK
@@ -4914,7 +4921,7 @@ pub unsafe extern "C" fn napi_get_global(env: NapiEnv, out: *mut NapiValue) -> N
         return NAPI_INVALID_ARG;
     };
     if out.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if env.global.is_null() {
         env.global = env.alloc(Value::Object(HashMap::new()));
@@ -4930,17 +4937,18 @@ pub unsafe extern "C" fn napi_run_script(
     result: *mut NapiValue,
 ) -> NapiStatus {
     if result.is_null() || !value_belongs_to_environment(env, script) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let source = match value_ref(script) {
         Ok(Value::String(source)) => source.clone(),
-        _ => return NAPI_STRING_EXPECTED,
+        _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
     let evaluated = thaw_quickjs::eval_json(&source);
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    match evaluated {
+    let status = match evaluated {
         Ok(Some(json)) => match serde_json::from_str::<JsonValue>(&json) {
             Ok(json) => write_value(result, value_from_json(env, &json)),
             Err(error) => {
@@ -4958,7 +4966,8 @@ pub unsafe extern "C" fn napi_run_script(
             env.exception = Some(env.alloc(Value::Error(error)));
             NAPI_PENDING_EXCEPTION
         }
-    }
+    };
+    record_status(env_ptr, status)
 }
 
 #[no_mangle]
@@ -5165,7 +5174,7 @@ pub unsafe extern "C" fn napi_object_seal(env: NapiEnv, object: NapiValue) -> Na
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5210,11 +5219,11 @@ pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> 
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let status = napi_object_seal(env, object);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -5231,19 +5240,19 @@ pub unsafe extern "C" fn napi_object_freeze(env: NapiEnv, object: NapiValue) -> 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_uv_event_loop(env: NapiEnv, out: *mut *mut c_void) -> NapiStatus {
     if env.is_null() || out.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     #[cfg(target_os = "linux")]
     {
         let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr());
         if symbol.is_null() {
-            return NAPI_GENERIC_FAILURE;
+            return record_status(env, NAPI_GENERIC_FAILURE);
         }
         let default_loop =
             std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> *mut c_void>(symbol);
         *out = default_loop();
         if (*out).is_null() {
-            return NAPI_GENERIC_FAILURE;
+            return record_status(env, NAPI_GENERIC_FAILURE);
         }
         NAPI_OK
     }
@@ -11023,6 +11032,14 @@ mod tests {
         unsafe {
             let mut env = Env::new();
             let env_ptr: NapiEnv = &mut env;
+            assert_eq!(
+                napi_throw_error(env_ptr, ptr::null(), ptr::null()),
+                NAPI_INVALID_ARG
+            );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+            assert!(env.exception.is_none());
             let mut message = ptr::null_mut();
             assert_eq!(
                 napi_create_string_utf8(env_ptr, c"outside range".as_ptr(), 13, &mut message),
@@ -11037,9 +11054,15 @@ mod tests {
             assert_eq!(napi_is_error(env_ptr, error, &mut is_error), NAPI_OK);
             assert!(is_error);
             assert_eq!(napi_throw(env_ptr, error), NAPI_OK);
+            assert_eq!(
+                napi_get_and_clear_last_exception(env_ptr, ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
             let mut pending = false;
             assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
             assert!(pending);
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
             let mut caught = ptr::null_mut();
             assert_eq!(
                 napi_get_and_clear_last_exception(env_ptr, &mut caught),
