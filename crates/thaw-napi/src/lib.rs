@@ -3303,10 +3303,42 @@ fn run_one_async_completion() -> Option<()> {
     Some(())
 }
 
+#[cfg(target_os = "linux")]
+unsafe fn poll_uv_loop() -> bool {
+    type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
+    type UvRun = unsafe extern "C" fn(*mut c_void, i32) -> i32;
+    type UvLoopAlive = unsafe extern "C" fn(*const c_void) -> i32;
+
+    let default_loop = libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr());
+    let run = libc::dlsym(libc::RTLD_DEFAULT, c"uv_run".as_ptr());
+    let alive = libc::dlsym(libc::RTLD_DEFAULT, c"uv_loop_alive".as_ptr());
+    if default_loop.is_null() || run.is_null() || alive.is_null() {
+        return false;
+    }
+    let default_loop = std::mem::transmute::<*mut c_void, UvDefaultLoop>(default_loop);
+    let run = std::mem::transmute::<*mut c_void, UvRun>(run);
+    let alive = std::mem::transmute::<*mut c_void, UvLoopAlive>(alive);
+    let event_loop = default_loop();
+    if event_loop.is_null() {
+        return false;
+    }
+    const UV_RUN_NOWAIT: i32 = 2;
+    run(event_loop, UV_RUN_NOWAIT);
+    alive(event_loop) != 0
+}
+
+#[cfg(not(target_os = "linux"))]
+unsafe fn poll_uv_loop() -> bool {
+    false
+}
+
 /// Runs every callback which is ready now without waiting for producers.
 #[no_mangle]
 pub extern "C" fn thaw_napi_poll_async_work() -> usize {
     let mut completed = 0;
+    unsafe {
+        poll_uv_loop();
+    }
     loop {
         let mut progressed = false;
         while let Some(called) = run_one_threadsafe_callback() {
@@ -3345,9 +3377,11 @@ pub extern "C" fn thaw_napi_run_async_work() -> usize {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_empty();
+        let uv_alive = unsafe { poll_uv_loop() };
         if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) == 0
             && ACTIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) == 0
             && !threadsafe_pending
+            && !uv_alive
         {
             break;
         }
@@ -3371,12 +3405,82 @@ mod tests {
 
     static BCRYPT_ASYNC_RESULT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    #[cfg(target_os = "linux")]
+    static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "C" fn test_uv_timer_callback(timer: *mut c_void) {
+        type UvTimerStop = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvClose = unsafe extern "C" fn(*mut c_void, Option<unsafe extern "C" fn(*mut c_void)>);
+        let stop = libc::dlsym(libc::RTLD_DEFAULT, c"uv_timer_stop".as_ptr());
+        let close = libc::dlsym(libc::RTLD_DEFAULT, c"uv_close".as_ptr());
+        if !stop.is_null() {
+            std::mem::transmute::<*mut c_void, UvTimerStop>(stop)(timer);
+        }
+        if !close.is_null() {
+            std::mem::transmute::<*mut c_void, UvClose>(close)(timer, None);
+        }
+        UV_TIMER_FIRED.store(true, Ordering::Release);
+    }
 
     fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
         ASYNC_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn poll_uv_loop_drives_the_default_libuv_loop() {
+        let _guard = lock_async_test();
+        unsafe {
+            type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
+            type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
+            type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+            type UvTimerStart = unsafe extern "C" fn(
+                *mut c_void,
+                Option<unsafe extern "C" fn(*mut c_void)>,
+                u64,
+                u64,
+            ) -> i32;
+
+            let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+            assert!(!library.is_null());
+            let default_loop = std::mem::transmute::<*mut c_void, UvDefaultLoop>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_default_loop".as_ptr(),
+            ));
+            let handle_size = std::mem::transmute::<*mut c_void, UvHandleSize>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_handle_size".as_ptr(),
+            ));
+            let timer_init = std::mem::transmute::<*mut c_void, UvTimerInit>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_timer_init".as_ptr(),
+            ));
+            let timer_start = std::mem::transmute::<*mut c_void, UvTimerStart>(libc::dlsym(
+                libc::RTLD_DEFAULT,
+                c"uv_timer_start".as_ptr(),
+            ));
+            const UV_TIMER: i32 = 13;
+            let timer = libc::calloc(1, handle_size(UV_TIMER));
+            assert!(!timer.is_null());
+            assert_eq!(timer_init(default_loop(), timer), 0);
+            UV_TIMER_FIRED.store(false, Ordering::Release);
+            assert_eq!(timer_start(timer, Some(test_uv_timer_callback), 1, 0), 0);
+            for _ in 0..1000 {
+                poll_uv_loop();
+                if UV_TIMER_FIRED.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(UV_TIMER_FIRED.load(Ordering::Acquire));
+            poll_uv_loop();
+            libc::free(timer);
+            libc::dlclose(library);
+        }
     }
 
     unsafe extern "C" fn bcrypt_async_callback(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
