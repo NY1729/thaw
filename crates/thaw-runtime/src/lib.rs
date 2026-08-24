@@ -432,6 +432,39 @@ pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *con
     arena_c_string(&value.to_uppercase()).map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[no_mangle]
+/// Converts a UTF-8 string into the native `string[]` array layout, following
+/// JavaScript string-iterator semantics (one Unicode scalar value per slot).
+///
+/// # Safety
+/// `value` must be null or point to a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
+    if value.is_null() {
+        return std::ptr::null_mut();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let characters = value.chars().collect::<Vec<_>>();
+    let output = thaw_arena::thaw_arena_alloc((characters.len() + 1) * 8, 8);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        output.cast::<u64>().write(characters.len() as u64);
+    }
+    for (index, character) in characters.into_iter().enumerate() {
+        let Some(character) = arena_c_string(&character.to_string()) else {
+            return std::ptr::null_mut();
+        };
+        unsafe {
+            output
+                .add(8 + index * 8)
+                .cast::<*const u8>()
+                .write_unaligned(character);
+        }
+    }
+    output
+}
+
 unsafe fn native_array_length(array: *const u8) -> Option<usize> {
     (!array.is_null()).then(|| unsafe { array.cast::<u64>().read() as usize })
 }

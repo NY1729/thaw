@@ -731,6 +731,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, string_transform_type, Some(Linkage::External));
         }
+        self.module.add_function(
+            "thaw_string_to_array",
+            string_transform_type,
+            Some(Linkage::External),
+        );
         let string_length_type = f64_type.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
             "thaw_string_length",
@@ -7896,6 +7901,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 let runtime = format!("thaw_{}", name.trim_start_matches("__thaw_"));
                 return self.compile_single_arg_call(&runtime, args, "string transform");
             }
+            "__thaw_string_to_array" => {
+                return self.compile_single_arg_call(
+                    "thaw_string_to_array",
+                    args,
+                    "string iterator array",
+                )
+            }
             "__thaw_string_length" => {
                 return self.compile_single_arg_call("thaw_string_length", args, "string length")
             }
@@ -12640,6 +12652,15 @@ mod tests {
                 await sleep(1);
                 return ["a", "b"];
             }
+            function text(): string {
+                console.log("text");
+                return "A😀é";
+            }
+            async function delayedText(): Promise<string> {
+                console.log("awaited text");
+                await sleep(1);
+                return "😀a";
+            }
             async function main(): Promise<void> {
                 const source: number[] = [1, 2, 3];
                 const copied: number[] = Array.from(source);
@@ -12655,11 +12676,14 @@ mod tests {
                 console.log(Array.from<boolean>(emptySource).length);
                 console.log(Array.from(receiver(), (value, index) => value + index, thisValue()).join(","));
                 console.log(Array.from(await delayed(), value => value + value).join(","));
+                console.log(Array.from(text()).join("|"));
+                console.log(Array.from<string, string>("ab", (value, index) => value + String(index), thisValue()).join(","));
+                console.log(Array.from(await delayedText()).length);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "array_from"),
-            "1,2,3\n2,5,8\n1!|2!|3!\n7\n0\nreceiver\nthisArg\n1,3\nawaited\naa,bb\n"
+            "1,2,3\n2,5,8\n1!|2!|3!\n7\n0\nreceiver\nthisArg\n1,3\nawaited\naa,bb\ntext\nA|😀|é\nthisArg\na0,b1\nawaited text\n2\n"
         );
     }
 
