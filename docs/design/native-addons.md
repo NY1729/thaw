@@ -657,3 +657,6 @@ instance生成時にprototype property／accessorを複製せず、instanceか�
 保持する。get／has／set／accessor探索と`napi_get_all_property_names`は同じchainを辿るため、生成後の
 prototype更新が既存instanceへ反映され、own-only列挙・own-property判定・継承property shadowingを
 区別できる。call用Envとaddon module Envをまたぐprototype metadataも同じ探索規則で参照する。
+`napi_type_tag_object`／`napi_check_object_type_tag`はNode-API v8の128-bit type tagをobject identityへ
+一度だけ関連付ける。照合はcall用Envとmodule Envをまたいで行い、異なるtagはfalse、二重tag付けは
+invalid-arg、非objectはobject-expectedとしてnative classの安全な型検査を提供する。
