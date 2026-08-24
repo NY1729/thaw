@@ -28,6 +28,7 @@ type NapiAsyncCompleteCallback = unsafe extern "C" fn(NapiEnv, NapiStatus, *mut 
 type ThawNativeCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char);
 type NapiFinalize = unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void);
 type NapiCleanupHook = unsafe extern "C" fn(*mut c_void);
+type NapiAsyncCleanupHook = unsafe extern "C" fn(*mut AsyncCleanupHookHandle, *mut c_void);
 type NapiThreadsafeFunctionCallJs =
     unsafe extern "C" fn(NapiEnv, NapiValue, *mut c_void, *mut c_void);
 const NAPI_OK: NapiStatus = 0;
@@ -84,6 +85,7 @@ static ACTIVE_ASYNC_WORK: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
+static ACTIVE_ASYNC_CLEANUP_HOOKS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SYMBOL_ID: AtomicU64 = AtomicU64::new(1);
 static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 
@@ -99,6 +101,13 @@ pub struct ThreadsafeFunction {
     referenced: AtomicBool,
     state: Mutex<ThreadsafeState>,
     space_available: Condvar,
+}
+
+pub struct AsyncCleanupHookHandle {
+    env: usize,
+    hook: NapiAsyncCleanupHook,
+    data: usize,
+    state: AtomicU8,
 }
 
 struct ThreadsafeState {
@@ -334,6 +343,7 @@ pub struct Env {
     finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
+    async_cleanup_hooks: Vec<*mut AsyncCleanupHookHandle>,
     external_memory: i64,
     sealed_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
@@ -380,6 +390,7 @@ impl Env {
             finalizers: Vec::new(),
             instance_data: None,
             cleanup_hooks: Vec::new(),
+            async_cleanup_hooks: Vec::new(),
             external_memory: 0,
             sealed_objects: HashSet::new(),
             frozen_objects: HashSet::new(),
@@ -398,6 +409,22 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        for handle in std::mem::take(&mut self.async_cleanup_hooks)
+            .into_iter()
+            .rev()
+        {
+            let Some(handle_ref) = (unsafe { handle.as_ref() }) else {
+                continue;
+            };
+            if handle_ref
+                .state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_add(1, Ordering::AcqRel);
+                unsafe { (handle_ref.hook)(handle, handle_ref.data as *mut c_void) };
+            }
+        }
         for hook in std::mem::take(&mut self.cleanup_hooks).into_iter().rev() {
             unsafe { (hook.hook)(hook.data) };
         }
@@ -821,29 +848,35 @@ pub unsafe extern "C" fn thaw_napi_load_named(path: *const c_char, root_name: *c
 pub extern "C" fn thaw_napi_unload_all() -> u8 {
     if ACTIVE_ASYNC_WORK.load(Ordering::Acquire) != 0
         || LIVE_THREADSAFE_FUNCTIONS.load(Ordering::Acquire) != 0
+        || ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0
     {
         HOST.with(|host| {
             host.borrow_mut().last_error =
-                "cannot unload N-API addons while async work or thread-safe functions are active"
-                    .into();
+                "cannot unload N-API addons while asynchronous work or cleanup is active".into();
         });
         return 0;
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.functions.clear();
+        host.exports.clear();
         host.compiled_callbacks.clear();
         host.pending_call_envs.clear();
         // Cleanup hooks and native finalizers must run while their addon code
         // is still mapped.
         host.module_envs.clear();
+        if ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire) != 0 {
+            host.last_error =
+                "cannot unload N-API addons while asynchronous cleanup is active".into();
+            return 0;
+        }
         for handle in host.libraries.drain(..).rev() {
             unsafe {
                 libc::dlclose(handle);
             }
         }
-    });
-    1
+        1
+    })
 }
 
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
@@ -2677,6 +2710,52 @@ pub unsafe extern "C" fn napi_remove_env_cleanup_hook(
         return NAPI_INVALID_ARG;
     };
     env.cleanup_hooks.remove(index);
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_add_async_cleanup_hook(
+    env: NapiEnv,
+    hook: Option<NapiAsyncCleanupHook>,
+    data: *mut c_void,
+    result: *mut *mut AsyncCleanupHookHandle,
+) -> NapiStatus {
+    let (Ok(env_ref), Some(hook)) = (env_mut(env), hook) else {
+        return NAPI_INVALID_ARG;
+    };
+    let handle = Box::into_raw(Box::new(AsyncCleanupHookHandle {
+        env: env as usize,
+        hook,
+        data: data as usize,
+        state: AtomicU8::new(0),
+    }));
+    env_ref.async_cleanup_hooks.push(handle);
+    if let Some(result) = result.as_mut() {
+        *result = handle;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_remove_async_cleanup_hook(
+    handle: *mut AsyncCleanupHookHandle,
+) -> NapiStatus {
+    let Some(handle_ref) = handle.as_ref() else {
+        return NAPI_INVALID_ARG;
+    };
+    match handle_ref.state.swap(2, Ordering::AcqRel) {
+        0 => {
+            if let Some(env) = (handle_ref.env as NapiEnv).as_mut() {
+                env.async_cleanup_hooks
+                    .retain(|candidate| *candidate != handle);
+            }
+        }
+        1 => {
+            ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_sub(1, Ordering::AcqRel);
+        }
+        _ => return NAPI_INVALID_ARG,
+    }
+    drop(Box::from_raw(handle));
     NAPI_OK
 }
 
@@ -5012,6 +5091,7 @@ mod tests {
     static BCRYPT_ASYNC_RESULT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static EXTERNAL_MEMORY_FINALIZED: AtomicUsize = AtomicUsize::new(0);
+    static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
     #[cfg(target_os = "linux")]
     static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
@@ -6287,6 +6367,21 @@ mod tests {
         probe.output.lock().unwrap().push(probe.value);
     }
 
+    unsafe extern "C" fn async_cleanup_probe(
+        handle: *mut AsyncCleanupHookHandle,
+        data: *mut c_void,
+    ) {
+        cleanup_probe(data);
+        assert_eq!(napi_remove_async_cleanup_hook(handle), NAPI_OK);
+    }
+
+    unsafe extern "C" fn hold_async_cleanup(
+        handle: *mut AsyncCleanupHookHandle,
+        _data: *mut c_void,
+    ) {
+        HELD_ASYNC_CLEANUP.store(handle as usize, Ordering::Release);
+    }
+
     unsafe extern "C" fn parcel_watcher_callback(
         env: NapiEnv,
         info: NapiCallbackInfo,
@@ -6525,6 +6620,88 @@ mod tests {
         }
         drop(env);
         assert_eq!(*output.lock().unwrap(), vec![3, 1]);
+    }
+
+    #[test]
+    fn async_cleanup_hooks_complete_in_reverse_and_can_be_removed() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let first = Box::into_raw(Box::new(CleanupProbe {
+            output: Arc::clone(&output),
+            value: 1,
+        }));
+        let removed = Box::into_raw(Box::new(CleanupProbe {
+            output: Arc::clone(&output),
+            value: 2,
+        }));
+        let last = Box::into_raw(Box::new(CleanupProbe {
+            output: Arc::clone(&output),
+            value: 3,
+        }));
+        let mut env = Env::new();
+        let mut removed_handle = ptr::null_mut();
+        unsafe {
+            assert_eq!(
+                napi_add_async_cleanup_hook(
+                    &mut env,
+                    Some(async_cleanup_probe),
+                    first.cast(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_add_async_cleanup_hook(
+                    &mut env,
+                    Some(async_cleanup_probe),
+                    removed.cast(),
+                    &mut removed_handle,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_add_async_cleanup_hook(
+                    &mut env,
+                    Some(async_cleanup_probe),
+                    last.cast(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OK
+            );
+            assert_eq!(napi_remove_async_cleanup_hook(removed_handle), NAPI_OK);
+            drop(Box::from_raw(removed));
+        }
+        drop(env);
+        assert_eq!(*output.lock().unwrap(), vec![3, 1]);
+        assert_eq!(ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn asynchronous_cleanup_remains_active_until_handle_removal() {
+        let _guard = lock_async_test();
+        HELD_ASYNC_CLEANUP.store(0, Ordering::Release);
+        let mut env = Env::new();
+        unsafe {
+            assert_eq!(
+                napi_add_async_cleanup_hook(
+                    &mut env,
+                    Some(hold_async_cleanup),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OK
+            );
+        }
+        drop(env);
+        let handle = HELD_ASYNC_CLEANUP.swap(0, Ordering::AcqRel);
+        assert_ne!(handle, 0);
+        assert_eq!(ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire), 1);
+        unsafe {
+            assert_eq!(
+                napi_remove_async_cleanup_hook(handle as *mut AsyncCleanupHookHandle),
+                NAPI_OK
+            );
+        }
+        assert_eq!(ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire), 0);
     }
 
     #[test]
