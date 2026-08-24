@@ -217,7 +217,21 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
     ctx.eval::<(), _>(source).map_err(|e| match e {
         rquickjs::Error::Exception => describe_exception(&ctx),
         e => e.to_string(),
-    })
+    })?;
+    if let Ok(ready) = ctx
+        .globals()
+        .get::<_, rquickjs::Promise>("__thaw_module_ready")
+    {
+        finish_with_platform_events(&ctx, &ready).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            error => format!("module initialization failed: {error}"),
+        })?;
+        while ctx.execute_pending_job() {}
+        let _ = ctx
+            .globals()
+            .set("__thaw_module_ready", Value::new_undefined(ctx.clone()));
+    }
+    Ok(())
 }
 
 /// Calls a top-level function (previously loaded via `thaw_js_load`) named

@@ -960,6 +960,10 @@ struct BundledModule {
     key: String,
     source: String,
     requires: Vec<(String, String)>,
+    static_esm_specs: Vec<String>,
+    has_esm: bool,
+    has_top_level_await: bool,
+    async_module: bool,
 }
 
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
@@ -1036,11 +1040,11 @@ fn bundle_commonjs_package(
         } else {
             source
         };
-        let module_specs = find_module_specs(&source);
-        // A no-op for a file that's already CommonJS (or doesn't parse as
-        // JS at all -- left completely untouched either way, so this can
-        // never make an already-working file worse).
-        let source = rewrite_esm_to_commonjs(&source).unwrap_or(source);
+        let analysis = analyze_module(&source);
+        if let Some(error) = &analysis.attribute_error {
+            return Err(format!("invalid import attributes in `{key}`: {error}"));
+        }
+        let module_specs = analysis.specs;
 
         let relative_in_pkg = key
             .strip_prefix(&format!("{pkg_name}/"))
@@ -1048,6 +1052,47 @@ fn bundle_commonjs_package(
         let requiring_dir = Path::new(relative_in_pkg).parent().unwrap_or(Path::new(""));
 
         let mut requires = Vec::new();
+
+        if analysis.has_nonliteral_dynamic_import {
+            let mut candidates = Vec::new();
+            collect_relative_files(&pkg_dir, &pkg_dir, &mut candidates)?;
+            for relative in candidates.into_iter().filter(|path| {
+                !path.split('/').any(|component| component == "node_modules")
+                    && matches!(
+                        Path::new(path)
+                            .extension()
+                            .and_then(|extension| extension.to_str()),
+                        Some("js" | "cjs" | "mjs" | "json")
+                    )
+            }) {
+                let target_key = format!("{pkg_name}/{relative}");
+                if target_key == key {
+                    continue;
+                }
+                let specifier = relative_module_specifier(requiring_dir, Path::new(&relative));
+                if !requires.iter().any(|(source, _)| source == &specifier) {
+                    requires.push((specifier.clone(), target_key.clone()));
+                }
+                if let Some(extensionless) = specifier
+                    .strip_suffix(".js")
+                    .or_else(|| specifier.strip_suffix(".mjs"))
+                    .or_else(|| specifier.strip_suffix(".cjs"))
+                {
+                    if !requires.iter().any(|(source, _)| source == extensionless) {
+                        requires.push((extensionless.to_string(), target_key.clone()));
+                    }
+                }
+                if !visited.contains(&target_key) {
+                    visited.push(target_key.clone());
+                    worklist.push((
+                        target_key,
+                        pkg_dir.join(&relative),
+                        pkg_name.clone(),
+                        pkg_dir.clone(),
+                    ));
+                }
+            }
+        }
 
         for spec in module_specs
             .iter()
@@ -1128,6 +1173,10 @@ fn bundle_commonjs_package(
                         key: builtin_key,
                         source: builtin_source.to_string(),
                         requires: Vec::new(),
+                        static_esm_specs: Vec::new(),
+                        has_esm: false,
+                        has_top_level_await: false,
+                        async_module: false,
                     });
                 }
             }
@@ -1139,8 +1188,14 @@ fn bundle_commonjs_package(
             key,
             source,
             requires,
+            static_esm_specs: analysis.static_esm_specs,
+            has_esm: analysis.has_esm,
+            has_top_level_await: analysis.has_top_level_await,
+            async_module: false,
         });
     }
+
+    prepare_async_modules(&mut modules)?;
 
     let file_count = modules.len();
     Ok((
@@ -1174,19 +1229,73 @@ fn record_package_version(versions: &mut BTreeMap<String, String>, name: &str, d
 #[derive(Default)]
 struct ModuleAnalysis {
     specs: Vec<String>,
+    static_esm_specs: Vec<String>,
+    has_esm: bool,
+    has_top_level_await: bool,
+    attribute_error: Option<String>,
+    has_nonliteral_dynamic_import: bool,
     _commonjs_exports: Vec<String>,
 }
 
 fn analyze_module(source: &str) -> ModuleAnalysis {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        AssignExpr, AssignTarget, CallExpr, Callee, Expr, Lit, MemberExpr, MemberProp, ModuleDecl,
-        ModuleItem, SimpleAssignTarget,
+        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, Function, Lit,
+        MemberExpr, MemberProp, ModuleDecl, ModuleItem, ObjectLit, Prop, PropName, PropOrSpread,
+        SimpleAssignTarget,
     };
+
+    fn validate_attributes(source: &str, attributes: Option<&ObjectLit>) -> Result<(), String> {
+        let Some(attributes) = attributes else {
+            return Ok(());
+        };
+        let mut json = false;
+        for property in &attributes.props {
+            let PropOrSpread::Prop(property) = property else {
+                return Err("spread import attributes are not supported".to_string());
+            };
+            let Prop::KeyValue(property) = property.as_ref() else {
+                return Err("only key/value import attributes are supported".to_string());
+            };
+            let key = match &property.key {
+                PropName::Ident(identifier) => identifier.sym.to_string(),
+                PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                _ => String::new(),
+            };
+            let Expr::Lit(Lit::Str(value)) = property.value.as_ref() else {
+                return Err("import attribute values must be strings".to_string());
+            };
+            if key == "type" && value.value.to_string_lossy() == "json" {
+                json = true;
+            } else {
+                return Err(format!(
+                    "unsupported import attribute `{key}` for `{source}`"
+                ));
+            }
+        }
+        if !json || !source.ends_with(".json") {
+            return Err(format!(
+                "only JSON modules accept `type: json` import attributes (`{source}`)"
+            ));
+        }
+        Ok(())
+    }
 
     struct Calls {
         specs: Vec<String>,
         commonjs_exports: Vec<String>,
+        has_nonliteral_dynamic_import: bool,
+    }
+
+    struct TopLevelAwait {
+        found: bool,
+    }
+    impl Visit for TopLevelAwait {
+        fn visit_await_expr(&mut self, _: &AwaitExpr) {
+            self.found = true;
+        }
+        fn visit_function(&mut self, _: &Function) {}
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
     }
     impl Visit for Calls {
         fn visit_call_expr(&mut self, call: &CallExpr) {
@@ -1196,9 +1305,13 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
                     if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == "require")
             );
             let is_import = matches!(&call.callee, Callee::Import(_));
-            if (is_require || is_import) && call.args.len() == 1 && call.args[0].spread.is_none() {
+            if ((is_require && call.args.len() == 1) || (is_import && !call.args.is_empty()))
+                && call.args[0].spread.is_none()
+            {
                 if let Expr::Lit(Lit::Str(spec)) = call.args[0].expr.as_ref() {
                     self.specs.push(spec.value.to_string_lossy().into_owned());
+                } else if is_import {
+                    self.has_nonliteral_dynamic_import = true;
                 }
             }
             call.visit_children_with(self);
@@ -1253,19 +1366,33 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     let mut calls = Calls {
         specs: Vec::new(),
         commonjs_exports: Vec::new(),
+        has_nonliteral_dynamic_import: false,
     };
     module.visit_with(&mut calls);
+    let mut top_level_await = TopLevelAwait { found: false };
+    module.visit_with(&mut top_level_await);
+    let mut static_esm_specs = Vec::new();
+    let mut attribute_error = None;
     for item in &module.body {
-        let source = match item {
-            ModuleItem::ModuleDecl(ModuleDecl::Import(decl)) => Some(&decl.src),
-            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(decl)) => decl.src.as_ref(),
-            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(decl)) => Some(&decl.src),
-            _ => None,
+        let (source, attributes) = match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(decl)) => {
+                (Some(&decl.src), decl.with.as_deref())
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(decl)) => {
+                (decl.src.as_ref(), decl.with.as_deref())
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(decl)) => {
+                (Some(&decl.src), decl.with.as_deref())
+            }
+            _ => (None, None),
         };
         if let Some(source) = source {
-            calls
-                .specs
-                .push(source.value.to_string_lossy().into_owned());
+            let spec = source.value.to_string_lossy().into_owned();
+            if attribute_error.is_none() {
+                attribute_error = validate_attributes(&spec, attributes).err();
+            }
+            calls.specs.push(spec.clone());
+            static_esm_specs.push(spec);
         }
     }
     let mut unique = Vec::new();
@@ -1278,10 +1405,19 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     calls.commonjs_exports.dedup();
     ModuleAnalysis {
         specs: unique,
+        static_esm_specs,
+        has_esm: module
+            .body
+            .iter()
+            .any(|item| matches!(item, ModuleItem::ModuleDecl(_))),
+        has_top_level_await: top_level_await.found,
+        attribute_error,
+        has_nonliteral_dynamic_import: calls.has_nonliteral_dynamic_import,
         _commonjs_exports: calls.commonjs_exports,
     }
 }
 
+#[cfg(test)]
 fn find_module_specs(source: &str) -> Vec<String> {
     analyze_module(source).specs
 }
@@ -1292,26 +1428,22 @@ fn find_module_specs(source: &str) -> Vec<String> {
 /// Promise is returned.
 fn rewrite_dynamic_imports(source: &str) -> Option<String> {
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{CallExpr, Callee, Expr, Lit};
+    use thaw_parser::ast::{CallExpr, Callee};
     use thaw_parser::common::Spanned;
 
     struct Imports {
-        spans: Vec<(u32, u32, String)>,
+        spans: Vec<(u32, u32, u32, u32)>,
     }
     impl Visit for Imports {
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if matches!(&call.callee, Callee::Import(_))
-                && call.args.len() == 1
+                && !call.args.is_empty()
                 && call.args[0].spread.is_none()
             {
-                if let Expr::Lit(Lit::Str(spec)) = call.args[0].expr.as_ref() {
-                    let span = call.span();
-                    self.spans.push((
-                        span.lo.0,
-                        span.hi.0,
-                        spec.value.to_string_lossy().into_owned(),
-                    ));
-                }
+                let span = call.span();
+                let argument = call.args[0].expr.span();
+                self.spans
+                    .push((span.lo.0, span.hi.0, argument.lo.0, argument.hi.0));
             }
             call.visit_children_with(self);
         }
@@ -1323,10 +1455,10 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
     if imports.spans.is_empty() {
         return None;
     }
-    imports.spans.sort_by_key(|(lo, _, _)| *lo);
+    imports.spans.sort_by_key(|(lo, _, _, _)| *lo);
     let mut output = String::with_capacity(source.len());
     let mut cursor = 0usize;
-    for (lo, hi, spec) in imports.spans {
+    for (lo, hi, argument_lo, argument_hi) in imports.spans {
         let lo = cm
             .lookup_byte_offset(thaw_parser::common::BytePos(lo))
             .pos
@@ -1335,10 +1467,251 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
             .lookup_byte_offset(thaw_parser::common::BytePos(hi))
             .pos
             .0 as usize;
+        let argument_lo = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(argument_lo))
+            .pos
+            .0 as usize;
+        let argument_hi = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(argument_hi))
+            .pos
+            .0 as usize;
         output.push_str(&source[cursor..lo]);
-        output.push_str("Promise.resolve().then(function() { return require(");
-        output.push_str(&js_string_literal(&spec));
-        output.push_str("); })");
+        output.push_str("requireAsync(String(");
+        output.push_str(&source[argument_lo..argument_hi]);
+        output.push_str("))");
+        cursor = hi;
+    }
+    output.push_str(&source[cursor..]);
+    Some(output)
+}
+
+fn rewrite_live_import_references(source: &str) -> Option<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{
+        ArrowExpr, BlockStmt, CatchClause, Decl, Expr, Function, ImportSpecifier, ModuleDecl,
+        ModuleExportName, ModuleItem, Pat, Prop, Stmt,
+    };
+    use thaw_parser::common::Spanned;
+
+    fn pattern_names(pattern: &Pat, names: &mut BTreeSet<String>) {
+        match pattern {
+            Pat::Ident(binding) => {
+                names.insert(binding.id.sym.to_string());
+            }
+            Pat::Array(array) => {
+                for element in array.elems.iter().flatten() {
+                    pattern_names(element, names);
+                }
+            }
+            Pat::Object(object) => {
+                for property in &object.props {
+                    match property {
+                        thaw_parser::ast::ObjectPatProp::KeyValue(property) => {
+                            pattern_names(&property.value, names);
+                        }
+                        thaw_parser::ast::ObjectPatProp::Assign(property) => {
+                            names.insert(property.key.sym.to_string());
+                        }
+                        thaw_parser::ast::ObjectPatProp::Rest(property) => {
+                            pattern_names(&property.arg, names);
+                        }
+                    }
+                }
+            }
+            Pat::Assign(assign) => pattern_names(&assign.left, names),
+            Pat::Rest(rest) => pattern_names(&rest.arg, names),
+            Pat::Expr(_) | Pat::Invalid(_) => {}
+        }
+    }
+
+    fn direct_block_bindings(block: &BlockStmt) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for statement in &block.stmts {
+            if let Stmt::Decl(declaration) = statement {
+                match declaration {
+                    Decl::Var(variable) => {
+                        for declarator in &variable.decls {
+                            pattern_names(&declarator.name, &mut names);
+                        }
+                    }
+                    Decl::Fn(function) => {
+                        names.insert(function.ident.sym.to_string());
+                    }
+                    Decl::Class(class) => {
+                        names.insert(class.ident.sym.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    }
+
+    let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
+    let export_name = |name: &ModuleExportName| match name {
+        ModuleExportName::Ident(identifier) => identifier.sym.to_string(),
+        ModuleExportName::Str(value) => value.value.to_string_lossy().into_owned(),
+    };
+    let mut bindings = BTreeMap::<String, String>::new();
+    let mut synthetic_count = 0usize;
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+                let module_name = format!("__thaw_esm_import_{synthetic_count}");
+                synthetic_count += 1;
+                for specifier in &import.specifiers {
+                    match specifier {
+                        ImportSpecifier::Named(named) => {
+                            let local = named.local.sym.to_string();
+                            let imported = named
+                                .imported
+                                .as_ref()
+                                .map(&export_name)
+                                .unwrap_or_else(|| local.clone());
+                            bindings.insert(
+                                local,
+                                format!("{module_name}[{}]", js_string_literal(&imported)),
+                            );
+                        }
+                        ImportSpecifier::Default(default) => {
+                            bindings.insert(
+                                default.local.sym.to_string(),
+                                format!(
+                                    "(({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name})"
+                                ),
+                            );
+                        }
+                        ImportSpecifier::Namespace(_) => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if export.src.is_some() => {
+                synthetic_count += 1;
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(_)) => synthetic_count += 1,
+            _ => {}
+        }
+    }
+    if bindings.is_empty() {
+        return None;
+    }
+
+    struct References<'a> {
+        bindings: &'a BTreeMap<String, String>,
+        shadowed: Vec<BTreeSet<String>>,
+        replacements: Vec<(u32, u32, String)>,
+    }
+    impl References<'_> {
+        fn is_shadowed(&self, name: &str) -> bool {
+            self.shadowed.iter().rev().any(|scope| scope.contains(name))
+        }
+        fn push_function_scope(&mut self, function: &Function) {
+            let mut names = BTreeSet::new();
+            for parameter in &function.params {
+                pattern_names(&parameter.pat, &mut names);
+            }
+            self.shadowed.push(names);
+            function.decorators.visit_with(self);
+            function.body.visit_with(self);
+            self.shadowed.pop();
+        }
+    }
+    impl Visit for References<'_> {
+        fn visit_function(&mut self, function: &Function) {
+            self.push_function_scope(function);
+        }
+
+        fn visit_arrow_expr(&mut self, arrow: &ArrowExpr) {
+            let mut names = BTreeSet::new();
+            for parameter in &arrow.params {
+                pattern_names(parameter, &mut names);
+            }
+            self.shadowed.push(names);
+            arrow.body.visit_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_block_stmt(&mut self, block: &BlockStmt) {
+            self.shadowed.push(direct_block_bindings(block));
+            block.stmts.visit_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_catch_clause(&mut self, clause: &CatchClause) {
+            let mut names = BTreeSet::new();
+            if let Some(parameter) = &clause.param {
+                pattern_names(parameter, &mut names);
+            }
+            self.shadowed.push(names);
+            clause.body.visit_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_expr(&mut self, expression: &Expr) {
+            if let Expr::Ident(identifier) = expression {
+                let name = identifier.sym.as_str();
+                if !self.is_shadowed(name) {
+                    if let Some(replacement) = self.bindings.get(name) {
+                        let span = identifier.span();
+                        self.replacements
+                            .push((span.lo.0, span.hi.0, replacement.clone()));
+                        return;
+                    }
+                }
+            }
+            expression.visit_children_with(self);
+        }
+
+        fn visit_prop(&mut self, property: &Prop) {
+            if let Prop::Shorthand(identifier) = property {
+                let name = identifier.sym.as_str();
+                if !self.is_shadowed(name) {
+                    if let Some(replacement) = self.bindings.get(name) {
+                        let span = identifier.span();
+                        self.replacements.push((
+                            span.lo.0,
+                            span.hi.0,
+                            format!("{name}: {replacement}"),
+                        ));
+                        return;
+                    }
+                }
+            }
+            property.visit_children_with(self);
+        }
+    }
+
+    let mut references = References {
+        bindings: &bindings,
+        shadowed: vec![BTreeSet::new()],
+        replacements: Vec::new(),
+    };
+    for item in &module.body {
+        if !matches!(item, ModuleItem::ModuleDecl(ModuleDecl::Import(_))) {
+            item.visit_with(&mut references);
+        }
+    }
+    if references.replacements.is_empty() {
+        return None;
+    }
+    references.replacements.sort_by_key(|(lo, _, _)| *lo);
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for (lo, hi, replacement) in references.replacements {
+        let lo = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+            .pos
+            .0 as usize;
+        let hi = cm
+            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+            .pos
+            .0 as usize;
+        if lo < cursor {
+            continue;
+        }
+        output.push_str(&source[cursor..lo]);
+        output.push_str(&replacement);
         cursor = hi;
     }
     output.push_str(&source[cursor..]);
@@ -1366,7 +1739,12 @@ fn rewrite_dynamic_imports(source: &str) -> Option<String> {
 /// string-literal name (`export { x as "weird name" }`, a rare ES2022
 /// form) fall outside what's extracted -- silently contribute nothing to
 /// `exports`, rather than aborting the whole rewrite.
+#[cfg(test)]
 fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
+    rewrite_esm_to_commonjs_mode(source, false)
+}
+
+fn rewrite_esm_to_commonjs_mode(source: &str, await_imports: bool) -> Option<String> {
     use thaw_parser::ast::{
         Decl, DefaultDecl, ExportSpecifier, ImportSpecifier, ModuleDecl, ModuleExportName,
         ModuleItem, Pat,
@@ -1375,13 +1753,15 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
 
     let dynamic_source = rewrite_dynamic_imports(source);
     let source = dynamic_source.as_deref().unwrap_or(source);
+    let live_source = rewrite_live_import_references(source);
+    let source = live_source.as_deref().unwrap_or(source);
     let (module, cm) = thaw_parser::parse_javascript_with_source_map(source).ok()?;
     let has_esm_syntax = module
         .body
         .iter()
         .any(|item| matches!(item, ModuleItem::ModuleDecl(_)));
     if !has_esm_syntax {
-        return dynamic_source;
+        return live_source.or(dynamic_source);
     }
 
     let snippet = |span: thaw_parser::common::Span| cm.span_to_snippet(span).ok();
@@ -1412,6 +1792,46 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
     let mut local_export_prologue = String::new();
     let mut rest = String::new();
     let mut synthetic_count = 0usize;
+    let mut imported_bindings = BTreeMap::<String, String>::new();
+    let mut binding_counter = 0usize;
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+                let module_name = format!("__thaw_esm_import_{binding_counter}");
+                binding_counter += 1;
+                for specifier in &import.specifiers {
+                    match specifier {
+                        ImportSpecifier::Named(named) => {
+                            let local = named.local.sym.to_string();
+                            let imported = named
+                                .imported
+                                .as_ref()
+                                .map(&export_name)
+                                .unwrap_or_else(|| local.clone());
+                            imported_bindings.insert(
+                                local,
+                                format!("{module_name}[{}]", js_string_literal(&imported)),
+                            );
+                        }
+                        ImportSpecifier::Default(default) => {
+                            imported_bindings.insert(
+                                default.local.sym.to_string(),
+                                format!(
+                                    "(({module_name} && {module_name}.__esModule) ? {module_name}.default : {module_name})"
+                                ),
+                            );
+                        }
+                        ImportSpecifier::Namespace(_) => {}
+                    }
+                }
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) if export.src.is_some() => {
+                binding_counter += 1;
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(_)) => binding_counter += 1,
+            _ => {}
+        }
+    }
 
     for item in &module.body {
         match item {
@@ -1425,29 +1845,25 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                 let var_name = format!("__thaw_esm_import_{synthetic_count}");
                 synthetic_count += 1;
                 let spec = import.src.value.to_string_lossy();
+                let loader = if await_imports {
+                    "await requireAsync"
+                } else {
+                    "require"
+                };
                 prologue.push_str(&format!(
-                    "var {var_name} = require({});\n",
+                    "var {var_name} = {loader}({});\n",
                     js_string_literal(&spec)
                 ));
                 for specifier in &import.specifiers {
                     match specifier {
                         ImportSpecifier::Default(d) => {
-                            let local = d.local.sym.to_string();
-                            prologue.push_str(&format!(
-                                "var {local} = ({var_name} && {var_name}.__esModule) ? {var_name}.default : {var_name};\n"
-                            ));
+                            let _ = d;
                         }
                         ImportSpecifier::Namespace(n) => {
                             prologue.push_str(&format!("var {} = {var_name};\n", n.local.sym));
                         }
                         ImportSpecifier::Named(n) => {
-                            let local = n.local.sym.to_string();
-                            let imported = n
-                                .imported
-                                .as_ref()
-                                .map(&export_name)
-                                .unwrap_or_else(|| local.clone());
-                            prologue.push_str(&format!("var {local} = {var_name}.{imported};\n"));
+                            let _ = n;
                         }
                     }
                 }
@@ -1484,8 +1900,13 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                     let var_name = format!("__thaw_esm_reexport_{synthetic_count}");
                     synthetic_count += 1;
                     let spec = src.value.to_string_lossy();
+                    let loader = if await_imports {
+                        "await requireAsync"
+                    } else {
+                        "require"
+                    };
                     prologue.push_str(&format!(
-                        "var {var_name} = require({});\n",
+                        "var {var_name} = {loader}({});\n",
                         js_string_literal(&spec)
                     ));
                     for spec in &named.specifiers {
@@ -1515,8 +1936,12 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                                 .as_ref()
                                 .map(&export_name)
                                 .unwrap_or_else(|| orig.clone());
+                            let value = imported_bindings
+                                .get(&orig)
+                                .map(String::as_str)
+                                .unwrap_or(orig.as_str());
                             local_export_prologue.push_str(&format!(
-                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ return {orig}; }} }});\n",
+                                "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ return {value}; }} }});\n",
                                 js_string_literal(&exported)
                             ));
                         }
@@ -1527,8 +1952,13 @@ fn rewrite_esm_to_commonjs(source: &str) -> Option<String> {
                 let var_name = format!("__thaw_esm_reexport_all_{synthetic_count}");
                 synthetic_count += 1;
                 let spec = export_all.src.value.to_string_lossy();
+                let loader = if await_imports {
+                    "await requireAsync"
+                } else {
+                    "require"
+                };
                 prologue.push_str(&format!(
-                    "var {var_name} = require({});\n",
+                    "var {var_name} = {loader}({});\n",
                     js_string_literal(&spec)
                 ));
                 rest.push_str(&format!(
@@ -1798,6 +2228,36 @@ fn normalize_path_string(path: &str) -> String {
     stack.join("/")
 }
 
+fn relative_module_specifier(from_dir: &Path, target: &Path) -> String {
+    let from: Vec<_> = from_dir
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let to: Vec<_> = target
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let common = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = vec!["..".to_string(); from.len() - common];
+    parts.extend(to[common..].iter().cloned());
+    let path = parts.join("/");
+    if path.starts_with("../") {
+        path
+    } else {
+        format!("./{path}")
+    }
+}
+
 /// Renders `modules` into one JS string: a small embedded CommonJS
 /// module-system emulation (a factory + a per-module require-spec-to-key
 /// map, both precomputed statically -- no runtime path resolution needed
@@ -1820,14 +2280,94 @@ fn normalize_path_string(path: &str) -> String {
 /// has overwritten the globals -- would silently resolve against the
 /// wrong package's module map. The IIFE's closures keep each package's
 /// module system private to itself regardless of what loads after it.
+fn prepare_async_modules(modules: &mut [BundledModule]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+
+    for module in modules.iter_mut() {
+        module.async_module = module.has_top_level_await;
+    }
+    loop {
+        let async_keys: BTreeSet<_> = modules
+            .iter()
+            .filter(|module| module.async_module)
+            .map(|module| module.key.clone())
+            .collect();
+        let mut changed = false;
+        for module in modules.iter_mut().filter(|module| module.has_esm) {
+            if module.async_module {
+                continue;
+            }
+            if module.static_esm_specs.iter().any(|specifier| {
+                module
+                    .requires
+                    .iter()
+                    .any(|(source, target)| source == specifier && async_keys.contains(target))
+            }) {
+                module.async_module = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    fn visit(
+        key: &str,
+        modules: &[BundledModule],
+        visiting: &mut Vec<String>,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        if let Some(index) = visiting.iter().position(|item| item == key) {
+            let mut cycle = visiting[index..].to_vec();
+            cycle.push(key.to_string());
+            return Err(format!(
+                "top-level await module cycle is not supported: {}",
+                cycle.join(" -> ")
+            ));
+        }
+        if !visited.insert(key.to_string()) {
+            return Ok(());
+        }
+        let Some(module) = modules.iter().find(|module| module.key == key) else {
+            return Ok(());
+        };
+        visiting.push(key.to_string());
+        for (specifier, target) in &module.requires {
+            if module.static_esm_specs.contains(specifier)
+                && modules
+                    .iter()
+                    .any(|candidate| candidate.key == *target && candidate.async_module)
+            {
+                visit(target, modules, visiting, visited)?;
+            }
+        }
+        visiting.pop();
+        Ok(())
+    }
+
+    let mut visited = BTreeSet::new();
+    for module in modules.iter().filter(|module| module.async_module) {
+        visit(&module.key, modules, &mut Vec::new(), &mut visited)?;
+    }
+
+    for module in modules.iter_mut() {
+        let source = rewrite_esm_to_commonjs_mode(&module.source, module.async_module)
+            .unwrap_or_else(|| module.source.clone());
+        module.source = source;
+    }
+    Ok(())
+}
+
 fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     let mut out = String::from("module.exports = (function() {\n");
 
     out.push_str("var __thaw_bundle_cache = {};\n");
     out.push_str("var __thaw_bundle_factories = {\n");
     for module in modules {
+        let asynchronous = if module.async_module { "async " } else { "" };
         out.push_str(&format!(
-            "{}: function(module, exports, require) {{\n{}\n}},\n",
+            "{}: {asynchronous}function(module, exports, require, requireAsync) {{\n{}\n}},\n",
             js_string_literal(&module.key),
             module.source
         ));
@@ -1854,19 +2394,28 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20var mod = { exports: {} };\n\
          \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
          \x20\x20\x20\x20var map = __thaw_bundle_require_maps[key] || {};\n\
-         \x20\x20\x20\x20__thaw_bundle_factories[key](mod, mod.exports, function(spec) {\n\
-         \x20\x20\x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(map, spec)) {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20return __thaw_bundle_require(map[spec]);\n\
-         \x20\x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20var localRequire = function(spec) {\n\
+         \x20\x20\x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(map, spec)) return __thaw_bundle_require(map[spec]);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
-         \x20\x20\x20\x20});\n\
+         \x20\x20\x20\x20};\n\
+         \x20\x20\x20\x20var localRequireAsync = function(spec) {\n\
+         \x20\x20\x20\x20\x20\x20if (!Object.prototype.hasOwnProperty.call(map, spec)) return Promise.resolve().then(function() { return require(spec); });\n\
+         \x20\x20\x20\x20\x20\x20var target = map[spec];\n\
+         \x20\x20\x20\x20\x20\x20var value = __thaw_bundle_require(target);\n\
+         \x20\x20\x20\x20\x20\x20return __thaw_bundle_cache[target].ready.then(function() { return value; });\n\
+         \x20\x20\x20\x20};\n\
+         \x20\x20\x20\x20var initialized = __thaw_bundle_factories[key](mod, mod.exports, localRequire, localRequireAsync);\n\
+         \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
          }\n",
     );
 
     out.push_str(&format!(
-        "return __thaw_bundle_require({});\n",
+        "var __thaw_bundle_entry_key = {};\n\
+         var __thaw_bundle_entry = __thaw_bundle_require(__thaw_bundle_entry_key);\n\
+         globalThis.__thaw_module_ready = __thaw_bundle_cache[__thaw_bundle_entry_key].ready;\n\
+         return __thaw_bundle_entry;\n",
         js_string_literal(main_key)
     ));
     out.push_str("})();\n");
@@ -2414,8 +2963,7 @@ mod tests {
     fn rewrites_literal_dynamic_import_to_an_async_bundle_require() {
         let rewritten =
             rewrite_esm_to_commonjs("function load() { return import('./feature.js'); }").unwrap();
-        assert!(rewritten
-            .contains("Promise.resolve().then(function() { return require(\"./feature.js\"); })"));
+        assert!(rewritten.contains("requireAsync(String('./feature.js'))"));
         assert!(!rewritten.contains("import("));
     }
 
@@ -3088,7 +3636,26 @@ mod tests {
             rewrite_esm_to_commonjs("import { add } from './math';\nconsole.log(add(1, 2));")
                 .unwrap();
         assert!(rewritten.contains("require(\"./math\")"));
-        assert!(rewritten.contains("console.log(add(1, 2));"));
+        assert!(rewritten.contains("console.log(__thaw_esm_import_0[\"add\"](1, 2));"));
+        assert!(!rewritten.contains("var add ="));
+    }
+
+    #[test]
+    fn live_import_rewrite_respects_shadowing_and_shorthand_properties() {
+        let rewritten = rewrite_esm_to_commonjs(
+            "import { value } from './state.js';\n\
+             function read() {\n\
+               const before = value;\n\
+               { let value = 9; if (value !== 9) throw new Error('shadow'); }\n\
+               return { value }.value + before;\n\
+             }",
+        )
+        .unwrap();
+        assert!(rewritten.contains("const before = __thaw_esm_import_0[\"value\"]"));
+        assert!(rewritten.contains("let value = 9; if (value !== 9)"));
+        assert!(
+            rewritten.contains("return { value: __thaw_esm_import_0[\"value\"] }.value + before")
+        );
     }
 
     /// The bundle isn't just plausible-looking text: an ESM main file
@@ -3154,13 +3721,13 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("index.js"),
-            "import * as counter from '#counter';\n\
-             import data from './data.json';\n\
+            "import { increment, value } from '#counter';\n\
+             import data from './data.json' with { type: 'json' };\n\
              import { fromA } from './a.js';\n\
              export default async function run() {\n\
-               counter.increment();\n\
+               increment();\n\
                const dynamic = await import('./dynamic.js');\n\
-               return counter.value + dynamic.extra + data.base + (fromA() === 'b' ? 10 : 0);\n\
+               return value + dynamic.extra + data.base + (fromA() === 'b' ? 10 : 0);\n\
              }",
         )
         .unwrap();
@@ -3200,6 +3767,122 @@ mod tests {
         let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
 
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn top_level_await_initializes_dependencies_before_export_binding() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("top_level_await_graph");
+        fs::write(
+            dir.join("index.js"),
+            "import { value } from './value.js'; export default function run() { return value + 2; }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("value.js"),
+            "export const value = await new Promise(resolve => setTimeout(() => resolve(40), 1));",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("top_level_await_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(name); }};\n\
+             {bundle}\n\
+             globalThis.runTopLevelAwait = function() {{ return module.exports.default(); }};\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("runTopLevelAwait").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn top_level_await_cycle_is_an_explicit_bundle_error() {
+        let dir = temp_registry("top_level_await_cycle");
+        fs::write(
+            dir.join("a.js"),
+            "import { b } from './b.js'; export const a = await Promise.resolve(b);",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("b.js"),
+            "import { a } from './a.js'; export const b = a;",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("top_level_await_cycle_modules");
+        let error = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "a.js").unwrap_err();
+        assert!(error.contains("top-level await module cycle"), "{error}");
+        assert!(error.contains("pkg/a.js"), "{error}");
+        assert!(error.contains("pkg/b.js"), "{error}");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn validates_json_import_attributes_and_rejects_unsupported_types() {
+        let modern = analyze_module(
+            "import data from './data.json' with { type: 'json' }; export default data;",
+        );
+        assert!(modern.attribute_error.is_none());
+
+        let legacy = analyze_module(
+            "import data from './data.json' assert { type: 'json' }; export default data;",
+        );
+        assert!(legacy.attribute_error.is_none());
+
+        let unsupported = analyze_module(
+            "import source from './code.js' with { type: 'javascript' }; export default source;",
+        );
+        assert!(unsupported
+            .attribute_error
+            .as_deref()
+            .is_some_and(|error| error.contains("unsupported import attribute")));
+    }
+
+    #[test]
+    fn nonliteral_dynamic_import_resolves_candidates_and_reuses_namespace() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("runtime_dynamic_import");
+        fs::write(
+            dir.join("index.js"),
+            "export default async function run() {\n\
+               const name = 'feature';\n\
+               const first = await import('./' + name + '.js');\n\
+               const second = await import(`./${name}.js`);\n\
+               return first === second ? first.value : 0;\n\
+             }",
+        )
+        .unwrap();
+        fs::write(dir.join("feature.js"), "export const value = 42;").unwrap();
+        let empty_node_modules = temp_registry("runtime_dynamic_import_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(name); }};\n\
+             {bundle}\n\
+             globalThis.runRuntimeImport = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("runRuntimeImport").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
