@@ -857,6 +857,46 @@ pub unsafe extern "C" fn thaw_bool_array_includes(
     (unsafe { bool_array_search(array, needle, from_index) } >= 0.0).into()
 }
 
+unsafe fn object_array_search(array: *const u8, needle: *const u8, from_index: f64) -> f64 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return -1.0;
+    };
+    for index in array_search_start(length, from_index)..length {
+        let slot = unsafe {
+            array
+                .add(8 + index * 8)
+                .cast::<*const u8>()
+                .read_unaligned()
+        };
+        if slot == needle {
+            return index as f64;
+        }
+    }
+    -1.0
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing fixed-object pointer slots.
+pub unsafe extern "C" fn thaw_object_array_index_of(
+    array: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> f64 {
+    unsafe { object_array_search(array, needle, from_index) }
+}
+
+#[no_mangle]
+/// # Safety
+/// `array` must point to a Thaw array containing fixed-object pointer slots.
+pub unsafe extern "C" fn thaw_object_array_includes(
+    array: *const u8,
+    needle: *const u8,
+    from_index: f64,
+) -> u8 {
+    (unsafe { object_array_search(array, needle, from_index) } >= 0.0).into()
+}
+
 fn clamped_string_position(position: f64, length: usize) -> usize {
     if position.is_nan() || position == f64::NEG_INFINITY {
         0

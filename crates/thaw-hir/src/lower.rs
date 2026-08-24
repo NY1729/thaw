@@ -3255,9 +3255,11 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_number_array_index_of"
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"
+                    | "__thaw_object_array_index_of"
                     | "__thaw_number_array_includes"
                     | "__thaw_string_array_includes"
-                    | "__thaw_bool_array_includes" => {
+                    | "__thaw_bool_array_includes"
+                    | "__thaw_object_array_includes" => {
                         if args.len() != 3 {
                             return Err("array search expects three operands".into());
                         }
@@ -6228,6 +6230,7 @@ impl<'a> FnLowerer<'a> {
                         HirType::F64 => "number",
                         HirType::Str => "string",
                         HirType::Bool => "bool",
+                        HirType::Object(_) => "object",
                         other => {
                             return Err(format!(
                                 "array search does not support element type {other:?}"
@@ -6239,10 +6242,32 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         "index_of"
                     };
-                    return Ok(HirExpr::Call(
+                    let receiver_name = format!("__thaw_search_array_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let needle_name = format!("__thaw_search_needle_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let start_name = format!("__thaw_search_start_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), receiver_type.clone());
+                    self.scope.insert(needle_name.clone(), needle_type.clone());
+                    self.scope.insert(start_name.clone(), HirType::F64);
+                    let result = HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_{prefix}_array_{suffix}"))),
-                        vec![receiver, needle, from_index],
-                    ));
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(needle_name.clone()),
+                            HirExpr::Var(start_name.clone()),
+                        ],
+                    );
+                    return self.wrap_call_argument_bindings(
+                        result,
+                        &[
+                            (receiver_name, receiver_type, receiver),
+                            (needle_name, needle_type, needle),
+                            (start_name, HirType::F64, from_index),
+                        ],
+                    );
                 }
                 if property.sym == *"toString" {
                     if !call.args.is_empty() {
