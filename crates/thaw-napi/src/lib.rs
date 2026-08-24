@@ -294,6 +294,7 @@ pub struct Deferred {
 }
 
 pub struct Reference {
+    env: usize,
     value: NapiValue,
     count: u32,
 }
@@ -3422,6 +3423,7 @@ pub unsafe extern "C" fn napi_wrap(
     );
     if !result.is_null() {
         *result = Box::into_raw(Box::new(Reference {
+            env: env as *mut Env as usize,
             value: object,
             count: 0,
         }));
@@ -3497,6 +3499,7 @@ pub unsafe extern "C" fn napi_add_finalizer(
     });
     if !result.is_null() {
         *result = Box::into_raw(Box::new(Reference {
+            env: env as *mut Env as usize,
             value: object,
             count: 0,
         }));
@@ -5484,15 +5487,19 @@ pub unsafe extern "C" fn napi_get_typedarray_info(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_reference(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     initial_count: u32,
     out: *mut *mut Reference,
 ) -> NapiStatus {
-    if value.is_null() || out.is_null() {
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if value.is_null() || out.is_null() || !env_ref.values.contains(&value) {
         return NAPI_INVALID_ARG;
     }
     *out = Box::into_raw(Box::new(Reference {
+        env: env as usize,
         value,
         count: initial_count,
     }));
@@ -5501,10 +5508,15 @@ pub unsafe extern "C" fn napi_create_reference(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_delete_reference(
-    _env: NapiEnv,
+    env: NapiEnv,
     reference: *mut Reference,
 ) -> NapiStatus {
-    if reference.is_null() {
+    if env.is_null()
+        || reference.is_null()
+        || reference
+            .as_ref()
+            .is_none_or(|reference| reference.env != env as usize)
+    {
         return NAPI_INVALID_ARG;
     }
     drop(Box::from_raw(reference));
@@ -5513,27 +5525,36 @@ pub unsafe extern "C" fn napi_delete_reference(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_reference_value(
-    _env: NapiEnv,
+    env: NapiEnv,
     reference: *mut Reference,
     out: *mut NapiValue,
 ) -> NapiStatus {
     let Some(reference) = reference.as_ref() else {
         return NAPI_INVALID_ARG;
     };
+    if env.is_null() || reference.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
     let _ = reference.count;
     write_value(out, reference.value)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_reference_ref(
-    _env: NapiEnv,
+    env: NapiEnv,
     reference: *mut Reference,
     result: *mut u32,
 ) -> NapiStatus {
     let Some(reference) = reference.as_mut() else {
         return NAPI_INVALID_ARG;
     };
-    reference.count = reference.count.saturating_add(1);
+    if env.is_null() || reference.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
+    let Some(count) = reference.count.checked_add(1) else {
+        return NAPI_GENERIC_FAILURE;
+    };
+    reference.count = count;
     if !result.is_null() {
         *result = reference.count;
     }
@@ -5542,13 +5563,16 @@ pub unsafe extern "C" fn napi_reference_ref(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_reference_unref(
-    _env: NapiEnv,
+    env: NapiEnv,
     reference: *mut Reference,
     result: *mut u32,
 ) -> NapiStatus {
     let Some(reference) = reference.as_mut() else {
         return NAPI_INVALID_ARG;
     };
+    if env.is_null() || reference.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
     if reference.count == 0 {
         return NAPI_GENERIC_FAILURE;
     }
@@ -8529,6 +8553,62 @@ mod tests {
                 napi_async_init(env_ptr, ptr::null_mut(), number, &mut context),
                 NAPI_STRING_EXPECTED
             );
+        }
+    }
+
+    #[test]
+    fn references_enforce_environment_ownership_and_refcounts() {
+        unsafe {
+            let mut env = Env::new();
+            let mut other_env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let value = env.alloc(Value::Object(HashMap::new()));
+            let foreign = other_env.alloc(Value::Object(HashMap::new()));
+            let mut reference = ptr::null_mut();
+            assert_eq!(
+                napi_create_reference(env_ptr, value, 1, &mut reference),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_create_reference(env_ptr, foreign, 1, &mut ptr::null_mut()),
+                NAPI_INVALID_ARG
+            );
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_get_reference_value(&mut other_env, reference, &mut actual),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_get_reference_value(env_ptr, reference, &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, value);
+            let mut count = 0;
+            assert_eq!(napi_reference_ref(env_ptr, reference, &mut count), NAPI_OK);
+            assert_eq!(count, 2);
+            assert_eq!(
+                napi_reference_unref(env_ptr, reference, ptr::null_mut()),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_reference_unref(env_ptr, reference, &mut count),
+                NAPI_OK
+            );
+            assert_eq!(count, 0);
+            assert_eq!(
+                napi_reference_unref(env_ptr, reference, &mut count),
+                NAPI_GENERIC_FAILURE
+            );
+            (*reference).count = u32::MAX;
+            assert_eq!(
+                napi_reference_ref(env_ptr, reference, &mut count),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(
+                napi_delete_reference(&mut other_env, reference),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
         }
     }
 
