@@ -2874,24 +2874,35 @@ pub unsafe extern "C" fn node_api_symbol_for(
 pub unsafe extern "C" fn napi_create_external(
     env: NapiEnv,
     data: *mut c_void,
-    _finalize: Option<unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void)>,
-    _hint: *mut c_void,
+    finalize: Option<unsafe extern "C" fn(NapiEnv, *mut c_void, *mut c_void)>,
+    hint: *mut c_void,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     let value = env.alloc(Value::External(data));
-    write_value(out, value)
+    if finalize.is_some() {
+        env.finalizers.push(FinalizeRecord {
+            data,
+            finalize,
+            hint,
+        });
+    }
+    *out = value;
+    NAPI_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_value_external(
-    _env: NapiEnv,
+    env: NapiEnv,
     value: NapiValue,
     out: *mut *mut c_void,
 ) -> NapiStatus {
-    if out.is_null() {
+    if out.is_null() || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
     match value_ref(value) {
@@ -6758,6 +6769,7 @@ mod tests {
     static ASYNC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static EXTERNAL_MEMORY_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
+    static PLAIN_EXTERNAL_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
     static POSTED_FINALIZER_RAN: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
@@ -6792,6 +6804,15 @@ mod tests {
         hint: *mut c_void,
     ) {
         EXTERNAL_STRING_FINALIZED.fetch_add(*(hint as *const usize), Ordering::AcqRel);
+    }
+
+    unsafe extern "C" fn plain_external_finalize(
+        _env: NapiEnv,
+        data: *mut c_void,
+        hint: *mut c_void,
+    ) {
+        let total = *(data.cast::<usize>()) + *(hint.cast::<usize>());
+        PLAIN_EXTERNAL_FINALIZED.fetch_add(total, Ordering::AcqRel);
     }
 
     #[test]
@@ -8097,6 +8118,56 @@ mod tests {
             assert_eq!(napi_is_array(env_ptr, array, &mut result), NAPI_OK);
             assert!(result);
         }
+    }
+
+    #[test]
+    fn plain_externals_preserve_data_and_finalize_once() {
+        PLAIN_EXTERNAL_FINALIZED.store(0, Ordering::Release);
+        let mut data = 17_usize;
+        let mut hint = 25_usize;
+        let external;
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            external = {
+                let mut value = ptr::null_mut();
+                assert_eq!(
+                    napi_create_external(
+                        env_ptr,
+                        (&mut data as *mut usize).cast(),
+                        Some(plain_external_finalize),
+                        (&mut hint as *mut usize).cast(),
+                        &mut value,
+                    ),
+                    NAPI_OK
+                );
+                value
+            };
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_get_value_external(env_ptr, external, &mut actual),
+                NAPI_OK
+            );
+            assert_eq!(actual, (&mut data as *mut usize).cast());
+            let mut other_env = Env::new();
+            assert_eq!(
+                napi_get_value_external(&mut other_env, external, &mut actual),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_external(
+                    env_ptr,
+                    ptr::null_mut(),
+                    Some(plain_external_finalize),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(PLAIN_EXTERNAL_FINALIZED.load(Ordering::Acquire), 0);
+        }
+        assert!(!external.is_null());
+        assert_eq!(PLAIN_EXTERNAL_FINALIZED.load(Ordering::Acquire), 42);
     }
 
     #[test]

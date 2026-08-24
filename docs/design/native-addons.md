@@ -690,6 +690,7 @@ hole／null／undefined／nested Arrayのjoin規則を扱う。SymbolのToString
 TypeErrorをpending exceptionへ設定する。
 `napi_wrap`／`napi_unwrap`／`napi_remove_wrap`／`napi_add_finalizer`はclass instanceだけでなく、
 Array／Buffer／ArrayBuffer／view／Function／Promise／Error／Dateを含む全JavaScript Objectを受理する。
+`napi_create_external`はdataと任意のfinalizer／hintをEnvに保持し、Env破棄時に一度だけ実行する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 generic property APIはArray／Buffer／ArrayBuffer／SharedArrayBuffer／TypedArray／DataView／Promise／
