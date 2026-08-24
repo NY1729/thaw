@@ -4053,7 +4053,9 @@ impl<'ctx> HirCompiler<'ctx> {
             // These arms compile only legacy/direct awaits that remain in an
             // ordinary expression path.
             HirExpr::Await(inner) => self.compile_await(inner),
-            HirExpr::AwaitPromise(inner, _) => self.compile_await(inner),
+            HirExpr::AwaitPromise(inner, resolved) => {
+                self.compile_typed_blocking_await(inner, resolved)
+            }
             HirExpr::PromiseNew(executor, resolved, assimilates) => {
                 self.compile_promise_new(executor, resolved, *assimilates)
             }
@@ -6767,13 +6769,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 "closure_call",
             )
             .map_err(|error| error.to_string())?;
-        if *ret == HirType::Void {
-            Ok(self.context.f64_type().const_zero().into())
+        let value = if *ret == HirType::Void {
+            self.context.f64_type().const_zero().into()
         } else {
             call.try_as_basic_value()
                 .basic()
-                .ok_or_else(|| format!("function value `{name}` does not return a value"))
-        }
+                .ok_or_else(|| format!("function value `{name}` does not return a value"))?
+        };
+        self.branch_on_pending_exception()?;
+        Ok(value)
     }
 
     fn allocate_special_closure(
@@ -7726,6 +7730,98 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_is_not_null(result, "await_resolved")
             .map_err(|e| e.to_string())?;
         Ok(resolved.into())
+    }
+
+    /// Drives a typed Promise that remains inside a synchronous closure (for
+    /// example the selected branch of a short-circuit expression) and loads
+    /// its native payload. Ordinary async-function awaits are frame-split
+    /// before reaching this fallback.
+    fn compile_typed_blocking_await(
+        &mut self,
+        inner: &HirExpr,
+        resolved: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let promise = self.compile_expr(inner)?.into_pointer_value();
+        let result = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_runtime_run_until_resolved")
+                    .unwrap(),
+                &[promise.into()],
+                "await_typed_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("typed Promise did not settle")?
+            .into_pointer_value();
+        let state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_promise_state").unwrap(),
+                &[promise.into()],
+                "blocking_await_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("typed Promise has no state")?
+            .into_int_value();
+        let rejected = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                state,
+                self.context.i8_type().const_int(2, false),
+                "blocking_await_rejected",
+            )
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed = self
+            .context
+            .append_basic_block(function, "blocking_await_failed");
+        let succeeded = self
+            .context
+            .append_basic_block(function, "blocking_await_succeeded");
+        let merge = self
+            .context
+            .append_basic_block(function, "blocking_await_merge");
+        self.builder
+            .build_conditional_branch(rejected, failed, succeeded)
+            .map_err(|error| error.to_string())?;
+
+        let llvm_type = self.basic_type(resolved)?;
+        self.builder.position_at_end(failed);
+        self.builder
+            .build_store(self.pending_exception().as_pointer_value(), result)
+            .map_err(|error| error.to_string())?;
+        let default = llvm_type.const_zero();
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(succeeded);
+        let value = self
+            .builder
+            .build_load(llvm_type, result, "await_typed_value")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge);
+        let phi = self
+            .builder
+            .build_phi(llvm_type, "blocking_await_value")
+            .map_err(|error| error.to_string())?;
+        phi.add_incoming(&[(&default, failed), (&value, succeeded)]);
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_promise_destroy").unwrap(),
+                &[promise.into()],
+                "destroy_blocking_await",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(phi.as_basic_value())
     }
 
     fn apply_ffi_string_ownership(
@@ -9287,6 +9383,45 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "extended_operators"),
             "left\n-2\n2\ntrue\nleft\ntrue\nfalse\nfalse\n-3\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn logical_operators_short_circuit_sync_and_awaited_operands() {
+        let source = r#"
+            function flag(label: string, value: boolean): boolean {
+                console.log(label);
+                return value;
+            }
+            async function asyncFlag(label: string, value: boolean): Promise<boolean> {
+                await sleep(1);
+                console.log(label);
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(false && flag("wrong-sync-and", true));
+                console.log(true || flag("wrong-sync-or", false));
+                console.log(true && flag("sync-and", true));
+                console.log(false || flag("sync-or", true));
+                console.log(false && (await asyncFlag("wrong-async-and", true)));
+                console.log(true || (await asyncFlag("wrong-async-or", false)));
+                console.log(true && (await asyncFlag("async-and", true)));
+                console.log(false || (await asyncFlag("async-or", true)));
+                try {
+                    console.log(true && (await new Promise<boolean>((resolve, reject) => {
+                        reject("logical rejection");
+                    })));
+                } catch (error) {
+                    console.log(error);
+                }
+                console.log(false && (await new Promise<boolean>((resolve, reject) => {
+                    reject("skipped rejection");
+                })));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "logical_short_circuit"),
+            "false\ntrue\nsync-and\ntrue\nsync-or\ntrue\nfalse\ntrue\nasync-and\ntrue\nasync-or\ntrue\nlogical rejection\nfalse\n"
         );
     }
 

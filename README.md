@@ -227,6 +227,8 @@ The workspace crates have narrow responsibilities:
   function argument count/types are checked against the inferred native layout
 - Strict equality compares numbers and booleans by value, strings by content,
   and arrays/objects by reference identity
+- Boolean `&&`/`||` short-circuit without evaluating the inactive operand;
+  selected awaited operands settle or reject through the surrounding catch path
 - Unresolved and conflicting parameter constraints identify the responsible
   function or call with its source byte range
 - Identity-shaped generic functions are monomorphized once per concrete

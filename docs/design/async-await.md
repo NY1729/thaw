@@ -471,6 +471,9 @@ array literalのspreadは各sourceをtyped array partとして保持し、await�
 awaitを含むcase test/bodyも通常のnested-if frame guardとして分割する。
 typed unary `+`/`-`/`!`と`!==`/`<=`/`>=`は既存の算術・厳密等価HIRへ正規化する。
 operandは一度だけ保持されるため、副作用やawaitを含む式でも評価回数と順序を変えない。
+boolean `&&`/`||`は即時実行closure内のif/returnへlowerし、非選択operandを評価しない。
+closure内に残るtyped awaitはruntimeを完了まで駆動してpayloadをloadし、reject時はpending
+exceptionを設定して呼び出し元のtry/catchへ伝播する。
 fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
 index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
 loop loweringを使う。
