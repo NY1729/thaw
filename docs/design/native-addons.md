@@ -54,8 +54,11 @@ primitive変換call、`.length`の結果もlocal変数を通して追跡する�
 parameterはsourceで観測した実引数個数だけを展開するため、固定の最大arityを設けない。
 同じE2Eで0要素・3要素をN-API methodへ渡して検証した。user function callも明示的な
 戻り値annotation、または全returnから一意に推論できる型を使ってoverloadを選択する。
-複数回収集により前方call chainも解決する。parameter依存／競合するreturn、任意の
-property型の推論、現在のnative表現を越えるrest要素型は引き続き残課題である。
+複数回収集により前方call chainも解決する。parameter依存／競合するreturnと、現在の
+native表現を越えるrest要素型は引き続き残課題である。
+object literalはfield名と再帰的に推論した型を保持し、property readと同一arityの
+structural object overloadを選択する。computed/spread propertyとmutationを考慮した
+flow解析は引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
