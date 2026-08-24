@@ -38,6 +38,8 @@ const NAPI_OBJECT_EXPECTED: NapiStatus = 2;
 const NAPI_FUNCTION_EXPECTED: NapiStatus = 5;
 const NAPI_GENERIC_FAILURE: NapiStatus = 9;
 const NAPI_CANCELLED: NapiStatus = 11;
+const NAPI_ESCAPE_CALLED_TWICE: NapiStatus = 12;
+const NAPI_HANDLE_SCOPE_MISMATCH: NapiStatus = 13;
 const NAPI_QUEUE_FULL: NapiStatus = 15;
 const NAPI_CLOSING: NapiStatus = 16;
 const NAPI_WOULD_DEADLOCK: NapiStatus = 21;
@@ -365,6 +367,24 @@ pub struct Env {
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
     module_file_name: CString,
+    // Box keeps the opaque C handle stable when the owning vector grows.
+    #[allow(clippy::vec_box)]
+    handle_scopes: Vec<Box<HandleScope>>,
+    active_handle_scopes: Vec<*mut HandleScope>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HandleScopeKind {
+    Normal,
+    Escapable,
+    Callback,
+}
+
+struct HandleScope {
+    env: usize,
+    kind: HandleScopeKind,
+    closed: bool,
+    escaped: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -418,6 +438,8 @@ impl Env {
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
             module_file_name: CString::new("").unwrap(),
+            handle_scopes: Vec::new(),
+            active_handle_scopes: Vec::new(),
         }
     }
 
@@ -426,6 +448,57 @@ impl Env {
         self.values.push(value);
         value
     }
+}
+
+unsafe fn open_handle_scope(
+    env: NapiEnv,
+    out: *mut *mut c_void,
+    kind: HandleScopeKind,
+) -> NapiStatus {
+    let (Ok(env_ref), Some(out)) = (env_mut(env), out.as_mut()) else {
+        return NAPI_INVALID_ARG;
+    };
+    let mut scope = Box::new(HandleScope {
+        env: env as usize,
+        kind,
+        closed: false,
+        escaped: false,
+    });
+    let scope_ptr = (&mut *scope) as *mut HandleScope;
+    env_ref.handle_scopes.push(scope);
+    env_ref.active_handle_scopes.push(scope_ptr);
+    *out = scope_ptr.cast();
+    NAPI_OK
+}
+
+unsafe fn close_handle_scope(
+    env: NapiEnv,
+    scope: *mut c_void,
+    kind: HandleScopeKind,
+) -> NapiStatus {
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let scope_ptr = scope.cast::<HandleScope>();
+    let Some(scope_ref) = env_ref
+        .handle_scopes
+        .iter_mut()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), scope_ptr))
+    else {
+        return NAPI_INVALID_ARG;
+    };
+    if scope_ref.env != env as usize {
+        return NAPI_INVALID_ARG;
+    }
+    if scope_ref.closed
+        || scope_ref.kind != kind
+        || env_ref.active_handle_scopes.last().copied() != Some(scope_ptr)
+    {
+        return NAPI_HANDLE_SCOPE_MISMATCH;
+    }
+    scope_ref.closed = true;
+    env_ref.active_handle_scopes.pop();
+    NAPI_OK
 }
 
 impl Drop for Env {
@@ -5934,16 +6007,11 @@ pub unsafe extern "C" fn node_api_get_module_file_name(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_open_handle_scope(env: NapiEnv, out: *mut *mut c_void) -> NapiStatus {
-    if env.is_null() || out.is_null() {
-        NAPI_INVALID_ARG
-    } else {
-        *out = env.cast();
-        NAPI_OK
-    }
+    open_handle_scope(env, out, HandleScopeKind::Normal)
 }
 #[no_mangle]
-pub unsafe extern "C" fn napi_close_handle_scope(_env: NapiEnv, _scope: *mut c_void) -> NapiStatus {
-    NAPI_OK
+pub unsafe extern "C" fn napi_close_handle_scope(env: NapiEnv, scope: *mut c_void) -> NapiStatus {
+    close_handle_scope(env, scope, HandleScopeKind::Normal)
 }
 
 #[no_mangle]
@@ -5953,12 +6021,12 @@ pub unsafe extern "C" fn napi_open_callback_scope(
     _context: *mut c_void,
     out: *mut *mut c_void,
 ) -> NapiStatus {
-    napi_open_handle_scope(env, out)
+    open_handle_scope(env, out, HandleScopeKind::Callback)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_close_callback_scope(env: NapiEnv, scope: *mut c_void) -> NapiStatus {
-    napi_close_handle_scope(env, scope)
+    close_handle_scope(env, scope, HandleScopeKind::Callback)
 }
 
 #[no_mangle]
@@ -6189,23 +6257,48 @@ pub unsafe extern "C" fn napi_open_escapable_handle_scope(
     env: NapiEnv,
     out: *mut *mut c_void,
 ) -> NapiStatus {
-    napi_open_handle_scope(env, out)
+    open_handle_scope(env, out, HandleScopeKind::Escapable)
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_close_escapable_handle_scope(
     env: NapiEnv,
     scope: *mut c_void,
 ) -> NapiStatus {
-    napi_close_handle_scope(env, scope)
+    close_handle_scope(env, scope, HandleScopeKind::Escapable)
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_escape_handle(
-    _env: NapiEnv,
-    _scope: *mut c_void,
+    env: NapiEnv,
+    scope: *mut c_void,
     value: NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    write_value(out, value)
+    if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let scope_ptr = scope.cast::<HandleScope>();
+    let Some(scope_ref) = env_ref
+        .handle_scopes
+        .iter_mut()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), scope_ptr))
+    else {
+        return NAPI_INVALID_ARG;
+    };
+    if scope_ref.closed
+        || scope_ref.kind != HandleScopeKind::Escapable
+        || env_ref.active_handle_scopes.last().copied() != Some(scope_ptr)
+    {
+        return NAPI_HANDLE_SCOPE_MISMATCH;
+    }
+    if scope_ref.escaped {
+        return NAPI_ESCAPE_CALLED_TWICE;
+    }
+    scope_ref.escaped = true;
+    *out = value;
+    NAPI_OK
 }
 
 #[no_mangle]
@@ -6658,6 +6751,69 @@ mod tests {
         hint: *mut c_void,
     ) {
         EXTERNAL_STRING_FINALIZED.fetch_add(*(hint as *const usize), Ordering::AcqRel);
+    }
+
+    #[test]
+    fn handle_scopes_enforce_environment_order_kind_and_single_escape() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut other_env = Env::new();
+            let other_env_ptr: NapiEnv = &mut other_env;
+            let mut outer = ptr::null_mut();
+            let mut inner = ptr::null_mut();
+            assert_eq!(napi_open_handle_scope(env_ptr, &mut outer), NAPI_OK);
+            assert_eq!(
+                napi_open_escapable_handle_scope(env_ptr, &mut inner),
+                NAPI_OK
+            );
+            assert_ne!(outer, inner);
+            assert_eq!(
+                napi_close_handle_scope(env_ptr, outer),
+                NAPI_HANDLE_SCOPE_MISMATCH
+            );
+            assert_eq!(
+                napi_close_escapable_handle_scope(other_env_ptr, inner),
+                NAPI_INVALID_ARG
+            );
+
+            let value = env.alloc(Value::Number(42.0));
+            let mut escaped = ptr::null_mut();
+            assert_eq!(
+                napi_escape_handle(env_ptr, inner, value, &mut escaped),
+                NAPI_OK
+            );
+            assert_eq!(escaped, value);
+            assert_eq!(
+                napi_escape_handle(env_ptr, inner, value, &mut escaped),
+                NAPI_ESCAPE_CALLED_TWICE
+            );
+            assert_eq!(
+                napi_close_handle_scope(env_ptr, inner),
+                NAPI_HANDLE_SCOPE_MISMATCH
+            );
+            assert_eq!(napi_close_escapable_handle_scope(env_ptr, inner), NAPI_OK);
+            assert_eq!(
+                napi_close_escapable_handle_scope(env_ptr, inner),
+                NAPI_HANDLE_SCOPE_MISMATCH
+            );
+            assert_eq!(napi_close_handle_scope(env_ptr, outer), NAPI_OK);
+            assert_eq!(
+                napi_close_handle_scope(env_ptr, outer),
+                NAPI_HANDLE_SCOPE_MISMATCH
+            );
+
+            let mut callback = ptr::null_mut();
+            assert_eq!(
+                napi_open_callback_scope(env_ptr, ptr::null_mut(), ptr::null_mut(), &mut callback),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_close_handle_scope(env_ptr, callback),
+                NAPI_HANDLE_SCOPE_MISMATCH
+            );
+            assert_eq!(napi_close_callback_scope(env_ptr, callback), NAPI_OK);
+        }
     }
 
     #[test]
