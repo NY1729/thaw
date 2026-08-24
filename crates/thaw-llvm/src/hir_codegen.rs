@@ -12958,6 +12958,50 @@ mod tests {
     }
 
     #[test]
+    fn compiles_optional_native_method_calls() {
+        let source = r#"
+            interface Handler { run: (value: number) => number; }
+            function text(present: boolean): string | undefined {
+                if (present) return "ok";
+                return undefined;
+            }
+            function values(present: boolean): number[] | undefined {
+                if (present) return [1, 2, 3];
+                return undefined;
+            }
+            function maybeHandler(present: boolean): Handler | undefined {
+                if (present) return { run: (value: number) => value * 3 };
+                return undefined;
+            }
+            function needle(): number {
+                console.log("needle");
+                return 2;
+            }
+            async function delayedValues(): Promise<number[] | undefined> {
+                await sleep(1);
+                return [4, 5];
+            }
+            async function main(): Promise<void> {
+                console.log(text(true)?.toUpperCase());
+                console.log(text(false)?.toUpperCase());
+                console.log(values(true)?.includes(needle()));
+                console.log(values(false)?.includes(needle()));
+                console.log(maybeHandler(true)?.run(needle()));
+                console.log(maybeHandler(false)?.run(needle()));
+                console.log(values(true)?.at(9));
+                console.log(values(false)?.at(0));
+                console.log(values(false)?.forEach(value => { console.log(value); }));
+                console.log(values(true)?.forEach(value => { console.log(value); }));
+                console.log((await delayedValues())?.includes(5));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_native_methods"),
+            "OK\nundefined\nneedle\ntrue\nundefined\nneedle\n6\nundefined\nundefined\nundefined\nundefined\n1\n2\n3\nundefined\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_for_each() {
         let source = r#"
             interface Item { value: number; }

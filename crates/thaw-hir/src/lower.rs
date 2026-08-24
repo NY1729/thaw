@@ -9470,7 +9470,11 @@ impl<'a> FnLowerer<'a> {
                     }
                     _ => requested_property,
                 };
-                let object_ty = self.scope.get(&object_name).cloned();
+                let object_ty = self
+                    .narrowings
+                    .get(&object_name)
+                    .cloned()
+                    .or_else(|| self.scope.get(&object_name).cloned());
                 let callable = object_ty.as_ref().and_then(|ty| match ty {
                     HirType::Object(fields) => fields
                         .iter()
@@ -10096,6 +10100,64 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_optional_call(&mut self, call: &swc_ecma_ast::OptCall) -> Result<HirExpr, String> {
+        let optional_member = match call.callee.as_ref() {
+            Expr::Member(member) => Some(member),
+            Expr::OptChain(chain) => match chain.base.as_ref() {
+                OptChainBase::Member(member) => Some(member),
+                OptChainBase::Call(_) => None,
+            },
+            _ => None,
+        };
+        if let Some(member) = optional_member {
+            let receiver = self.lower_expr(&member.obj)?;
+            let receiver_type = self.infer_expr_type(&receiver)?;
+            if let HirType::Optional(payload) = receiver_type.clone() {
+                let name = format!("__thaw_optional_method_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), receiver_type.clone());
+                self.narrowings
+                    .insert(name.clone(), payload.as_ref().clone());
+
+                let mut rebound = member.clone();
+                rebound.obj = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    name.clone().into(),
+                    member.span,
+                )));
+                let mut ordinary = CallExpr::from(call.clone());
+                ordinary.callee = Callee::Expr(Box::new(Expr::Member(rebound)));
+                let invoked = self.lower_call(&ordinary);
+                self.narrowings.remove(&name);
+                let invoked = invoked?;
+                let return_type = self.infer_expr_type(&invoked)?;
+                let bound = HirExpr::Var(name.clone());
+                let result = if return_type == HirType::Void {
+                    HirExpr::Block(vec![HirStmt::If(
+                        HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))],
+                        vec![
+                            HirStmt::Expr(invoked),
+                            HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))),
+                        ],
+                    )])
+                } else {
+                    let (result_payload, present) = match &return_type {
+                        HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
+                        output => (
+                            output.clone(),
+                            HirExpr::OptionalSome(Box::new(invoked), output.clone()),
+                        ),
+                    };
+                    HirExpr::Block(vec![HirStmt::If(
+                        HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::OptionalNone(result_payload)))],
+                        vec![HirStmt::Return(Some(present))],
+                    )])
+                };
+                return self
+                    .wrap_call_argument_bindings(result, &[(name, receiver_type, receiver)]);
+            }
+        }
+
         let callee = self.lower_expr(&call.callee)?;
         let callee_type = self.infer_expr_type(&callee)?;
         let HirType::Optional(payload) = callee_type.clone() else {
