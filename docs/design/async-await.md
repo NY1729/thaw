@@ -473,6 +473,9 @@ callbackを呼び、それ以外のsettlementはpayloadを変えずに転送す�
 typed result slotを読み、closureを呼び、戻り値を新しいtyped slotへ格納して出力をresolveする。
 callbackのthrowは出力のrejectになる。callbackが`Promise<U>`を返した場合は
 `thaw_promise_adopt`がそのsettlementを出力へ転送するため、結果は`Promise<U>`へflattenされる。
+入力と出力が`void`のthen callbackはゼロ引数closureとして呼び、値を返さない正常完了を
+null payloadでresolveする。catch callbackも`void`を返せるため、`Promise<void>`の回復連鎖を
+そのままawaitできる。
 
 constructorとcontinuationはarrow、関数変数、top-level named functionを受け取る。型引数を
 省略したconstructorはexecutor内の`resolve(value)`を走査し、すべて同じ具体型なら`T`を推論する。
