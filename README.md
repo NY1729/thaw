@@ -343,6 +343,9 @@ The workspace crates have narrow responsibilities:
 - Binary `+` and `+=` concatenate when either operand is a native string,
   converting number/boolean operands with the same JavaScript formatting and
   preserving reference evaluation plus synchronous/awaited operand order
+- Function calls evaluate direct synchronous and awaited arguments once in
+  left-to-right order, including calls returning `void`; argument temporaries
+  survive async frame suspension and resume before later arguments run
 - `Boolean(...)` applies the same JavaScript truthiness rules to native
   booleans, numbers, strings, JSON and reference values, evaluating its
   synchronous or awaited argument exactly once

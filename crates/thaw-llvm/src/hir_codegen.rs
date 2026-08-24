@@ -13778,6 +13778,41 @@ mod tests {
     }
 
     #[test]
+    fn frame_split_preserves_synchronous_call_arguments_before_await() {
+        let source = r#"
+            interface Trace { value: string; }
+            function record(trace: Trace, label: string, value: number): number {
+                trace.value = trace.value + label;
+                return value;
+            }
+            async function delayed(trace: Trace, label: string, value: number): Promise<number> {
+                trace.value = trace.value + label;
+                await sleep(1);
+                return value;
+            }
+            function combine(first: number, second: number, third: number): number {
+                return first * 100 + second * 10 + third;
+            }
+            function consume(trace: Trace, first: number, second: number): void {
+                trace.value = trace.value + String(first) + String(second);
+            }
+            async function main(): Promise<void> {
+                const trace: Trace = { value: "" };
+                const value: number = combine(
+                    record(trace, "a", 1), await delayed(trace, "b", 2), record(trace, "c", 3)
+                );
+                consume(trace, record(trace, "d", 4), await delayed(trace, "e", 5));
+                console.log(trace.value);
+                console.log(value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "call_argument_order_across_await"),
+            "abcde45\n123\n"
+        );
+    }
+
+    #[test]
     fn frame_split_returns_from_deep_async_loop_try_and_block_scopes() {
         let source = r#"
             async function delayed(value: number): Promise<number> {

@@ -6409,16 +6409,22 @@ impl<'a> FnLowerer<'a> {
             .map(|sig| sig.params.clone())
             .or_else(|| local_function.as_ref().map(|(params, _)| params.clone()));
 
-        let has_spread = call.args.iter().any(|arg| arg.spread.is_some());
         let mut argument_bindings = Vec::new();
         let mut lowered_arguments = Vec::new();
-        for arg in &call.args {
-            let value = self.lower_expr(&arg.expr)?;
-            if !has_spread {
+        let lowered = call
+            .args
+            .iter()
+            .map(|arg| self.lower_expr(&arg.expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        let preserve_argument_order = call.args.iter().any(|arg| arg.spread.is_some())
+            || lowered
+                .iter()
+                .any(|value| matches!(value, HirExpr::Await(_) | HirExpr::AwaitPromise(_, _)));
+        for (arg, value) in call.args.iter().zip(lowered) {
+            if !preserve_argument_order {
                 lowered_arguments.push(value);
                 continue;
             }
-
             if arg.spread.is_none() {
                 let ty = self.infer_expr_type(&value)?;
                 let name = format!("__thaw_call_arg_{}", self.next_binding);
