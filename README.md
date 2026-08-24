@@ -473,6 +473,10 @@ The workspace crates have narrow responsibilities:
   arena-owned typed allocation. Mappers receive zero to three typed arguments
   and may change the element type; named callbacks, captures, empty arrays,
   nested aggregates, optional `thisArg` ordering and awaited receivers work
+- Homogeneous native arrays implement `.filter()` with stable shallow copies,
+  typed zero-to-three-argument predicates and arena capacity trimming. Named
+  callbacks, captures, empty arrays, every native element layout, optional
+  `thisArg` ordering and awaited receivers are supported
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays

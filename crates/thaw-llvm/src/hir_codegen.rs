@@ -4329,6 +4329,22 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::ArrayLit(elems) => self.compile_array_lit(elems),
             HirExpr::ArrayConcat(parts, _) => self.compile_array_concat(parts),
             HirExpr::ArrayAlloc(length, _) => self.compile_array_alloc(length),
+            HirExpr::ArraySetLen(array, length, _) => {
+                let array = self.compile_expr(array)?.into_pointer_value();
+                let length = self.compile_expr(length)?.into_float_value();
+                let length = self
+                    .builder
+                    .build_float_to_signed_int(
+                        length,
+                        self.context.i64_type(),
+                        "array_updated_length",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(array, length)
+                    .map_err(|error| error.to_string())?;
+                Ok(array.into())
+            }
             HirExpr::Index(arr, idx) => {
                 let elem_ptr = self.compile_element_ptr(arr, idx)?;
                 self.builder
@@ -12297,6 +12313,50 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_map"),
             "5,8,11\na0!|b1!\nfalse-true\n23\n2\n0\nreceiver\nthisArg\n2,3\nawaited\naa,bb\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_array_filter() {
+        let source = r#"
+            interface Item { value: number; }
+            function even(value: number, index: number, array: number[]): boolean {
+                console.log(index);
+                return value % 2 === 0 && index < array.length;
+            }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function thisValue(): string {
+                console.log("thisArg");
+                return "ignored";
+            }
+            async function delayed(): Promise<string[]> {
+                console.log("awaited");
+                await sleep(1);
+                return ["", "a", "bb"];
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2, 3, 4].filter(even).join(","));
+                const prefix: string = "a";
+                console.log(["a", "b", "aa"].filter(value => value.startsWith(prefix)).join("|"));
+                console.log([true, false, true].filter(value => value).join("-"));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 2 };
+                const items: Item[] = [first, second];
+                const selected: Item[] = items.filter(item => item.value === 2);
+                selected[0].value = 9;
+                console.log(items[1].value);
+                const empty: number[] = [];
+                console.log(empty.filter(() => true).length);
+                console.log(receiver().filter(value => value > 1, thisValue()).join(","));
+                console.log((await delayed()).filter(value => value.length > 0).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_filter"),
+            "0\n1\n2\n3\n2,4\na|aa\ntrue-true\n9\n0\nreceiver\nthisArg\n2,3\nawaited\na,bb\n"
         );
     }
 
