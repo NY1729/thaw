@@ -671,6 +671,11 @@ The workspace crates have narrow responsibilities:
   templates, parentheses and string-only concatenations are folded and bundled;
   conditional branches and template interpolations composed from those values
   produce a bounded finite candidate set (up to 64 external specifiers)
+- Static and dynamic JSON imports accept modern `{ with: { type: "json" } }`
+  and legacy `{ assert: { type: "json" } }` forms. Dynamic options are
+  validated before rewriting; spreads, unknown options, non-string attributes,
+  extension mismatches and attributed imports without finite specifiers are
+  explicit bundle errors
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit

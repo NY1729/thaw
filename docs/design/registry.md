@@ -1019,7 +1019,9 @@ export aliasを公開する。async dependency cycleはdeadlockさせず、modul
 明示エラーにする。同期ESM cycleは従来どおり部分初期化cacheで動作する。
 
 JSON moduleは`with { type: "json" }`と旧`assert { type: "json" }`を受理し、その他の
-attributeを明示エラーにする。dynamic importは実行時式を`requireAsync(String(expr))`へ
+attributeを明示エラーにする。dynamic importの第2引数も`{with:{type:"json"}}`と
+`{assert:{type:"json"}}`を同じ規則で検証し、未知option、spread、型/拡張子不一致、
+有限候補を持たないattributed importをbundle前に診断する。dynamic importは実行時式を`requireAsync(String(expr))`へ
 変換し、同一package内のJS／JSON候補をbundle mapへ収録する。同じmoduleを複数回import
 しても同じnamespace objectとready Promiseを再利用する。式なしtemplate、括弧、文字列
 だけの連結はbundle時に畳み込む。conditional branchとtemplate interpolationの構成は
