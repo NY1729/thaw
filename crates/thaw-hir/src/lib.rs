@@ -127,11 +127,18 @@ pub struct FfiBitFieldLayout {
     pub signed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiRegisterClass {
+    Integer,
+    Sse,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfiAggregateLayout {
     pub field_offsets: Vec<u64>,
     pub field_layouts: Vec<Option<Box<FfiAggregateLayout>>>,
     pub field_bitfields: Vec<Option<FfiBitFieldLayout>>,
+    pub register_classes: Vec<FfiRegisterClass>,
     pub size: u64,
     pub alignment: u32,
     pub indirect: bool,
@@ -1178,10 +1185,28 @@ pub fn set_ffi_aggregate_layout(
                 "FFI aggregate layout for `{symbol}` at `{path}` needs a non-zero size divisible by its alignment"
             ));
         }
-        if root != layout.indirect {
+        if !root && layout.indirect {
             return Err(format!(
-                "FFI aggregate layout for `{symbol}` at `{path}` requires `indirect: {root}`"
+                "FFI aggregate layout for `{symbol}` at `{path}` requires `indirect: false` for nested objects"
             ));
+        }
+        if !root && !layout.register_classes.is_empty() {
+            return Err(format!(
+                "FFI aggregate layout for `{symbol}` at `{path}` cannot declare nested register classes"
+            ));
+        }
+        if root && layout.indirect && !layout.register_classes.is_empty() {
+            return Err(format!(
+                "FFI aggregate layout for `{symbol}` at `{path}` cannot combine indirect return storage with register classes"
+            ));
+        }
+        if root && !layout.indirect {
+            let expected = layout.size.div_ceil(8) as usize;
+            if layout.size > 16 || layout.register_classes.len() != expected {
+                return Err(format!(
+                    "FFI direct aggregate layout for `{symbol}` requires one register class per 8-byte unit and supports at most 16 bytes"
+                ));
+            }
         }
         let mut previous_end = 0;
         let mut shared_bit_storage = None;

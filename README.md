@@ -196,6 +196,10 @@ The workspace crates have narrow responsibilities:
   fields; scalar fields use `null`. `bitFields` can map multiple boolean or
   number fields onto shared 1/2/4/8-byte C storage using explicit `bitOffset`,
   `bitWidth`, `storageBytes`, and signedness
+- Small explicit aggregate returns can set `indirect: false` and provide one
+  `registerClasses` entry (`integer` or `sse`) per eight-byte unit. LLVM writes
+  the returned registers into the declared byte layout before reconstructing
+  ordinary and bitfield values
 - QuickJS fallback for signatures which cannot use the C ABI path
 - Parser-backed CommonJS/ESM dependency discovery and bundling, including
   literal and same-package runtime dynamic imports, constant-folded external
@@ -714,8 +718,8 @@ The workspace crates have narrow responsibilities:
   recursive object/string/number-array result ownership, common LLVM calling
   conventions, ordinary or packed aggregate returns, and explicit scalar
   and recursively nested object-return field offsets/alignment, including
-  boolean and signed/unsigned integer bitfields. Direct register-class
-  overrides and other vararg types are not yet described
+  boolean and signed/unsigned integer bitfields, plus explicit direct register
+  classes for aggregates up to 16 bytes. Other vararg types are not yet described
 - Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
   exports the complete Node-API v10 symbol surface used by the current headers,
   plus the implemented experimental SharedArrayBuffer/finalizer/module-file
