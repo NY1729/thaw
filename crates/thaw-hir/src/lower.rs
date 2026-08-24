@@ -5870,10 +5870,26 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         HirExpr::Lit(HirLit::F64(0.0))
                     };
-                    return Ok(HirExpr::Call(
+                    let receiver_name = format!("__thaw_char_code_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let index_name = format!("__thaw_char_code_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    let result = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_char_code_at".to_string())),
-                        vec![receiver, index],
-                    ));
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(index_name.clone()),
+                        ],
+                    );
+                    return self.wrap_call_argument_bindings(
+                        result,
+                        &[
+                            (receiver_name, HirType::Str, receiver),
+                            (index_name, HirType::F64, index),
+                        ],
+                    );
                 }
                 if property.sym == *"concat" {
                     if call.args.iter().any(|argument| argument.spread.is_some()) {
