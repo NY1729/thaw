@@ -694,3 +694,6 @@ backingを確保し、通常ArrayBufferとは別の型identityを返す。TypedA
 同じ反復内でqueueをdrainし、callbackから通常のNode-APIを呼べるlive Envを渡す。callbackがさらに
 postしたfinalizerも同じdrain cycleで処理し、poll前にEnv teardownへ入った場合もnative finalizer後、
 Value解放前に一度だけ実行する。
+`node_api_get_module_file_name`用にaddon load時のcanonical absolute pathを`file://` URLとしてEnvへ
+保持する。module初期化だけでなく、JSON bridgeがtop-level exportを新しいcall Envで呼ぶ場合も元の
+module EnvからURLを継承し、Env所有のNUL終端pointerを安定して返す。

@@ -359,6 +359,7 @@ pub struct Env {
     symbols: HashMap<u64, NapiValue>,
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
+    module_file_name: CString,
 }
 
 #[derive(Clone, Copy)]
@@ -408,6 +409,7 @@ impl Env {
             symbols: HashMap::new(),
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
+            module_file_name: CString::new("").unwrap(),
         }
     }
 
@@ -752,6 +754,7 @@ pub unsafe extern "C" fn napi_module_register(module: *mut NapiModule) {
 type RegisterV1 = unsafe extern "C" fn(NapiEnv, NapiValue) -> NapiValue;
 
 unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
+    let path_text = path;
     let path = CString::new(path).map_err(|_| "addon path contains NUL".to_string())?;
     PENDING_MODULE.with(|slot| slot.borrow_mut().take());
     // Node exports libuv from its executable. Some otherwise portable N-API
@@ -785,6 +788,10 @@ unsafe fn load_impl(path: &str, root_name: Option<&str>) -> Result<(), String> {
     };
 
     let mut env = Box::new(Env::new());
+    let absolute_path =
+        std::fs::canonicalize(path_text).unwrap_or_else(|_| std::path::PathBuf::from(path_text));
+    env.module_file_name = CString::new(format!("file://{}", absolute_path.to_string_lossy()))
+        .unwrap_or_else(|_| CString::new("").unwrap());
     let env_ptr = &mut *env as NapiEnv;
     let exports = env.alloc(Value::Object(HashMap::new()));
     let returned = init(env_ptr, exports);
@@ -1107,6 +1114,14 @@ fn wait_for_promise(value: NapiValue) -> Result<NapiValue, String> {
     }
 }
 
+fn module_file_name_for_export(name: &str) -> Option<CString> {
+    HOST.with(|host| {
+        let host = host.borrow();
+        let (env, _) = host.exports.get(name)?;
+        unsafe { Some((*(*env as NapiEnv)).module_file_name.clone()) }
+    })
+}
+
 unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
     let args: Vec<JsonValue> = serde_json::from_str(args_json)
         .map_err(|error| format!("invalid argument JSON: {error}"))?;
@@ -1114,6 +1129,9 @@ unsafe fn call_impl(name: &str, args_json: &str) -> Result<String, String> {
         .with(|host| host.borrow().functions.get(name).cloned())
         .ok_or_else(|| format!("no such native addon function `{name}`"))?;
     let mut env = Box::new(Env::new());
+    if let Some(module_file_name) = module_file_name_for_export(name) {
+        env.module_file_name = module_file_name;
+    }
     let args = args
         .iter()
         .map(|value| value_from_json(&mut env, value))
@@ -1431,6 +1449,9 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
             },
         );
         let mut env = Box::new(Env::new());
+        if let Some(module_file_name) = module_file_name_for_export(&name) {
+            env.module_file_name = module_file_name;
+        }
         let mut values: Vec<NapiValue> = args
             .iter()
             .map(|value| value_from_json(&mut env, value))
@@ -4840,6 +4861,18 @@ pub unsafe extern "C" fn napi_get_node_version(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_get_module_file_name(
+    env: NapiEnv,
+    result: *mut *const c_char,
+) -> NapiStatus {
+    let (Some(env), Some(result)) = (env.as_ref(), result.as_mut()) else {
+        return NAPI_INVALID_ARG;
+    };
+    *result = env.module_file_name.as_ptr();
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_open_handle_scope(env: NapiEnv, out: *mut *mut c_void) -> NapiStatus {
     if env.is_null() || out.is_null() {
         NAPI_INVALID_ARG
@@ -7802,6 +7835,7 @@ mod tests {
             extern napi_status napi_define_class(napi_env, const char*, size_t, napi_value (*)(napi_env,napi_callback_info), void*, size_t, const void*, napi_value*);
             extern napi_status napi_new_instance(napi_env, napi_value, size_t, const napi_value*, napi_value*);
             extern napi_status napi_instanceof(napi_env, napi_value, napi_value, _Bool*);
+            extern napi_status node_api_get_module_file_name(napi_env, const char**);
             typedef napi_value (*napi_callback)(napi_env,napi_callback_info);
             typedef struct { const char* utf8name; napi_value name; napi_callback method; napi_callback getter; napi_callback setter; napi_value value; unsigned attributes; void* data; } napi_property_descriptor;
             typedef struct { double value; } native_box;
@@ -7856,6 +7890,11 @@ mod tests {
                 napi_get_value_string_utf8(env, arg, text, sizeof(text), &length);
                 napi_create_string_utf8(env, text, length, &result); return result;
             }
+            static napi_value module_file(napi_env env, napi_callback_info info) {
+                (void)info; const char* path; napi_value result;
+                node_api_get_module_file_name(env, &path);
+                napi_create_string_utf8(env, path, (size_t)-1, &result); return result;
+            }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value fn; napi_property_descriptor properties[2] = {
                     { "get", 0, box_get, 0, 0, 0, 0, 0 },
@@ -7868,6 +7907,7 @@ mod tests {
                 napi_create_function(env, "add", 3, add, 0, &fn); napi_set_named_property(env, exports, "add", fn);
                 napi_create_function(env, "negate", 6, negate, 0, &fn); napi_set_named_property(env, exports, "negate", fn);
                 napi_create_function(env, "echo", 4, echo, 0, &fn); napi_set_named_property(env, exports, "echo", fn);
+                napi_create_function(env, "moduleFile", 10, module_file, 0, &fn); napi_set_named_property(env, exports, "moduleFile", fn);
                 return exports;
             }
         "#).unwrap();
@@ -7895,6 +7935,11 @@ mod tests {
             let string = CString::new("[\"hello\"]").unwrap();
             let result = thaw_napi_call_result(echo.as_ptr(), string.as_ptr());
             assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "\"hello\"");
+            let result = thaw_napi_call_result(c"moduleFile".as_ptr(), c"[]".as_ptr());
+            let module_file: String =
+                serde_json::from_str(CStr::from_ptr(result.value).to_str().unwrap()).unwrap();
+            assert!(module_file.starts_with("file://"));
+            assert!(module_file.ends_with("addon.node"));
             let result = thaw_napi_call_result(c"roundtrip".as_ptr(), c"[42]".as_ptr());
             assert!(result.error.is_null());
             assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "84.0");
