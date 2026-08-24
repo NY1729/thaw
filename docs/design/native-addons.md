@@ -713,6 +713,8 @@ property、optional `code`を通常のown propertyとして保持する。`name`
 own `name`でshadow可能である。ToStringは現在のname／messageから`Name: message`を構成する。
 `napi_strict_equals`は別handleのBigIntも符号と正規化済みlittle-endian wordsで値比較する一方、Objectは
 identity比較を維持する。DateのToNumberは保存したmillisecond値を返す。
+Referenceは生成元Env identityを保持し、create／get／ref／unref／deleteのcross-Env利用をinvalid-argで
+拒否する。ref／unrefのresultは省略可能で、zero未満へのunrefとu32上限を越えるrefはgeneric failureにする。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
