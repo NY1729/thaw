@@ -431,6 +431,9 @@ The workspace crates have narrow responsibilities:
 - Native strings implement variadic `.concat()` with left-to-right receiver
   and argument evaluation, aggregate/primitive conversion, arena ownership and
   awaited operands
+- Native string `.length` and `.charCodeAt()` operate on JavaScript UTF-16
+  code units, including surrogate pairs, default/converted indices, out-of-range
+  `NaN`, receiver-before-index evaluation and awaited receivers
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
