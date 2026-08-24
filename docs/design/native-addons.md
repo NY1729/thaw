@@ -611,3 +611,6 @@ UTF-8に加えて`napi_create_string_latin1`、`napi_create_string_utf16`、
 `napi_get_value_string_latin1`、`napi_get_value_string_utf16`を実装する。`NAPI_AUTO_LENGTH`、
 長さ照会、buffer切り詰め、NUL終端、UTF-8 multi-byte文字の途中で切らない規則をhost testで
 固定する。内部値はUTF-8 `String`のまま保持し、各N-API境界で指定encodingへ変換する。
+
+`napi_create_int32`、`napi_create_uint32`、`napi_create_int64`も既存のdouble-backed JavaScript
+Number表現へ統合し、対応するgetterとの境界値往復をhost testで固定する。

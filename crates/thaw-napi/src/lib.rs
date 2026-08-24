@@ -1342,6 +1342,33 @@ pub unsafe extern "C" fn napi_create_double(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_int32(
+    env: NapiEnv,
+    value: i32,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    napi_create_double(env, f64::from(value), out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_uint32(
+    env: NapiEnv,
+    value: u32,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    napi_create_double(env, f64::from(value), out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_int64(
+    env: NapiEnv,
+    value: i64,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    napi_create_double(env, value as f64, out)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_create_string_utf8(
     env: NapiEnv,
     value: *const c_char,
@@ -3671,6 +3698,42 @@ mod tests {
             assert_eq!(written, 1);
             assert_eq!(truncated[0], b'A' as i8);
             assert_eq!(truncated[1], 0);
+        }
+    }
+
+    #[test]
+    fn integer_creation_roundtrips_through_napi_number_accessors() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+
+            let mut value = ptr::null_mut();
+            assert_eq!(
+                napi_create_int32(env_ptr, -2_000_000_000, &mut value),
+                NAPI_OK
+            );
+            let mut signed32 = 0;
+            assert_eq!(napi_get_value_int32(env_ptr, value, &mut signed32), NAPI_OK);
+            assert_eq!(signed32, -2_000_000_000);
+
+            assert_eq!(
+                napi_create_uint32(env_ptr, 4_000_000_000, &mut value),
+                NAPI_OK
+            );
+            let mut unsigned32 = 0;
+            assert_eq!(
+                napi_get_value_uint32(env_ptr, value, &mut unsigned32),
+                NAPI_OK
+            );
+            assert_eq!(unsigned32, 4_000_000_000);
+
+            assert_eq!(
+                napi_create_int64(env_ptr, 9_007_199_254_740_991, &mut value),
+                NAPI_OK
+            );
+            let mut signed64 = 0;
+            assert_eq!(napi_get_value_int64(env_ptr, value, &mut signed64), NAPI_OK);
+            assert_eq!(signed64, 9_007_199_254_740_991);
         }
     }
 
