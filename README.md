@@ -621,7 +621,9 @@ The workspace crates have narrow responsibilities:
   variables in the corresponding `if` branch, including negated comparisons;
   terminating guard clauses and subsequent assignments update the narrowed
   state. Logical `&&`/`||` propagate safe narrowing into their short-circuited
-  RHS and the implied `if` branch. Optional chaining now short-circuits tagged
+  RHS and the implied `if` branch. `typeof value ===/!== "undefined"` reports
+  the tagged runtime state and provides the same branch narrowing. Optional
+  chaining now short-circuits tagged
   fixed-object fields, array/tuple elements, native `.length`, function-value
   calls and receiver-bound methods. Native `null` and dynamically computed
   method names still require broader optional-chain lowering
