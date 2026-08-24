@@ -3311,12 +3311,12 @@ pub unsafe extern "C" fn napi_set_named_property(
         return NAPI_INVALID_ARG;
     }
     let Ok(name) = text(name) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let name = PropertyKey::String(name);
     if let Some(accessor) = find_accessor(env, object, &name) {
         let Some(setter) = accessor.setter else {
-            return NAPI_GENERIC_FAILURE;
+            return record_status(env, NAPI_GENERIC_FAILURE);
         };
         let mut info = CallbackInfo {
             args: vec![value],
@@ -3325,7 +3325,7 @@ pub unsafe extern "C" fn napi_set_named_property(
             data: accessor.data,
         };
         setter(env, &mut info);
-        return if env_mut(env)
+        let status = if env_mut(env)
             .map(|env| env.exception.is_some())
             .unwrap_or(false)
         {
@@ -3333,6 +3333,7 @@ pub unsafe extern "C" fn napi_set_named_property(
         } else {
             NAPI_OK
         };
+        return record_status(env, status);
     }
     let inherited_owner = find_data_property_owner(env, object, &name);
     let (frozen, sealed) = env
@@ -3348,11 +3349,11 @@ pub unsafe extern "C" fn napi_set_named_property(
         .map(|owner| property_attributes_for(env, owner, &name) & NAPI_WRITABLE != 0)
         .unwrap_or(true);
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let exists = own_property_value(env, object, &name).is_some();
     if frozen || (inherited_owner.is_some() && !writable) || (sealed && !exists) {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     let status = match env_mut(env) {
         Ok(env) => set_own_property(env, object, &name, value),
@@ -3365,7 +3366,7 @@ pub unsafe extern "C" fn napi_set_named_property(
                 .insert((object as usize, name), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
         }
     }
-    status
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -3376,10 +3377,10 @@ pub unsafe extern "C" fn napi_get_named_property(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, object) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(name) = text(name) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let name = PropertyKey::String(name);
     let value = find_property_value(env, object, &name);
@@ -3397,15 +3398,17 @@ pub unsafe extern "C" fn napi_get_named_property(
                 .map(|env| env.exception.is_some())
                 .unwrap_or(false)
             {
-                return NAPI_PENDING_EXCEPTION;
+                return record_status(env, NAPI_PENDING_EXCEPTION);
             }
-            return write_callback_value(env, out, value);
+            let status = write_callback_value(env, out, value);
+            return record_status(env, status);
         }
     }
-    match value {
+    let status = match value {
         Some(value) => write_value(out, value),
         None => napi_get_undefined(env, out),
-    }
+    };
+    record_status(env, status)
 }
 
 unsafe fn property_key(value: NapiValue) -> Result<PropertyKey, NapiStatus> {
@@ -3424,13 +3427,13 @@ unsafe fn set_property_key(
 ) -> NapiStatus {
     if let PropertyKey::String(name) = &key {
         let Ok(name) = CString::new(name.as_str()) else {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         };
         return napi_set_named_property(env, object, name.as_ptr(), value);
     }
     if let Some(accessor) = find_accessor(env, object, &key) {
         let Some(setter) = accessor.setter else {
-            return NAPI_GENERIC_FAILURE;
+            return record_status(env, NAPI_GENERIC_FAILURE);
         };
         let mut info = CallbackInfo {
             args: vec![value],
@@ -3439,7 +3442,7 @@ unsafe fn set_property_key(
             data: accessor.data,
         };
         setter(env, &mut info);
-        return if env_mut(env)
+        let status = if env_mut(env)
             .map(|env| env.exception.is_some())
             .unwrap_or(false)
         {
@@ -3447,13 +3450,14 @@ unsafe fn set_property_key(
         } else {
             NAPI_OK
         };
+        return record_status(env, status);
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let exists = own_property_value(env, object, &key).is_some();
     let Some(env_ref) = env.as_ref() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let property_owner = find_data_property_owner(env, object, &key);
     let writable = property_owner
@@ -3463,14 +3467,14 @@ unsafe fn set_property_key(
         || (property_owner.is_some() && !writable)
         || (env_ref.sealed_objects.contains(&(object as usize)) && !exists)
     {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     let Ok(env_ref) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let status = set_own_property(env_ref, object, &key, value);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     if !exists {
         if let Ok(env) = env_mut(env) {
@@ -3490,12 +3494,12 @@ unsafe fn get_property_key(
 ) -> NapiStatus {
     if let PropertyKey::String(name) = key {
         let Ok(name) = CString::new(name.as_str()) else {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         };
         return napi_get_named_property(env, object, name.as_ptr(), out);
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let value = find_property_value(env, object, key);
     if value.is_none() {
@@ -3512,16 +3516,18 @@ unsafe fn get_property_key(
                     .map(|env| env.exception.is_some())
                     .unwrap_or(false)
                 {
-                    return NAPI_PENDING_EXCEPTION;
+                    return record_status(env, NAPI_PENDING_EXCEPTION);
                 }
-                return write_callback_value(env, out, value);
+                let status = write_callback_value(env, out, value);
+                return record_status(env, status);
             }
         }
     }
-    match value {
+    let status = match value {
         Some(value) => write_value(out, value),
         None => napi_get_undefined(env, out),
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -3538,9 +3544,10 @@ pub unsafe extern "C" fn napi_set_property(
         return NAPI_INVALID_ARG;
     }
     let Ok(key) = property_key(key) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
-    set_property_key(env, object, key, value)
+    let status = set_property_key(env, object, key, value);
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -3554,12 +3561,13 @@ pub unsafe extern "C" fn napi_get_property(
         || !value_belongs_to_environment(env, object)
         || !value_belongs_to_environment(env, key)
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(key) = property_key(key) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
-    get_property_key(env, object, &key, out)
+    let status = get_property_key(env, object, &key, out);
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -3573,11 +3581,14 @@ pub unsafe extern "C" fn napi_has_property(
         || !value_belongs_to_environment(env, object)
         || !value_belongs_to_environment(env, key)
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(key) = property_key(key) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return record_status(env, NAPI_OBJECT_EXPECTED);
+    }
     *out = find_property_value(env, object, &key).is_some()
         || find_accessor(env, object, &key).is_some();
     NAPI_OK
@@ -3594,13 +3605,13 @@ pub unsafe extern "C" fn napi_has_own_property(
         || !value_belongs_to_environment(env, object)
         || !value_belongs_to_environment(env, key)
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(key) = property_key(key) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let own_value = own_property_value(env, object, &key).is_some();
     let own_accessor = accessor_for_owner(env, object as usize, &key).is_some();
@@ -3619,10 +3630,10 @@ pub unsafe extern "C" fn napi_delete_property(
         return NAPI_INVALID_ARG;
     }
     let Ok(key) = property_key(key) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let own = own_property_value(env, object, &key).is_some()
         || accessor_for_owner(env, object as usize, &key).is_some();
@@ -3647,7 +3658,7 @@ pub unsafe extern "C" fn napi_delete_property(
     if let Ok(env) = env_mut(env) {
         let status = remove_own_property(env, object, &key);
         if status != NAPI_OK {
-            return status;
+            return record_status(env, status);
         }
         env.accessors.remove(&(object as usize, key.clone()));
         remove_property_order(env, object as usize, &key);
@@ -3667,14 +3678,14 @@ pub unsafe extern "C" fn napi_has_named_property(
     result: *mut bool,
 ) -> NapiStatus {
     if name.is_null() || result.is_null() || !value_belongs_to_environment(env, object) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(name) = text(name) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let name = PropertyKey::String(name);
-    if env.is_null() {
-        return NAPI_INVALID_ARG;
+    if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     *result = find_property_value(env, object, &name).is_some()
         || find_accessor(env, object, &name).is_some();
@@ -3692,11 +3703,11 @@ pub unsafe extern "C" fn napi_define_properties(
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let status = validate_property_descriptors(env, count, descriptors);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     if count == 0 {
         return NAPI_OK;
@@ -3714,10 +3725,10 @@ pub unsafe extern "C" fn napi_define_properties(
             Ok(descriptor.name)
         };
         let Ok(key) = key else {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         };
         let Ok(key_name) = property_key(key) else {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         };
         let attributes = descriptor.attributes & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
         if descriptor.getter.is_some() || descriptor.setter.is_some() {
@@ -3725,7 +3736,7 @@ pub unsafe extern "C" fn napi_define_properties(
                 return NAPI_INVALID_ARG;
             };
             if env.sealed_objects.contains(&(object as usize)) {
-                return NAPI_GENERIC_FAILURE;
+                return record_status(env, NAPI_GENERIC_FAILURE);
             }
             env.accessors.insert(
                 (object as usize, key_name.clone()),
@@ -3751,7 +3762,7 @@ pub unsafe extern "C" fn napi_define_properties(
                 &mut value,
             );
             if status != NAPI_OK {
-                return status;
+                return record_status(env, status);
             }
             value
         } else {
@@ -3759,7 +3770,7 @@ pub unsafe extern "C" fn napi_define_properties(
         };
         let status = napi_set_property(env, object, key, value);
         if status != NAPI_OK {
-            return status;
+            return record_status(env, status);
         }
         if let Ok(env) = env_mut(env) {
             env.property_attributes
@@ -4280,14 +4291,14 @@ pub unsafe extern "C" fn napi_get_prototype(
     result: *mut NapiValue,
 ) -> NapiStatus {
     if result.is_null() || !value_belongs_to_environment(env, object) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     let env_ptr = env;
     let Ok(env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     let prototype =
         prototype_for_owner(env_ptr, object as usize).map(|prototype| prototype as NapiValue);
@@ -4310,11 +4321,11 @@ pub unsafe extern "C" fn node_api_set_prototype(
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     if !matches!(value_ref(prototype), Ok(value) if is_object_value(value) || matches!(value, Value::Null))
     {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
 
     let object_id = object as usize;
@@ -4326,7 +4337,7 @@ pub unsafe extern "C" fn node_api_set_prototype(
         return NAPI_OK;
     }
     if env.sealed_objects.contains(&object_id) {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
 
     if !matches!(value_ref(prototype), Ok(Value::Null)) {
@@ -4334,7 +4345,7 @@ pub unsafe extern "C" fn node_api_set_prototype(
         let mut visited = HashSet::new();
         while let Some(current) = ancestor {
             if current == object_id {
-                return NAPI_GENERIC_FAILURE;
+                return record_status(env, NAPI_GENERIC_FAILURE);
             }
             if !visited.insert(current) {
                 break;
@@ -4959,14 +4970,14 @@ pub unsafe extern "C" fn napi_get_all_property_names(
             NAPI_KEY_KEEP_NUMBERS | NAPI_KEY_NUMBERS_TO_STRINGS
         )
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env_ptr, NAPI_OBJECT_EXPECTED);
     }
     let mut keys = Vec::new();
     let mut current = Some(object as usize);
@@ -8967,6 +8978,42 @@ mod tests {
             assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
             assert_eq!((*info).error_code, NAPI_INVALID_ARG);
             assert_eq!(env.values.len(), values_before);
+        }
+    }
+
+    #[test]
+    fn property_operations_record_type_and_state_errors() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let object = env.alloc(Value::Object(HashMap::new()));
+            let key = env.alloc(Value::String("new".into()));
+            let value = env.alloc(Value::Number(1.0));
+            let mut info = ptr::null();
+
+            assert_eq!(napi_object_seal(env_ptr, object), NAPI_OK);
+            assert_eq!(
+                napi_set_property(env_ptr, object, key, value),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_GENERIC_FAILURE);
+
+            let mut present = false;
+            assert_eq!(
+                napi_has_property(env_ptr, value, key, &mut present),
+                NAPI_OBJECT_EXPECTED
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_OBJECT_EXPECTED);
+
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_get_property(env_ptr, object, value, &mut actual),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
         }
     }
 
