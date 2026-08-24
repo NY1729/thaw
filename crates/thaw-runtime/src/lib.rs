@@ -30,6 +30,87 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
+fn javascript_number_string(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value == f64::INFINITY {
+        return "Infinity".to_string();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+
+    let negative = value.is_sign_negative();
+    let mut buffer = ryu::Buffer::new();
+    let rendered = buffer.format_finite(value.abs());
+    let (mantissa, exponent) = rendered
+        .split_once(['e', 'E'])
+        .map_or((rendered, 0), |(mantissa, exponent)| {
+            (mantissa, exponent.parse::<i32>().unwrap())
+        });
+    let decimal_position = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let mut digits = mantissa
+        .bytes()
+        .filter(|byte| *byte != b'.')
+        .collect::<Vec<_>>();
+    let leading = digits.iter().take_while(|digit| **digit == b'0').count();
+    digits.drain(..leading);
+    let n = decimal_position - leading as i32 + exponent;
+    while digits.len() > 1 && digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+    let digits = String::from_utf8(digits).unwrap();
+    let mut result = String::new();
+    if negative {
+        result.push('-');
+    }
+    if n > 0 && n <= 21 {
+        if digits.len() <= n as usize {
+            result.push_str(&digits);
+            result.extend(std::iter::repeat_n('0', n as usize - digits.len()));
+        } else {
+            result.push_str(&digits[..n as usize]);
+            result.push('.');
+            result.push_str(&digits[n as usize..]);
+        }
+    } else if n <= 0 && n > -6 {
+        result.push_str("0.");
+        result.extend(std::iter::repeat_n('0', (-n) as usize));
+        result.push_str(&digits);
+    } else {
+        result.push(digits.as_bytes()[0] as char);
+        if digits.len() > 1 {
+            result.push('.');
+            result.push_str(&digits[1..]);
+        }
+        result.push('e');
+        let scientific_exponent = n - 1;
+        if scientific_exponent >= 0 {
+            result.push('+');
+        }
+        result.push_str(&scientific_exponent.to_string());
+    }
+    result
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
+    let text = javascript_number_string(value);
+    let destination = thaw_arena::thaw_arena_alloc(text.len() + 1, 1);
+    if destination.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr(), destination, text.len());
+        destination.add(text.len()).write(0);
+    }
+    destination.cast()
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 
@@ -2353,6 +2434,26 @@ mod tests {
     use std::sync::mpsc;
 
     static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn formats_numbers_with_javascript_string_boundaries() {
+        let cases = [
+            (0.0, "0"),
+            (-0.0, "0"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+            (1.5, "1.5"),
+            (1e20, "100000000000000000000"),
+            (1e21, "1e+21"),
+            (1e-6, "0.000001"),
+            (1e-7, "1e-7"),
+            (1.2345678901234567, "1.2345678901234567"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(javascript_number_string(value), expected, "value={value:?}");
+        }
+    }
 
     fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {
         unsafe { super::thaw_runtime_run_until_resolved(promise) }

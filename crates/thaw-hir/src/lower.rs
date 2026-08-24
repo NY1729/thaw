@@ -3051,6 +3051,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Bool, argument, "boolean string conversion")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_number_to_string" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("number string conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, argument, "number string conversion")?;
+                        return Ok(HirType::Str);
+                    }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
                     "Promise.all" => {
@@ -3394,6 +3401,14 @@ impl<'a> FnLowerer<'a> {
                                 value = HirExpr::Call(
                                     Box::new(HirExpr::Var(
                                         "__thaw_bool_to_string".to_string(),
+                                    )),
+                                    vec![value],
+                                );
+                            }
+                            HirType::F64 => {
+                                value = HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_number_to_string".to_string(),
                                     )),
                                     vec![value],
                                 );
@@ -5337,6 +5352,12 @@ impl<'a> FnLowerer<'a> {
             if callee_name == "String" && ty == HirType::Bool {
                 return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
+                    vec![value],
+                ));
+            }
+            if callee_name == "String" && ty == HirType::F64 {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                     vec![value],
                 ));
             }

@@ -490,6 +490,12 @@ impl<'ctx> HirCompiler<'ctx> {
             json_as_number_type,
             Some(Linkage::External),
         );
+        let number_to_string_type = i8_ptr.fn_type(&[f64_type.into()], false);
+        self.module.add_function(
+            "thaw_number_to_string",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -6911,6 +6917,13 @@ impl<'ctx> HirCompiler<'ctx> {
             "console.log" => return self.compile_console_log(args),
             "__thaw_string_concat" => return self.compile_string_concat(args),
             "__thaw_bool_to_string" => return self.compile_bool_to_string(args),
+            "__thaw_number_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_number_to_string",
+                    args,
+                    "String(number)",
+                )
+            }
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
             "sleep" => return self.compile_sleep(args),
             "JSON.parse" => {
@@ -10254,13 +10267,15 @@ mod tests {
                 const enabled: boolean = true;
                 console.log(`enabled=${enabled}, disabled=${false}`);
                 console.log(String(enabled));
+                console.log(`numbers=${0},${-0},${1.5},${1000000000000000000000},${0.0000001}`);
+                console.log(String(0 / 0));
                 console.log(`before:${await delayed("done")}:after`);
                 console.log(``);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "string_templates"),
-            "plain\nfirst\nsecond\nA:x:y:Z\nenabled=true, disabled=false\ntrue\nawaited\nbefore:done:after\n\n"
+            "plain\nfirst\nsecond\nA:x:y:Z\nenabled=true, disabled=false\ntrue\nnumbers=0,0,1.5,1e+21,1e-7\nNaN\nawaited\nbefore:done:after\n\n"
         );
     }
 
