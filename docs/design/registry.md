@@ -1028,7 +1028,8 @@ attributeを明示エラーにする。dynamic importは実行時式を`requireA
 優先し、異なるbindingの曖昧性をbarrel越しに伝播してimport時に診断する。任意の実行時
 文字列から決まる外部packageはまだ対象外である。user moduleの静的なrelative/absolute
 `import.meta.resolve()`はsource directory基準でpathを正規化し、query/fragmentを保った
-`file://` URLへ変換する。bare packageのresolveとその他のmeta propertyはまだ対象外である。
+`file://` URLへ変換する。Node互換の`import.meta.filename`/`dirname`はpercent encodeしない
+絶対filesystem pathへ変換する。bare packageのresolveとその他のmeta propertyはまだ対象外である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 

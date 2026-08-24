@@ -3122,7 +3122,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("lib/expression.ts"),
-            "function offset(): number { return 2; }\nexport function moduleUrl(): string { return import.meta.url; }\nexport function resolvedUrl(): string { return import.meta.resolve('../data file.json?raw#part'); }\nexport default offset;\n",
+            "function offset(): number { return 2; }\nexport function moduleUrl(): string { return import.meta.url; }\nexport function moduleFilename(): string { return import.meta.filename; }\nexport function moduleDirname(): string { return import.meta.dirname; }\nexport function resolvedUrl(): string { return import.meta.resolve('../data file.json?raw#part'); }\nexport default offset;\n",
         )
         .unwrap();
         let entry = dir.join("main.ts");
@@ -3132,7 +3132,7 @@ mod tests {
                 import { makePair, chooseFirst as first, value, values, offset as reexportedOffset } from "./lib";
                 import offset, { value as sameValue } from "./lib/values";
                 import { value as otherValue } from "./lib/other";
-                import expressionOffset, { moduleUrl, resolvedUrl } from "./lib/expression";
+                import expressionOffset, { moduleUrl, moduleFilename, moduleDirname, resolvedUrl } from "./lib/expression";
                 function main(): void {
                     const pair = makePair(value(), "ok");
                     console.log(pair.first + otherValue());
@@ -3141,6 +3141,8 @@ mod tests {
                     console.log(value() + reexportedOffset());
                     console.log(value() + expressionOffset());
                     console.log(moduleUrl());
+                    console.log(moduleFilename());
+                    console.log(moduleDirname());
                     console.log(resolvedUrl());
                 }
             "#,
@@ -3157,11 +3159,13 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
             format!(
-                "42\nselected\n42\n42\n42\nfile://{}\nfile://{}/data%20file.json?raw#part\n",
+                "42\nselected\n42\n42\n42\nfile://{}\n{}\n{}\nfile://{}/data%20file.json?raw#part\n",
                 dir.join("lib/expression.ts")
                     .display()
                     .to_string()
                     .replace(' ', "%20"),
+                dir.join("lib/expression.ts").display(),
+                dir.join("lib").display(),
                 dir.display().to_string().replace(' ', "%20")
             )
         );

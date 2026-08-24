@@ -656,7 +656,8 @@ The workspace crates have narrow responsibilities:
   merge identical bindings and propagate ambiguity through barrel modules;
   importing an ambiguous name is a source-located error. Top-level-await
   cycles are explicit errors. `import.meta.url` is replaced per source module
-  with its percent-encoded absolute `file://` URL. Static relative/absolute
+  with its percent-encoded absolute `file://` URL; Node-compatible
+  `import.meta.filename` and `.dirname` expose unescaped absolute paths. Static relative/absolute
   `import.meta.resolve(specifier)` uses lexical path normalization and preserves
   queries/fragments. Bare-package resolution, other meta properties, non-JSON
   attributes and genuinely runtime-computed external package imports remain
