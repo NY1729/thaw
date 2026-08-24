@@ -604,3 +604,10 @@ codeがmappedな間に実行し、その後library handleを逆順に`dlclose`�
 `napi_fatal_exception`は診断をstderrへ出し、process failure flagを設定する。生成mainはcleanup
 後にflagを一度だけ取得し、未処理callback例外があれば終了status 1を返す。cleanup hookのLIFO、
 remove、active TSFN中のunload拒否、fatal statusのconsume-onceをhost testで固定する。
+
+## 22. Latin-1／UTF-16文字列
+
+UTF-8に加えて`napi_create_string_latin1`、`napi_create_string_utf16`、
+`napi_get_value_string_latin1`、`napi_get_value_string_utf16`を実装する。`NAPI_AUTO_LENGTH`、
+長さ照会、buffer切り詰め、NUL終端、UTF-8 multi-byte文字の途中で切らない規則をhost testで
+固定する。内部値はUTF-8 `String`のまま保持し、各N-API境界で指定encodingへ変換する。
