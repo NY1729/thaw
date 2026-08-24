@@ -17,6 +17,15 @@
 `napi_get_uv_event_loop`もホストへ追加した。TypeScriptからsqlite3のクラスを
 直接構築する部分は、AOTフロントエンドのclass構文対応とは別の残課題である。
 
+さらに`.d.ts`のclass宣言について、継承、constructor、instance/static method、
+getter、property、overloadを構造化して抽出するようbridgeを拡張した。overloadは
+同名memberへ明示的に記録され、単一signatureと誤認してFast Pathへ流さない。
+N-API host側にはexport取得、constructor呼び出し、instance method呼び出しの
+不透明handle ABIを追加した。handleはaddonを初期化した同じ`napi_env`に所属し、
+method callbackには元instanceを`this`として渡す。自作`NativeBox`の構築とmethod
+実行、および実sqlite3 `Database(":memory:")`の構築で検証した。通常のTypeScript
+`new sqlite3.Database(...)`構文からこのABIへの自動loweringは次の統合作業である。
+
 ## 1. 何が難しいのか（おさらい）
 
 registry.md 16章で確認した通り、実際の npm ネイティブアドオン
