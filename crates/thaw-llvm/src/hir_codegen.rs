@@ -246,7 +246,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         .iter()
                         .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions))
             }
-            HirStmt::Break | HirStmt::Continue => false,
+            HirStmt::Break
+            | HirStmt::Continue
+            | HirStmt::BreakDepth(_)
+            | HirStmt::ContinueDepth(_) => false,
             HirStmt::Try(body, _, catch_body) => body
                 .iter()
                 .chain(catch_body)
@@ -1373,7 +1376,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                         inner_stmt,
                                         &inner_try_guard,
                                         true,
-                                        None,
+                                        &[],
                                         &frame_names,
                                         &mut extra_locals,
                                         &mut guarded_rethrow_handlers,
@@ -1429,7 +1432,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                         inner_stmt,
                                         &inner_catch_guard,
                                         true,
-                                        None,
+                                        &[],
                                         &frame_names,
                                         &mut extra_locals,
                                         &mut guarded_rethrow_handlers,
@@ -1478,7 +1481,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 nested,
                                 &try_guard,
                                 true,
-                                None,
+                                &[],
                                 &frame_names,
                                 &mut extra_locals,
                                 &mut guarded_rethrow_handlers,
@@ -1506,7 +1509,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 nested,
                                 &catch_guard,
                                 true,
-                                None,
+                                &[],
                                 &frame_names,
                                 &mut extra_locals,
                                 &mut guarded_rethrow_handlers,
@@ -1581,17 +1584,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     ));
 
                     for nested in body {
-                        if matches!(nested, HirStmt::Break | HirStmt::Continue) {
-                            let mut exits = vec![HirStmt::Expr(HirExpr::Assign(
-                                body_guard.clone(),
-                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                            ))];
-                            if matches!(nested, HirStmt::Break) {
-                                exits.push(HirStmt::Expr(HirExpr::Assign(
-                                    guard.clone(),
-                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                                )));
-                            }
+                        if matches!(
+                            nested,
+                            HirStmt::Break
+                                | HirStmt::Continue
+                                | HirStmt::BreakDepth(_)
+                                | HirStmt::ContinueDepth(_)
+                        ) {
+                            let exits = Self::async_loop_exit_stmts(
+                                nested,
+                                &[(body_guard.clone(), guard.clone())],
+                            )?;
                             segments.last_mut().unwrap().stmts.push(HirStmt::If(
                                 HirExpr::Var(body_guard.clone()),
                                 exits,
@@ -1607,7 +1610,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 else_body,
                                 &body_guard,
                                 true,
-                                Some((&body_guard, &guard)),
+                                &[(body_guard.clone(), guard.clone())],
                                 &frame_names,
                                 &mut extra_locals,
                                 &mut guarded_rethrow_handlers,
@@ -1624,6 +1627,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 nested_body,
                                 &body_guard,
                                 true,
+                                &[(body_guard.clone(), guard.clone())],
                                 &frame_names,
                                 &mut extra_locals,
                                 &mut guarded_rethrow_handlers,
@@ -1641,7 +1645,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 nested,
                                 &body_guard,
                                 true,
-                                Some((&body_guard, &guard)),
+                                &[(body_guard.clone(), guard.clone())],
                                 &frame_names,
                                 &mut extra_locals,
                                 &mut guarded_rethrow_handlers,
@@ -1757,7 +1761,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     else_body,
                                     &guard,
                                     expected,
-                                    None,
+                                    &[],
                                     &frame_names,
                                     &mut extra_locals,
                                     &mut guarded_rethrow_handlers,
@@ -1775,7 +1779,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     nested,
                                     &guard,
                                     expected,
-                                    None,
+                                    &[],
                                     &frame_names,
                                     &mut extra_locals,
                                     &mut guarded_rethrow_handlers,
@@ -2396,7 +2400,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 stmt,
                 &try_guard,
                 true,
-                None,
+                &[],
                 frame_names,
                 extra_locals,
                 guarded_rethrow_handlers,
@@ -2448,7 +2452,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     stmt,
                     &catch_guard,
                     true,
-                    None,
+                    &[],
                     frame_names,
                     extra_locals,
                     guarded_rethrow_handlers,
@@ -2468,6 +2472,37 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    fn async_loop_exit_stmts(
+        stmt: &HirStmt,
+        loop_guards: &[(String, String)],
+    ) -> Result<Vec<HirStmt>, String> {
+        let (depth, is_break) = match stmt {
+            HirStmt::Break => (0, true),
+            HirStmt::Continue => (0, false),
+            HirStmt::BreakDepth(depth) => (*depth, true),
+            HirStmt::ContinueDepth(depth) => (*depth, false),
+            _ => return Err("expected async loop control statement".to_string()),
+        };
+        let target = loop_guards
+            .len()
+            .checked_sub(depth + 1)
+            .ok_or("labeled loop target is outside the active async loop stack")?;
+        let mut exits = Vec::new();
+        for (index, (body_guard, loop_guard)) in loop_guards.iter().enumerate().skip(target) {
+            exits.push(HirStmt::Expr(HirExpr::Assign(
+                body_guard.clone(),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            )));
+            if is_break || index > target {
+                exits.push(HirStmt::Expr(HirExpr::Assign(
+                    loop_guard.clone(),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                )));
+            }
+        }
+        Ok(exits)
+    }
+
     // The loop splitter threads the surrounding control-flow destinations and
     // frame layout explicitly; grouping them would only hide this pass state.
     #[allow(clippy::too_many_arguments)]
@@ -2478,6 +2513,7 @@ impl<'ctx> HirCompiler<'ctx> {
         body: &[HirStmt],
         parent_guard: &str,
         parent_expected: bool,
+        outer_loop_guards: &[(String, String)],
         frame_names: &std::collections::HashSet<String>,
         extra_locals: &mut Vec<(String, HirType)>,
         guarded_rethrow_handlers: &mut HashMap<String, AsyncRejectionHandler>,
@@ -2490,6 +2526,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let enabled_guard = format!("__thaw_nested_loop_enabled_{suffix}");
         let loop_guard = format!("__thaw_nested_loop_{suffix}");
         let body_guard = format!("__thaw_nested_loop_body_{suffix}");
+        let mut loop_guards = outer_loop_guards.to_vec();
+        loop_guards.push((body_guard.clone(), loop_guard.clone()));
         let loop_rejection_handler = rejection_handler.clone().map(|mut handler| {
             handler.disable_guards.extend([
                 enabled_guard.clone(),
@@ -2588,7 +2626,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 stmt,
                 &body_guard,
                 true,
-                Some((&body_guard, &loop_guard)),
+                &loop_guards,
                 frame_names,
                 extra_locals,
                 guarded_rethrow_handlers,
@@ -2629,7 +2667,7 @@ impl<'ctx> HirCompiler<'ctx> {
         else_body: &[HirStmt],
         parent_guard: &str,
         parent_expected: bool,
-        loop_guards: Option<(&str, &str)>,
+        loop_guards: &[(String, String)],
         frame_names: &std::collections::HashSet<String>,
         extra_locals: &mut Vec<(String, HirType)>,
         guarded_rethrow_handlers: &mut HashMap<String, AsyncRejectionHandler>,
@@ -2737,7 +2775,7 @@ impl<'ctx> HirCompiler<'ctx> {
         stmt: &HirStmt,
         guard: &str,
         expected: bool,
-        loop_guards: Option<(&str, &str)>,
+        loop_guards: &[(String, String)],
         frame_names: &std::collections::HashSet<String>,
         extra_locals: &mut Vec<(String, HirType)>,
         guarded_rethrow_handlers: &mut HashMap<String, AsyncRejectionHandler>,
@@ -2763,23 +2801,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 next_guard,
             );
         }
-        if matches!(stmt, HirStmt::Break | HirStmt::Continue) {
-            let Some((body_guard, loop_guard)) = loop_guards else {
-                return Err(
-                    "`break`/`continue` in an async branch requires an enclosing async loop"
-                        .to_string(),
-                );
-            };
-            let mut exits = vec![HirStmt::Expr(HirExpr::Assign(
-                body_guard.to_string(),
-                Box::new(HirExpr::Lit(HirLit::Bool(false))),
-            ))];
-            if matches!(stmt, HirStmt::Break) {
-                exits.push(HirStmt::Expr(HirExpr::Assign(
-                    loop_guard.to_string(),
-                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                )));
-            }
+        if matches!(
+            stmt,
+            HirStmt::Break | HirStmt::Continue | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_)
+        ) {
+            let exits = Self::async_loop_exit_stmts(stmt, loop_guards)?;
             segments.last_mut().unwrap().stmts.push(HirStmt::If(
                 HirExpr::Var(guard.to_string()),
                 if expected { exits.clone() } else { Vec::new() },
@@ -2794,6 +2820,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 body,
                 guard,
                 expected,
+                loop_guards,
                 frame_names,
                 extra_locals,
                 guarded_rethrow_handlers,
@@ -3761,12 +3788,38 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(true)
             }
 
+            HirStmt::BreakDepth(depth) => {
+                let index = self
+                    .loop_stack
+                    .len()
+                    .checked_sub(depth + 1)
+                    .ok_or("labeled `break` target is outside the active loop stack")?;
+                let (_, break_target) = self.loop_stack[index];
+                self.builder
+                    .build_unconditional_branch(break_target)
+                    .map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+
             HirStmt::Continue => {
                 let (continue_target, _) = self
                     .loop_stack
                     .last()
                     .copied()
                     .ok_or("`continue` used outside a loop")?;
+                self.builder
+                    .build_unconditional_branch(continue_target)
+                    .map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+
+            HirStmt::ContinueDepth(depth) => {
+                let index = self
+                    .loop_stack
+                    .len()
+                    .checked_sub(depth + 1)
+                    .ok_or("labeled `continue` target is outside the active loop stack")?;
+                let (continue_target, _) = self.loop_stack[index];
                 self.builder
                     .build_unconditional_branch(continue_target)
                     .map_err(|e| e.to_string())?;
@@ -12151,6 +12204,29 @@ mod tests {
     }
 
     #[test]
+    fn compiles_labeled_loop_control_and_block_breaks() {
+        let source = r#"
+            function main(): void {
+                let total: number = 0;
+                outer: for (let i: number = 0; i < 4; i = i + 1) {
+                    for (let j: number = 0; j < 4; j = j + 1) {
+                        if (j === 1) continue outer;
+                        total = total + 1;
+                        if (i === 2) break outer;
+                    }
+                }
+                done: {
+                    total = total + 10;
+                    break done;
+                    total = 1000;
+                }
+                console.log(total);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "labeled_loop_control"), "13\n");
+    }
+
+    #[test]
     fn frame_split_supports_break_and_continue_in_while_loop() {
         let source = r#"
             async function main(): Promise<void> {
@@ -12174,6 +12250,29 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "async_break_continue"), "3\n1\n");
+    }
+
+    #[test]
+    fn frame_split_supports_labeled_nested_loop_control() {
+        let source = r#"
+            async function main(): Promise<void> {
+                let total: number = 0;
+                let i: number = 0;
+                outer: while (i < 4) {
+                    i = i + 1;
+                    let j: number = 0;
+                    while (j < 3) {
+                        j = j + 1;
+                        await sleep(1);
+                        if (j === 2) continue outer;
+                        total = total + 1;
+                        if (i === 3) break outer;
+                    }
+                }
+                console.log(total);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "async_labeled_control"), "3\n");
     }
 
     #[test]
