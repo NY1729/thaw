@@ -9705,6 +9705,33 @@ mod tests {
     }
 
     #[test]
+    fn compiles_static_computed_object_and_json_access() {
+        let source = r#"
+            async function asyncPoint(point: { value: number }): Promise<{ value: number }> {
+                await sleep(1);
+                console.log("object");
+                return point;
+            }
+            async function main(): Promise<void> {
+                let point = { value: 1 };
+                console.log(point["value"]);
+                point["value"] = 2;
+                point["value"] += 3;
+                console.log(point["value"]++);
+                console.log(point.value);
+                console.log((await asyncPoint(point))["value"]--);
+                console.log(point.value);
+                const data: Json = JSON.parse("{\"name\":\"thaw\"}");
+                console.log(String(data["name"]));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "static_computed_properties"),
+            "1\n5\n6\nobject\n6\n5\nthaw\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
