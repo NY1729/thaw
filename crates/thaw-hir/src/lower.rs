@@ -3374,6 +3374,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string trim receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_string_to_array" => {
+                        let [value] = args.as_slice() else {
+                            return Err("string iterator conversion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "string iterator source")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());
@@ -7273,12 +7280,25 @@ impl<'a> FnLowerer<'a> {
                         }
                         let source = self.lower_expr(&call.args[0].expr)?;
                         let source_type = self.infer_expr_type(&source)?;
-                        let HirType::Array(element) = &source_type else {
-                            return Err(format!(
-                                "native `Array.from` currently requires a homogeneous array, got {source_type:?}"
-                            ));
+                        let (source, source_type, element_type) = match source_type {
+                            HirType::Array(element) => {
+                                let element_type = element.as_ref().clone();
+                                (source, HirType::Array(element), element_type)
+                            }
+                            HirType::Str => (
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_to_array".into())),
+                                    vec![source],
+                                ),
+                                HirType::Array(Box::new(HirType::Str)),
+                                HirType::Str,
+                            ),
+                            other => {
+                                return Err(format!(
+                                    "native `Array.from` requires a homogeneous array or string, got {other:?}"
+                                ))
+                            }
                         };
-                        let element_type = element.as_ref().clone();
                         if let Some(expected) = explicit_types.first() {
                             if expected != &element_type {
                                 return Err(format!(
