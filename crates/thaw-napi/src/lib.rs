@@ -162,6 +162,13 @@ unsafe fn threadsafe_function_ref<'a>(
     }
 }
 
+unsafe fn record_threadsafe_status(
+    function: &ThreadsafeFunction,
+    status: NapiStatus,
+) -> NapiStatus {
+    record_status(function.env as NapiEnv, status)
+}
+
 fn schedule_threadsafe(function: *mut ThreadsafeFunction, state: &mut ThreadsafeState) {
     if !state.scheduled {
         state.scheduled = true;
@@ -6600,15 +6607,15 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
         || (!async_resource_name.is_null()
             && !value_belongs_to_environment(env, async_resource_name))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if !function.is_null() && !matches!(value_ref(function), Ok(Value::Function(_))) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if !async_resource_name.is_null()
         && !matches!(value_ref(async_resource_name), Ok(Value::String(_)))
     {
-        return NAPI_STRING_EXPECTED;
+        return record_status(env, NAPI_STRING_EXPECTED);
     }
     let mut threadsafe = Box::new(ThreadsafeFunction {
         env: env as usize,
@@ -6645,8 +6652,11 @@ pub unsafe extern "C" fn napi_get_threadsafe_function_context(
     function: *mut ThreadsafeFunction,
     result: *mut *mut c_void,
 ) -> NapiStatus {
-    let (Ok(function), Some(result)) = (threadsafe_function_ref(function), result.as_mut()) else {
+    let Ok(function) = threadsafe_function_ref(function) else {
         return NAPI_INVALID_ARG;
+    };
+    let Some(result) = result.as_mut() else {
+        return record_threadsafe_status(function, NAPI_INVALID_ARG);
     };
     *result = function.context as *mut c_void;
     NAPI_OK
@@ -6662,7 +6672,7 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
         return NAPI_INVALID_ARG;
     };
     if mode != 0 && mode != 1 {
-        return NAPI_INVALID_ARG;
+        return record_threadsafe_status(function_ref, NAPI_INVALID_ARG);
     }
     let mut state = function_ref
         .state
@@ -6670,16 +6680,16 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     loop {
         if state.closing {
-            return NAPI_CLOSING;
+            return record_threadsafe_status(function_ref, NAPI_CLOSING);
         }
         if function_ref.max_queue_size == 0 || state.queue.len() < function_ref.max_queue_size {
             break;
         }
         if mode == 0 {
-            return NAPI_QUEUE_FULL;
+            return record_threadsafe_status(function_ref, NAPI_QUEUE_FULL);
         }
         if std::thread::current().id() == function_ref.creator {
-            return NAPI_WOULD_DEADLOCK;
+            return record_threadsafe_status(function_ref, NAPI_WOULD_DEADLOCK);
         }
         state = function_ref
             .space_available
@@ -6700,14 +6710,14 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(
         return NAPI_INVALID_ARG;
     };
     if mode != 0 && mode != 1 {
-        return NAPI_INVALID_ARG;
+        return record_threadsafe_status(function_ref, NAPI_INVALID_ARG);
     }
     let mut state = function_ref
         .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.closing || state.thread_count == 0 {
-        return NAPI_CLOSING;
+        return record_threadsafe_status(function_ref, NAPI_CLOSING);
     }
     if mode == 1 {
         state.thread_count = 0;
@@ -6738,7 +6748,7 @@ pub unsafe extern "C" fn napi_acquire_threadsafe_function(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.closing {
-        return NAPI_CLOSING;
+        return record_threadsafe_status(function_ref, NAPI_CLOSING);
     }
     state.thread_count = state.thread_count.saturating_add(1);
     NAPI_OK
@@ -6753,7 +6763,7 @@ pub unsafe extern "C" fn napi_ref_threadsafe_function(
         return NAPI_INVALID_ARG;
     };
     if env.is_null() || function.env != env as usize {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if function
         .state
@@ -6761,7 +6771,7 @@ pub unsafe extern "C" fn napi_ref_threadsafe_function(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .closing
     {
-        return NAPI_CLOSING;
+        return record_status(env, NAPI_CLOSING);
     }
     if !function.referenced.swap(true, Ordering::AcqRel) {
         ACTIVE_THREADSAFE_FUNCTIONS.fetch_add(1, Ordering::AcqRel);
@@ -6778,7 +6788,7 @@ pub unsafe extern "C" fn napi_unref_threadsafe_function(
         return NAPI_INVALID_ARG;
     };
     if env.is_null() || function.env != env as usize {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if function
         .state
@@ -6786,7 +6796,7 @@ pub unsafe extern "C" fn napi_unref_threadsafe_function(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .closing
     {
-        return NAPI_CLOSING;
+        return record_status(env, NAPI_CLOSING);
     }
     if function.referenced.swap(false, Ordering::AcqRel) {
         ACTIVE_THREADSAFE_FUNCTIONS.fetch_sub(1, Ordering::AcqRel);
@@ -11833,12 +11843,17 @@ mod tests {
                 napi_call_threadsafe_function(threadsafe, full.cast(), 0),
                 NAPI_QUEUE_FULL
             );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(&mut env, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_QUEUE_FULL);
             drop(Box::from_raw(full));
             let deadlock = Box::into_raw(Box::new(2.0));
             assert_eq!(
                 napi_call_threadsafe_function(threadsafe, deadlock.cast(), 1),
                 NAPI_WOULD_DEADLOCK
             );
+            assert_eq!(napi_get_last_error_info(&mut env, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_WOULD_DEADLOCK);
             drop(Box::from_raw(deadlock));
             assert_eq!(
                 napi_unref_threadsafe_function(&mut env, threadsafe),
@@ -11850,6 +11865,8 @@ mod tests {
                 napi_call_threadsafe_function(threadsafe, ptr::null_mut(), 0),
                 NAPI_CLOSING
             );
+            assert_eq!(napi_get_last_error_info(&mut env, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_CLOSING);
         }
         assert_eq!(thaw_napi_run_async_work(), 0);
         let probe = unsafe { Box::from_raw(probe) };
