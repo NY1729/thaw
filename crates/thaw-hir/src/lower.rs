@@ -2065,8 +2065,10 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_scoped_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
         let saved = self.bindings.clone();
+        let saved_narrowings = self.narrowings.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
+        self.narrowings = saved_narrowings;
         lowered
     }
 
@@ -2074,8 +2076,31 @@ impl<'a> FnLowerer<'a> {
         let mut out = Vec::new();
         for stmt in stmts {
             out.extend(self.lower_stmt_seq(stmt)?);
+            if let Stmt::If(if_stmt) = stmt {
+                if if_stmt.alt.is_none() && Self::stmt_definitely_exits(&if_stmt.cons) {
+                    if let Some((name, payload, present_when_true)) =
+                        self.optional_undefined_narrowing(&if_stmt.test)
+                    {
+                        if !present_when_true {
+                            self.narrowings.insert(name, payload);
+                        }
+                    }
+                }
+            }
         }
         Ok(out)
+    }
+
+    fn stmt_definitely_exits(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return(_) | Stmt::Throw(_) => true,
+            Stmt::Block(block) => block.stmts.last().is_some_and(Self::stmt_definitely_exits),
+            Stmt::If(if_stmt) => if_stmt.alt.as_ref().is_some_and(|alternative| {
+                Self::stmt_definitely_exits(&if_stmt.cons)
+                    && Self::stmt_definitely_exits(alternative)
+            }),
+            _ => false,
+        }
     }
 
     fn infer_return_type(&self, body: &[HirStmt]) -> Result<HirType, String> {
@@ -5510,6 +5535,11 @@ impl<'a> FnLowerer<'a> {
 
         let mut target = self.lower_assign_target(&assign.left)?;
         let rhs = self.lower_expr(&assign.right)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        let assigned_variable = match &target {
+            Target::Var(name) => Some(name.clone()),
+            _ => None,
+        };
         let mut bindings = Vec::new();
 
         if assign.op != AssignOp::Assign {
@@ -5580,6 +5610,9 @@ impl<'a> FnLowerer<'a> {
                 )))],
             )]);
             bindings.push((current_name, current_type, current));
+            if let Some(name) = assigned_variable {
+                self.narrowings.insert(name, payload.as_ref().clone());
+            }
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
@@ -5638,6 +5671,15 @@ impl<'a> FnLowerer<'a> {
         };
 
         let result = build_assign(target, value);
+        if let Some(name) = assigned_variable {
+            if let Some(HirType::Optional(payload)) = self.scope.get(&name) {
+                if rhs_type == **payload || assign.op != AssignOp::Assign {
+                    self.narrowings.insert(name, payload.as_ref().clone());
+                } else {
+                    self.narrowings.remove(&name);
+                }
+            }
+        }
         self.wrap_call_argument_bindings(result, &bindings)
     }
 

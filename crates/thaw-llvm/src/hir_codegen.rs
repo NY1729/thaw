@@ -12680,6 +12680,25 @@ mod tests {
                 }
                 return 2;
             }
+            function guarded(value: number | undefined): number {
+                if (value === undefined) return 10;
+                return value + 4;
+            }
+            function guardedNegation(value: number | undefined): number {
+                if (!(value !== undefined)) {
+                    return 20;
+                }
+                return value * 4;
+            }
+            function assigned(value: number | undefined): number {
+                value = 5;
+                return value + 1;
+            }
+            function reset(value: number | undefined): number {
+                if (value === undefined) return 1;
+                value = undefined;
+                return value ?? 3;
+            }
             async function delayed(value: number | undefined): Promise<number> {
                 if (value !== undefined) {
                     await sleep(1);
@@ -12696,13 +12715,19 @@ mod tests {
                 console.log(equality(undefined));
                 console.log(negated(3));
                 console.log(negated(undefined));
+                console.log(guarded(6));
+                console.log(guarded(undefined));
+                console.log(guardedNegation(2));
+                console.log(guardedNegation(undefined));
+                console.log(assigned(undefined));
+                console.log(reset(8));
                 console.log(await delayed(6));
                 console.log(await delayed(undefined));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "optional_branch_narrowing"),
-            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n12\n3\n"
+            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n10\n10\n8\n20\n6\n3\n12\n3\n"
         );
     }
 
