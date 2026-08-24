@@ -259,12 +259,20 @@ impl VisitMut for RenameReferences<'_> {
         let thaw_parser::ast::MemberProp::Ident(property) = &member.prop else {
             return;
         };
-        if property.sym != *"url" {
-            return;
-        }
+        let value = match property.sym.as_ref() {
+            "url" => self.import_meta_url.to_string(),
+            "filename" => self.module_path.to_string_lossy().into_owned(),
+            "dirname" => self
+                .module_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .to_string_lossy()
+                .into_owned(),
+            _ => return,
+        };
         *expr = Expr::Lit(thaw_parser::ast::Lit::Str(thaw_parser::ast::Str {
             span: member.span,
-            value: self.import_meta_url.into(),
+            value: value.into(),
             raw: None,
         }));
     }
