@@ -50,8 +50,10 @@
 //! differentiator" left undone; this is a placeholder for the local half
 //! of it, real enough to remove the remaining manual
 //! `--bridge`/`--link`/`loadScript` steps for a package that's already
-//! been fetched/built by some other means. `add` does select already-bundled
-//! `.node` prebuilds; it never runs package install scripts or `node-gyp`.
+//! been fetched/built by some other means. `add` selects already-bundled
+//! `.node` prebuilds and `prebuild-install`-style GitHub Release assets
+//! described by the package manifest; it never runs package install scripts
+//! or `node-gyp`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -220,7 +222,7 @@ pub struct NativeAddonMetadata {
 #[derive(Debug)]
 struct SelectedPrebuild {
     path: PathBuf,
-    relative_path: String,
+    source: String,
     platform: String,
     arch: String,
     libc: String,
@@ -296,9 +298,14 @@ fn select_prebuilt_addon(package_dir: &Path) -> Result<Option<SelectedPrebuild>,
         .unwrap_or(&path)
         .to_string_lossy()
         .into_owned();
+    let source = fs::read_to_string(package_dir.join(".thaw-prebuild-source"))
+        .ok()
+        .map(|source| source.trim().to_string())
+        .filter(|source| !source.is_empty())
+        .unwrap_or(relative_path);
     Ok(Some(SelectedPrebuild {
         path,
-        relative_path,
+        source,
         platform: platform.into(),
         arch: arch.into(),
         libc: libc.into(),
@@ -349,7 +356,7 @@ fn select_optional_dependency_addon(
                 .into_owned();
             return Ok(Some(SelectedPrebuild {
                 path,
-                relative_path,
+                source: relative_path,
                 platform: platform.into(),
                 arch: arch.into(),
                 libc: libc.into(),
@@ -357,6 +364,146 @@ fn select_optional_dependency_addon(
         }
     }
     Ok(None)
+}
+
+fn github_repository(manifest: &serde_json::Value) -> Option<String> {
+    let repository = manifest.get("repository")?;
+    let raw = repository
+        .as_str()
+        .or_else(|| repository.get("url").and_then(serde_json::Value::as_str))?;
+    let normalized = raw
+        .strip_prefix("git+")
+        .unwrap_or(raw)
+        .strip_prefix("https://github.com/")?
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    let mut parts = normalized.split('/');
+    let owner = parts.next()?;
+    let repository = parts.next()?;
+    if owner.is_empty() || repository.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repository}"))
+}
+
+fn prebuild_install_asset(
+    manifest: &serde_json::Value,
+) -> Option<(String, String, String, String)> {
+    let binary = manifest.get("binary")?;
+    let napi = binary
+        .get("napi_versions")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_u64)
+        .filter(|version| *version <= 8)
+        .max()?;
+    let name = manifest.get("name")?.as_str()?;
+    let version = manifest.get("version")?.as_str()?;
+    let repository = github_repository(manifest)?;
+    let (platform, arch, libc) = target_prebuild_components();
+    let platform = if platform == "linux" && libc == "musl" {
+        "linuxmusl"
+    } else {
+        platform
+    };
+    let asset = format!("{name}-v{version}-napi-v{napi}-{platform}-{arch}.tar.gz");
+    let url = format!("https://github.com/{repository}/releases/download/v{version}/{asset}");
+    Some((url, asset, platform.to_string(), arch.to_string()))
+}
+
+fn find_node_file(root: &Path) -> Result<Option<PathBuf>, String> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut matches = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("failed to inspect `{}`: {error}", directory.display()))?
+        {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to inspect an entry in `{}`: {error}",
+                    directory.display()
+                )
+            })?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("failed to inspect `{}`: {error}", path.display()))?;
+            if file_type.is_dir() {
+                directories.push(path);
+            } else if file_type.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "node")
+            {
+                matches.push(path);
+            }
+        }
+    }
+    matches.sort();
+    if matches.len() > 1 {
+        return Err(format!(
+            "downloaded prebuild contains multiple `.node` files: {}",
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(matches.pop())
+}
+
+fn download_prebuild_install_addon(
+    package_dir: &Path,
+    manifest: &serde_json::Value,
+) -> Result<(), String> {
+    if package_dir.join("prebuilds").is_dir() {
+        return Ok(());
+    }
+    let Some((url, asset, _, _)) = prebuild_install_asset(manifest) else {
+        return Ok(());
+    };
+    let mut response = ureq::get(&url)
+        .call()
+        .map_err(|error| format!("failed to download native prebuild `{url}`: {error}"))?;
+    let archive_bytes = response
+        .body_mut()
+        .with_config()
+        .limit(128 * 1024 * 1024)
+        .read_to_vec()
+        .map_err(|error| format!("failed to read native prebuild `{url}`: {error}"))?;
+    let unpack_dir = package_dir.join(".thaw-prebuild");
+    if unpack_dir.is_dir() {
+        fs::remove_dir_all(&unpack_dir)
+            .map_err(|error| format!("failed to clear `{}`: {error}", unpack_dir.display()))?;
+    }
+    fs::create_dir_all(&unpack_dir)
+        .map_err(|error| format!("failed to create `{}`: {error}", unpack_dir.display()))?;
+    let decoder = flate2::read::GzDecoder::new(archive_bytes.as_slice());
+    tar::Archive::new(decoder)
+        .unpack(&unpack_dir)
+        .map_err(|error| format!("failed to unpack native prebuild `{asset}`: {error}"))?;
+    let addon = find_node_file(&unpack_dir)?
+        .ok_or_else(|| format!("native prebuild `{asset}` contains no `.node` file"))?;
+    let (platform, arch, _) = target_prebuild_components();
+    let target = package_dir
+        .join("prebuilds")
+        .join(format!("{platform}-{arch}"));
+    fs::create_dir_all(&target)
+        .map_err(|error| format!("failed to create `{}`: {error}", target.display()))?;
+    let destination =
+        target.join(addon.file_name().ok_or_else(|| {
+            format!("native prebuild path `{}` has no filename", addon.display())
+        })?);
+    fs::copy(&addon, &destination).map_err(|error| {
+        format!(
+            "failed to copy downloaded native addon to `{}`: {error}",
+            destination.display()
+        )
+    })?;
+    fs::write(package_dir.join(".thaw-prebuild-source"), url)
+        .map_err(|error| format!("failed to record downloaded native prebuild source: {error}"))?;
+    Ok(())
 }
 
 /// Fetches `package` via `npm install` (into a throwaway scratch
@@ -375,9 +522,9 @@ fn select_optional_dependency_addon(
 /// (`@types/<package>`, or `@types/<scope>__<name>` for a scoped
 /// `@<scope>/<name>` package) and uses *its* declarations -- the JS
 /// still always comes from `package` itself, since `@types/*` packages
-/// carry no runtime code. An ESM-only package and a native addon (this
-/// never produces a `native.a`) are still out of scope; see the design
-/// doc's closing section.
+/// carry no runtime code. Native addons never produce a `native.a`: bundled
+/// `.node` files, platform optional dependencies, and GitHub-hosted
+/// `prebuild-install` assets are selected independently of the JS fallback.
 ///
 /// `package` may carry a version/tag/range specifier the same way `npm
 /// install` accepts one (`left-pad@1.3.0`, `left-pad@^1.2.0`,
@@ -454,6 +601,7 @@ fn fetch_and_copy(
     let node_modules_dir = scratch.join("node_modules");
     let package_dir = node_modules_dir.join(name);
     let manifest = read_manifest(&package_dir)?;
+    download_prebuild_install_addon(&package_dir, &manifest)?;
     let fallback_dts = if find_own_dts(&manifest, &package_dir).is_none() {
         Some(fetch_types_package_dts(scratch, name)?)
     } else {
@@ -542,7 +690,7 @@ fn add_installed_inner(
                 )
             })?;
             let metadata = NativeAddonMetadata {
-                source: selected.relative_path,
+                source: selected.source,
                 sha256: format!("{:x}", Sha256::digest(&bytes)),
                 platform: selected.platform,
                 arch: selected.arch,
@@ -2669,6 +2817,36 @@ mod tests {
     }
 
     #[test]
+    fn builds_prebuild_install_github_asset_for_the_current_target() {
+        let manifest = serde_json::json!({
+            "name": "sqlite3",
+            "version": "5.1.7",
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/TryGhost/node-sqlite3.git"
+            },
+            "binary": { "napi_versions": [3, 6, 99] }
+        });
+        let (url, asset, platform, arch) = prebuild_install_asset(&manifest).unwrap();
+        let (target_platform, target_arch, libc) = target_prebuild_components();
+        let asset_platform = if target_platform == "linux" && libc == "musl" {
+            "linuxmusl"
+        } else {
+            target_platform
+        };
+        assert_eq!(
+            asset,
+            format!("sqlite3-v5.1.7-napi-v6-{asset_platform}-{target_arch}.tar.gz")
+        );
+        assert_eq!(
+            url,
+            format!("https://github.com/TryGhost/node-sqlite3/releases/download/v5.1.7/{asset}")
+        );
+        assert_eq!(platform, asset_platform);
+        assert_eq!(arch, target_arch);
+    }
+
+    #[test]
     fn reports_available_targets_when_no_prebuild_matches() {
         let package = temp_registry("mismatched_native_prebuild");
         let target = package.join("prebuilds/imaginary-other");
@@ -2704,7 +2882,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(selected.path, dependency_dir.join("binding.node"));
-        assert_eq!(selected.relative_path, format!("{dependency}/binding.node"));
+        assert_eq!(selected.source, format!("{dependency}/binding.node"));
         assert_eq!(selected.platform, platform);
         assert_eq!(selected.arch, arch);
         assert_eq!(selected.libc, libc);

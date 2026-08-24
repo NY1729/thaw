@@ -245,6 +245,7 @@ unsafe impl Sync for NapiExtendedErrorInfo {}
 
 pub struct Env {
     values: Vec<NapiValue>,
+    global: NapiValue,
     exception: Option<NapiValue>,
     wraps: HashMap<usize, WrapRecord>,
     instances: HashMap<usize, usize>,
@@ -283,6 +284,7 @@ impl Env {
     fn new() -> Self {
         Self {
             values: Vec::new(),
+            global: ptr::null_mut(),
             exception: None,
             wraps: HashMap::new(),
             instances: HashMap::new(),
@@ -2009,6 +2011,77 @@ pub unsafe extern "C" fn napi_get_version(_env: NapiEnv, out: *mut u32) -> NapiS
     } else {
         *out = 8;
         NAPI_OK
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_global(env: NapiEnv, out: *mut NapiValue) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    if env.global.is_null() {
+        env.global = env.alloc(Value::Object(HashMap::new()));
+    }
+    *out = env.global;
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_property_names(
+    env: NapiEnv,
+    object: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let mut names = match value_ref(object) {
+        Ok(Value::Object(properties)) => properties.keys().cloned().collect::<Vec<_>>(),
+        Ok(Value::Function(function)) => function.properties.keys().cloned().collect::<Vec<_>>(),
+        Ok(Value::Array(values)) => (0..values.len()).map(|index| index.to_string()).collect(),
+        _ => return NAPI_INVALID_ARG,
+    };
+    names.sort();
+    let names = names
+        .into_iter()
+        .map(|name| env.alloc(Value::String(name)))
+        .collect();
+    let result = env.alloc(Value::Array(names));
+    write_value(out, result)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_uv_event_loop(
+    _env: NapiEnv,
+    out: *mut *mut c_void,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr());
+        if symbol.is_null() {
+            return NAPI_GENERIC_FAILURE;
+        }
+        let default_loop =
+            std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> *mut c_void>(symbol);
+        *out = default_loop();
+        if (*out).is_null() {
+            return NAPI_GENERIC_FAILURE;
+        }
+        NAPI_OK
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        *out = ptr::null_mut();
+        NAPI_GENERIC_FAILURE
     }
 }
 
@@ -3937,6 +4010,24 @@ mod tests {
             assert!(error.is_null());
             assert!(result.as_str().unwrap().starts_with("$2b$04$"));
         }
+    }
+
+    #[test]
+    fn loads_sqlite3_prebuild_when_supplied() {
+        let _guard = lock_async_test();
+        let Ok(path) = std::env::var("THAW_SQLITE3_NODE") else {
+            return;
+        };
+        let path = CString::new(path).unwrap();
+        unsafe {
+            assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+        }
+        HOST.with(|host| {
+            let host = host.borrow();
+            assert!(host.functions.contains_key("Database"));
+            assert!(host.functions.contains_key("Statement"));
+            assert!(host.functions.contains_key("Backup"));
+        });
     }
 
     #[test]
