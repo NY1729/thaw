@@ -849,6 +849,8 @@ N-API functions retain their requested names and standard name/length descriptor
 classes expose immutable prototype links and constructor backlinks.
 Created and thrown Error variants expose name, message, and optional code properties,
 with shadowable names and JavaScript-style error stringification.
+Strict equality compares BigInts by value while preserving object identity rules;
+Date-to-number coercion returns the stored millisecond timestamp.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
