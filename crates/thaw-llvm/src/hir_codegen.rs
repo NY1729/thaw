@@ -12426,6 +12426,68 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_array_to_spliced() {
+        let source = r#"
+            interface Item { value: number; }
+            function receiver(): number[] {
+                console.log("receiver");
+                return [1, 2, 3];
+            }
+            function start(): number {
+                console.log("start");
+                return 1;
+            }
+            function deletion(): number {
+                console.log("delete");
+                return 1;
+            }
+            function item(): number {
+                console.log("item");
+                return 9;
+            }
+            async function delayedReceiver(): Promise<string[]> {
+                console.log("awaited receiver");
+                await sleep(1);
+                return ["a", "b", "c"];
+            }
+            async function delayedStart(): Promise<number> {
+                console.log("awaited start");
+                await sleep(1);
+                return -1;
+            }
+            async function delayedItem(): Promise<string> {
+                console.log("awaited item");
+                await sleep(1);
+                return "z";
+            }
+            async function main(): Promise<void> {
+                const source: number[] = [1, 2, 3, 4];
+                console.log(source.toSpliced().join(","));
+                console.log(source.toSpliced(2).join(","));
+                console.log(source.toSpliced(-2, 1, 8, 9).join(","));
+                console.log(source.toSpliced(0 / 0, 0 / 0, 7).join(","));
+                console.log(source.toSpliced(1.9, 1.9, 6).join(","));
+                console.log(source.toSpliced(99, 5, 8).join(","));
+                console.log(source.toSpliced(-99, -2, 8).join(","));
+                console.log(source.join(","));
+                const first: Item = { value: 1 };
+                const second: Item = { value: 2 };
+                const replacement: Item = { value: 3 };
+                const objects: Item[] = [first, second];
+                const copied: Item[] = objects.toSpliced(1, 1, replacement);
+                copied[0].value = 5;
+                console.log(objects[0].value + copied[1].value);
+                console.log(receiver().toSpliced(start(), deletion(), item()).join(","));
+                console.log((await delayedReceiver()).toSpliced(await delayedStart(), 1, await delayedItem()).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_to_spliced"),
+            "1,2,3,4\n1,2\n1,2,8,9,4\n7,1,2,3,4\n1,6,3,4\n1,2,3,4,8\n8,1,2,3,4\n1,2,3,4\n8\nreceiver\nstart\ndelete\nitem\n1,9,3\nawaited receiver\nawaited start\nawaited item\na,b,z\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
