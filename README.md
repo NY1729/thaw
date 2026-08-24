@@ -331,8 +331,10 @@ The workspace crates have narrow responsibilities:
 - Full ESM semantics and a parser-backed production bundler
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
-  Promise resolution and explicit release. Arguments/results that are not
-  handles still use JSON; automatic lifetime analysis remains future work
+  Promise resolution, constructors, mixed JSON/handle arguments and explicit
+  release. Callable interfaces and default callable exports are recognized
+  from `.d.ts`; generated programs release all remaining handles at shutdown.
+  Fine-grained escape-based early release remains future work
 - A fully general ABI-description format. Version 3 covers string layouts,
   number-array result ownership and common LLVM calling conventions, but
   target-specific struct packing, variadics and nested aggregate ownership

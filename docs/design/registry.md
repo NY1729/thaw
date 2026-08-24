@@ -975,9 +975,15 @@ callableの戻り値を別handleとして受け取り、handleを引数として
 Thawのcatchへ伝播する。`.d.ts`でcallable戻り値を判定できるFallback wrapperは自動的に
 `JsValue`を返す。
 
-p-limit workloadはpackage exportをhandleとして取得し、`pLimit(2)`が返したlimiterを別handleに
-保持し、async taskのhandleを直接渡す。結果PromiseをJSONへ解決して単一実行ファイルが42を
-出力するため、package内部だけに閉じたwrapperには依存しない。
+p-limit workloadはpackage exportを通常のdefault importで取得し、`pLimit(2)`が返したlimiterを
+別handleに保持し、QuickJS callableのhandleをtaskとして直接渡す。結果PromiseをJSONへ解決する
+ため、package内部だけに閉じたwrapperには依存しない。
+
+call signatureを持つinterfaceはnative recordではなく`JsValue`として分類する。これにより
+`export default function pLimit(concurrency: number): Limit`をtyped dynamic declarationへ変換し、
+利用側は通常の`import pLimit from "p-limit"`と`pLimit(2)`でlimiter handleを得られる。混在呼び出し
+はJSON引数の後へ複数handleを追加でき、constructor、Symbol、`undefined`もlive bitmapによって
+解放済みslotと区別する。明示releaseに加え、生成プログラム終了時にrealmのhandleを一括解放する。
 
 ## 25. Node風の構造化listen error
 

@@ -222,11 +222,23 @@ pub extern "C" fn thaw_js_get_global(name: *const c_char) -> u64 {
                 {
                     return 0;
                 }
+                let Ok(live) = Array::new(ctx.clone()) else {
+                    return 0;
+                };
+                if globals.set("__thaw_value_handle_live", live).is_err() {
+                    return 0;
+                }
                 handles
             }
         };
         let index = handles.len();
         if handles.set(index, value).is_err() {
+            return 0;
+        }
+        let Ok(live) = ctx.globals().get::<_, Array>("__thaw_value_handle_live") else {
+            return 0;
+        };
+        if live.set(index, true).is_err() {
             return 0;
         }
         index as u64 + 1
@@ -243,12 +255,16 @@ fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, Stri
     if handle == 0 {
         return Err("invalid JavaScript value handle 0".to_string());
     }
+    let live: Array = ctx
+        .globals()
+        .get("__thaw_value_handle_live")
+        .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
+    if !live.get::<bool>((handle - 1) as usize).unwrap_or(false) {
+        return Err(format!("released JavaScript value handle {handle}"));
+    }
     let value: Value = handle_array(ctx)?
         .get((handle - 1) as usize)
         .map_err(|_| format!("invalid JavaScript value handle {handle}"))?;
-    if value.is_undefined() {
-        return Err(format!("released JavaScript value handle {handle}"));
-    }
     Ok(value)
 }
 
@@ -258,6 +274,11 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
     handles
         .set(index, value)
         .map_err(|error| error.to_string())?;
+    let live: Array = ctx
+        .globals()
+        .get("__thaw_value_handle_live")
+        .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
+    live.set(index, true).map_err(|error| error.to_string())?;
     Ok(index as u64 + 1)
 }
 
@@ -283,6 +304,126 @@ fn invoke_raw<'js>(
         rquickjs::Error::Exception => describe_exception(&ctx),
         error => error.to_string(),
     })
+}
+
+unsafe fn native_handle_slice<'a>(array: *const u8) -> Result<&'a [u64], String> {
+    if array.is_null() {
+        return Err("null JsValue array".into());
+    }
+    let length = unsafe { *(array.cast::<u64>()) } as usize;
+    Ok(unsafe { std::slice::from_raw_parts(array.add(8).cast::<u64>(), length) })
+}
+
+unsafe fn invoke_mixed<'js>(
+    ctx: Ctx<'js>,
+    target: Function<'js>,
+    args_json: &str,
+    handles: *const u8,
+) -> Result<Value<'js>, String> {
+    let json: Object = ctx
+        .globals()
+        .get("JSON")
+        .map_err(|error| error.to_string())?;
+    let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+    let arguments: Array = parse
+        .call((args_json,))
+        .map_err(|error| error.to_string())?;
+    let mut call_args = Args::new_unsized(ctx.clone());
+    for index in 0..arguments.len() {
+        call_args
+            .push_arg(
+                arguments
+                    .get::<Value>(index)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    for handle in unsafe { native_handle_slice(handles)? } {
+        call_args
+            .push_arg(value_for_handle(&ctx, *handle)?)
+            .map_err(|error| error.to_string())?;
+    }
+    target.call_arg(call_args).map_err(|error| match error {
+        rquickjs::Error::Exception => describe_exception(&ctx),
+        error => error.to_string(),
+    })
+}
+
+#[no_mangle]
+/// Calls a retained function with JSON arguments followed by retained values.
+///
+/// # Safety
+///
+/// `handles` must point to a live Thaw array buffer containing an initial
+/// `u64` length followed by that many aligned `u64` handle identifiers.
+pub unsafe extern "C" fn thaw_js_call_handle_mixed_result(
+    handle: u64,
+    args_json: *const c_char,
+    handles: *const u8,
+) -> ThawResult {
+    let args_json = to_str(args_json);
+    let result = with_context(|ctx| {
+        let target = Function::from_value(value_for_handle(&ctx, handle)?)
+            .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+        let value = unsafe { invoke_mixed(ctx.clone(), target, &args_json, handles)? };
+        resolve_value_impl(ctx, value, &format!("JavaScript value #{handle}"))
+    });
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawResult {
+            value: std::ptr::null(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_construct_handle_result(
+    handle: u64,
+    args_json: *const c_char,
+) -> ThawHandleResult {
+    let args_json = to_str(args_json);
+    match with_context(|ctx| {
+        let constructor = value_for_handle(&ctx, handle)?
+            .into_constructor()
+            .ok_or_else(|| format!("JavaScript value handle {handle} is not a constructor"))?;
+        let json: Object = ctx
+            .globals()
+            .get("JSON")
+            .map_err(|error| error.to_string())?;
+        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
+        let arguments: Array = parse
+            .call((args_json,))
+            .map_err(|error| error.to_string())?;
+        let mut args = Args::new_unsized(ctx.clone());
+        for index in 0..arguments.len() {
+            args.push_arg(
+                arguments
+                    .get::<Value>(index)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let value: Value = constructor
+            .construct_args(args)
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_exception(&ctx),
+                error => error.to_string(),
+            })?;
+        retain_value(&ctx, value)
+    }) {
+        Ok(value) => ThawHandleResult {
+            value,
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawHandleResult {
+            value: 0,
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
 }
 
 #[no_mangle]
@@ -343,13 +484,35 @@ pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
             return 0;
         };
         let index = (handle - 1) as usize;
-        let Ok(value) = handles.get::<Value>(index) else {
+        let Ok(live) = ctx.globals().get::<_, Array>("__thaw_value_handle_live") else {
             return 0;
         };
-        if value.is_undefined() {
+        if !live.get::<bool>(index).unwrap_or(false) {
+            return 0;
+        }
+        if live.set(index, false).is_err() {
             return 0;
         }
         u8::from(handles.set(index, Value::new_undefined(ctx)).is_ok())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_release_all_handles() -> u64 {
+    with_context(|ctx| {
+        let count = handle_array(&ctx).map(|handles| handles.len()).unwrap_or(0);
+        let Ok(handles) = Array::new(ctx.clone()) else {
+            return 0;
+        };
+        let Ok(live) = Array::new(ctx.clone()) else {
+            return 0;
+        };
+        if ctx.globals().set("__thaw_value_handles", handles).is_err()
+            || ctx.globals().set("__thaw_value_handle_live", live).is_err()
+        {
+            return 0;
+        }
+        count as u64
     })
 }
 

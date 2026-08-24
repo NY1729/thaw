@@ -202,6 +202,17 @@ fn resolve_interface(
         return DtsType::Unsupported(format!("unknown or generic interface `{name}`"));
     };
 
+    if iface
+        .body
+        .body
+        .iter()
+        .any(|member| matches!(member, TsTypeElement::TsCallSignatureDecl(_)))
+    {
+        let ty = DtsType::Native(HirType::JsValue);
+        resolved.insert(name.to_string(), ty.clone());
+        return ty;
+    }
+
     in_progress.push(name.to_string());
 
     // `extends`: same rule as thaw-hir's `resolve_interface` -- base
@@ -1104,7 +1115,10 @@ pub fn generate_shim(
                     .iter()
                     .filter(|candidate| candidate.name == function)
                     .all(|candidate| {
-                        matches!(candidate.ret, DtsType::Native(HirType::Function(_, _)))
+                        matches!(
+                            candidate.ret,
+                            DtsType::Native(HirType::Function(_, _) | HirType::JsValue)
+                        )
                     });
                 let qualified_entry = qualified.iter().find(|q| q.name == function);
                 if let Some(q) = qualified_entry {
@@ -1426,6 +1440,27 @@ mod tests {
         );
         assert!(
             shim.contains("callDynamicValueHandle(callable, argsArray)"),
+            "{shim}"
+        );
+    }
+
+    #[test]
+    fn callable_interface_return_is_preserved_as_javascript_value() {
+        let functions = parse_dts(
+            r#"export interface Limit {
+                <T>(task: () => T): Promise<T>;
+                readonly activeCount: number;
+                clearQueue(): void;
+            }
+            export default function pLimit(concurrency: number): Limit;"#,
+        )
+        .unwrap();
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "pLimit");
+        assert_eq!(functions[0].ret, DtsType::Native(HirType::JsValue));
+        let shim = generate_shim(&functions, false, &[]);
+        assert!(
+            shim.contains("function pLimit(argsArray: Json): JsValue"),
             "{shim}"
         );
     }
