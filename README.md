@@ -736,6 +736,8 @@ The workspace crates have narrow responsibilities:
   before reading or mutating identity metadata.
   Named, generic and descriptor-based property APIs similarly require the
   object, key and assigned value handles to belong to the calling Env.
+  Element access, property-name enumeration and script evaluation apply the
+  same ownership check before object, value or source inspection.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.
