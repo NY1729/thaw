@@ -471,6 +471,9 @@ The workspace crates have narrow responsibilities:
 - Native strings implement `.trim()`, `.trimStart()` and `.trimEnd()` with the
   exact ECMAScript whitespace/line-terminator set (rather than the broader
   host-language predicate), arena-owned results, single evaluation and `await`
+- Native strings implement locale-independent `.toLowerCase()` and
+  `.toUpperCase()` with Unicode multi-character case expansion, arena-owned
+  results, empty strings and awaited receivers
 - Strict equality and inequality recognize every native string-producing
   builtin and compare C-string contents, not arena/global pointer identities
 - Native strings implement variadic `.concat()` with left-to-right receiver
