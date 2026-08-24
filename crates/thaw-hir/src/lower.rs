@@ -3834,6 +3834,45 @@ impl<'a> FnLowerer<'a> {
         Ok(build_assign(target, value))
     }
 
+    fn wrap_call_argument_bindings(
+        &mut self,
+        mut result: HirExpr,
+        bindings: &[(Symbol, HirType, HirExpr)],
+    ) -> Result<HirExpr, String> {
+        if bindings.is_empty() {
+            return Ok(result);
+        }
+        let result_type = self.infer_expr_type(&result)?;
+        for index in (0..bindings.len()).rev() {
+            let (name, ty, source) = &bindings[index];
+            let captures = bindings[..index]
+                .iter()
+                .map(|(name, ty, _)| HirParam {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                })
+                .collect();
+            let body = if result_type == HirType::Void {
+                HirExpr::Block(vec![HirStmt::Expr(result)])
+            } else {
+                result
+            };
+            result = HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    captures,
+                    vec![HirParam {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                    }],
+                    result_type.clone(),
+                    Box::new(body),
+                )),
+                vec![source.clone()],
+            );
+        }
+        Ok(result)
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
@@ -4307,26 +4346,73 @@ impl<'a> FnLowerer<'a> {
             .map(|sig| sig.params.clone())
             .or_else(|| local_function.as_ref().map(|(params, _)| params.clone()));
 
+        let has_spread = call.args.iter().any(|arg| arg.spread.is_some());
+        let mut argument_bindings = Vec::new();
+        let mut lowered_arguments = Vec::new();
+        for arg in &call.args {
+            let value = self.lower_expr(&arg.expr)?;
+            if !has_spread {
+                lowered_arguments.push(value);
+                continue;
+            }
+
+            if arg.spread.is_none() {
+                let ty = self.infer_expr_type(&value)?;
+                let name = format!("__thaw_call_arg_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                argument_bindings.push((name.clone(), ty, value));
+                lowered_arguments.push(HirExpr::Var(name));
+                continue;
+            }
+
+            if let HirExpr::ArrayLit(values) = value {
+                for value in values {
+                    let ty = self.infer_expr_type(&value)?;
+                    let name = format!("__thaw_call_arg_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    argument_bindings.push((name.clone(), ty, value));
+                    lowered_arguments.push(HirExpr::Var(name));
+                }
+                continue;
+            }
+
+            let source_type = self.infer_expr_type(&value)?;
+            let HirType::Tuple(elements) = &source_type else {
+                return Err(format!(
+                    "call spread source must have statically known tuple length, got {source_type:?}"
+                ));
+            };
+            let elements = elements.clone();
+            let name = format!("__thaw_call_spread_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), source_type.clone());
+            argument_bindings.push((name.clone(), source_type, value));
+            lowered_arguments.extend(elements.into_iter().enumerate().map(|(index, element)| {
+                HirExpr::TypedIndex(
+                    Box::new(HirExpr::Var(name.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    element,
+                )
+            }));
+        }
+
         if let Some(params) = &param_types {
-            if call.args.len() != params.len() {
+            if lowered_arguments.len() != params.len() {
                 return Err(format!(
                     "function `{callee_name}` expects {} argument(s), got {}",
                     params.len(),
-                    call.args.len()
+                    lowered_arguments.len()
                 ));
             }
         }
 
-        let args = call
-            .args
-            .iter()
+        let args = lowered_arguments
+            .into_iter()
             .enumerate()
-            .map(|(i, arg)| {
-                if arg.spread.is_some() {
-                    return Err("spread arguments are not supported".to_string());
-                }
-                let value = self.lower_expr(&arg.expr)?;
-                match param_types.as_ref().and_then(|p| p.get(i)) {
+            .map(
+                |(i, value)| match param_types.as_ref().and_then(|p| p.get(i)) {
                     Some(_)
                         if signature
                             .as_ref()
@@ -4338,8 +4424,8 @@ impl<'a> FnLowerer<'a> {
                         format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                     }),
                     None => Ok(value),
-                }
-            })
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
 
         let generic_types = if let Some(signature) = signature
@@ -4388,7 +4474,7 @@ impl<'a> FnLowerer<'a> {
 
         if let Some(sig) = signature.clone().filter(|sig| sig.is_extern) {
             if let Some((backend, symbol)) = dynamic_symbol(&callee_name) {
-                return Ok(HirExpr::DynamicCall(
+                let result = HirExpr::DynamicCall(
                     DynamicSignature {
                         backend,
                         symbol,
@@ -4396,7 +4482,8 @@ impl<'a> FnLowerer<'a> {
                         ret: sig.ret,
                     },
                     args,
-                ));
+                );
+                return self.wrap_call_argument_bindings(result, &argument_bindings);
             }
             let param_count = sig.params.len();
             let ffi_signature = FfiSignature {
@@ -4411,7 +4498,8 @@ impl<'a> FnLowerer<'a> {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
             };
-            return Ok(HirExpr::FfiCall(ffi_signature, args));
+            let result = HirExpr::FfiCall(ffi_signature, args);
+            return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
         let lowered_name = if generic_types
@@ -4426,7 +4514,8 @@ impl<'a> FnLowerer<'a> {
         } else {
             callee_name
         };
-        Ok(HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args))
+        let result = HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args);
+        self.wrap_call_argument_bindings(result, &argument_bindings)
     }
 }
 
@@ -5028,6 +5117,46 @@ mod tests {
                     if matches!(&args[0], HirExpr::BinOp(BinOp::EqEqEq, _, _))
             ));
         }
+    }
+
+    #[test]
+    fn lowers_static_and_tuple_call_argument_spreads() {
+        let program = lower(
+            r#"function emit(first: number, second: string, third: number): void {}
+            function makeArgs(): [string, number] { return ["two", 3]; }
+            function main(): void {
+                emit(...[1, "two", 3]);
+                emit(1, ...makeArgs());
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[0],
+            HirStmt::Expr(HirExpr::Call(lambda, _))
+                if matches!(lambda.as_ref(), HirExpr::Lambda(_, _, HirType::Void, _))
+        ));
+        let HirStmt::Expr(HirExpr::Call(_, first_arguments)) = &main.body[1] else {
+            panic!("expected bound leading argument");
+        };
+        assert!(matches!(
+            first_arguments.as_slice(),
+            [HirExpr::Lit(HirLit::F64(1.0))]
+        ));
+    }
+
+    #[test]
+    fn rejects_dynamic_length_call_spread() {
+        let module = thaw_parser::parse_typescript(
+            r#"function emit(first: number): void {}
+            function main(values: number[]): void { emit(...values); }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("statically known tuple length"), "{error}");
     }
 
     #[test]
