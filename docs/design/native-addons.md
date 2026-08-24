@@ -715,6 +715,10 @@ own `name`でshadow可能である。ToStringは現在のname／messageから`Na
 identity比較を維持する。DateのToNumberは保存したmillisecond値を返す。
 Referenceは生成元Env identityを保持し、create／get／ref／unref／deleteのcross-Env利用をinvalid-argで
 拒否する。ref／unrefのresultは省略可能で、zero未満へのunrefとu32上限を越えるrefはgeneric failureにする。
+`napi_call_function`／`napi_new_instance`はreceiver／function／argvのEnv ownership、argc/argv組、既存の
+pending exceptionを検証する。callbackがnullを返し例外がない場合はundefinedとし、constructorがArrayや
+Buffer等の任意Objectを返した場合もそのidentityを採用する。`napi_get_cb_info`は要求capacityが実引数より
+大きい場合、余剰slotをundefinedで埋める。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending

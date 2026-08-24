@@ -562,6 +562,19 @@ unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
     value.as_ref().ok_or(NAPI_INVALID_ARG)
 }
 
+unsafe fn value_belongs_to_environment(env: NapiEnv, value: NapiValue) -> bool {
+    if value.is_null() {
+        return false;
+    }
+    env.as_ref().is_some_and(|env| env.values.contains(&value))
+        || HOST.with(|host| {
+            host.borrow()
+                .module_envs
+                .iter()
+                .any(|module_env| module_env.values.contains(&value))
+        })
+}
+
 fn is_object_value(value: &Value) -> bool {
     matches!(
         value,
@@ -2873,13 +2886,16 @@ pub unsafe extern "C" fn napi_create_function(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_cb_info(
-    _env: NapiEnv,
+    env: NapiEnv,
     info: NapiCallbackInfo,
     argc: *mut usize,
     argv: *mut NapiValue,
     this_arg: *mut NapiValue,
     data: *mut *mut c_void,
 ) -> NapiStatus {
+    if env.is_null() {
+        return NAPI_INVALID_ARG;
+    }
     let Some(info) = info.as_ref() else {
         return NAPI_INVALID_ARG;
     };
@@ -2887,7 +2903,18 @@ pub unsafe extern "C" fn napi_get_cb_info(
         let capacity = *argc;
         *argc = info.args.len();
         if !argv.is_null() {
-            ptr::copy_nonoverlapping(info.args.as_ptr(), argv, capacity.min(info.args.len()));
+            let copied = capacity.min(info.args.len());
+            ptr::copy_nonoverlapping(info.args.as_ptr(), argv, copied);
+            if copied < capacity {
+                let mut undefined = ptr::null_mut();
+                let status = napi_get_undefined(env, &mut undefined);
+                if status != NAPI_OK {
+                    return status;
+                }
+                for index in copied..capacity {
+                    *argv.add(index) = undefined;
+                }
+            }
         }
     }
     if !this_arg.is_null() {
@@ -2901,11 +2928,11 @@ pub unsafe extern "C" fn napi_get_cb_info(
 
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_new_target(
-    _env: NapiEnv,
+    env: NapiEnv,
     info: NapiCallbackInfo,
     result: *mut NapiValue,
 ) -> NapiStatus {
-    if result.is_null() {
+    if env.is_null() || result.is_null() {
         return NAPI_INVALID_ARG;
     }
     let Some(info) = info.as_ref() else {
@@ -3730,12 +3757,25 @@ pub unsafe extern "C" fn napi_new_instance(
     if result.is_null() || (argc != 0 && argv.is_null()) {
         return NAPI_INVALID_ARG;
     }
+    let Ok(host_env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if !value_belongs_to_environment(env, constructor)
+        || (argc != 0
+            && std::slice::from_raw_parts(argv, argc)
+                .iter()
+                .any(|value| !value_belongs_to_environment(env, *value)))
+        || host_env.exception.is_some()
+    {
+        return if host_env.exception.is_some() {
+            NAPI_PENDING_EXCEPTION
+        } else {
+            NAPI_INVALID_ARG
+        };
+    }
     let function = match value_ref(constructor) {
         Ok(Value::Function(function)) => function.clone(),
         _ => return NAPI_INVALID_ARG,
-    };
-    let Ok(host_env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
     };
     let prototype = function
         .properties
@@ -3768,9 +3808,10 @@ pub unsafe extern "C" fn napi_new_instance(
     {
         return NAPI_PENDING_EXCEPTION;
     }
-    *result = match returned.as_ref() {
-        Some(Value::Object(_) | Value::Function(_)) => returned,
-        _ => instance,
+    *result = if matches!(returned.as_ref(), Some(value) if is_object_value(value)) {
+        returned
+    } else {
+        instance
     };
     NAPI_OK
 }
@@ -5492,10 +5533,10 @@ pub unsafe extern "C" fn napi_create_reference(
     initial_count: u32,
     out: *mut *mut Reference,
 ) -> NapiStatus {
-    let Ok(env_ref) = env_mut(env) else {
+    let Ok(_env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    if value.is_null() || out.is_null() || !env_ref.values.contains(&value) {
+    if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
     *out = Box::into_raw(Box::new(Reference {
@@ -5592,14 +5633,32 @@ pub unsafe extern "C" fn napi_call_function(
     argv: *const NapiValue,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    if env_ref.exception.is_some() {
+        return NAPI_PENDING_EXCEPTION;
+    }
+    if this_arg.is_null()
+        || !value_belongs_to_environment(env, this_arg)
+        || !value_belongs_to_environment(env, function)
+        || (argc != 0 && argv.is_null())
+    {
+        return NAPI_INVALID_ARG;
+    }
+    if argc != 0
+        && std::slice::from_raw_parts(argv, argc)
+            .iter()
+            .any(|value| !value_belongs_to_environment(env, *value))
+    {
+        return NAPI_INVALID_ARG;
+    }
     let function = match value_ref(function) {
         Ok(Value::Function(function)) => function.clone(),
         _ => return NAPI_INVALID_ARG,
     };
     let args = if argc == 0 {
         Vec::new()
-    } else if argv.is_null() {
-        return NAPI_INVALID_ARG;
     } else {
         std::slice::from_raw_parts(argv, argc).to_vec()
     };
@@ -5618,6 +5677,8 @@ pub unsafe extern "C" fn napi_call_function(
     }
     if out.is_null() {
         NAPI_OK
+    } else if result.is_null() {
+        napi_get_undefined(env, out)
     } else {
         write_value(out, result)
     }
@@ -8609,6 +8670,107 @@ mod tests {
                 NAPI_INVALID_ARG
             );
             assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+        }
+    }
+
+    #[test]
+    fn callback_boundaries_validate_values_and_fill_missing_arguments() {
+        unsafe extern "C" fn inspect_arguments(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+            let mut argc = 3;
+            let mut argv = [ptr::null_mut(); 3];
+            let mut this_arg = ptr::null_mut();
+            assert_eq!(
+                unsafe {
+                    napi_get_cb_info(
+                        env,
+                        info,
+                        &mut argc,
+                        argv.as_mut_ptr(),
+                        &mut this_arg,
+                        ptr::null_mut(),
+                    )
+                },
+                NAPI_OK
+            );
+            assert_eq!(argc, 1);
+            assert!(matches!(
+                unsafe { value_ref(argv[1]) },
+                Ok(Value::Undefined)
+            ));
+            assert!(matches!(
+                unsafe { value_ref(argv[2]) },
+                Ok(Value::Undefined)
+            ));
+            ptr::null_mut()
+        }
+
+        unsafe extern "C" fn return_array(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+            let mut target = ptr::null_mut();
+            assert_eq!(
+                unsafe { napi_get_new_target(env, info, &mut target) },
+                NAPI_OK
+            );
+            assert!(!target.is_null());
+            let mut array = ptr::null_mut();
+            assert_eq!(unsafe { napi_create_array(env, &mut array) }, NAPI_OK);
+            array
+        }
+
+        unsafe {
+            let mut env = Env::new();
+            let mut other_env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut function = ptr::null_mut();
+            assert_eq!(
+                napi_create_function(
+                    env_ptr,
+                    c"inspect".as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    Some(inspect_arguments),
+                    ptr::null_mut(),
+                    &mut function,
+                ),
+                NAPI_OK
+            );
+            let this_arg = env.alloc(Value::Object(HashMap::new()));
+            let argument = env.alloc(Value::Number(1.0));
+            let mut result = ptr::null_mut();
+            assert_eq!(
+                napi_call_function(env_ptr, this_arg, function, 1, &argument, &mut result),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(result), Ok(Value::Undefined)));
+            let foreign = other_env.alloc(Value::Number(2.0));
+            assert_eq!(
+                napi_call_function(env_ptr, this_arg, function, 1, &foreign, &mut result),
+                NAPI_INVALID_ARG
+            );
+
+            let mut constructor = ptr::null_mut();
+            assert_eq!(
+                napi_define_class(
+                    env_ptr,
+                    c"ReturnsArray".as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    Some(return_array),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null(),
+                    &mut constructor,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_new_instance(env_ptr, constructor, 0, ptr::null(), &mut result),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(result), Ok(Value::Array(_))));
+
+            env.exception = Some(env.alloc(Value::Error("pending".into())));
+            assert_eq!(
+                napi_call_function(env_ptr, this_arg, function, 0, ptr::null(), &mut result),
+                NAPI_PENDING_EXCEPTION
+            );
         }
     }
 

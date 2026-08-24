@@ -853,6 +853,9 @@ Strict equality compares BigInts by value while preserving object identity rules
 Date-to-number coercion returns the stored millisecond timestamp.
 N-API references retain environment ownership, reject cross-environment use, and
 check refcount underflow and overflow while allowing omitted count results.
+Callback invocation validates receiver/function/argument ownership, propagates
+pending exceptions, fills missing callback arguments with undefined, and honors
+all object-valued constructor returns.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
