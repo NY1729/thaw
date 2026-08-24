@@ -4139,30 +4139,30 @@ pub unsafe extern "C" fn napi_define_class(
         || result.is_null()
         || (property_count != 0 && properties.is_null())
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let descriptor_status = validate_property_descriptors(env, property_count, properties);
     if descriptor_status != NAPI_OK {
-        return descriptor_status;
+        return record_status(env, descriptor_status);
     }
     let status = napi_create_function(env, name, length, constructor, data, result);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     let mut prototype = ptr::null_mut();
     let status = napi_create_object(env, &mut prototype);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     let prototype_name = c"prototype";
     let status = napi_set_named_property(env, *result, prototype_name.as_ptr(), prototype);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     let constructor_name = c"constructor";
     let status = napi_set_named_property(env, prototype, constructor_name.as_ptr(), *result);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -4188,7 +4188,7 @@ pub unsafe extern "C" fn napi_define_class(
             };
             let status = napi_define_properties(env, target, 1, descriptor);
             if status != NAPI_OK {
-                return status;
+                return record_status(env, status);
             }
         }
     }
@@ -4204,7 +4204,7 @@ pub unsafe extern "C" fn napi_new_instance(
     result: *mut NapiValue,
 ) -> NapiStatus {
     if result.is_null() || (argc != 0 && argv.is_null()) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(host_env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -4216,15 +4216,16 @@ pub unsafe extern "C" fn napi_new_instance(
                 .any(|value| !value_belongs_to_environment(env, *value)))
         || host_env.exception.is_some()
     {
-        return if host_env.exception.is_some() {
+        let status = if host_env.exception.is_some() {
             NAPI_PENDING_EXCEPTION
         } else {
             NAPI_INVALID_ARG
         };
+        return record_status(env, status);
     }
     let function = match value_ref(constructor) {
         Ok(Value::Function(function)) => function.clone(),
-        _ => return NAPI_INVALID_ARG,
+        _ => return record_status(env, NAPI_FUNCTION_EXPECTED),
     };
     let prototype = function
         .properties
@@ -4255,7 +4256,7 @@ pub unsafe extern "C" fn napi_new_instance(
         .map(|env| env.exception.is_some())
         .unwrap_or(false)
     {
-        return NAPI_PENDING_EXCEPTION;
+        return record_status(env, NAPI_PENDING_EXCEPTION);
     }
     if !returned.is_null() && !value_belongs_to_environment(env, returned) {
         return NAPI_INVALID_ARG;
@@ -4276,14 +4277,14 @@ pub unsafe extern "C" fn napi_instanceof(
     result: *mut bool,
 ) -> NapiStatus {
     if env.is_null() || result.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, constructor)
     {
         return NAPI_INVALID_ARG;
     }
     if !matches!(value_ref(constructor), Ok(Value::Function(_))) {
-        return NAPI_FUNCTION_EXPECTED;
+        return record_status(env, NAPI_FUNCTION_EXPECTED);
     }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         *result = false;
@@ -4291,10 +4292,10 @@ pub unsafe extern "C" fn napi_instanceof(
     }
     let prototype_key = PropertyKey::String("prototype".into());
     let Some(expected) = find_property_value(env, constructor, &prototype_key) else {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     };
     if !matches!(value_ref(expected), Ok(value) if is_object_value(value)) {
-        return NAPI_GENERIC_FAILURE;
+        return record_status(env, NAPI_GENERIC_FAILURE);
     }
     let mut current = prototype_for_owner(env, object as usize);
     let mut visited = HashSet::new();
@@ -6237,25 +6238,25 @@ pub unsafe extern "C" fn napi_call_function(
         return NAPI_INVALID_ARG;
     };
     if env_ref.exception.is_some() {
-        return NAPI_PENDING_EXCEPTION;
+        return record_status(env, NAPI_PENDING_EXCEPTION);
     }
     if this_arg.is_null()
         || !value_belongs_to_environment(env, this_arg)
         || !value_belongs_to_environment(env, function)
         || (argc != 0 && argv.is_null())
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if argc != 0
         && std::slice::from_raw_parts(argv, argc)
             .iter()
             .any(|value| !value_belongs_to_environment(env, *value))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let function = match value_ref(function) {
         Ok(Value::Function(function)) => function.clone(),
-        _ => return NAPI_INVALID_ARG,
+        _ => return record_status(env, NAPI_FUNCTION_EXPECTED),
     };
     let args = if argc == 0 {
         Vec::new()
@@ -6273,18 +6274,19 @@ pub unsafe extern "C" fn napi_call_function(
         .map(|env| env.exception.is_some())
         .unwrap_or(false)
     {
-        return NAPI_PENDING_EXCEPTION;
+        return record_status(env, NAPI_PENDING_EXCEPTION);
     }
     if !result.is_null() && !value_belongs_to_environment(env, result) {
         return NAPI_INVALID_ARG;
     }
-    if out.is_null() {
+    let status = if out.is_null() {
         NAPI_OK
     } else if result.is_null() {
         napi_get_undefined(env, out)
     } else {
         write_value(out, result)
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -6340,14 +6342,14 @@ unsafe fn create_error_kind(
         || !value_belongs_to_environment(env, message)
         || (!code.is_null() && !value_belongs_to_environment(env, code))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let message = match value_ref(message) {
         Ok(Value::String(message)) => message.clone(),
-        _ => return NAPI_STRING_EXPECTED,
+        _ => return record_status(env, NAPI_STRING_EXPECTED),
     };
     if !code.is_null() && !matches!(value_ref(code), Ok(Value::String(_))) {
-        return NAPI_STRING_EXPECTED;
+        return record_status(env, NAPI_STRING_EXPECTED);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -10798,11 +10800,27 @@ mod tests {
             );
             assert!(matches!(value_ref(result), Ok(Value::Array(_))));
 
+            assert_eq!(
+                napi_call_function(env_ptr, this_arg, argument, 0, ptr::null(), &mut result),
+                NAPI_FUNCTION_EXPECTED
+            );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_FUNCTION_EXPECTED);
+            assert_eq!(
+                napi_new_instance(env_ptr, argument, 0, ptr::null(), &mut result),
+                NAPI_FUNCTION_EXPECTED
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_FUNCTION_EXPECTED);
+
             env.exception = Some(env.alloc(Value::Error("pending".into())));
             assert_eq!(
                 napi_call_function(env_ptr, this_arg, function, 0, ptr::null(), &mut result),
                 NAPI_PENDING_EXCEPTION
             );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_PENDING_EXCEPTION);
         }
     }
 
@@ -11005,6 +11023,14 @@ mod tests {
                 napi_create_type_error(env_ptr, code, message, &mut error),
                 NAPI_OK
             );
+            let number = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_create_type_error(env_ptr, code, number, &mut error),
+                NAPI_STRING_EXPECTED
+            );
+            let mut info = ptr::null();
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_STRING_EXPECTED);
             for (name, expected) in [
                 (c"name", "TypeError"),
                 (c"message", "failed"),
