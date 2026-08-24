@@ -191,7 +191,8 @@ The workspace crates have narrow responsibilities:
 - FFI metadata v4 can additionally describe fixed object return layouts with
   explicit `fieldOffsets`, total `size`, `alignment`, and an `indirect` return
   convention. LLVM emits exact byte padding, aligns the return storage, and
-  reconstructs the object fields from the declared offsets
+  reconstructs the object fields from the declared offsets for direct and
+  `thaw-result` returns
 - QuickJS fallback for signatures which cannot use the C ABI path
 - Parser-backed CommonJS/ESM dependency discovery and bundling, including
   literal and same-package runtime dynamic imports, constant-folded external

@@ -398,11 +398,12 @@ order; `size` and `alignment` describe the complete C object, including tail
 padding; and `indirect: true` selects an explicit hidden return-storage
 pointer. LLVM represents the value as a packed structure with byte-array
 padding at the declared offsets and gives the storage the requested alignment.
-The first implementation accepts direct-error portable/packed object returns
-whose fields are `boolean`, `number`, `bigint`/`i64`, or `string`. Invalid,
+The implementation accepts direct and `thaw-result` portable/packed object
+returns whose fields are `boolean`, `number`, `bigint`/`i64`, or `string`.
+For `thaw-result`, LLVM also derives the outer value/error structure padding
+and alignment from the declared value layout. Invalid,
 overlapping, out-of-bounds, non-power-of-two, or mismatched layouts are hard
-errors. Nested explicit layouts and explicit `thaw-result` outer layouts remain
-future extensions.
+errors. Nested explicit layouts remain a future extension.
 
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
