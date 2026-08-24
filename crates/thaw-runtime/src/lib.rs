@@ -434,6 +434,53 @@ pub unsafe extern "C" fn thaw_array_reverse(array: *mut u8) -> *mut u8 {
     array
 }
 
+fn relative_array_index(index: f64, length: usize) -> usize {
+    if index.is_nan() || index == f64::NEG_INFINITY {
+        return 0;
+    }
+    if index == f64::INFINITY {
+        return length;
+    }
+    let index = index.trunc();
+    if index < 0.0 {
+        (length as f64 + index).max(0.0) as usize
+    } else {
+        index.min(length as f64) as usize
+    }
+}
+
+#[no_mangle]
+/// Implements in-place `Array.prototype.copyWithin` for eight-byte slots.
+///
+/// # Safety
+///
+/// `array` must point to a writable Thaw array whose elements occupy
+/// eight-byte slots.
+pub unsafe extern "C" fn thaw_array_copy_within(
+    array: *mut u8,
+    target: f64,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    let target = relative_array_index(target, length);
+    let start = relative_array_index(start, length);
+    let end = relative_array_index(end, length);
+    let count = end.saturating_sub(start).min(length - target);
+    if count != 0 {
+        unsafe {
+            std::ptr::copy(
+                array.add(8 + start * 8),
+                array.add(8 + target * 8),
+                count * 8,
+            );
+        }
+    }
+    array
+}
+
 #[no_mangle]
 /// # Safety
 ///
