@@ -7751,6 +7751,15 @@ impl<'ctx> HirCompiler<'ctx> {
                     );
                 }
             }
+            if let Some(HirType::Function(params, ret)) = self.expr_hir_type(callee) {
+                return self.compile_closure_call(
+                    callee,
+                    &params,
+                    ret.as_ref(),
+                    args,
+                    "function expression",
+                );
+            }
             return Err("call target is not a compiled function value".to_string());
         };
 
@@ -12906,6 +12915,45 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "optional_array_tuple_access"),
             "index\n4\nundefined\n2\nundefined\n3\nok\n2\nundefined\n4\nundefined\n6\n"
+        );
+    }
+
+    #[test]
+    fn compiles_optional_function_calls() {
+        let source = r#"
+            function callback(present: boolean): ((value: number) => number) | undefined {
+                if (present) return (value: number) => value * 2;
+                return undefined;
+            }
+            function action(present: boolean): ((value: number) => void) | undefined {
+                if (present) return (value: number) => { console.log(value); };
+                return undefined;
+            }
+            function argument(): number {
+                console.log("argument");
+                return 5;
+            }
+            async function delayedArgument(): Promise<number> {
+                console.log("delayed argument");
+                await sleep(1);
+                return 6;
+            }
+            async function delayedCallback(): Promise<((value: number) => number) | undefined> {
+                await sleep(1);
+                return (value: number) => value + 1;
+            }
+            async function main(): Promise<void> {
+                console.log(callback(true)?.(argument()));
+                console.log(callback(false)?.(argument()));
+                console.log(callback(true)?.(await delayedArgument()));
+                console.log((await delayedCallback())?.(7));
+                console.log(action(false)?.(argument()));
+                console.log(action(true)?.(8));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_function_calls"),
+            "argument\n10\nundefined\ndelayed argument\n12\n8\nundefined\n8\nundefined\n"
         );
     }
 
