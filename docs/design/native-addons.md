@@ -52,8 +52,10 @@ primitive変換call、`.length`の結果もlocal変数を通して追跡する�
 必須prefixから完全signatureまでの各arityを個別に生成し、実行ファイルE2Eで0引数・1引数
 の双方を検証した。number型のrest
 parameterはsourceで観測した実引数個数だけを展開するため、固定の最大arityを設けない。
-同じE2Eで0要素・3要素をN-API methodへ渡して検証した。user functionの戻り値や任意の
-property型の推論と、現在のnative表現を越えるrest要素型は引き続き残課題である。
+同じE2Eで0要素・3要素をN-API methodへ渡して検証した。user function callも明示的な
+戻り値annotation、または全returnから一意に推論できる型を使ってoverloadを選択する。
+複数回収集により前方call chainも解決する。parameter依存／競合するreturn、任意の
+property型の推論、現在のnative表現を越えるrest要素型は引き続き残課題である。
 
 ## 1. 何が難しいのか（おさらい）
 
