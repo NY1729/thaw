@@ -652,6 +652,24 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_napi_get_export",
+            self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_construct_handle_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_method_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_napi_call_with_callback_result",
             result_type.fn_type(
                 &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
@@ -5057,6 +5075,64 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_global_string_ptr(&signature.symbol, "dynamic_symbol")
             .map_err(|error| error.to_string())?;
+        if signature.backend == DynamicBackend::Napi && signature.ret == HirType::JsValue {
+            let constructor_name = signature.symbol.strip_prefix("$new$").ok_or_else(|| {
+                "N-API JsValue return is reserved for class constructors".to_string()
+            })?;
+            let constructor_name = self
+                .builder
+                .build_global_string_ptr(constructor_name, "napi_constructor_name")
+                .map_err(|error| error.to_string())?;
+            let constructor = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_napi_get_export").unwrap(),
+                    &[constructor_name.as_pointer_value().into()],
+                    "napi_constructor",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap();
+            let args_json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_stringify").unwrap(),
+                    &[array.into()],
+                    "napi_constructor_args",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap();
+            let result = self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_napi_construct_handle_result")
+                        .unwrap(),
+                    &[constructor.into(), args_json.into()],
+                    "napi_construct_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_struct_value();
+            let value = self
+                .builder
+                .build_extract_value(result, 0, "napi_constructed_value")
+                .map_err(|error| error.to_string())?;
+            let error = self
+                .builder
+                .build_extract_value(result, 1, "napi_construct_error")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_store(self.pending_exception().as_pointer_value(), error)
+                .map_err(|error| error.to_string())?;
+            self.branch_on_pending_exception()?;
+            return Ok(value);
+        }
         if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
             self.uses_quickjs_handles = true;
             let callable = self

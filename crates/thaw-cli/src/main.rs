@@ -294,6 +294,7 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
 struct ResolvedPackage {
     name: String,
     functions: Vec<thaw_bridge::DtsFunction>,
+    classes: Vec<thaw_bridge::DtsClass>,
     classifications: Vec<(String, thaw_bridge::Classification)>,
     native_lib: Option<PathBuf>,
     native_addon: Option<PathBuf>,
@@ -375,7 +376,15 @@ fn typed_dynamic_declaration(
 /// here is the *qualifier identifier* (`qualifier_identifier`), not
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
+type ClassConstructorRewrite = (String, String);
 type ExternalExports = std::collections::HashMap<String, std::collections::HashMap<String, String>>;
+type RegistryShims = (
+    String,
+    Vec<PathBuf>,
+    Vec<QualifiedCallRewrite>,
+    Vec<ClassConstructorRewrite>,
+    ExternalExports,
+);
 
 /// The identifier a user writes as the object in `pkg.name(...)`
 /// qualified-call syntax for a `--use`d package. A scoped package's real
@@ -409,15 +418,7 @@ fn is_native_builtin(package: &str) -> bool {
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
-) -> Result<
-    (
-        String,
-        Vec<PathBuf>,
-        Vec<QualifiedCallRewrite>,
-        ExternalExports,
-    ),
-    String,
-> {
+) -> Result<RegistryShims, String> {
     let mut resolved = Vec::new();
     for name in use_packages {
         let package = if name.starts_with("node:") {
@@ -427,6 +428,8 @@ fn generate_registry_shims(
         };
         let functions = thaw_bridge::parse_dts(&package.dts_source)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts: {e}"))?;
+        let classes = thaw_bridge::parse_dts_classes(&package.dts_source)
+            .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
         // Whether there's actually a `native.a` to link a FastPath
         // signature against -- without one, a fully-primitive real npm
         // function (e.g. date-fns's `daysToWeeks(days: number): number`)
@@ -440,6 +443,7 @@ fn generate_registry_shims(
         resolved.push(ResolvedPackage {
             name: package.name.clone(),
             functions,
+            classes,
             classifications,
             native_lib: package.native_lib,
             native_addon: package.native_addon,
@@ -543,6 +547,9 @@ fn generate_registry_shims(
     let mut shim = String::new();
     let mut typed_targets: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
+    let mut class_targets: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    let mut class_rewrites = Vec::new();
     let mut native_libs = Vec::new();
     let mut bundles: Vec<PendingBundle> = Vec::new();
     let mut native_addons: Vec<(String, Vec<u8>, Option<String>)> = Vec::new();
@@ -551,6 +558,52 @@ fn generate_registry_shims(
     for pkg in &resolved {
         let native_lib_available = pkg.native_lib.is_some() || is_native_builtin(&pkg.name);
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
+        if pkg.native_addon.is_some() {
+            for class in &pkg.classes {
+                let Some(params) = class
+                    .constructors
+                    .iter()
+                    .map(|constructor| {
+                        constructor
+                            .params
+                            .iter()
+                            .take_while(|(_, ty)| {
+                                matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|params| !params.is_empty())
+                    .min_by_key(|params| params.len())
+                else {
+                    continue;
+                };
+                let rendered = params
+                    .iter()
+                    .map(|(name, ty)| match ty {
+                        thaw_bridge::DtsType::Native(ty) => {
+                            format!("{name}: {}", render_dynamic_type(ty).unwrap())
+                        }
+                        thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let runtime_key = format!("$new${}", class.name);
+                let encoded = runtime_key
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                let symbol = format!("__thaw_typed_napi_{encoded}");
+                shim.push_str(&format!(
+                    "declare function {symbol}({rendered}): JsValue;\n"
+                ));
+                class_targets.insert((pkg.name.clone(), class.name.clone()), symbol);
+                class_rewrites.push((
+                    qualifier_identifier(&pkg.name).to_string(),
+                    class.name.clone(),
+                ));
+            }
+        }
         for function in &pkg.functions {
             let is_fallback = pkg.classifications.iter().any(|(name, classification)| {
                 name == &function.name
@@ -655,6 +708,11 @@ fn generate_registry_shims(
             };
             package_exports.insert(name.clone(), target.clone());
         }
+        for class in &pkg.classes {
+            if let Some(target) = class_targets.get(&(pkg.name.clone(), class.name.clone())) {
+                package_exports.insert(class.name.clone(), target.clone());
+            }
+        }
         if package_exports.len() == 1 {
             let target = package_exports.values().next().unwrap().clone();
             package_exports.insert("default".to_string(), target);
@@ -662,7 +720,65 @@ fn generate_registry_shims(
         external_exports.insert(pkg.name.clone(), package_exports);
     }
 
-    Ok((shim, native_libs, rewrites, external_exports))
+    Ok((
+        shim,
+        native_libs,
+        rewrites,
+        class_rewrites,
+        external_exports,
+    ))
+}
+
+fn rewrite_external_class_constructors(
+    source: &str,
+    classes: &[ClassConstructorRewrite],
+) -> Result<String, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Expr, MemberProp, NewExpr};
+    use thaw_parser::common::Spanned;
+
+    if classes.is_empty() {
+        return Ok(source.to_string());
+    }
+    struct Finder<'a> {
+        classes: &'a [(String, String)],
+        removals: Vec<(u32, u32)>,
+    }
+    impl Visit for Finder<'_> {
+        fn visit_new_expr(&mut self, expression: &NewExpr) {
+            let matches = match expression.callee.as_ref() {
+                Expr::Ident(class) => self
+                    .classes
+                    .iter()
+                    .any(|(_, name)| name == class.sym.as_str()),
+                Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                    (Expr::Ident(package), MemberProp::Ident(class)) => {
+                        self.classes.iter().any(|(qualifier, name)| {
+                            qualifier == package.sym.as_str() && name == class.sym.as_str()
+                        })
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if matches {
+                self.removals
+                    .push((expression.span().lo.0, expression.callee.span().lo.0));
+            }
+            expression.visit_children_with(self);
+        }
+    }
+    let module = thaw_parser::parse_typescript(source)?;
+    let mut finder = Finder {
+        classes,
+        removals: Vec::new(),
+    };
+    module.visit_with(&mut finder);
+    let mut output = source.to_string();
+    for (start, end) in finder.removals.into_iter().rev() {
+        output.replace_range((start - 1) as usize..(end - 1) as usize, "");
+    }
+    Ok(output)
 }
 
 /// Rewrites `pkg.name(...)` call expressions in a user's own `.ts` source
@@ -1033,8 +1149,13 @@ fn build_with_link_mode(
             resolved_packages.push(package);
         }
     }
-    let (registry_shim, registry_native_libs, mut qualified_call_rewrites, external_exports) =
-        generate_registry_shims(registry_dir, &resolved_packages)?;
+    let (
+        registry_shim,
+        registry_native_libs,
+        mut qualified_call_rewrites,
+        class_constructor_rewrites,
+        external_exports,
+    ) = generate_registry_shims(registry_dir, &resolved_packages)?;
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
         .iter()
         .map(|package| qualifier_identifier(package))
@@ -1046,6 +1167,8 @@ fn build_with_link_mode(
     // generated -- see `rewrite_qualified_calls`'s doc comment. A no-op
     // (and no parse at all) when there were no collisions.
     let user_source = rewrite_qualified_calls(&user_source, &qualified_call_rewrites)?;
+    let user_source =
+        rewrite_external_class_constructors(&user_source, &class_constructor_rewrites)?;
     let mut shim_source = registry_shim + &generate_bridge_shims(bridge_dts)?;
     if static_link && shim_source.contains("loadNativeAddonEmbedded(") {
         return Err(
@@ -2693,19 +2816,22 @@ mod tests {
         assert_eq!(native.libc, "glibc");
         assert!(native.source.contains("TryGhost/node-sqlite3/releases"));
 
-        // The typed AOT frontend does not lower classes yet. A minimal
-        // declaration is enough to force the real addon initializer into
-        // this executable; class calls remain covered directly in thaw-napi.
+        // Keep this fixture focused on constructor integration rather than
+        // sqlite3's much broader callback-heavy declaration surface.
         std::fs::write(
             registry.join("sqlite3/package.d.ts"),
-            "declare function Database(argsArray: Json): Json;\n",
+            "export declare class Database { constructor(filename: string); }\n",
         )
         .unwrap();
         let source = dir.join("main.ts");
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "function main(): void { console.log(\"sqlite3-loaded\"); }\n",
+            "import { Database } from \"sqlite3\";\n\
+             function main(): void {\n\
+                 const database: JsValue = new Database(\":memory:\");\n\
+                 console.log(\"sqlite3-constructed\");\n\
+             }\n",
         )
         .unwrap();
         build(
@@ -2725,7 +2851,10 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "sqlite3-loaded\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "sqlite3-constructed\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3007,5 +3136,17 @@ mod tests {
         )];
         let rewritten = rewrite_qualified_calls(source, &rewrites).unwrap();
         assert!(rewritten.contains("const r = String(qs_stringify(x));"));
+    }
+
+    #[test]
+    fn rewrites_external_class_constructors_without_touching_other_new_expressions() {
+        let source = "const a = new Database(\":memory:\"); const b = new sqlite3.Database(\"db.sqlite\"); const c = new LocalBox(1);";
+        let rewritten =
+            rewrite_external_class_constructors(source, &[("sqlite3".into(), "Database".into())])
+                .unwrap();
+        assert_eq!(
+            rewritten,
+            "const a = Database(\":memory:\"); const b = sqlite3.Database(\"db.sqlite\"); const c = new LocalBox(1);"
+        );
     }
 }

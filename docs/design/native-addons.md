@@ -24,7 +24,13 @@ N-API host側にはexport取得、constructor呼び出し、instance method呼�
 不透明handle ABIを追加した。handleはaddonを初期化した同じ`napi_env`に所属し、
 method callbackには元instanceを`this`として渡す。自作`NativeBox`の構築とmethod
 実行、および実sqlite3 `Database(":memory:")`の構築で検証した。通常のTypeScript
-`new sqlite3.Database(...)`構文からこのABIへの自動loweringは次の統合作業である。
+`new Database(...)`／`new sqlite3.Database(...)`は、registryがclass exportを
+通常のfunctionと分けて解決し、対象classだけをtyped N-API constructor callへ
+書き換えるようになった。LLVMは`DynamicBackend::Napi`のconstructor symbolを
+export handle取得とconstructor ABI呼び出しへloweringする。公式sqlite3を取得・
+埋め込み、named importから`new Database(":memory:")`を含むTypeScriptを実行
+ファイルへコンパイルして、registry削除後にも実instanceを構築できることを確認した。
+instance methodとcallbackの通常構文loweringは次の統合作業である。
 
 ## 1. 何が難しいのか（おさらい）
 
