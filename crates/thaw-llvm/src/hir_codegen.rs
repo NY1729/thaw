@@ -420,7 +420,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .f64_type()
             .fn_type(&[self.context.f64_type().into()], false);
         for name in [
-            "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "cbrt",
+            "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "cbrt", "acosh", "asinh",
+            "atanh", "expm1", "log1p",
         ] {
             self.module
                 .add_function(name, unary_f64_type, Some(Linkage::External));
@@ -7612,7 +7613,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 );
             }
             "__thaw_math_tan" | "__thaw_math_asin" | "__thaw_math_acos" | "__thaw_math_atan"
-            | "__thaw_math_sinh" | "__thaw_math_cosh" | "__thaw_math_tanh" | "__thaw_math_cbrt" => {
+            | "__thaw_math_sinh" | "__thaw_math_cosh" | "__thaw_math_tanh" | "__thaw_math_cbrt"
+            | "__thaw_math_acosh" | "__thaw_math_asinh" | "__thaw_math_atanh"
+            | "__thaw_math_expm1" | "__thaw_math_log1p" => {
                 let operation = name.trim_start_matches("__thaw_math_");
                 return self.compile_single_arg_call(operation, args, &format!("Math.{operation}"));
             }
@@ -11591,6 +11594,33 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "extended_libm"),
             "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nleft\nright\ntrue\ntrue\nfalse\nawaited-hypot\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_near_zero_libm_functions() {
+        let source = r#"
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-log1p");
+                return "0";
+            }
+            async function main(): Promise<void> {
+                console.log(Math.acosh(1) === 0);
+                console.log(Number.isNaN(Math.acosh(0)));
+                console.log((1 / Math.asinh(-0)) < 0);
+                console.log(Math.atanh(0) === 0);
+                console.log(Number.isFinite(Math.atanh(1)));
+                console.log(Math.atanh(1) > 0);
+                console.log((1 / Math.expm1(-0)) < 0);
+                console.log((1 / Math.log1p(-0)) < 0);
+                console.log(Number.isNaN(Math.log1p(-2)));
+                console.log(Math.log1p(await delayed()) === 0);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "near_zero_libm"),
+            "true\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\nawaited-log1p\ntrue\n"
         );
     }
 

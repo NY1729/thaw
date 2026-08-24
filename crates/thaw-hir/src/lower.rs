@@ -3161,7 +3161,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_math_sin" | "__thaw_math_cos" | "__thaw_math_tan"
                     | "__thaw_math_asin" | "__thaw_math_acos" | "__thaw_math_atan"
                     | "__thaw_math_sinh" | "__thaw_math_cosh" | "__thaw_math_tanh"
-                    | "__thaw_math_cbrt" => {
+                    | "__thaw_math_cbrt" | "__thaw_math_acosh" | "__thaw_math_asinh"
+                    | "__thaw_math_atanh" | "__thaw_math_expm1" | "__thaw_math_log1p" => {
                         let [argument] = args.as_slice() else {
                             return Err("unary Math function expects one operand".into());
                         };
@@ -5227,6 +5228,11 @@ impl<'a> FnLowerer<'a> {
                                 | "cosh"
                                 | "tanh"
                                 | "cbrt"
+                                | "acosh"
+                                | "asinh"
+                                | "atanh"
+                                | "expm1"
+                                | "log1p"
                         )
                     {
                         let [argument] = call.args.as_slice() else {
