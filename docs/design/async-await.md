@@ -517,6 +517,9 @@ destructuring assignmentも同じfixed-layout展開を使い、既存bindingへ�
 結果として保存済みの元の右辺を返す。nested/rest patternとawaited RHSでも評価は一度だけになる。
 `for...of`/`for await...of`のdeclarationおよびassignment headも、各itemを一度だけ内部localへ
 保存してからobject/tuple patternを展開する。continue時のindex更新とbreakは既存loop変換を維持する。
+function parameter patternは固定layout型の内部ABI parameterを一つ受け、body先頭で通常の
+destructuring bindingへ展開する。typed arrowと文脈型付きPromise callbackも同じ変換を使うため、
+nested/rest patternを保ったままnative closure ABIとasync continuationへ統合できる。
 
 ## 12. Promise constructorとcontinuation chain
 
