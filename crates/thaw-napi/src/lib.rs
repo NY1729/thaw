@@ -87,6 +87,7 @@ static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
 static ACTIVE_ASYNC_CLEANUP_HOOKS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SYMBOL_ID: AtomicU64 = AtomicU64::new(1);
+static GLOBAL_SYMBOLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static THREADSAFE_READY: OnceLock<Mutex<VecDeque<usize>>> = OnceLock::new();
 
 pub struct ThreadsafeFunction {
@@ -1944,6 +1945,41 @@ pub unsafe extern "C" fn napi_create_symbol(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_symbol_for(
+    env: NapiEnv,
+    description: *const c_char,
+    length: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if description.is_null() || out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let bytes = if length == NAPI_AUTO_LENGTH {
+        CStr::from_ptr(description).to_bytes()
+    } else {
+        std::slice::from_raw_parts(description.cast::<u8>(), length)
+    };
+    let description = String::from_utf8_lossy(bytes).into_owned();
+    let id = *GLOBAL_SYMBOLS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(description.clone())
+        .or_insert_with(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = if let Some(value) = env.symbols.get(&id).copied() {
+        value
+    } else {
+        let value = env.alloc(Value::Symbol { id, description });
+        env.symbols.insert(id, value);
+        value
+    };
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_create_external(
     env: NapiEnv,
     data: *mut c_void,
@@ -2924,6 +2960,7 @@ pub unsafe extern "C" fn napi_strict_equals(
         (Ok(Value::Bool(left)), Ok(Value::Bool(right))) => left == right,
         (Ok(Value::Number(left)), Ok(Value::Number(right))) => left == right,
         (Ok(Value::String(left)), Ok(Value::String(right))) => left == right,
+        (Ok(Value::Symbol { id: left, .. }), Ok(Value::Symbol { id: right, .. })) => left == right,
         (Ok(_), Ok(_)) => left == right,
         _ => false,
     };
@@ -3201,6 +3238,15 @@ pub unsafe extern "C" fn napi_throw_type_error(
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_throw_range_error(
+    env: NapiEnv,
+    code: *const c_char,
+    message: *const c_char,
+) -> NapiStatus {
+    napi_throw_error(env, code, message)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_throw_syntax_error(
     env: NapiEnv,
     code: *const c_char,
     message: *const c_char,
@@ -4369,6 +4415,16 @@ pub unsafe extern "C" fn napi_create_range_error(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn node_api_create_syntax_error(
+    env: NapiEnv,
+    code: NapiValue,
+    message: NapiValue,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    napi_create_error(env, code, message, out)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_is_error(
     _env: NapiEnv,
     value: NapiValue,
@@ -5187,6 +5243,27 @@ mod tests {
                 NAPI_OK
             );
             assert!(!equal);
+            let mut registered_first = ptr::null_mut();
+            let mut registered_second = ptr::null_mut();
+            assert_eq!(
+                node_api_symbol_for(
+                    env_ptr,
+                    c"shared".as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    &mut registered_first,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                node_api_symbol_for(env_ptr, c"shared".as_ptr(), 6, &mut registered_second),
+                NAPI_OK
+            );
+            assert_eq!(registered_first, registered_second);
+            assert_eq!(
+                napi_strict_equals(env_ptr, registered_first, registered_second, &mut equal,),
+                NAPI_OK
+            );
+            assert!(equal);
 
             let mut object = ptr::null_mut();
             assert_eq!(napi_create_object(env_ptr, &mut object), NAPI_OK);
@@ -6178,6 +6255,22 @@ mod tests {
             assert_eq!(caught, error);
             assert_eq!(
                 napi_throw_range_error(env_ptr, ptr::null(), c"again".as_ptr()),
+                NAPI_OK
+            );
+            assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);
+            assert!(pending);
+            assert_eq!(
+                napi_get_and_clear_last_exception(env_ptr, &mut caught),
+                NAPI_OK
+            );
+            assert_eq!(
+                node_api_create_syntax_error(env_ptr, ptr::null_mut(), message, &mut error,),
+                NAPI_OK
+            );
+            assert_eq!(napi_is_error(env_ptr, error, &mut is_error), NAPI_OK);
+            assert!(is_error);
+            assert_eq!(
+                node_api_throw_syntax_error(env_ptr, ptr::null(), c"syntax".as_ptr()),
                 NAPI_OK
             );
             assert_eq!(napi_is_exception_pending(env_ptr, &mut pending), NAPI_OK);

@@ -738,6 +738,8 @@ The workspace crates have narrow responsibilities:
   `napi_run_script` evaluates JavaScript in the embedded persistent QuickJS
   context, converts JSON-representable results into host values and reports
   JavaScript exceptions through the pending-exception channel.
+  Node-API v9 syntax errors and the process-wide `Symbol.for` registry are
+  exposed through their `node_api_*` entry points.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
