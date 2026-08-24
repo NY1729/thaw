@@ -9770,6 +9770,47 @@ mod tests {
     }
 
     #[test]
+    fn compiles_destructuring_assignments_and_returns_rhs() {
+        let source = r#"
+            async function source(): Promise<{
+                x: number; nested: { flag: boolean }; label: string; extra: number
+            }> {
+                await sleep(1);
+                console.log("source");
+                return { x: 1, nested: { flag: true }, label: "ok", extra: 4 };
+            }
+            function tupleSource(): [number, number, number] {
+                console.log("tuple");
+                return [5, 6, 7];
+            }
+            async function main(): Promise<void> {
+                let x = 0;
+                let flag = false;
+                let rest = { label: "", extra: 0 };
+                const returned = ({ x, nested: { flag }, ...rest } = await source());
+                console.log(x);
+                console.log(flag);
+                console.log(rest.label);
+                console.log(rest.extra);
+                console.log(returned.x);
+                let first = 0;
+                let tail = [0, 0];
+                [first, ...tail] = tupleSource();
+                console.log(first);
+                console.log(tail[0]);
+                console.log(tail[1]);
+                const returnedTuple = ([first, ...tail] = [8, 9, 10]);
+                console.log(returnedTuple[0]);
+                console.log(first);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "destructuring_assignments"),
+            "source\n1\ntrue\nok\n4\n1\ntuple\n5\n6\n7\n8\n8\n"
+        );
+    }
+
+    #[test]
     fn compiles_void_expressions_with_await_and_rejection() {
         let source = r#"
             function effect(): number {
