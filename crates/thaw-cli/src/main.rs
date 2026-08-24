@@ -945,7 +945,8 @@ fn rewrite_external_class_methods(
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        BinaryOp, CallExpr, Callee, Expr, Lit, MemberProp, Pat, UnaryOp, VarDeclarator,
+        ArrowFunctionBody, BinaryOp, CallExpr, Callee, Expr, FnDecl, FunctionBody, Lit, MemberProp,
+        Pat, ReturnStmt, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
     };
     use thaw_parser::common::Spanned;
 
@@ -981,6 +982,7 @@ fn rewrite_external_class_methods(
     fn source_expr_type(
         expression: &Expr,
         variables: &std::collections::HashMap<String, thaw_hir::HirType>,
+        functions: &std::collections::HashMap<String, thaw_hir::HirType>,
     ) -> Option<thaw_hir::HirType> {
         match expression {
             Expr::Lit(Lit::Num(_)) => Some(thaw_hir::HirType::F64),
@@ -989,7 +991,7 @@ fn rewrite_external_class_methods(
             Expr::Array(array)
                 if array.elems.iter().all(|element| {
                     element.as_ref().is_some_and(|element| {
-                        source_expr_type(element.expr.as_ref(), variables)
+                        source_expr_type(element.expr.as_ref(), variables, functions)
                             == Some(thaw_hir::HirType::F64)
                     })
                 }) =>
@@ -998,13 +1000,18 @@ fn rewrite_external_class_methods(
             }
             Expr::Object(_) => Some(thaw_hir::HirType::Object(Vec::new())),
             Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
-            Expr::Paren(parenthesized) => source_expr_type(&parenthesized.expr, variables),
-            Expr::TsAs(assertion) => source_expr_type(&assertion.expr, variables),
-            Expr::TsTypeAssertion(assertion) => source_expr_type(&assertion.expr, variables),
+            Expr::Paren(parenthesized) => {
+                source_expr_type(&parenthesized.expr, variables, functions)
+            }
+            Expr::TsAs(assertion) => source_expr_type(&assertion.expr, variables, functions),
+            Expr::TsTypeAssertion(assertion) => {
+                source_expr_type(&assertion.expr, variables, functions)
+            }
             Expr::Tpl(_) => Some(thaw_hir::HirType::Str),
             Expr::Unary(unary) => match unary.op {
                 UnaryOp::Plus | UnaryOp::Minus
-                    if source_expr_type(&unary.arg, variables) == Some(thaw_hir::HirType::F64) =>
+                    if source_expr_type(&unary.arg, variables, functions)
+                        == Some(thaw_hir::HirType::F64) =>
                 {
                     Some(thaw_hir::HirType::F64)
                 }
@@ -1012,8 +1019,8 @@ fn rewrite_external_class_methods(
                 _ => None,
             },
             Expr::Bin(binary) => {
-                let left = source_expr_type(&binary.left, variables);
-                let right = source_expr_type(&binary.right, variables);
+                let left = source_expr_type(&binary.left, variables, functions);
+                let right = source_expr_type(&binary.right, variables, functions);
                 match binary.op {
                     BinaryOp::Add
                         if left == Some(thaw_hir::HirType::Str)
@@ -1044,8 +1051,8 @@ fn rewrite_external_class_methods(
                 }
             }
             Expr::Cond(conditional) => {
-                let consequent = source_expr_type(&conditional.cons, variables);
-                let alternate = source_expr_type(&conditional.alt, variables);
+                let consequent = source_expr_type(&conditional.cons, variables, functions);
+                let alternate = source_expr_type(&conditional.alt, variables, functions);
                 (consequent == alternate).then_some(consequent).flatten()
             }
             Expr::Call(call) => match &call.callee {
@@ -1059,6 +1066,7 @@ fn rewrite_external_class_methods(
                     Expr::Ident(identifier) if identifier.sym == *"Boolean" => {
                         Some(thaw_hir::HirType::Bool)
                     }
+                    Expr::Ident(identifier) => functions.get(identifier.sym.as_str()).cloned(),
                     _ => None,
                 },
                 _ => None,
@@ -1067,6 +1075,158 @@ fn rewrite_external_class_methods(
                 Some(thaw_hir::HirType::F64)
             }
             _ => None,
+        }
+    }
+
+    fn source_ts_type(ty: &TsType) -> Option<thaw_hir::HirType> {
+        match ty {
+            TsType::TsKeywordType(keyword) => match keyword.kind {
+                TsKeywordTypeKind::TsNumberKeyword => Some(thaw_hir::HirType::F64),
+                TsKeywordTypeKind::TsStringKeyword => Some(thaw_hir::HirType::Str),
+                TsKeywordTypeKind::TsBooleanKeyword => Some(thaw_hir::HirType::Bool),
+                TsKeywordTypeKind::TsVoidKeyword => Some(thaw_hir::HirType::Void),
+                _ => None,
+            },
+            TsType::TsArrayType(array) => match source_ts_type(&array.elem_type) {
+                Some(thaw_hir::HirType::F64) => {
+                    Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))
+                }
+                _ => None,
+            },
+            TsType::TsParenthesizedType(parenthesized) => source_ts_type(&parenthesized.type_ann),
+            _ => None,
+        }
+    }
+
+    #[derive(Default)]
+    struct FunctionTypeFinder {
+        types: std::collections::HashMap<String, thaw_hir::HirType>,
+    }
+
+    impl Visit for FunctionTypeFinder {
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            if let Some(return_type) = declaration
+                .function
+                .return_type
+                .as_ref()
+                .and_then(|annotation| source_ts_type(&annotation.type_ann))
+            {
+                self.types
+                    .insert(declaration.ident.sym.to_string(), return_type);
+            }
+            declaration.visit_children_with(self);
+        }
+
+        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
+            {
+                let annotation = match initializer.as_ref() {
+                    Expr::Arrow(arrow) => arrow.return_type.as_ref(),
+                    Expr::Fn(function) => function.function.return_type.as_ref(),
+                    _ => None,
+                };
+                if let Some(return_type) =
+                    annotation.and_then(|annotation| source_ts_type(&annotation.type_ann))
+                {
+                    self.types.insert(binding.id.sym.to_string(), return_type);
+                }
+            }
+            declaration.visit_children_with(self);
+        }
+    }
+
+    fn inferred_block_return_type(
+        block: &FunctionBody,
+        functions: &std::collections::HashMap<String, thaw_hir::HirType>,
+    ) -> Option<thaw_hir::HirType> {
+        struct Returns<'a> {
+            functions: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+            types: Vec<Option<thaw_hir::HirType>>,
+        }
+        impl Visit for Returns<'_> {
+            fn visit_return_stmt(&mut self, statement: &ReturnStmt) {
+                self.types
+                    .push(statement.arg.as_ref().and_then(|expression| {
+                        source_expr_type(
+                            expression,
+                            &std::collections::HashMap::new(),
+                            self.functions,
+                        )
+                    }));
+            }
+
+            // Returns inside nested functions belong to those functions, not
+            // to the block currently being inferred.
+            fn visit_fn_decl(&mut self, _declaration: &FnDecl) {}
+
+            fn visit_arrow_expr(&mut self, _expression: &thaw_parser::ast::ArrowExpr) {}
+
+            fn visit_fn_expr(&mut self, _expression: &thaw_parser::ast::FnExpr) {}
+        }
+
+        let mut returns = Returns {
+            functions,
+            types: Vec::new(),
+        };
+        block.visit_with(&mut returns);
+        let first = returns.types.first()?.clone()?;
+        returns
+            .types
+            .iter()
+            .all(|candidate| candidate.as_ref() == Some(&first))
+            .then_some(first)
+    }
+
+    struct InferredFunctionTypeFinder<'a> {
+        known: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+        additions: std::collections::HashMap<String, thaw_hir::HirType>,
+    }
+
+    impl Visit for InferredFunctionTypeFinder<'_> {
+        fn visit_fn_decl(&mut self, declaration: &FnDecl) {
+            if !self.known.contains_key(declaration.ident.sym.as_str()) {
+                if let Some(return_type) = declaration
+                    .function
+                    .body
+                    .as_ref()
+                    .and_then(|body| inferred_block_return_type(body, self.known))
+                {
+                    self.additions
+                        .insert(declaration.ident.sym.to_string(), return_type);
+                }
+            }
+            declaration.visit_children_with(self);
+        }
+
+        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
+            {
+                if !self.known.contains_key(binding.id.sym.as_str()) {
+                    let return_type = match initializer.as_ref() {
+                        Expr::Arrow(arrow) => match arrow.body.as_ref() {
+                            ArrowFunctionBody::FunctionBody(block) => {
+                                inferred_block_return_type(block, self.known)
+                            }
+                            ArrowFunctionBody::Expr(expression) => source_expr_type(
+                                expression,
+                                &std::collections::HashMap::new(),
+                                self.known,
+                            ),
+                        },
+                        Expr::Fn(function) => function
+                            .function
+                            .body
+                            .as_ref()
+                            .and_then(|body| inferred_block_return_type(body, self.known)),
+                        _ => None,
+                    };
+                    if let Some(return_type) = return_type {
+                        self.additions
+                            .insert(binding.id.sym.to_string(), return_type);
+                    }
+                }
+            }
+            declaration.visit_children_with(self);
         }
     }
 
@@ -1084,6 +1244,7 @@ fn rewrite_external_class_methods(
         methods: &'a [ClassMethodRewrite],
         variables: std::collections::HashMap<String, String>,
         value_types: std::collections::HashMap<String, thaw_hir::HirType>,
+        function_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
     }
@@ -1098,7 +1259,9 @@ fn rewrite_external_class_methods(
                 if matches!(initializer.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
                     self.callbacks.insert(binding.id.sym.to_string());
                 }
-                if let Some(ty) = source_expr_type(initializer, &self.value_types) {
+                if let Some(ty) =
+                    source_expr_type(initializer, &self.value_types, self.function_types)
+                {
                     self.value_types.insert(binding.id.sym.to_string(), ty);
                 }
             }
@@ -1142,6 +1305,7 @@ fn rewrite_external_class_methods(
                                         if let Some(actual) = source_expr_type(
                                             argument.expr.as_ref(),
                                             &self.value_types,
+                                            self.function_types,
                                         ) {
                                             score +=
                                                 u16::from(overload_type_score(declared, &actual)?);
@@ -1176,11 +1340,28 @@ fn rewrite_external_class_methods(
     }
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
+    let mut function_types = FunctionTypeFinder::default();
+    module.visit_with(&mut function_types);
+    loop {
+        let mut inferred = InferredFunctionTypeFinder {
+            known: &function_types.types,
+            additions: std::collections::HashMap::new(),
+        };
+        module.visit_with(&mut inferred);
+        inferred
+            .additions
+            .retain(|name, _| !function_types.types.contains_key(name));
+        if inferred.additions.is_empty() {
+            break;
+        }
+        function_types.types.extend(inferred.additions);
+    }
     let mut finder = Finder {
         classes,
         methods,
         variables: std::collections::HashMap::new(),
         value_types: std::collections::HashMap::new(),
+        function_types: &function_types.types,
         callbacks: std::collections::HashSet::new(),
         edits: Vec::new(),
     };
@@ -3908,5 +4089,47 @@ mod tests {
         assert!(rewritten.contains("__set_number(box, Number(\"7\"))"));
         assert!(rewritten.contains("__set_string(box, `value-${s}`)"));
         assert!(rewritten.contains("__set_string(box, true ? \"yes\" : \"no\")"));
+    }
+
+    #[test]
+    fn infers_external_overload_types_from_user_function_returns_and_forward_references() {
+        let source = r#"const box = new NativeBox(1); const makeText = (): string => "text"; const makeFlag = function(): boolean { return true; }; const inferredFlag = () => true; box.set(makeNumber()); box.set(makeText()); box.set(makeFlag()); box.set(inferredNumber()); box.set(inferredText()); box.set(inferredFlag()); function makeNumber(): number { return 42; } function inferredNumber() { return 40 + 2; } function inferredText() { return forwardText(); } function forwardText() { return "text"; }"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_boolean".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Bool],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("__set_number(box, makeNumber())"));
+        assert!(rewritten.contains("__set_string(box, makeText())"));
+        assert!(rewritten.contains("__set_boolean(box, makeFlag())"));
+        assert!(rewritten.contains("__set_number(box, inferredNumber())"));
+        assert!(rewritten.contains("__set_string(box, inferredText())"));
+        assert!(rewritten.contains("__set_boolean(box, inferredFlag())"));
     }
 }
