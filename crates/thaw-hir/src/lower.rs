@@ -5505,38 +5505,54 @@ impl<'a> FnLowerer<'a> {
                     field_type,
                 )
             }
-            HirType::Array(element) => {
-                let MemberProp::Computed(computed) = &member.prop else {
-                    return Err("optional array access requires a computed index".into());
-                };
-                let index = self.lower_expr(&computed.expr)?;
-                self.expect_type(&HirType::F64, &index, "optional array index")?;
-                (
-                    HirExpr::TypedIndex(Box::new(unwrapped), Box::new(index), *element.clone()),
-                    *element.clone(),
-                )
-            }
-            HirType::Tuple(elements) => {
-                let MemberProp::Computed(computed) = &member.prop else {
-                    return Err("optional tuple access requires a computed index".into());
-                };
-                let Expr::Lit(Lit::Num(index)) = computed.expr.as_ref() else {
-                    return Err("optional tuple index must be a numeric literal".into());
-                };
-                let index = index.value as usize;
-                let element = elements
-                    .get(index)
-                    .cloned()
-                    .ok_or_else(|| format!("tuple index {index} is out of bounds"))?;
-                (
-                    HirExpr::TypedIndex(
-                        Box::new(unwrapped),
-                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                        element.clone(),
+            HirType::Array(element) => match &member.prop {
+                MemberProp::Ident(property) if property.sym == *"length" => {
+                    (HirExpr::ArrayLen(Box::new(unwrapped)), HirType::F64)
+                }
+                MemberProp::Computed(computed) => {
+                    let index = self.lower_expr(&computed.expr)?;
+                    self.expect_type(&HirType::F64, &index, "optional array index")?;
+                    (
+                        HirExpr::TypedIndex(Box::new(unwrapped), Box::new(index), *element.clone()),
+                        *element.clone(),
+                    )
+                }
+                _ => return Err("unsupported optional array member".into()),
+            },
+            HirType::Tuple(elements) => match &member.prop {
+                MemberProp::Ident(property) if property.sym == *"length" => {
+                    (HirExpr::ArrayLen(Box::new(unwrapped)), HirType::F64)
+                }
+                MemberProp::Computed(computed) => {
+                    let Expr::Lit(Lit::Num(index)) = computed.expr.as_ref() else {
+                        return Err("optional tuple index must be a numeric literal".into());
+                    };
+                    let index = index.value as usize;
+                    let element = elements
+                        .get(index)
+                        .cloned()
+                        .ok_or_else(|| format!("tuple index {index} is out of bounds"))?;
+                    (
+                        HirExpr::TypedIndex(
+                            Box::new(unwrapped),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            element.clone(),
+                        ),
+                        element,
+                    )
+                }
+                _ => return Err("unsupported optional tuple member".into()),
+            },
+            HirType::Str => match &member.prop {
+                MemberProp::Ident(property) if property.sym == *"length" => (
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_length".into())),
+                        vec![unwrapped],
                     ),
-                    element,
-                )
-            }
+                    HirType::F64,
+                ),
+                _ => return Err("unsupported optional string member".into()),
+            },
             other => {
                 return Err(format!(
                     "optional member access is not yet supported on {other:?}"
