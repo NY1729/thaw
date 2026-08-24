@@ -10586,6 +10586,14 @@ mod tests {
     #[test]
     fn frame_split_extracts_awaits_from_array_spreads_left_to_right() {
         let source = r#"
+            function first(): number {
+                console.log("first");
+                return 1;
+            }
+            function last(): number {
+                console.log("last");
+                return 5;
+            }
             async function part(): Promise<number[]> {
                 await sleep(1);
                 console.log("part");
@@ -10597,14 +10605,50 @@ mod tests {
                 return 4;
             }
             async function main(): Promise<void> {
-                const values: number[] = [1, ...(await part()), await value(), 5];
+                const values: number[] = [first(), ...(await part()), await value(), last()];
                 console.log(values.length);
                 console.log(values[3]);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "await_array_spreads"),
-            "part\nvalue\n5\n4\n"
+            "first\npart\nvalue\nlast\n5\n4\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_preserves_object_spreads_and_overrides_across_await() {
+        let source = r#"
+            interface Config { x: number; y: number; z: number; }
+            function field(label: string, value: number): number {
+                console.log(label);
+                return value;
+            }
+            async function spread(): Promise<{ x: number; y: number }> {
+                console.log("spread");
+                await sleep(1);
+                return { x: 9, y: 2 };
+            }
+            async function delayedField(): Promise<number> {
+                console.log("last");
+                await sleep(1);
+                return 4;
+            }
+            async function main(): Promise<void> {
+                const config: Config = {
+                    x: field("first", 1),
+                    ...(await spread()),
+                    x: field("override", 3),
+                    z: await delayedField()
+                };
+                console.log(config.x);
+                console.log(config.y);
+                console.log(config.z);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_spread_order_across_await"),
+            "first\nspread\noverride\nlast\n3\n2\n4\n"
         );
     }
 
