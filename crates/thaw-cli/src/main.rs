@@ -3120,6 +3120,11 @@ mod tests {
             "export function value(): number { return 2; }\n",
         )
         .unwrap();
+        std::fs::write(
+            dir.join("lib/expression.ts"),
+            "function offset(): number { return 2; }\nexport default offset;\n",
+        )
+        .unwrap();
         let entry = dir.join("main.ts");
         std::fs::write(
             &entry,
@@ -3127,12 +3132,14 @@ mod tests {
                 import { makePair, chooseFirst as first, value, values, offset as reexportedOffset } from "./lib";
                 import offset, { value as sameValue } from "./lib/values";
                 import { value as otherValue } from "./lib/other";
+                import expressionOffset from "./lib/expression";
                 function main(): void {
                     const pair = makePair(value(), "ok");
                     console.log(pair.first + otherValue());
                     console.log(first("selected", sameValue() + offset()));
                     console.log(values.value() + values.default());
                     console.log(value() + reexportedOffset());
+                    console.log(value() + expressionOffset());
                 }
             "#,
         )
@@ -3147,7 +3154,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "42\nselected\n42\n42\n"
+            "42\nselected\n42\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
