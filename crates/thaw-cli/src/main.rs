@@ -3112,7 +3112,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("lib/index.ts"),
-            "export { makePair, chooseFirst } from './pair';\nexport { value } from './values';\n",
+            "export { makePair, chooseFirst } from './pair';\nexport { value, default as offset } from './values';\nexport * as values from './values';\n",
         )
         .unwrap();
         std::fs::write(
@@ -3124,13 +3124,15 @@ mod tests {
         std::fs::write(
             &entry,
             r#"
-                import { makePair, chooseFirst as first, value } from "./lib";
+                import { makePair, chooseFirst as first, value, values, offset as reexportedOffset } from "./lib";
                 import offset, { value as sameValue } from "./lib/values";
                 import { value as otherValue } from "./lib/other";
                 function main(): void {
                     const pair = makePair(value(), "ok");
                     console.log(pair.first + otherValue());
                     console.log(first("selected", sameValue() + offset()));
+                    console.log(values.value() + values.default());
+                    console.log(value() + reexportedOffset());
                 }
             "#,
         )
@@ -3143,7 +3145,10 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nselected\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "42\nselected\n42\n42\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
