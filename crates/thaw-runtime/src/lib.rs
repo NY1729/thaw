@@ -465,6 +465,26 @@ pub unsafe extern "C" fn thaw_string_to_array(value: *const c_char) -> *mut u8 {
     output
 }
 
+#[no_mangle]
+/// # Safety
+/// `value` must point to a valid NUL-terminated UTF-8 string. `count` must be
+/// finite, non-negative and already normalized to an integer.
+pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) -> *const c_char {
+    if value.is_null() || !count.is_finite() || count < 0.0 {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let count = count as usize;
+    let Some(capacity) = value.len().checked_mul(count) else {
+        return std::ptr::null();
+    };
+    let mut output = String::with_capacity(capacity);
+    for _ in 0..count {
+        output.push_str(&value);
+    }
+    arena_c_string(&output).map_or(std::ptr::null(), |value| value.cast())
+}
+
 unsafe fn native_array_length(array: *const u8) -> Option<usize> {
     (!array.is_null()).then(|| unsafe { array.cast::<u64>().read() as usize })
 }
