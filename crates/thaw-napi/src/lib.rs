@@ -1388,6 +1388,33 @@ pub unsafe extern "C" fn napi_create_string_latin1(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_create_string_utf16(
+    env: NapiEnv,
+    value: *const u16,
+    length: usize,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    if value.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let length = if length == NAPI_AUTO_LENGTH {
+        let mut length = 0;
+        while *value.add(length) != 0 {
+            length += 1;
+        }
+        length
+    } else {
+        length
+    };
+    let string = String::from_utf16_lossy(std::slice::from_raw_parts(value, length));
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::String(string));
+    write_value(out, value)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_create_symbol(
     env: NapiEnv,
     description: NapiValue,
@@ -2280,13 +2307,71 @@ pub unsafe extern "C" fn napi_get_value_string_utf8(
         Ok(Value::String(string)) => string,
         _ => return NAPI_STRING_EXPECTED,
     };
-    if !written.is_null() {
-        *written = string.len();
-    }
+    let mut count = string.len();
     if !buffer.is_null() && size > 0 {
-        let count = string.len().min(size - 1);
+        count = string.len().min(size - 1);
+        while !string.is_char_boundary(count) {
+            count -= 1;
+        }
         ptr::copy_nonoverlapping(string.as_ptr(), buffer.cast(), count);
         *buffer.add(count) = 0;
+    }
+    if !written.is_null() {
+        *written = count;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_string_latin1(
+    _env: NapiEnv,
+    value: NapiValue,
+    buffer: *mut c_char,
+    size: usize,
+    written: *mut usize,
+) -> NapiStatus {
+    let string = match value_ref(value) {
+        Ok(Value::String(string)) => string,
+        _ => return NAPI_STRING_EXPECTED,
+    };
+    let encoded: Vec<u8> = string.encode_utf16().map(|unit| unit as u8).collect();
+    let count = if buffer.is_null() || size == 0 {
+        encoded.len()
+    } else {
+        let count = encoded.len().min(size - 1);
+        ptr::copy_nonoverlapping(encoded.as_ptr(), buffer.cast(), count);
+        *buffer.add(count) = 0;
+        count
+    };
+    if !written.is_null() {
+        *written = count;
+    }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_value_string_utf16(
+    _env: NapiEnv,
+    value: NapiValue,
+    buffer: *mut u16,
+    size: usize,
+    written: *mut usize,
+) -> NapiStatus {
+    let string = match value_ref(value) {
+        Ok(Value::String(string)) => string,
+        _ => return NAPI_STRING_EXPECTED,
+    };
+    let encoded: Vec<u16> = string.encode_utf16().collect();
+    let count = if buffer.is_null() || size == 0 {
+        encoded.len()
+    } else {
+        let count = encoded.len().min(size - 1);
+        ptr::copy_nonoverlapping(encoded.as_ptr(), buffer, count);
+        *buffer.add(count) = 0;
+        count
+    };
+    if !written.is_null() {
+        *written = count;
     }
     NAPI_OK
 }
@@ -3508,6 +3593,85 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn latin1_and_utf16_strings_follow_napi_buffer_contracts() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+
+            let latin1 = [0xe9_u8, 0];
+            let mut latin1_value = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_latin1(
+                    env_ptr,
+                    latin1.as_ptr().cast(),
+                    NAPI_AUTO_LENGTH,
+                    &mut latin1_value,
+                ),
+                NAPI_OK
+            );
+            let mut utf8 = [0_i8; 3];
+            let mut written = 0;
+            assert_eq!(
+                napi_get_value_string_utf8(
+                    env_ptr,
+                    latin1_value,
+                    utf8.as_mut_ptr(),
+                    utf8.len(),
+                    &mut written,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(written, 2);
+            assert_eq!(utf8.map(|byte| byte as u8), [0xc3, 0xa9, 0]);
+
+            let utf16 = [0x41_u16, 0xd83d, 0xde03, 0];
+            let mut utf16_value = ptr::null_mut();
+            assert_eq!(
+                napi_create_string_utf16(
+                    env_ptr,
+                    utf16.as_ptr(),
+                    NAPI_AUTO_LENGTH,
+                    &mut utf16_value,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_value_string_utf16(env_ptr, utf16_value, ptr::null_mut(), 0, &mut written,),
+                NAPI_OK
+            );
+            assert_eq!(written, 3);
+            let mut utf16_copy = [0_u16; 4];
+            assert_eq!(
+                napi_get_value_string_utf16(
+                    env_ptr,
+                    utf16_value,
+                    utf16_copy.as_mut_ptr(),
+                    utf16_copy.len(),
+                    &mut written,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(written, 3);
+            assert_eq!(utf16_copy, utf16);
+
+            let mut truncated = [0_i8; 5];
+            assert_eq!(
+                napi_get_value_string_utf8(
+                    env_ptr,
+                    utf16_value,
+                    truncated.as_mut_ptr(),
+                    truncated.len(),
+                    &mut written,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(written, 1);
+            assert_eq!(truncated[0], b'A' as i8);
+            assert_eq!(truncated[1], 0);
+        }
     }
 
     #[cfg(target_os = "linux")]

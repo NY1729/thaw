@@ -697,7 +697,9 @@ The workspace crates have narrow responsibilities:
   are not yet described
 - The broader N-API surface beyond the current number/string/boolean/JSON/
   Buffer and async-work host. The async-work lifecycle, including
-  `napi_cancel_async_work`, is supported by a bounded shared worker pool
+  `napi_cancel_async_work`, is supported by a bounded shared worker pool.
+  UTF-8, Latin-1 and UTF-16 string creation/extraction follow N-API length,
+  truncation and null-termination rules
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design
 
