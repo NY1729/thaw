@@ -505,12 +505,14 @@ participate in overload selection through explicit return annotations or a
 uniformly inferred return type; repeated collection resolves forward call
 chains. Parameter-dependent/conflicting returns and rest element types beyond
 the currently native-representable surface remain explicit gaps. Object
-literals retain recursively inferred field types, so
+literals, including shorthand properties such as `{ value }`, retain
+recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
 name and type. Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
 compound assignments invalidate the affected fact. Computed/spread
-object-literal properties remain outside this local inference pass. `if/else`
+object-literal properties remain outside this local inference pass and HIR
+lowering. `if/else`
 branches are analyzed from the same incoming state and retain
 only value, class-instance, and callback facts that agree on every outgoing
 path; an omitted `else` joins against the unchanged incoming path. `while` and

@@ -2827,17 +2827,24 @@ impl<'a> FnLowerer<'a> {
                         "spread properties are not supported in object literals".to_string()
                     );
                 };
-                let Prop::KeyValue(KeyValueProp { key, value }) = prop.as_ref() else {
-                    return Err(
-                        "only `key: value` object literal properties are supported".to_string()
-                    );
-                };
-                let name = match key {
-                    PropName::Ident(ident) => ident.sym.to_string(),
-                    PropName::Str(s) => s.value.to_string_lossy().into_owned(),
-                    _ => return Err("unsupported object literal key".to_string()),
-                };
-                Ok((name, self.lower_expr(value)?))
+                match prop.as_ref() {
+                    Prop::KeyValue(KeyValueProp { key, value }) => {
+                        let name = match key {
+                            PropName::Ident(ident) => ident.sym.to_string(),
+                            PropName::Str(s) => s.value.to_string_lossy().into_owned(),
+                            _ => return Err("unsupported object literal key".to_string()),
+                        };
+                        Ok((name, self.lower_expr(value)?))
+                    }
+                    Prop::Shorthand(ident) => Ok((
+                        ident.sym.to_string(),
+                        self.lower_expr(&Expr::Ident(ident.clone()))?,
+                    )),
+                    _ => Err(
+                        "only `key: value` and shorthand object literal properties are supported"
+                            .to_string(),
+                    ),
+                }
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(HirExpr::ObjectLit(fields))
@@ -4314,6 +4321,33 @@ mod tests {
                     Box::new(HirExpr::Lit(HirLit::F64(1.0))),
                 )),
             ))
+        );
+    }
+
+    #[test]
+    fn lowers_object_literal_shorthand_properties() {
+        let program = lower(
+            r#"function main(): void {
+                const x: number = 1;
+                const label: string = "point";
+                const point: { x: number; label: string } = { x, label };
+                console.log(point.x);
+            }"#,
+        );
+
+        assert_eq!(
+            program.functions[0].body[2],
+            HirStmt::Let(
+                "point".into(),
+                HirType::Object(vec![
+                    ("x".into(), HirType::F64),
+                    ("label".into(), HirType::Str),
+                ]),
+                HirExpr::ObjectLit(vec![
+                    ("x".into(), HirExpr::Var("x".into())),
+                    ("label".into(), HirExpr::Var("label".into())),
+                ]),
+            )
         );
     }
 
