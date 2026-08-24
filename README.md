@@ -503,9 +503,12 @@ parameters are expanded only for the argument counts observed at compiled call
 sites, so they do not impose an arbitrary maximum arity. User-function calls
 participate in overload selection through explicit return annotations or a
 uniformly inferred return type; repeated collection resolves forward call
-chains. Parameter-dependent/conflicting returns, arbitrary property types, and
-rest element types beyond the currently native-representable surface remain
-explicit gaps.
+chains. Parameter-dependent/conflicting returns and rest element types beyond
+the currently native-representable surface remain explicit gaps. Object
+literals retain recursively inferred field types, so
+property reads and same-arity structural object overloads are selected by field
+name and type. Computed/spread properties and mutation-sensitive flow analysis
+remain outside this local inference pass.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
