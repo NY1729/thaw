@@ -721,6 +721,8 @@ The workspace crates have narrow responsibilities:
   Symbol values have identity independent of their descriptions and occupy a
   property-key namespace distinct from strings; JSON conversion omits Symbol
   keys in the same way as JavaScript.
+  Property-name enumeration supports N-API string/Symbol skipping, descriptor
+  attribute filters, own-key mode and numeric array-index conversion.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
