@@ -2709,7 +2709,7 @@ pub unsafe extern "C" fn napi_create_bigint_words(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || sign_bit != 0 && sign_bit != 1 || (word_count != 0 && words.is_null()) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2823,7 +2823,7 @@ pub unsafe extern "C" fn napi_create_string_utf8(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2846,7 +2846,7 @@ pub unsafe extern "C" fn napi_create_string_latin1(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2869,7 +2869,7 @@ pub unsafe extern "C" fn napi_create_string_utf16(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2905,7 +2905,7 @@ pub unsafe extern "C" fn node_api_create_property_key_utf8(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2927,7 +2927,7 @@ pub unsafe extern "C" fn node_api_create_property_key_latin1(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2949,7 +2949,7 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if value.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -2978,11 +2978,11 @@ pub unsafe extern "C" fn node_api_create_external_string_latin1(
     copied: *mut bool,
 ) -> NapiStatus {
     if value.is_null() || out.is_null() || copied.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let status = napi_create_string_latin1(env, value, length, out);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     *copied = true;
     if let Some(finalize) = finalize {
@@ -3002,11 +3002,11 @@ pub unsafe extern "C" fn node_api_create_external_string_utf16(
     copied: *mut bool,
 ) -> NapiStatus {
     if value.is_null() || out.is_null() || copied.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let status = napi_create_string_utf16(env, value, length, out);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     *copied = true;
     if let Some(finalize) = finalize {
@@ -3023,14 +3023,14 @@ pub unsafe extern "C" fn napi_create_symbol(
 ) -> NapiStatus {
     if out.is_null() || (!description.is_null() && !value_belongs_to_environment(env, description))
     {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let description = if description.is_null() {
         String::new()
     } else {
         match value_ref(description) {
             Ok(Value::String(value)) => value.clone(),
-            _ => return NAPI_STRING_EXPECTED,
+            _ => return record_status(env, NAPI_STRING_EXPECTED),
         }
     };
     let Ok(env) = env_mut(env) else {
@@ -3050,7 +3050,7 @@ pub unsafe extern "C" fn node_api_symbol_for(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if description.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -3086,7 +3086,7 @@ pub unsafe extern "C" fn napi_create_external(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -3110,15 +3110,16 @@ pub unsafe extern "C" fn napi_get_value_external(
     out: *mut *mut c_void,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, value) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
-    match value_ref(value) {
+    let status = match value_ref(value) {
         Ok(Value::External(data)) => {
             *out = *data;
             NAPI_OK
         }
         _ => NAPI_INVALID_ARG,
-    }
+    };
+    record_status(env, status)
 }
 
 #[no_mangle]
@@ -3140,14 +3141,14 @@ pub unsafe extern "C" fn node_api_create_object_with_properties(
     out: *mut NapiValue,
 ) -> NapiStatus {
     if out.is_null() || !value_belongs_to_environment(env, prototype_or_null) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     if !matches!(value_ref(prototype_or_null), Ok(value) if is_object_value(value) || matches!(value, Value::Null))
     {
-        return NAPI_OBJECT_EXPECTED;
+        return record_status(env, NAPI_OBJECT_EXPECTED);
     }
     if property_count != 0 && (property_names.is_null() || property_values.is_null()) {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
 
     let (names, values) = if property_count == 0 {
@@ -3163,23 +3164,23 @@ pub unsafe extern "C" fn node_api_create_object_with_properties(
             || !value_belongs_to_environment(env, value)
             || property_key(name).is_err()
         {
-            return NAPI_INVALID_ARG;
+            return record_status(env, NAPI_INVALID_ARG);
         }
     }
 
     let mut object = ptr::null_mut();
     let status = napi_create_object(env, &mut object);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     let status = node_api_set_prototype(env, object, prototype_or_null);
     if status != NAPI_OK {
-        return status;
+        return record_status(env, status);
     }
     for (&name, &value) in names.iter().zip(values) {
         let status = napi_set_property(env, object, name, value);
         if status != NAPI_OK {
-            return status;
+            return record_status(env, status);
         }
     }
     write_value(out, object)
@@ -3211,10 +3212,10 @@ pub unsafe extern "C" fn napi_create_function(
     out: *mut NapiValue,
 ) -> NapiStatus {
     let Some(callback) = callback else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if out.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Ok(env) = env_for_value_output(env, out) else {
         return NAPI_INVALID_ARG;
@@ -3270,7 +3271,7 @@ pub unsafe extern "C" fn napi_get_cb_info(
         return NAPI_INVALID_ARG;
     }
     let Some(info) = info.as_ref() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     if !argc.is_null() {
         let capacity = *argc;
@@ -3282,7 +3283,7 @@ pub unsafe extern "C" fn napi_get_cb_info(
                 let mut undefined = ptr::null_mut();
                 let status = napi_get_undefined(env, &mut undefined);
                 if status != NAPI_OK {
-                    return status;
+                    return record_status(env, status);
                 }
                 for index in copied..capacity {
                     *argv.add(index) = undefined;
@@ -3306,10 +3307,10 @@ pub unsafe extern "C" fn napi_get_new_target(
     result: *mut NapiValue,
 ) -> NapiStatus {
     if env.is_null() || result.is_null() {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     }
     let Some(info) = info.as_ref() else {
-        return NAPI_INVALID_ARG;
+        return record_status(env, NAPI_INVALID_ARG);
     };
     *result = info.new_target;
     NAPI_OK
@@ -9170,6 +9171,40 @@ mod tests {
             );
             assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
             assert_eq!((*info).error_code, NAPI_STRING_EXPECTED);
+        }
+    }
+
+    #[test]
+    fn value_creation_errors_update_last_error_without_allocating() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut value = ptr::null_mut();
+            let mut info = ptr::null();
+            let values_before = env.values.len();
+
+            assert_eq!(
+                napi_create_string_utf8(env_ptr, ptr::null(), 0, &mut value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
+            assert_eq!(env.values.len(), values_before);
+
+            let number = env.alloc(Value::Number(1.0));
+            assert_eq!(
+                napi_create_symbol(env_ptr, number, &mut value),
+                NAPI_STRING_EXPECTED
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_STRING_EXPECTED);
+
+            assert_eq!(
+                napi_create_function(env_ptr, ptr::null(), 0, None, ptr::null_mut(), &mut value,),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(napi_get_last_error_info(env_ptr, &mut info), NAPI_OK);
+            assert_eq!((*info).error_code, NAPI_INVALID_ARG);
         }
     }
 
