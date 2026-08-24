@@ -364,6 +364,31 @@ pub extern "C" fn thaw_math_imul(left: f64, right: f64) -> f64 {
     f64::from(result as i32)
 }
 
+static MATH_RANDOM_STATE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x6a09_e667_f3bc_c909);
+
+#[no_mangle]
+pub extern "C" fn thaw_math_random() -> f64 {
+    use std::sync::atomic::Ordering;
+
+    let mut current = MATH_RANDOM_STATE.load(Ordering::Relaxed);
+    loop {
+        let mut next = current;
+        next ^= next << 13;
+        next ^= next >> 7;
+        next ^= next << 17;
+        match MATH_RANDOM_STATE.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return ((next >> 11) as f64) * (1.0 / 9_007_199_254_740_992.0),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 #[no_mangle]
 /// Compares UTF-8 native strings using JavaScript's UTF-16 code-unit order.
 ///
