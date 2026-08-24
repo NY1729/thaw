@@ -383,6 +383,9 @@ The workspace crates have narrow responsibilities:
 - `Math.round` implements JavaScript's ties-toward-positive-infinity rule,
   including negative-zero results between `-0.5` and zero, numeric coercion,
   non-finite values, single evaluation and awaited arguments
+- `Math.exp`, `Math.log`, `Math.log2`, `Math.log10`, `Math.sin` and `Math.cos`
+  lower to LLVM floating-point intrinsics after JavaScript numeric coercion;
+  domain errors, infinities, `NaN`, single evaluation and `await` are preserved
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
