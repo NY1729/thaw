@@ -1112,6 +1112,101 @@ pub unsafe extern "C" fn thaw_napi_call_with_callback_result(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn thaw_napi_call_method_with_callback_result(
+    receiver: u64,
+    method: *const c_char,
+    args: *const c_char,
+    callback: Option<ThawNativeCallback>,
+    context: *mut c_void,
+) -> ThawResult {
+    let result = (|| -> Result<String, String> {
+        let env = module_env_for_handle(receiver)?;
+        let method_name = text(method)?;
+        let args: Vec<JsonValue> = serde_json::from_str(&text(args)?)
+            .map_err(|error| format!("invalid argument JSON: {error}"))?;
+        let mut callable = ptr::null_mut();
+        let method_name_c = CString::new(method_name.clone()).map_err(|_| "method contains NUL")?;
+        let status = napi_get_named_property(
+            env,
+            receiver as NapiValue,
+            method_name_c.as_ptr(),
+            &mut callable,
+        );
+        if status != NAPI_OK {
+            take_env_exception(env)?;
+            return Err(format!(
+                "failed to get native method `{method_name}`: status {status}"
+            ));
+        }
+        let function = match value_ref(callable).map_err(|_| "invalid native method")? {
+            Value::Function(function) => function.clone(),
+            _ => return Err(format!("native property `{method_name}` is not callable")),
+        };
+        let callback = callback.ok_or("native addon callback is null")?;
+        let callback_key = (
+            context as usize,
+            if context.is_null() {
+                callback as usize
+            } else {
+                0
+            },
+        );
+        let mut values: Vec<NapiValue> = args
+            .iter()
+            .map(|value| value_from_json(&mut *env, value))
+            .collect();
+        let cached_callback =
+            HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied());
+        let callback_value = if let Some(callback) = cached_callback {
+            callback
+        } else {
+            let bridge = Arc::new(ThawCallbackBridge {
+                callback,
+                context: context as usize,
+            });
+            let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
+            let value = (*env).alloc(Value::Function(Function {
+                callback: thaw_compiled_callback,
+                data: bridge_data,
+                properties: HashMap::new(),
+                _thaw_bridge: Some(bridge),
+            }));
+            HOST.with(|host| {
+                host.borrow_mut()
+                    .compiled_callbacks
+                    .insert(callback_key, value);
+            });
+            value
+        };
+        values.push(callback_value);
+        let mut info = CallbackInfo {
+            args: values,
+            this_arg: receiver as NapiValue,
+            new_target: ptr::null_mut(),
+            data: function.data,
+        };
+        let value = (function.callback)(env, &mut info);
+        take_env_exception(env)?;
+        let value = wait_for_promise(value)?;
+        if value.is_null() {
+            Ok("null".to_string())
+        } else {
+            serde_json::to_string(&json_from_value(value)?).map_err(|error| error.to_string())
+        }
+    })();
+    match result {
+        Ok(value) => ThawResult {
+            value: CString::new(value).unwrap_or_default().into_raw(),
+            error: ptr::null_mut(),
+        },
+        Err(error) => ThawResult {
+            value: ptr::null_mut(),
+            error: CString::new(error).unwrap_or_default().into_raw(),
+        },
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn thaw_napi_call(name: *const c_char, args: *const c_char) -> *const c_char {
     let result = thaw_napi_call_result(name, args);
     if result.error.is_null() {

@@ -328,6 +328,15 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
             .map(|(name, ty)| render_dynamic_type(ty).map(|ty| format!("{name}: {ty}")))
             .collect::<Option<Vec<_>>>()
             .map(|fields| format!("{{ {} }}", fields.join("; "))),
+        thaw_hir::HirType::Function(params, ret) => {
+            let params = params
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| render_dynamic_type(ty).map(|ty| format!("arg{index}: {ty}")))
+                .collect::<Option<Vec<_>>>()?;
+            let ret = render_dynamic_type(ret)?;
+            Some(format!("({}) => {ret}", params.join(", ")))
+        }
         _ => None,
     }
 }
@@ -623,7 +632,7 @@ fn generate_registry_shims(
                                 && candidate.kind == thaw_bridge::DtsMethodKind::Method
                         })
                         .filter(|candidate| {
-                            candidate.params.iter().all(|(_, ty)| {
+                            candidate.params.iter().enumerate().all(|(index, (_, ty))| {
                                 matches!(
                                     ty,
                                     thaw_bridge::DtsType::Native(
@@ -637,6 +646,12 @@ fn generate_registry_shims(
                                     ty,
                                     thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
                                         if **element == thaw_hir::HirType::F64
+                                ) || matches!(
+                                    ty,
+                                    thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
+                                        if index + 1 == candidate.params.len()
+                                            && params == &[thaw_hir::HirType::Json, thaw_hir::HirType::Json]
+                                            && **ret == thaw_hir::HirType::Json
                                 )
                             })
                         })
@@ -2781,7 +2796,7 @@ mod tests {
         std::fs::create_dir_all(&package).unwrap();
         std::fs::write(
             package.join("package.d.ts"),
-            "export declare class NativeBox { constructor(value: number); get(): number; }\n",
+            "export declare class NativeBox { constructor(value: number); get(): number; getLater(callback: (error: Json, result: Json) => Json): number; }\n",
         )
         .unwrap();
         let addon_c = dir.join("addon.c");
@@ -2798,6 +2813,8 @@ mod tests {
             extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
             extern napi_status napi_get_value_double(napi_env, napi_value, double*);
             extern napi_status napi_create_double(napi_env, double, napi_value*);
+            extern napi_status napi_get_null(napi_env, napi_value*);
+            extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
             extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
             extern napi_status napi_wrap(napi_env, napi_value, void*, void (*)(napi_env,void*,void*), void*, void**);
             extern napi_status napi_unwrap(napi_env, napi_value, void**);
@@ -2816,10 +2833,22 @@ mod tests {
                 napi_unwrap(env, self, (void**)&box);
                 napi_create_double(env, box->value, &result); return result;
             }
+            static napi_value box_get_later(napi_env env, napi_callback_info info) {
+                size_t argc = 1; napi_value callback, self, callback_args[2], ignored, queued; native_box* box;
+                napi_get_cb_info(env, info, &argc, &callback, &self, 0);
+                napi_unwrap(env, self, (void**)&box);
+                napi_get_null(env, &callback_args[0]);
+                napi_create_double(env, box->value, &callback_args[1]);
+                napi_call_function(env, self, callback, 2, callback_args, &ignored);
+                napi_create_double(env, 1, &queued); return queued;
+            }
             __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
                 napi_value constructor;
-                napi_property_descriptor properties[1] = { { "get", 0, box_get, 0, 0, 0, 0, 0 } };
-                napi_define_class(env, "NativeBox", 9, box_new, 0, 1, properties, &constructor);
+                napi_property_descriptor properties[2] = {
+                    { "get", 0, box_get, 0, 0, 0, 0, 0 },
+                    { "getLater", 0, box_get_later, 0, 0, 0, 0, 0 }
+                };
+                napi_define_class(env, "NativeBox", 9, box_new, 0, 2, properties, &constructor);
                 napi_set_named_property(env, exports, "NativeBox", constructor);
                 return exports;
             }
@@ -2838,7 +2867,7 @@ mod tests {
         let output = dir.join("app");
         std::fs::write(
             &source,
-            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); }\n",
+            "import { NativeBox } from \"native-box\"; function main(): void { const box: JsValue = new NativeBox(42); console.log(box.get()); const callback = (error: Json, result: Json): Json => { console.log(Number(result)); return result; }; console.log(box.getLater(callback)); }\n",
         )
         .unwrap();
         build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
@@ -2849,7 +2878,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n1\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
