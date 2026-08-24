@@ -1003,8 +1003,23 @@ fn rewrite_external_class_methods(
             Expr::Object(object) => {
                 let mut fields = Vec::with_capacity(object.props.len());
                 for property in &object.props {
+                    if let PropOrSpread::Spread(spread) = property {
+                        let Expr::Ident(identifier) = spread.expr.as_ref() else {
+                            return Some(thaw_hir::HirType::Object(Vec::new()));
+                        };
+                        let Some(thaw_hir::HirType::Object(spread_fields)) =
+                            variables.get(identifier.sym.as_str())
+                        else {
+                            return Some(thaw_hir::HirType::Object(Vec::new()));
+                        };
+                        for (name, value_type) in spread_fields {
+                            fields.retain(|(existing, _)| existing != name);
+                            fields.push((name.clone(), value_type.clone()));
+                        }
+                        continue;
+                    }
                     let PropOrSpread::Prop(property) = property else {
-                        return Some(thaw_hir::HirType::Object(Vec::new()));
+                        unreachable!();
                     };
                     let (name, value_type) = match property.as_ref() {
                         Prop::KeyValue(property) => {
@@ -1035,6 +1050,7 @@ fn rewrite_external_class_methods(
                         }
                         _ => return Some(thaw_hir::HirType::Object(Vec::new())),
                     };
+                    fields.retain(|(existing, _)| existing != &name);
                     fields.push((name, value_type));
                 }
                 Some(thaw_hir::HirType::Object(fields))
@@ -4419,7 +4435,7 @@ mod tests {
 
     #[test]
     fn selects_object_overloads_from_structural_property_types() {
-        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" });"#;
+        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" }); box.configure({ ...numeric }); box.configure({ ...numeric, value: "override" });"#;
         let rewritten = rewrite_external_class_methods(
             source,
             &[("addon".into(), "NativeBox".into())],
@@ -4453,6 +4469,8 @@ mod tests {
         assert!(rewritten.contains("__configure_string(box, textual)"));
         assert!(rewritten.contains("__configure_number(box, { value: 7 })"));
         assert!(rewritten.contains("__configure_string(box, { [\"value\"]: \"computed\" })"));
+        assert!(rewritten.contains("__configure_number(box, { ...numeric })"));
+        assert!(rewritten.contains("__configure_string(box, { ...numeric, value: \"override\" })"));
     }
 
     #[test]
