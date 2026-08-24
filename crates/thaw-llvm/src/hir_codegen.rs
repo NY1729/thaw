@@ -86,7 +86,10 @@ const ASYNC_FRAME_BYTES: u64 = 24;
 const ASYNC_SLOT_BYTES: u64 = 16;
 
 fn object_field_storage_bytes(ty: &HirType) -> u64 {
-    if matches!(ty, HirType::Optional(_) | HirType::Nullable(_)) {
+    if matches!(
+        ty,
+        HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+    ) {
         ASYNC_SLOT_BYTES
     } else {
         OBJECT_FIELD_BYTES
@@ -1233,6 +1236,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(self
                     .context
                     .struct_type(&[self.context.bool_type().into(), payload], false)
+                    .into())
+            }
+            HirType::Nullish(payload) => {
+                let payload = self.basic_type(payload)?;
+                Ok(self
+                    .context
+                    .struct_type(&[self.context.i8_type().into(), payload], false)
                     .into())
             }
             other => Err(format!(
@@ -4388,6 +4398,37 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_extract_value(nullable, 1, "nullable_value")
                     .map_err(|error| error.to_string())
             }
+            HirExpr::NullishSome(value, payload) => {
+                let value = self.compile_expr(value)?;
+                self.build_nullish_value(value, payload, 0)
+            }
+            HirExpr::NullishNull(payload) => self.compile_nullish_none(payload, 1),
+            HirExpr::NullishUndefined(payload) => self.compile_nullish_none(payload, 2),
+            HirExpr::NullishIsNull(value, _) => self.compile_nullish_tag_test(value, 1),
+            HirExpr::NullishIsUndefined(value, _) => self.compile_nullish_tag_test(value, 2),
+            HirExpr::NullishIsNone(value, _) => {
+                let nullish = self.compile_expr(value)?.into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(nullish, 0, "nullish_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        tag,
+                        self.context.i8_type().const_zero(),
+                        "nullish_is_none",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string())
+            }
+            HirExpr::NullishValue(value, _) => {
+                let nullish = self.compile_expr(value)?.into_struct_value();
+                self.builder
+                    .build_extract_value(nullish, 1, "nullish_value")
+                    .map_err(|error| error.to_string())
+            }
 
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
 
@@ -4554,6 +4595,62 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_insert_value(tagged, value, 1, "optional_with_payload")
             .map(|value| value.into_struct_value().into())
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_nullish_none(
+        &mut self,
+        payload: &HirType,
+        tag: u64,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let value = self.basic_type(payload)?.const_zero();
+        self.build_nullish_value(value, payload, tag)
+    }
+
+    fn build_nullish_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        payload: &HirType,
+        tag: u64,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let nullish_type = self
+            .basic_type(&HirType::Nullish(Box::new(payload.clone())))?
+            .into_struct_type();
+        let tagged = self
+            .builder
+            .build_insert_value(
+                nullish_type.get_undef(),
+                self.context.i8_type().const_int(tag, false),
+                0,
+                "nullish_with_tag",
+            )
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(tagged, value, 1, "nullish_with_payload")
+            .map(|value| value.into_struct_value().into())
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_nullish_tag_test(
+        &mut self,
+        value: &HirExpr,
+        expected: u64,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let nullish = self.compile_expr(value)?.into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(nullish, 0, "nullish_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                self.context.i8_type().const_int(expected, false),
+                "nullish_tag_matches",
+            )
+            .map(Into::into)
             .map_err(|error| error.to_string())
     }
 
@@ -7561,6 +7658,15 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::NullableIsNone(_, _) => Some(HirType::Bool),
             HirExpr::NullableValue(_, payload) => Some(payload.clone()),
+            HirExpr::NullishSome(_, payload)
+            | HirExpr::NullishNull(payload)
+            | HirExpr::NullishUndefined(payload) => {
+                Some(HirType::Nullish(Box::new(payload.clone())))
+            }
+            HirExpr::NullishIsNull(_, _)
+            | HirExpr::NullishIsUndefined(_, _)
+            | HirExpr::NullishIsNone(_, _) => Some(HirType::Bool),
+            HirExpr::NullishValue(_, payload) => Some(payload.clone()),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
             HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
                 .iter()
@@ -9986,6 +10092,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_console_tagged(value.into_struct_value(), &payload, "undefined")?;
         } else if let Some(HirType::Nullable(payload)) = hir_type {
             self.compile_console_tagged(value.into_struct_value(), &payload, "null")?;
+        } else if let Some(HirType::Nullish(payload)) = hir_type {
+            self.compile_console_nullish(value.into_struct_value(), &payload)?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
@@ -10196,6 +10304,88 @@ impl<'ctx> HirCompiler<'ctx> {
                 ))
             }
         }
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_block);
+        Ok(())
+    }
+
+    fn compile_console_nullish(
+        &mut self,
+        value: StructValue<'ctx>,
+        payload_type: &HirType,
+    ) -> Result<(), String> {
+        let tag = self
+            .builder
+            .build_extract_value(value, 0, "console_nullish_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(value, 1, "console_nullish_payload")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let undefined_block = self
+            .context
+            .append_basic_block(function, "nullish_undefined");
+        let value_or_null_block = self
+            .context
+            .append_basic_block(function, "nullish_value_or_null");
+        let merge_block = self.context.append_basic_block(function, "nullish_printed");
+        let is_undefined = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                self.context.i8_type().const_int(2, false),
+                "nullish_is_undefined",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_undefined, undefined_block, value_or_null_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(undefined_block);
+        let undefined = self
+            .builder
+            .build_global_string_ptr("undefined", "nullish_undefined_string")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("puts").unwrap(),
+                &[undefined.as_pointer_value().into()],
+                "puts_nullish_undefined",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_or_null_block);
+        let present = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                self.context.i8_type().const_zero(),
+                "nullish_has_value",
+            )
+            .map_err(|error| error.to_string())?;
+        let tagged_type = self
+            .basic_type(&HirType::Nullable(Box::new(payload_type.clone())))?
+            .into_struct_type();
+        let tagged = self
+            .builder
+            .build_insert_value(tagged_type.get_undef(), present, 0, "nullish_console_tag")
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        let tagged = self
+            .builder
+            .build_insert_value(tagged, payload, 1, "nullish_console_payload")
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        self.compile_console_tagged(tagged, payload_type, "null")?;
         self.builder
             .build_unconditional_branch(merge_block)
             .map_err(|error| error.to_string())?;
@@ -11525,6 +11715,84 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_nullable"),
             "4\nnull\n4\nfallback\n9\ntrue\nfalse\ntrue\nfalse\nnumber\nobject\nnull\n6\nfallback\n9\n9\nnull\nbox\n5\nundefined\nnull\nundefined\n6\nundefined\nnull\nundefined\n4\nundefined\n8\nundefined\nnull\nundefined\n5\n0\n8\n1\nok\nnull\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_three_way_nullish_values() {
+        let source = r#"
+            interface Box { value: number | null | undefined; label: string; }
+            interface Item { value: number; }
+            function maybe(kind: number): number | null | undefined {
+                if (kind === 1) return 4;
+                if (kind === 2) return null;
+                return undefined;
+            }
+            function show(value: number | null | undefined): void {
+                console.log(value);
+            }
+            function maybeItem(kind: number): Item | null | undefined {
+                if (kind === 1) return { value: 6 };
+                if (kind === 2) return null;
+                return undefined;
+            }
+            function narrowed(value: number | null | undefined): number {
+                if (value != null) return value + 1;
+                return 0;
+            }
+            function guarded(value: number | null | undefined): number {
+                if (value == null) return 0;
+                return value * 2;
+            }
+            async function delayed(kind: number): Promise<number | null | undefined> {
+                await sleep(1);
+                return maybe(kind);
+            }
+            async function main(): Promise<void> {
+                show(maybe(1));
+                show(maybe(2));
+                show(maybe(3));
+                console.log(maybe(1) ?? 9);
+                console.log(maybe(2) ?? 9);
+                console.log(maybe(3) ?? 9);
+                console.log(maybe(2) === null);
+                console.log(maybe(3) === null);
+                console.log(maybe(3) === undefined);
+                console.log(maybe(2) === undefined);
+                console.log(maybe(2) == undefined);
+                console.log(maybe(3) == null);
+                console.log(typeof maybe(1));
+                console.log(typeof maybe(2));
+                console.log(typeof maybe(3));
+                console.log(maybeItem(1)?.value);
+                console.log(maybeItem(2)?.value);
+                console.log(maybeItem(3)?.value);
+                let value: number | null | undefined = null;
+                console.log(value);
+                value = 8;
+                console.log(value);
+                value = undefined;
+                console.log(value);
+                console.log(value ??= 11);
+                console.log(value ??= 12);
+                console.log(value + 1);
+                console.log(narrowed(maybe(1)));
+                console.log(narrowed(maybe(2)));
+                console.log(narrowed(maybe(3)));
+                console.log(guarded(maybe(1)));
+                console.log(guarded(maybe(2)));
+                console.log(guarded(maybe(3)));
+                const box: Box = { value: null, label: "box" };
+                console.log(box.value);
+                console.log(box.label);
+                console.log(await delayed(1));
+                console.log(await delayed(2));
+                console.log(await delayed(3));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_three_way_nullish"),
+            "4\nnull\nundefined\n4\n9\n9\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nnumber\nobject\nundefined\n6\nundefined\nundefined\nnull\n8\nundefined\n11\n11\n12\n5\n0\n0\n8\n0\n0\nnull\nbox\n4\nnull\nundefined\n"
         );
     }
 
