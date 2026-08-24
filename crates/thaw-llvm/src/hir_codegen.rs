@@ -7891,6 +7891,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "destroy_blocking_await",
             )
             .map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
         Ok(phi.as_basic_value())
     }
 
@@ -9924,6 +9925,36 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "fixed_object_in"),
             "first\ntrue\nsecond\nfalse\n"
+        );
+    }
+
+    #[test]
+    fn compiles_sequence_expressions_with_await_and_rejection() {
+        let source = r#"
+            function effect(value: number): number {
+                console.log(value); return value;
+            }
+            async function asyncEffect(value: number, fail: boolean): Promise<number> {
+                await sleep(1);
+                console.log(value);
+                if (fail) throw "sequence failed";
+                return value;
+            }
+            async function main(): Promise<void> {
+                const result = (effect(1), await asyncEffect(2, false), effect(3), 4);
+                console.log(result);
+                try {
+                    const skipped = (effect(5), await asyncEffect(6, true), effect(7), 8);
+                    console.log(skipped);
+                } catch (error) {
+                    console.log(error);
+                }
+                (effect(9), console.log("done"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "sequence_expressions"),
+            "1\n2\n3\n4\n5\n6\nsequence failed\n9\ndone\n"
         );
     }
 

@@ -525,6 +525,8 @@ static型がnull/undefinedを含まないnative valueのoptional member/computed
 short-circuitはnative null/undefined表現の導入後に別途扱う。
 string literalを左辺とするfixed objectの`in`は静的field shapeからbooleanを決め、左右値を
 nested closureへ順に渡して副作用を保持する。awaited右辺も一度だけ評価する。
+comma/sequence式は即時closureのblockへ展開し、最後以外をexpression statement、最後を
+returnとして生成する。途中のawait/rejectは順序を維持し、reject後のoperandは評価しない。
 
 ## 12. Promise constructorとcontinuation chain
 
