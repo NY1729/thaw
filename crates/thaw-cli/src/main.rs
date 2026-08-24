@@ -945,9 +945,9 @@ fn rewrite_external_class_methods(
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowFunctionBody, BinaryOp, CallExpr, Callee, Expr, FnDecl, FunctionBody, Lit, MemberProp,
-        Pat, Prop, PropName, PropOrSpread, ReturnStmt, TsKeywordTypeKind, TsType, UnaryOp,
-        VarDeclarator,
+        ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Expr,
+        FnDecl, FunctionBody, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt,
+        SimpleAssignTarget, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
     };
     use thaw_parser::common::Spanned;
 
@@ -1297,6 +1297,62 @@ fn rewrite_external_class_methods(
         }
     }
 
+    fn member_property_name(property: &MemberProp) -> Option<String> {
+        match property {
+            MemberProp::Ident(identifier) => Some(identifier.sym.to_string()),
+            MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
+                _ => None,
+            },
+            MemberProp::PrivateName(_) => None,
+        }
+    }
+
+    fn member_assignment_path(
+        member: &thaw_parser::ast::MemberExpr,
+    ) -> Option<(String, Vec<String>)> {
+        let mut path = vec![member_property_name(&member.prop)?];
+        let mut object = member.obj.as_ref();
+        loop {
+            match object {
+                Expr::Ident(identifier) => {
+                    path.reverse();
+                    return Some((identifier.sym.to_string(), path));
+                }
+                Expr::Member(parent) => {
+                    path.push(member_property_name(&parent.prop)?);
+                    object = parent.obj.as_ref();
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn update_object_property_type(
+        object: &mut thaw_hir::HirType,
+        path: &[String],
+        value: thaw_hir::HirType,
+    ) -> bool {
+        let thaw_hir::HirType::Object(fields) = object else {
+            return false;
+        };
+        let Some((property, remaining)) = path.split_first() else {
+            return false;
+        };
+        if remaining.is_empty() {
+            if let Some((_, ty)) = fields.iter_mut().find(|(name, _)| name == property) {
+                *ty = value;
+            } else {
+                fields.push((property.clone(), value));
+            }
+            return true;
+        }
+        fields
+            .iter_mut()
+            .find(|(name, _)| name == property)
+            .is_some_and(|(_, nested)| update_object_property_type(nested, remaining, value))
+    }
+
     struct Finder<'a> {
         classes: &'a [ClassConstructorRewrite],
         methods: &'a [ClassMethodRewrite],
@@ -1394,6 +1450,60 @@ fn rewrite_external_class_methods(
                 }
             }
             call.visit_children_with(self);
+        }
+
+        fn visit_assign_expr(&mut self, assignment: &AssignExpr) {
+            assignment.visit_children_with(self);
+            let inferred = (assignment.op == AssignOp::Assign)
+                .then(|| {
+                    source_expr_type(&assignment.right, &self.value_types, self.function_types)
+                })
+                .flatten();
+            let AssignTarget::Simple(target) = &assignment.left else {
+                return;
+            };
+            match target {
+                SimpleAssignTarget::Ident(binding) => {
+                    if let Some(ty) = inferred {
+                        self.value_types.insert(binding.id.sym.to_string(), ty);
+                    } else {
+                        self.value_types.remove(binding.id.sym.as_str());
+                    }
+                    if assignment.op == AssignOp::Assign {
+                        if let Some(class) = constructed_class(&assignment.right, self.classes) {
+                            self.variables
+                                .insert(binding.id.sym.to_string(), class.to_string());
+                        } else {
+                            self.variables.remove(binding.id.sym.as_str());
+                        }
+                    } else {
+                        self.variables.remove(binding.id.sym.as_str());
+                    }
+                    if assignment.op == AssignOp::Assign
+                        && matches!(assignment.right.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
+                    {
+                        self.callbacks.insert(binding.id.sym.to_string());
+                    } else {
+                        self.callbacks.remove(binding.id.sym.as_str());
+                    }
+                }
+                SimpleAssignTarget::Member(member) => {
+                    let (root, path) = match member_assignment_path(member) {
+                        Some(path) => path,
+                        None => return,
+                    };
+                    let Some(value) = inferred else {
+                        self.value_types.remove(&root);
+                        return;
+                    };
+                    if let Some(object) = self.value_types.get_mut(&root) {
+                        if !update_object_property_type(object, &path, value) {
+                            self.value_types.remove(&root);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -4230,5 +4340,37 @@ mod tests {
         assert!(rewritten.contains("__configure_number(box, numeric)"));
         assert!(rewritten.contains("__configure_string(box, textual)"));
         assert!(rewritten.contains("__configure_number(box, { value: 7 })"));
+    }
+
+    #[test]
+    fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
+        let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_string".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Str],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(rewritten.contains("__set_number(box, value); value = \"text\""));
+        assert!(rewritten.contains("__set_string(box, value); const config"));
+        assert!(rewritten.contains("__set_string(box, config.nested.value)"));
+        assert!(rewritten.contains("__set_number(box, config.direct)"));
     }
 }

@@ -507,8 +507,11 @@ chains. Parameter-dependent/conflicting returns and rest element types beyond
 the currently native-representable surface remain explicit gaps. Object
 literals retain recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
-name and type. Computed/spread properties and mutation-sensitive flow analysis
-remain outside this local inference pass.
+name and type. Straight-line `=` assignments update local and nested property
+types; statically named computed properties are included, while unknown or
+compound assignments invalidate the affected fact. Branch joins and
+computed/spread object-literal properties remain outside this local inference
+pass.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
