@@ -1032,7 +1032,8 @@ exact subpathと実fileへ展開できるwildcard subpathも同じmapへ加え�
 `import.meta.url`はsourceごとの絶対`file://` URLへ変換する。star exportは明示exportを
 優先し、異なるbindingの曖昧性をbarrel越しに伝播してimport時に診断する。未宣言packageや
 exportsに現れず実行時に組み立てる未知のdeep subpathはまだ対象外である。user moduleの静的なrelative/absolute
-`import.meta.resolve()`はsource directory基準でpathを正規化し、query/fragmentを保った
+`import.meta.resolve()`は文字列template、連結、括弧、型assertionを定数畳み込みし、source
+directory基準でpathを正規化してquery/fragmentを保った
 `file://` URLへ変換する。Node互換の`import.meta.filename`/`dirname`はpercent encodeしない
 絶対filesystem pathへ変換し、`import.meta.main`は実行ファイルのentry moduleだけ`true`にする。
 bare registry package/subpathは選択済みの`bundle.js`、
