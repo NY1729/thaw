@@ -708,6 +708,8 @@ The workspace crates have narrow responsibilities:
   ArrayBuffer and all N-API TypedArray element kinds retain shared backing
   storage, byte offsets, alignment and bounds; Buffer remains a Uint8Array view.
   DataView uses the same backing storage with unaligned, byte-bounded views.
+  External ArrayBuffer and Buffer values retain caller-owned memory without a
+  copy, participate in views, and invoke their finalizers once at Env teardown.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
