@@ -402,6 +402,8 @@ The workspace crates have narrow responsibilities:
   `SQRT2` properties lower directly to correctly rounded native constants
 - `Number.NaN`, positive/negative infinity, `MAX_VALUE`, `MIN_VALUE`, safe
   integer bounds and `EPSILON` likewise lower to their exact IEEE-754 values
+- Unshadowed global `NaN` and `Infinity` identifiers lower to the same native
+  values; lexical parameters and locals with those names still take precedence
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,

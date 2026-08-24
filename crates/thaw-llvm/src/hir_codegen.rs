@@ -11776,6 +11776,25 @@ mod tests {
     }
 
     #[test]
+    fn compiles_global_nan_and_infinity() {
+        let source = r#"
+            function shadow(NaN: number, Infinity: number): number {
+                return NaN + Infinity;
+            }
+            function main(): void {
+                console.log(Number.isNaN(NaN));
+                console.log(Number.isFinite(Infinity));
+                console.log(-Infinity < 0);
+                console.log(shadow(20, 22));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "global_non_finite_numbers"),
+            "true\nfalse\ntrue\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_parse_float_and_parse_int() {
         let source = r#"
             async function delayed(): Promise<string> {

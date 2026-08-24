@@ -3678,9 +3678,17 @@ impl<'a> FnLowerer<'a> {
                 s.value.to_string_lossy().into_owned(),
             ))),
             Expr::Lit(Lit::Bool(b)) => Ok(HirExpr::Lit(HirLit::Bool(b.value))),
-            Expr::Ident(ident) => Ok(HirExpr::Var(
-                self.resolve_binding(ident.sym.as_ref()),
-            )),
+            Expr::Ident(ident) => {
+                let name = self.resolve_binding(ident.sym.as_ref());
+                if !self.scope.contains_key(&name) && !self.signatures.contains_key(&name) {
+                    match ident.sym.as_ref() {
+                        "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
+                        "Infinity" => return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
+                        _ => {}
+                    }
+                }
+                Ok(HirExpr::Var(name))
+            }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
 
             Expr::Seq(sequence) => {
