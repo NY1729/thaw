@@ -690,3 +690,7 @@ experimental `node_api_create_sharedarraybuffer`／`node_api_is_sharedarraybuffe
 backingを確保し、通常ArrayBufferとは別の型identityを返す。TypedArray／DataView／Buffer viewは
 同じbacking pointerを共有できる一方、SharedArrayBufferはdetach対象にせず、viewは常に有効なまま
 維持する。
+`node_api_post_finalizer`はcallback／data／hintをEnv queueへ追加する。main-thread pollerはasync workと
+同じ反復内でqueueをdrainし、callbackから通常のNode-APIを呼べるlive Envを渡す。callbackがさらに
+postしたfinalizerも同じdrain cycleで処理し、poll前にEnv teardownへ入った場合もnative finalizer後、
+Value解放前に一度だけ実行する。

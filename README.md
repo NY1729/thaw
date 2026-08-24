@@ -746,6 +746,8 @@ The workspace crates have narrow responsibilities:
   report `copied=true` and immediately honor their native finalizers.
   Experimental Node 22 SharedArrayBuffer creation and detection provide
   non-detachable shared backing for TypedArray, DataView and Buffer views.
+  `node_api_post_finalizer` defers GC-sensitive cleanup into the main-thread
+  poller while retaining a live environment for ordinary Node-API calls.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions

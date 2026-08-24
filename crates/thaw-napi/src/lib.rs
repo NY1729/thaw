@@ -348,6 +348,7 @@ pub struct Env {
     prototypes: HashMap<usize, usize>,
     accessors: HashMap<(usize, PropertyKey), Accessor>,
     finalizers: Vec<FinalizeRecord>,
+    posted_finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
     async_cleanup_hooks: Vec<*mut AsyncCleanupHookHandle>,
@@ -396,6 +397,7 @@ impl Env {
             prototypes: HashMap::new(),
             accessors: HashMap::new(),
             finalizers: Vec::new(),
+            posted_finalizers: Vec::new(),
             instance_data: None,
             cleanup_hooks: Vec::new(),
             async_cleanup_hooks: Vec::new(),
@@ -452,6 +454,13 @@ impl Drop for Env {
             if let Some(finalize) = wrap.finalize {
                 unsafe {
                     finalize(self, wrap.data, wrap.hint);
+                }
+            }
+        }
+        while !self.posted_finalizers.is_empty() {
+            for record in std::mem::take(&mut self.posted_finalizers) {
+                if let Some(finalize) = record.finalize {
+                    unsafe { finalize(self, record.data, record.hint) };
                 }
             }
         }
@@ -2819,6 +2828,24 @@ pub unsafe extern "C" fn napi_add_finalizer(
             count: 0,
         }));
     }
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn node_api_post_finalizer(
+    env: NapiEnv,
+    finalize: Option<NapiFinalize>,
+    data: *mut c_void,
+    hint: *mut c_void,
+) -> NapiStatus {
+    let (Ok(env), Some(finalize)) = (env_mut(env), finalize) else {
+        return NAPI_INVALID_ARG;
+    };
+    env.posted_finalizers.push(FinalizeRecord {
+        data,
+        finalize: Some(finalize),
+        hint,
+    });
     NAPI_OK
 }
 
@@ -5363,6 +5390,40 @@ fn run_one_async_completion() -> Option<()> {
     Some(())
 }
 
+fn drain_posted_finalizers() -> usize {
+    let mut completed = 0;
+    loop {
+        let batches = HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            let mut batches = Vec::new();
+            let mut collect = |envs: &mut Vec<Box<Env>>| {
+                for env in envs {
+                    if !env.posted_finalizers.is_empty() {
+                        batches.push((
+                            (&mut **env as NapiEnv) as usize,
+                            std::mem::take(&mut env.posted_finalizers),
+                        ));
+                    }
+                }
+            };
+            collect(&mut host.module_envs);
+            collect(&mut host.pending_call_envs);
+            batches
+        });
+        if batches.is_empty() {
+            return completed;
+        }
+        for (env, records) in batches {
+            for record in records {
+                if let Some(finalize) = record.finalize {
+                    unsafe { finalize(env as NapiEnv, record.data, record.hint) };
+                    completed += 1;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn poll_uv_loop() -> bool {
     type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
@@ -5395,7 +5456,7 @@ unsafe fn poll_uv_loop() -> bool {
 /// Runs every callback which is ready now without waiting for producers.
 #[no_mangle]
 pub extern "C" fn thaw_napi_poll_async_work() -> usize {
-    let mut completed = 0;
+    let mut completed = drain_posted_finalizers();
     unsafe {
         poll_uv_loop();
     }
@@ -5409,6 +5470,9 @@ pub extern "C" fn thaw_napi_poll_async_work() -> usize {
             completed += 1;
             progressed = true;
         }
+        let finalized = drain_posted_finalizers();
+        completed += finalized;
+        progressed |= finalized != 0;
         if !progressed {
             break;
         }
@@ -5468,6 +5532,7 @@ mod tests {
     static EXTERNAL_MEMORY_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
     static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
+    static POSTED_FINALIZER_RAN: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
     static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
 
@@ -7092,6 +7157,20 @@ mod tests {
         HELD_ASYNC_CLEANUP.store(handle as usize, Ordering::Release);
     }
 
+    unsafe extern "C" fn posted_finalizer_uses_napi(
+        env: NapiEnv,
+        _data: *mut c_void,
+        _hint: *mut c_void,
+    ) {
+        let mut value = ptr::null_mut();
+        assert_eq!(
+            napi_create_string_utf8(env, c"finalized".as_ptr(), 9, &mut value),
+            NAPI_OK
+        );
+        assert!(matches!(value_ref(value), Ok(Value::String(text)) if text == "finalized"));
+        POSTED_FINALIZER_RAN.store(true, Ordering::Release);
+    }
+
     unsafe extern "C" fn parcel_watcher_callback(
         env: NapiEnv,
         info: NapiCallbackInfo,
@@ -7412,6 +7491,28 @@ mod tests {
             );
         }
         assert_eq!(ACTIVE_ASYNC_CLEANUP_HOOKS.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn posted_finalizers_run_from_the_main_poller_with_live_env() {
+        let _guard = lock_async_test();
+        POSTED_FINALIZER_RAN.store(false, Ordering::Release);
+        let mut env = Box::new(Env::new());
+        let env_ptr: NapiEnv = &mut *env;
+        HOST.with(|host| host.borrow_mut().pending_call_envs.push(env));
+        unsafe {
+            assert_eq!(
+                node_api_post_finalizer(
+                    env_ptr,
+                    Some(posted_finalizer_uses_napi),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                NAPI_OK
+            );
+        }
+        assert_eq!(thaw_napi_poll_async_work(), 1);
+        assert!(POSTED_FINALIZER_RAN.load(Ordering::Acquire));
     }
 
     #[test]
