@@ -11502,6 +11502,35 @@ mod tests {
     }
 
     #[test]
+    fn compiles_variadic_string_concat() {
+        let source = r#"
+            function receiver(): string {
+                console.log("receiver");
+                return "value=";
+            }
+            function argument(): number {
+                console.log("argument");
+                return 42;
+            }
+            async function delayed(): Promise<boolean> {
+                await sleep(1);
+                console.log("awaited-concat");
+                return true;
+            }
+            async function main(): Promise<void> {
+                const values: number[] = [1, 2];
+                console.log(receiver().concat(argument(), ";values=", values, ";object=", { x: 1 }));
+                console.log("empty".concat());
+                console.log("flag=".concat(await delayed()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "string_concat_method"),
+            "receiver\nargument\nvalue=42;values=1,2;object=[object Object]\nempty\nawaited-concat\nflag=true\n"
+        );
+    }
+
+    #[test]
     fn compiles_number_predicates_and_aggregate_numeric_conversion() {
         let source = r#"
             function text(): string {
