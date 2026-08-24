@@ -485,6 +485,11 @@ The workspace crates have narrow responsibilities:
   argument form from a no-op copy through delete-to-end and variadic insertion.
   Start/delete values use JavaScript truncation and clamping, source and
   inserted values are evaluated once in order, and awaited operands work
+- Homogeneous native arrays implement `.flatMap()` by mapping once and
+  flattening exactly one array level into an arena-owned result. Typed named or
+  contextual callbacks may change the final element type; captures, empty
+  inner/outer arrays, nested aggregates, `thisArg` ordering and awaited
+  receivers are supported
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
