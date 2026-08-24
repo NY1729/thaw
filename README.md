@@ -343,6 +343,9 @@ The workspace crates have narrow responsibilities:
 - Binary `+` and `+=` concatenate when either operand is a native string,
   converting number/boolean operands with the same JavaScript formatting and
   preserving reference evaluation plus synchronous/awaited operand order
+- `Boolean(...)` applies the same JavaScript truthiness rules to native
+  booleans, numbers, strings, JSON and reference values, evaluating its
+  synchronous or awaited argument exactly once
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
