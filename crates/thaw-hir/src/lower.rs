@@ -3112,6 +3112,16 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, &args[1], "array join separator")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_array_reverse" => {
+                        let [array] = args.as_slice() else {
+                            return Err("array reverse expects one operand".into());
+                        };
+                        let ty = self.infer_expr_type(array)?;
+                        if !matches!(ty, HirType::Array(_)) {
+                            return Err("array reverse requires a homogeneous array".into());
+                        }
+                        return Ok(ty);
+                    }
                     "__thaw_number_array_index_of"
                     | "__thaw_string_array_index_of"
                     | "__thaw_bool_array_index_of"
@@ -5516,6 +5526,22 @@ impl<'a> FnLowerer<'a> {
                     };
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                        vec![receiver],
+                    ));
+                }
+                if property.sym == *"reverse" {
+                    if !call.args.is_empty() {
+                        return Err("native `.reverse()` expects no arguments".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    if !matches!(receiver_type, HirType::Array(_)) {
+                        return Err(format!(
+                            "`.reverse()` requires a homogeneous array, got {receiver_type:?}"
+                        ));
+                    }
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_reverse".to_string())),
                         vec![receiver],
                     ));
                 }

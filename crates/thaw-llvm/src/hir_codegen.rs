@@ -587,6 +587,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_join_type, Some(Linkage::External));
         }
+        let array_reverse_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_array_reverse",
+            array_reverse_type,
+            Some(Linkage::External),
+        );
         for (name, needle_type, return_type) in [
             (
                 "thaw_number_array_index_of",
@@ -7537,6 +7543,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array join returned no value".to_string());
             }
+            "__thaw_array_reverse" => {
+                return self.compile_single_arg_call("thaw_array_reverse", args, "array reverse")
+            }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
             | "__thaw_string_array_index_of"
@@ -11445,6 +11454,35 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_search"),
             "1\n-1\ntrue\ntrue\n2\ntrue\n2\nfalse\nreceiver\nneedle\nstart\nfalse\nawaited-start\n3\n"
+        );
+    }
+
+    #[test]
+    fn compiles_in_place_native_array_reverse() {
+        let source = r#"
+            async function delayed(): Promise<string[]> {
+                await sleep(1);
+                console.log("awaited-array");
+                return ["a", "b", "c"];
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, 2, 3, 4];
+                console.log(numbers.reverse().join("-"));
+                console.log(numbers.join(","));
+                const flags: boolean[] = [true, false, false];
+                flags.reverse();
+                console.log(flags.join("|"));
+                const objects: { value: number }[] = [{ value: 1 }, { value: 2 }];
+                objects.reverse();
+                console.log(objects[0].value);
+                console.log((await delayed()).reverse().join(""));
+                const empty: number[] = [];
+                console.log(empty.reverse().length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_reverse"),
+            "4-3-2-1\n4,3,2,1\nfalse|false|true\n2\nawaited-array\ncba\n0\n"
         );
     }
 
