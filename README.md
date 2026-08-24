@@ -947,7 +947,11 @@ arguments such as `Error | null` and `any` cross this boundary as `Json`, and
 both `Json` and `void` callback returns are supported. The same E2E exercises
 `box.getLater(callback)`. The generated process now drives the default libuv
 loop alongside N-API async work; a real libuv timer regression test verifies
-delivery. Instance facts also follow statically named nested object properties,
+delivery. Native shims which own a private/non-default loop can register it with
+`thaw_napi_register_uv_loop` and unregister it before `uv_loop_close`; the same
+drain loop drives every registered loop and includes it in liveness checks. An
+actual private `uv_loop_t` timer test covers registration through clean
+shutdown. Instance facts also follow statically named nested object properties,
 property assignments, and control-flow joins; overwriting a parent invalidates
 all descendant facts. Typed static class methods use the exported constructor
 as their N-API receiver and share the same arity, overload, callback, and native
@@ -958,8 +962,9 @@ and object properties is rewritten as well. Typed instance setters marshal the
 assigned native value through a property-result ABI, preserve the assignment
 expression's value, and use the same tracked receiver paths. Typed static
 getters and setters reuse the property-result ABI with the exported constructor
-as receiver, including named and namespace syntax. Private non-default event
-loops remain an explicit gap.
+as receiver, including named and namespace syntax. Arbitrary private loops
+which are neither registered nor driven by their owner remain outside host
+visibility, matching libuv's lack of a global loop registry.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
