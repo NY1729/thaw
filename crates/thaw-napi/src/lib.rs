@@ -283,6 +283,7 @@ pub struct Env {
     finalizers: Vec<FinalizeRecord>,
     instance_data: Option<FinalizeRecord>,
     cleanup_hooks: Vec<CleanupHookRecord>,
+    external_memory: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -322,6 +323,7 @@ impl Env {
             finalizers: Vec::new(),
             instance_data: None,
             cleanup_hooks: Vec::new(),
+            external_memory: 0,
         }
     }
 
@@ -3110,6 +3112,26 @@ pub unsafe extern "C" fn napi_create_external_arraybuffer(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn napi_adjust_external_memory(
+    env: NapiEnv,
+    change_in_bytes: i64,
+    adjusted_value: *mut i64,
+) -> NapiStatus {
+    if adjusted_value.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let Some(adjusted) = env.external_memory.checked_add(change_in_bytes) else {
+        return NAPI_GENERIC_FAILURE;
+    };
+    env.external_memory = adjusted;
+    *adjusted_value = adjusted;
+    NAPI_OK
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn napi_is_arraybuffer(
     _env: NapiEnv,
     value: NapiValue,
@@ -4701,6 +4723,31 @@ mod tests {
             assert_eq!(EXTERNAL_MEMORY_FINALIZED.load(Ordering::Acquire), 0);
             drop(env);
             assert_eq!(EXTERNAL_MEMORY_FINALIZED.load(Ordering::Acquire), 2);
+        }
+    }
+
+    #[test]
+    fn external_memory_adjustments_are_tracked_per_environment() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut adjusted = 0;
+            assert_eq!(
+                napi_adjust_external_memory(env_ptr, 4096, &mut adjusted),
+                NAPI_OK
+            );
+            assert_eq!(adjusted, 4096);
+            assert_eq!(
+                napi_adjust_external_memory(env_ptr, -1024, &mut adjusted),
+                NAPI_OK
+            );
+            assert_eq!(adjusted, 3072);
+            env.external_memory = i64::MAX;
+            assert_eq!(
+                napi_adjust_external_memory(env_ptr, 1, &mut adjusted),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(env.external_memory, i64::MAX);
         }
     }
 
