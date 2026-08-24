@@ -9611,6 +9611,36 @@ mod tests {
     }
 
     #[test]
+    fn compiles_prefix_and_postfix_updates_with_single_evaluation() {
+        let source = r#"
+            function index(): number {
+                console.log("index");
+                return 0;
+            }
+            async function asyncIndex(): Promise<number> {
+                await sleep(1);
+                console.log("async-index");
+                return 0;
+            }
+            async function main(): Promise<void> {
+                let value = 5;
+                console.log(value++);
+                console.log(value);
+                console.log(++value);
+                let values = [10];
+                console.log(values[index()]--);
+                console.log(values[0]);
+                console.log(values[await asyncIndex()]++);
+                console.log(values[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "update_expression_values"),
+            "5\n6\n7\nindex\n10\n9\nasync-index\n9\n10\n"
+        );
+    }
+
+    #[test]
     fn logical_operators_short_circuit_sync_and_awaited_operands() {
         let source = r#"
             function flag(label: string, value: boolean): boolean {

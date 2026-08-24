@@ -132,6 +132,8 @@ The workspace crates have narrow responsibilities:
   ordered comparisons, `if`, `while`, classic
   `for`, `do/while`, and typed-array `for...of`
 - Object fields and array indexing/mutation
+- Prefix and postfix `++`/`--` return the correct expression value and evaluate
+  computed array targets once, including awaited indexes
 - Typed array literals support multiple spreads and ordinary elements with
   single, left-to-right evaluation, including awaited spread sources
 - Named function calls support fixed-length argument spreads from array
