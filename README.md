@@ -659,8 +659,9 @@ The workspace crates have narrow responsibilities:
   with its percent-encoded absolute `file://` URL; Node-compatible
   `import.meta.filename` and `.dirname` expose unescaped absolute paths. Static relative/absolute
   `import.meta.main` is `true` only in the executable entry module.
-  `import.meta.resolve(specifier)` uses lexical path normalization and preserves
-  queries/fragments. Bare registry packages and subpaths resolve to their
+  `import.meta.resolve(specifier)` folds string templates, concatenation,
+  parentheses and type assertions, uses lexical path normalization, and
+  preserves queries/fragments. Bare registry packages and subpaths resolve to their
   selected `bundle.js`, `native.node` or `native.a` artifact, while `node:`
   builtins preserve their URL. Other meta properties, non-JSON attributes and
   runtime-computed imports of undeclared packages/subpaths remain outside the
