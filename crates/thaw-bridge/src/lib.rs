@@ -38,6 +38,7 @@ use thaw_hir::{
 pub struct DtsFunction {
     pub name: String,
     pub params: Vec<(String, DtsType)>,
+    pub rest_param: Option<(String, DtsType)>,
     pub ret: DtsType,
 }
 
@@ -602,9 +603,33 @@ fn lower_dts_function(
 ) -> DtsFunction {
     let name = name.to_string();
 
+    let rest_param = func.params.last().and_then(|param| {
+        let Pat::Rest(rest) = &param.pat else {
+            return None;
+        };
+        let name = match rest.arg.as_ref() {
+            Pat::Ident(binding) => binding.id.sym.to_string(),
+            _ => "rest".to_string(),
+        };
+        let ty = match rest.type_ann.as_ref() {
+            Some(annotation) => {
+                match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
+                    DtsType::Native(HirType::Array(element)) => DtsType::Native(*element),
+                    DtsType::Native(other) => DtsType::Unsupported(format!(
+                        "rest parameter must have an array type, found {other:?}"
+                    )),
+                    unsupported => unsupported,
+                }
+            }
+            None => DtsType::Unsupported("missing rest parameter type annotation".into()),
+        };
+        Some((name, ty))
+    });
+    let fixed_param_count = func.params.len() - usize::from(rest_param.is_some());
     let params = func
         .params
         .iter()
+        .take(fixed_param_count)
         .enumerate()
         .map(|(i, param)| {
             let Pat::Ident(binding) = &param.pat else {
@@ -627,7 +652,12 @@ fn lower_dts_function(
         None => DtsType::Native(HirType::Void),
     };
 
-    DtsFunction { name, params, ret }
+    DtsFunction {
+        name,
+        params,
+        rest_param,
+        ret,
+    }
 }
 
 /// Renders an arbitrary `.d.ts` type back to a short, TS-like expression,
@@ -1149,9 +1179,29 @@ pub fn classify(func: &DtsFunction) -> Classification {
         }
     };
 
+    let variadic = match &func.rest_param {
+        None => None,
+        Some((_, DtsType::Native(HirType::F64))) => Some(HirType::F64),
+        Some((name, DtsType::Native(other))) => {
+            return Classification::Fallback {
+                function: func.name.clone(),
+                reason: format!(
+                    "rest parameter `{name}`: native variadic ABI currently supports only number[], found {other:?}[]"
+                ),
+            }
+        }
+        Some((name, DtsType::Unsupported(reason))) => {
+            return Classification::Fallback {
+                function: func.name.clone(),
+                reason: format!("rest parameter `{name}`: {reason}"),
+            }
+        }
+    };
+
     Classification::FastPath(FfiSignature {
         symbol: func.name.clone(),
         params,
+        variadic,
         ret,
         error_abi: FfiErrorAbi::Direct,
         return_ownership: FfiOwnership::Borrowed,
@@ -1359,13 +1409,16 @@ pub fn generate_shim(
                     .iter()
                     .find(|f| f.name == name)
                     .expect("FastPath classification implies a matching DtsFunction exists");
-                let params = func
+                let mut params = func
                     .params
                     .iter()
                     .zip(&sig.params)
                     .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                    .collect::<Vec<_>>();
+                if let (Some((name, _)), Some(variadic)) = (&func.rest_param, &sig.variadic) {
+                    params.push(format!("...{name}: {}[]", render_ts_type(variadic)));
+                }
+                let params = params.join(", ");
                 out.push_str(&format!(
                     "declare function {}({params}): {};\n",
                     sig.symbol,
@@ -1741,6 +1794,7 @@ mod tests {
             Classification::FastPath(FfiSignature {
                 symbol: "add".into(),
                 params: vec![HirType::F64, HirType::F64],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -1751,6 +1805,38 @@ mod tests {
                 aggregate_return_abi: FfiAggregateAbi::Internal,
             })
         );
+    }
+
+    #[test]
+    fn classifies_number_rest_signature_as_variadic_fast_path() {
+        let funcs =
+            parse_dts("export declare function sum(count: number, ...values: number[]): number;")
+                .unwrap();
+        assert_eq!(funcs[0].params.len(), 1);
+        assert_eq!(
+            funcs[0].rest_param,
+            Some(("values".into(), DtsType::Native(HirType::F64)))
+        );
+        let Classification::FastPath(signature) = classify(&funcs[0]) else {
+            panic!("number rest signature should classify as FastPath");
+        };
+        assert_eq!(signature.params, vec![HirType::F64]);
+        assert_eq!(signature.variadic, Some(HirType::F64));
+        assert_eq!(
+            generate_shim(&funcs, true, &[]),
+            "declare function sum(count: number, ...values: number[]): number;\n"
+        );
+    }
+
+    #[test]
+    fn non_number_rest_signature_falls_back() {
+        let funcs =
+            parse_dts("export declare function join(...values: string[]): string;").unwrap();
+        assert!(matches!(
+            classify(&funcs[0]),
+            Classification::Fallback { reason, .. }
+                if reason.contains("number[]")
+        ));
     }
 
     #[test]
@@ -1780,6 +1866,7 @@ mod tests {
             Classification::FastPath(FfiSignature {
                 symbol: "sum".into(),
                 params: vec![HirType::Array(Box::new(HirType::F64))],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -1798,6 +1885,7 @@ mod tests {
                     ("x".into(), HirType::F64),
                     ("y".into(), HirType::F64),
                 ])],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -1996,6 +2084,7 @@ mod tests {
                     ("x".into(), HirType::F64),
                     ("y".into(), HirType::F64),
                 ])],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -2062,6 +2151,7 @@ mod tests {
                     ),
                     ("length".into(), HirType::F64),
                 ])],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -2106,6 +2196,7 @@ mod tests {
             Classification::FastPath(FfiSignature {
                 symbol: "unwrap".into(),
                 params: vec![HirType::Object(vec![("value".into(), HirType::F64)])],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
@@ -2170,6 +2261,7 @@ mod tests {
                     ("color".into(), HirType::F64),
                     ("radius".into(), HirType::F64),
                 ])],
+                variadic: None,
                 ret: HirType::F64,
                 error_abi: FfiErrorAbi::Direct,
                 return_ownership: FfiOwnership::Borrowed,
