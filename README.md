@@ -434,8 +434,9 @@ typed N-API constructor calls, and ordinary TypeScript named or namespace
 CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 `new Database(":memory:")` and constructs the real in-memory database from the
 standalone executable. Automatic instance-method and callback syntax lowering
-now covers callback-free methods on variables directly initialized from an
-external constructor. A CLI E2E compiles and runs `new NativeBox(42)` followed
+now covers callback-free methods on variables initialized from an external
+constructor or aliases of a tracked instance; assignments propagate or safely
+invalidate the class fact. A CLI E2E compiles and runs `new NativeBox(42)` followed
 by ordinary `box.get()` syntax through the typed HIR/LLVM N-API path. Instance
 methods whose final argument is a zero-to-two argument dynamic callback also
 use the receiver's persistent N-API environment and retain `this`; callback
@@ -443,8 +444,8 @@ arguments such as `Error | null` and `any` cross this boundary as `Json`, and
 both `Json` and `void` callback returns are supported. The same E2E exercises
 `box.getLater(callback)`. The generated process now drives the default libuv
 loop alongside N-API async work; a real libuv timer regression test verifies
-delivery. Getters, static methods, aliased instances, and private non-default
-event loops remain explicit gaps.
+delivery. Getters, static methods, instances stored in object properties, and
+private non-default event loops remain explicit gaps.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
