@@ -11506,8 +11506,8 @@ mod tests {
                 console.log(maybeItem(false)?.maybe);
                 console.log(maybeItem(true)?.run(3));
                 console.log(maybeItem(false)?.run(fallback()));
-                console.log(maybeItem(true)?.runMaybe(false));
-                console.log(maybeItem(false)?.runMaybe(true));
+                console.log(maybeItem(true)?.["runMaybe"](false));
+                console.log(maybeItem(false)?.["runMaybe"](true));
                 console.log(maybeText(true)?.length);
                 console.log(maybeText(false)?.toUpperCase());
                 console.log(maybeCallback(true)?.(7));
