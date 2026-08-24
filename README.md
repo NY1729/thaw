@@ -651,9 +651,11 @@ The workspace crates have narrow responsibilities:
   dynamic imports. Relative-module bundling also supports namespace imports,
   `export * as name`, default re-export aliases and anonymous default
   functions. `export default localName` also preserves the referenced
-  top-level declaration. Top-level-await cycles are explicit errors; `import.meta`,
-  star-export ambiguity, non-JSON attributes and runtime-computed external
-  package imports remain outside the supported subset
+  top-level declaration. Star exports follow explicit-export precedence,
+  merge identical bindings and propagate ambiguity through barrel modules;
+  importing an ambiguous name is a source-located error. Top-level-await
+  cycles are explicit errors; `import.meta`, non-JSON attributes and
+  runtime-computed external package imports remain outside the supported subset
 - `JsValue` retains callable/object identity across the native boundary,
   including callable return values, handle arguments, properties, methods,
   Promise resolution, constructors, mixed JSON/handle arguments and explicit

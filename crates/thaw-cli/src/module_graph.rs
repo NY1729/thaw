@@ -293,6 +293,7 @@ pub fn bundle(
     let mut exports: Vec<HashMap<String, String>> = vec![HashMap::new(); modules.len()];
     let mut namespace_exports: Vec<HashMap<String, HashMap<String, String>>> =
         vec![HashMap::new(); modules.len()];
+    let mut ambiguous_exports: Vec<HashSet<String>> = vec![HashSet::new(); modules.len()];
     let mut bundled_items = Vec::new();
     for index in 0..modules.len() {
         let is_entry = index == entry_index;
@@ -356,6 +357,18 @@ pub fn bundle(
                         continue;
                     }
                     let target = dependency_exports.get(&requested).ok_or_else(|| {
+                        if modules[index]
+                            .dependencies
+                            .get(specifier)
+                            .is_some_and(|dependency| {
+                                ambiguous_exports[*dependency].contains(&requested)
+                            })
+                        {
+                            return format!(
+                                "{}: `{specifier}` has an ambiguous star export named `{requested}`",
+                                module_location(&modules[index], specifier)
+                            );
+                        }
                         format!(
                             "{}: `{specifier}` has no export named `{requested}`",
                             module_location(&modules[index], specifier)
@@ -368,6 +381,8 @@ pub fn bundle(
 
         let mut public = HashMap::new();
         let mut public_namespaces = HashMap::new();
+        let mut explicit_exports = HashSet::new();
+        let mut ambiguous = HashSet::new();
         let mut items = Vec::new();
         for item in modules[index].module.body.clone() {
             match item {
@@ -391,6 +406,8 @@ pub fn bundle(
                     });
                     if let Some(original) = original {
                         public.insert(original.clone(), names[&original].clone());
+                        explicit_exports.insert(original.clone());
+                        ambiguous.remove(&original);
                     }
                     items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(export.decl)));
                 }
@@ -428,8 +445,26 @@ pub fn bundle(
                                     .and_then(|source| source.get(&original))
                                     .or_else(|| names.get(&original))
                                     .ok_or_else(|| {
+                                        if let Some(source) = &export.src {
+                                            if let Some(specifier) = source.value.as_str() {
+                                                if modules[index]
+                                                    .dependencies
+                                                    .get(specifier)
+                                                    .is_some_and(|dependency| {
+                                                        ambiguous_exports[*dependency]
+                                                            .contains(&original)
+                                                    })
+                                                {
+                                                    return format!(
+                                                        "cannot re-export ambiguous star export `{original}` from `{specifier}`"
+                                                    );
+                                                }
+                                            }
+                                        }
                                         format!("cannot export unknown name `{original}`")
                                     })?;
+                                explicit_exports.insert(exported.clone());
+                                ambiguous.remove(&exported);
                                 public.insert(exported, target.clone());
                             }
                             thaw_parser::ast::ExportSpecifier::Namespace(namespace) => {
@@ -437,6 +472,7 @@ pub fn bundle(
                                 let source = source_exports.ok_or_else(|| {
                                     "namespace exports require a source module".to_string()
                                 })?;
+                                explicit_exports.insert(exported.clone());
                                 public_namespaces.insert(exported, source.clone());
                             }
                             thaw_parser::ast::ExportSpecifier::Default(default) => {
@@ -447,6 +483,7 @@ pub fn bundle(
                                 let target = source.get("default").ok_or_else(|| {
                                     "re-export source has no default export".to_string()
                                 })?;
+                                explicit_exports.insert(exported.clone());
                                 public.insert(exported, target.clone());
                             }
                         }
@@ -469,6 +506,7 @@ pub fn bundle(
                                 ident.sym = replacement.clone().into();
                             }
                             public.insert("default".to_string(), ident.sym.to_string());
+                            explicit_exports.insert("default".to_string());
                             items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(
                                 thaw_parser::ast::FnDecl {
                                     ident,
@@ -484,6 +522,7 @@ pub fn bundle(
                                 namespaces: &namespaces,
                             });
                             public.insert("default".to_string(), interface.id.sym.to_string());
+                            explicit_exports.insert("default".to_string());
                             items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(
                                 Decl::TsInterface(interface.clone()),
                             )));
@@ -504,9 +543,14 @@ pub fn bundle(
                         format!("cannot default-export unknown name `{original}`")
                     })?;
                     public.insert("default".to_string(), target.clone());
+                    explicit_exports.insert("default".to_string());
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
                     let specifier = export.src.value.as_str().ok_or("invalid export-all")?;
+                    let dependency_ambiguous = modules[index]
+                        .dependencies
+                        .get(specifier)
+                        .map(|dependency| &ambiguous_exports[*dependency]);
                     let dependency_exports = modules[index]
                         .dependencies
                         .get(specifier)
@@ -514,10 +558,24 @@ pub fn bundle(
                         .or_else(|| external_exports.get(specifier))
                         .ok_or_else(|| format!("unresolved export-all `{specifier}`"))?;
                     for (name, target) in dependency_exports {
-                        if name != "default"
-                            && public.insert(name.clone(), target.clone()).is_some()
-                        {
-                            return Err(format!("duplicate re-export `{name}`"));
+                        if name == "default" || explicit_exports.contains(name) {
+                            continue;
+                        }
+                        if let Some(existing) = public.get(name) {
+                            if existing != target {
+                                public.remove(name);
+                                ambiguous.insert(name.clone());
+                            }
+                        } else if !ambiguous.contains(name) {
+                            public.insert(name.clone(), target.clone());
+                        }
+                    }
+                    if let Some(dependency_ambiguous) = dependency_ambiguous {
+                        for name in dependency_ambiguous {
+                            if !explicit_exports.contains(name) {
+                                public.remove(name);
+                                ambiguous.insert(name.clone());
+                            }
                         }
                     }
                 }
@@ -528,6 +586,7 @@ pub fn bundle(
         }
         exports[index] = public;
         namespace_exports[index] = public_namespaces;
+        ambiguous_exports[index] = ambiguous;
         bundled_items.extend(items);
     }
 
