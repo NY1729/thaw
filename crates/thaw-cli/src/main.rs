@@ -1688,6 +1688,63 @@ mod tests {
     }
 
     #[test]
+    fn registry_bundle_uses_timers_microtasks_and_text_encoding() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-platform-globals-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let package = registry.join("platform-work");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export interface PendingValue { (): void; }\nexport declare function exercise(seed: number): PendingValue;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("bundle.js"),
+            r#"module.exports = { exercise: function() {
+                return new Promise(resolve => {
+                    const events = [];
+                    const cancelled = setTimeout(() => events.push('cancelled'), 0);
+                    clearTimeout(cancelled);
+                    queueMicrotask(() => events.push('microtask'));
+                    let ticks = 0;
+                    const interval = setInterval(() => {
+                        ticks++;
+                        if (ticks === 2) {
+                            clearInterval(interval);
+                            const bytes = new TextEncoder().encode('雪');
+                            const text = new TextDecoder().decode(bytes);
+                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text), 0);
+                        }
+                    }, 1);
+                });
+            } };"#,
+        )
+        .unwrap();
+        let source = dir.join("main.ts");
+        std::fs::write(
+            &source,
+            r#"import { exercise } from "platform-work";
+                function main(): void {
+                    const pending: JsValue = exercise(0);
+                    console.log(String(readDynamicValue(pending)));
+                    releaseDynamicValue(pending);
+                }"#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&source, &output, &[], &[], &[], &registry, &[]).unwrap();
+        let result = Command::new(output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "microtask:2:雪\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn imports_supported_node_builtin_modules() {
         let dir =
             std::env::temp_dir().join(format!("thaw-cli-node-imports-{}", std::process::id()));

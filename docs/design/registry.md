@@ -868,10 +868,11 @@ bridge.md 5章がスコープ外として保留していた項目: Fast path の
   [native-addons.md](native-addons.md) にまとめてある（実装は未着手、
   実装すべき内容の具体的な書き下しのみ）。
 - namespace 内で宣言された `interface`/`type`（9章末尾）。
-- **その他のプラットフォームグローバル**: `Buffer`/`URL`/`process`
-  以外にも `TextEncoder`/`setTimeout` など、実際に参照する
-  パッケージにぶつかった時点で都度追加していく前提（12章と同じ方針）。
-  網羅的な対応表は用意していない。
+- **その他のプラットフォームグローバル**: `TextEncoder`/`TextDecoder`、
+  `setTimeout`/`clearTimeout`、`setInterval`/`clearInterval`、
+  `queueMicrotask` までは QuickJS realm と Promise driver に実装した。
+  網羅的な Node/Web API 対応表はまだ用意しておらず、これ以外は実際に
+  参照するパッケージにぶつかった時点で追加していく（12章と同じ方針）。
 - Marshal アダプタは、パラメータ側の配列／object展開、Array／Objectの
   portable struct戻り値、文字列の`(ptr, len)`引数／戻り値、配列戻り値の
   ownershipまで対応した。target固有struct packing、variadic、nested

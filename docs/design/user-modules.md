@@ -33,6 +33,15 @@ QuickJS polyfills also used by bundled npm dependency graphs. Their deliberately
 dynamic declarations currently retain that explicit `Json` ABI. This is
 intentionally smaller than Node's complete core module API.
 
+The same QuickJS realm installs the commonly expected platform globals
+`setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `queueMicrotask`,
+`TextEncoder`, and `TextDecoder`. The Promise driver exhausts QuickJS jobs
+before firing a due timer, so synchronous work, microtasks, and zero-delay
+timers retain their JavaScript ordering. Timers forward trailing arguments and
+can cancel themselves. Text encoding uses UTF-8 `Uint8Array` values and covers
+`encodeInto`, replacement decoding, BOM removal, and fatal decode mode;
+streaming decode remains an explicit error.
+
 ## Compilation model
 
 The CLI parses every canonical file path once and visits dependencies before
@@ -66,4 +75,6 @@ multi-argument generic specialization. A separate test compiles and invokes a
 multi-file resumable async `Json` Lambda handler against a mock Runtime API.
 Further E2E coverage imports two registry packages with colliding export names
 from that Lambda and verifies package initialization, async execution and the
-Runtime API response.
+Runtime API response. A generated executable also imports a registry bundle
+which combines cancelled and repeating timers, microtasks, and a non-ASCII
+`TextEncoder`/`TextDecoder` round trip.
