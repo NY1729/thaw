@@ -2819,6 +2819,7 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_object_lit(&mut self, obj_lit: &SwcObjectLit) -> Result<HirExpr, String> {
         let mut fields = Vec::new();
+        let mut evaluated_spreads: Vec<(Symbol, HirType, HirExpr)> = Vec::new();
         for property in &obj_lit.props {
             let additions = match property {
                 PropOrSpread::Spread(spread) => {
@@ -2846,10 +2847,23 @@ impl<'a> FnLowerer<'a> {
                             })
                             .collect::<Vec<_>>()
                     } else {
-                        return Err(
-                            "object spread currently requires a local variable or object literal"
-                                .to_string(),
-                        );
+                        let temporary = format!("__thaw_object_spread_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let additions = source_fields
+                            .iter()
+                            .map(|(name, _)| {
+                                (
+                                    name.clone(),
+                                    HirExpr::PropAccess(
+                                        Box::new(HirExpr::Var(temporary.clone())),
+                                        source_type.clone(),
+                                        name.clone(),
+                                    ),
+                                )
+                            })
+                            .collect();
+                        evaluated_spreads.push((temporary, source_type, source));
+                        additions
                     }
                 }
                 PropOrSpread::Prop(prop) => match prop.as_ref() {
@@ -2888,7 +2902,31 @@ impl<'a> FnLowerer<'a> {
                 fields.push((name, value));
             }
         }
-        Ok(HirExpr::ObjectLit(fields))
+        let mut result = HirExpr::ObjectLit(fields);
+        let result_type = self.infer_expr_type(&result)?;
+        for index in (0..evaluated_spreads.len()).rev() {
+            let (name, ty, source) = &evaluated_spreads[index];
+            let captures = evaluated_spreads[..index]
+                .iter()
+                .map(|(name, ty, _)| HirParam {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                })
+                .collect();
+            result = HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    captures,
+                    vec![HirParam {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                    }],
+                    result_type.clone(),
+                    Box::new(result),
+                )),
+                vec![source.clone()],
+            );
+        }
+        Ok(result)
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
@@ -4480,6 +4518,48 @@ mod tests {
                 ]),
             )
         );
+    }
+
+    #[test]
+    fn evaluates_call_result_object_spread_once() {
+        let program = lower(
+            r#"function makeConfig(): { x: number; label: string } {
+                return { x: 1, label: "base" };
+            }
+            function main(): void {
+                const point: { x: number; label: string } = {
+                    ...makeConfig(),
+                    label: "point"
+                };
+                console.log(point.x);
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let HirStmt::Let(_, _, HirExpr::Call(lambda, arguments)) = &main.body[0] else {
+            panic!("expected spread source to be bound through a lambda call");
+        };
+        assert!(matches!(
+            arguments.as_slice(),
+            [HirExpr::Call(callee, arguments)]
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "makeConfig")
+                    && arguments.is_empty()
+        ));
+        let HirExpr::Lambda(_, params, _, body) = lambda.as_ref() else {
+            panic!("expected spread binding lambda");
+        };
+        assert_eq!(params.len(), 1);
+        assert!(matches!(
+            body.as_ref(),
+            HirExpr::ObjectLit(fields)
+                if matches!(&fields[0].1, HirExpr::PropAccess(object, _, field)
+                    if matches!(object.as_ref(), HirExpr::Var(name) if name == &params[0].name)
+                        && field == "x")
+                    && fields[1] == ("label".into(), HirExpr::Lit(HirLit::Str("point".into())))
+        ));
     }
 
     #[test]

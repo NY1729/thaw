@@ -61,9 +61,10 @@ property readと同一arityの
 structural object overloadを選択する。直線的な`=`代入はlocal変数とnested propertyの
 型を更新し、静的文字列のcomputed propertyも扱う。未知またはcompound assignmentは
 該当する型情報を破棄する。`{ ["value"]: 1 }`のような文字列literalの
-computed object keyは扱う。静的なobject型を持つlocal変数と入れ子のobject
-literalのspreadを展開し、後続propによる上書きを保持する。動的computed keyと
-副作用を持つcallなど他のexpressionのspreadは引き続き残課題である。
+computed object keyは扱う。静的なobject型を持つlocal変数、入れ子のobject
+literal、型付きfunction callのspreadを展開し、後続propによる上書きを保持する。
+callは内部closureの引数へ束縛して一度だけ評価する。動的computed keyと動的型の
+spread元は引き続き残課題である。
 `if/else`は同じ入力状態から両branchを解析し、全ての出口で一致する
 value、class instance、callback情報だけを保持する。`else`省略時は未変更の入力経路と
 joinする。`while`とclassic `for`はbody／update後の状態を0回実行経路とjoinし、iteration
