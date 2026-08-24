@@ -3191,6 +3191,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "charCodeAt index")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_json_is_array" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Array.isArray expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "Array.isArray JSON operand")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
@@ -5356,6 +5363,32 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
+                    if object.sym == *"Array" && property.sym == *"isArray" {
+                        let [argument] = call.args.as_slice() else {
+                            return Err("`Array.isArray` expects exactly one argument".into());
+                        };
+                        if argument.spread.is_some() {
+                            return Err("Array.isArray spread is not supported".into());
+                        }
+                        let value = self.lower_expr(&argument.expr)?;
+                        let ty = self.infer_expr_type(&value)?;
+                        if ty == HirType::Json {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_is_array".to_string())),
+                                vec![value],
+                            ));
+                        }
+                        let name = format!("__thaw_is_array_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Lit(HirLit::Bool(matches!(
+                                ty,
+                                HirType::Array(_) | HirType::Tuple(_)
+                            ))),
+                            &[(name, ty, value)],
+                        );
+                    }
                     if object.sym == *"Number"
                         && matches!(property.sym.as_ref(), "parseFloat" | "parseInt")
                     {

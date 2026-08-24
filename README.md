@@ -424,6 +424,9 @@ The workspace crates have narrow responsibilities:
 - Homogeneous arrays implement in-place `.copyWithin()` with memmove-safe
   overlap, JavaScript negative/clamped indices, optional end, left-to-right
   coercion and awaited index expressions
+- `Array.isArray` recognizes native homogeneous arrays, typed tuples and
+  runtime JSON arrays, returns false for other native/JSON values, evaluates
+  its operand once and accepts awaited arrays
 - Native strings implement `.indexOf()`, `.includes()`, `.startsWith()` and
   `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
   byte offsets. Search values and positions are coerced left-to-right, clamped
