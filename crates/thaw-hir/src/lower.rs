@@ -2244,6 +2244,32 @@ impl<'a> FnLowerer<'a> {
             BinaryOp::EqEqEq | BinaryOp::EqEq => false,
             _ => return None,
         };
+        let typeof_ident = match (binary.left.as_ref(), binary.right.as_ref()) {
+            (Expr::Unary(unary), Expr::Lit(Lit::Str(value)))
+                if unary.op == UnaryOp::TypeOf && value.value == *"undefined" =>
+            {
+                match unary.arg.as_ref() {
+                    Expr::Ident(ident) => Some(ident),
+                    _ => None,
+                }
+            }
+            (Expr::Lit(Lit::Str(value)), Expr::Unary(unary))
+                if unary.op == UnaryOp::TypeOf && value.value == *"undefined" =>
+            {
+                match unary.arg.as_ref() {
+                    Expr::Ident(ident) => Some(ident),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(ident) = typeof_ident {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            let HirType::Optional(payload) = self.scope.get(&name)? else {
+                return None;
+            };
+            return Some((name, payload.as_ref().clone(), present_when_true));
+        }
         let ident = match (binary.left.as_ref(), binary.right.as_ref()) {
             (Expr::Ident(value), Expr::Ident(undefined)) if undefined.sym == *"undefined" => value,
             (Expr::Ident(undefined), Expr::Ident(value)) if undefined.sym == *"undefined" => value,
@@ -4466,6 +4492,33 @@ impl<'a> FnLowerer<'a> {
                         }
                         .map(Ok)
                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        if let HirType::Optional(payload) = &operand_type {
+                            let Some(type_name) = native_typeof_name(payload.as_ref()) else {
+                                return Err(format!(
+                                    "`typeof` optional payload has no supported runtime category: {payload:?}"
+                                ));
+                            };
+                            let parameter = format!("__thaw_typeof_optional_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(parameter.clone(), operand_type.clone());
+                            let bound = HirExpr::Var(parameter.clone());
+                            let result = HirExpr::Block(vec![HirStmt::If(
+                                HirExpr::OptionalIsNone(
+                                    Box::new(bound),
+                                    payload.as_ref().clone(),
+                                ),
+                                vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                                    "undefined".into(),
+                                ))))],
+                                vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                                    type_name.into(),
+                                ))))],
+                            )]);
+                            self.wrap_call_argument_bindings(
+                                result,
+                                &[(parameter, operand_type, value)],
+                            )?
+                        } else {
                         let Some(type_name) = native_typeof_name(&operand_type) else {
                             return Err(format!(
                                 "`typeof` requires one statically known runtime category, got {operand_type:?}"
@@ -4490,6 +4543,7 @@ impl<'a> FnLowerer<'a> {
                             )),
                             vec![value],
                             )
+                        }
                         }
                     }
                     UnaryOp::Void => {

@@ -12808,6 +12808,19 @@ mod tests {
                     return value + 10;
                 }
             }
+            function typeofGuard(value: number | undefined): number {
+                if (typeof value !== "undefined") {
+                    return value + 5;
+                }
+                return 0;
+            }
+            function typeofElse(value: string | undefined): string {
+                if ("undefined" === typeof value) {
+                    return "none";
+                } else {
+                    return value.toUpperCase();
+                }
+            }
             async function delayed(value: number | undefined): Promise<number> {
                 if (value !== undefined) {
                     await sleep(1);
@@ -12834,13 +12847,21 @@ mod tests {
                 console.log(conjunction(undefined));
                 console.log(disjunction(3));
                 console.log(disjunction(undefined));
+                console.log(typeofGuard(2));
+                console.log(typeofGuard(undefined));
+                console.log(typeofElse("yes"));
+                console.log(typeofElse(undefined));
+                const optionalNumber: number | undefined = 1;
+                const missingNumber: number | undefined = undefined;
+                console.log(typeof optionalNumber);
+                console.log(typeof missingNumber);
                 console.log(await delayed(6));
                 console.log(await delayed(undefined));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "optional_branch_narrowing"),
-            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n10\n10\n8\n20\n6\n3\n8\n0\n13\n1\n12\n3\n"
+            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n10\n10\n8\n20\n6\n3\n8\n0\n13\n1\n7\n0\nYES\nnone\nnumber\nundefined\n12\n3\n"
         );
     }
 
