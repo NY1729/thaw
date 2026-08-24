@@ -3328,6 +3328,23 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
 
+    fn coerce_primitive_to_string(&self, value: HirExpr) -> Result<HirExpr, String> {
+        match self.infer_expr_type(&value)? {
+            HirType::Str => Ok(value),
+            HirType::Bool => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
+                vec![value],
+            )),
+            HirType::F64 => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                vec![value],
+            )),
+            other => Err(format!(
+                "string concatenation cannot convert native type {other:?}"
+            )),
+        }
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
@@ -3508,6 +3525,18 @@ impl<'a> FnLowerer<'a> {
                         )),
                         Box::new(HirExpr::Lit(HirLit::Bool(false))),
                     ),
+                    BinaryOp::Add
+                        if self.infer_expr_type(&lhs)? == HirType::Str
+                            || self.infer_expr_type(&rhs)? == HirType::Str =>
+                    {
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                            vec![
+                                self.coerce_primitive_to_string(lhs)?,
+                                self.coerce_primitive_to_string(rhs)?,
+                            ],
+                        )
+                    }
                     other => HirExpr::BinOp(
                         lower_bin_op(other)?,
                         Box::new(lhs),
@@ -4530,7 +4559,21 @@ impl<'a> FnLowerer<'a> {
         let value = if assign.op == AssignOp::Assign {
             rhs
         } else if let Some(op) = compound_op(assign.op) {
-            HirExpr::BinOp(op, Box::new(target_to_read_expr(&target)), Box::new(rhs))
+            let current = target_to_read_expr(&target);
+            if assign.op == AssignOp::AddAssign
+                && (self.infer_expr_type(&current)? == HirType::Str
+                    || self.infer_expr_type(&rhs)? == HirType::Str)
+            {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                    vec![
+                        self.coerce_primitive_to_string(current)?,
+                        self.coerce_primitive_to_string(rhs)?,
+                    ],
+                )
+            } else {
+                HirExpr::BinOp(op, Box::new(current), Box::new(rhs))
+            }
         } else {
             return Err(format!(
                 "unsupported compound assignment operator {:?}",
