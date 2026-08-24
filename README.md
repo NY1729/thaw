@@ -835,6 +835,8 @@ Value classification distinguishes N-API externals from objects and validates
 environment, value, and result handles consistently across type predicates.
 Generic named and Symbol properties now work across arrays, buffers, array-buffer
 views, promises, errors, and dates with descriptors, enumeration, and integrity levels.
+Numeric property descriptors participate in the same writable, enumerable, and
+configurable name filters as string and Symbol properties.
 The declaration bridge now extracts external classes, including inheritance,
 constructor and method overloads, static methods, getters, and properties.
 The N-API host exposes stable export and instance handles with constructor and
