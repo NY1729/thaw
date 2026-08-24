@@ -12652,6 +12652,61 @@ mod tests {
     }
 
     #[test]
+    fn compiles_optional_undefined_branch_narrowing() {
+        let source = r#"
+            function increment(value: number | undefined): number {
+                if (value !== undefined) {
+                    return value + 1;
+                }
+                return 0;
+            }
+            function reversed(value: number | undefined): number {
+                if (undefined !== value) {
+                    value = value + 2;
+                    return value ?? 0;
+                }
+                return -1;
+            }
+            function equality(value: string | undefined): string {
+                if (value === undefined) {
+                    return "missing";
+                } else {
+                    return value.toUpperCase();
+                }
+            }
+            function negated(value: number | undefined): number {
+                if (!(value === undefined)) {
+                    return value * 3;
+                }
+                return 2;
+            }
+            async function delayed(value: number | undefined): Promise<number> {
+                if (value !== undefined) {
+                    await sleep(1);
+                    return value * 2;
+                }
+                return 3;
+            }
+            async function main(): Promise<void> {
+                console.log(increment(4));
+                console.log(increment(undefined));
+                console.log(reversed(5));
+                console.log(reversed(undefined));
+                console.log(equality("ok"));
+                console.log(equality(undefined));
+                console.log(negated(3));
+                console.log(negated(undefined));
+                console.log(await delayed(6));
+                console.log(await delayed(undefined));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_branch_narrowing"),
+            "5\n0\n7\n-1\nOK\nmissing\n9\n2\n12\n3\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_for_each() {
         let source = r#"
             interface Item { value: number; }
