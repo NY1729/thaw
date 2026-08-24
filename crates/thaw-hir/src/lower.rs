@@ -1022,7 +1022,18 @@ fn lower_fn_decl(
             .or_default()
             .push(param.name.clone());
     }
-    let body = lowerer.lower_stmts(&body_block.stmts)?;
+    let mut body = Vec::new();
+    for (source, param) in func.params.iter().zip(&params) {
+        if !matches!(source.pat, Pat::Ident(_)) {
+            lowerer.lower_binding_pattern(
+                &source.pat,
+                HirExpr::Var(param.name.clone()),
+                &param.ty,
+                &mut body,
+            )?;
+        }
+    }
+    body.extend(lowerer.lower_stmts(&body_block.stmts)?);
     let ret = if declared_ret == HirType::Dynamic {
         lowerer.infer_return_type(&body)?
     } else {
@@ -1078,11 +1089,19 @@ fn lower_param(
     allow_inference: bool,
     type_substitution: &HashMap<Symbol, HirType>,
 ) -> Result<HirParam, String> {
-    let Pat::Ident(binding) = pat else {
-        return Err("only simple identifier parameters are supported".into());
+    let (name, type_ann) = match pat {
+        Pat::Ident(binding) => (binding.id.sym.to_string(), binding.type_ann.as_ref()),
+        Pat::Object(pattern) => (
+            format!("__thaw_param_{}", pattern.span.lo.0),
+            pattern.type_ann.as_ref(),
+        ),
+        Pat::Array(pattern) => (
+            format!("__thaw_param_{}", pattern.span.lo.0),
+            pattern.type_ann.as_ref(),
+        ),
+        _ => return Err("unsupported function parameter pattern".into()),
     };
-    let name = binding.id.sym.to_string();
-    let ty = match &binding.type_ann {
+    let ty = match type_ann {
         Some(ann) => resolve_ts_type_with_substitution(
             &ann.type_ann,
             type_substitution,
@@ -3515,22 +3534,37 @@ impl<'a> FnLowerer<'a> {
         let saved_return = self.ret_type.clone();
         let result = (|| {
             let mut params = Vec::with_capacity(source_params.len());
-            for param in source_params {
+            let mut destructuring = Vec::new();
+            for (pattern, param) in arrow.params.iter().zip(source_params) {
                 let name = self.bind_local(&param.name, param.ty.clone());
+                if !matches!(pattern, Pat::Ident(_)) {
+                    destructuring.push((pattern, name.clone(), param.ty.clone()));
+                }
                 params.push(HirParam { name, ty: param.ty });
+            }
+            let mut prefix = Vec::new();
+            for (pattern, name, ty) in destructuring {
+                self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }
             self.ret_type = declared_return.clone().unwrap_or(HirType::Dynamic);
             let (body, inferred_return) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
-                    let body = self.lower_expr(expr)?;
+                    let expression = self.lower_expr(expr)?;
                     if let Some(expected) = &declared_return {
-                        self.expect_type(expected, &body, "arrow function return value")?;
+                        self.expect_type(expected, &expression, "arrow function return value")?;
                     }
-                    let inferred = self.infer_expr_type(&body)?;
+                    let inferred = self.infer_expr_type(&expression)?;
+                    let body = if prefix.is_empty() {
+                        expression
+                    } else {
+                        prefix.push(HirStmt::Return(Some(expression)));
+                        HirExpr::Block(prefix)
+                    };
                     (body, inferred)
                 }
                 ArrowFunctionBody::FunctionBody(block) => {
-                    let stmts = self.lower_stmts(&block.stmts)?;
+                    let mut stmts = prefix;
+                    stmts.extend(self.lower_stmts(&block.stmts)?);
                     let inferred = self.infer_return_type(&stmts)?;
                     (HirExpr::Block(stmts), inferred)
                 }
@@ -3581,25 +3615,43 @@ impl<'a> FnLowerer<'a> {
         let saved_return = self.ret_type.clone();
         let result = (|| {
             let mut params = Vec::with_capacity(parameter_types.len());
+            let mut destructuring = Vec::new();
             for (pat, ty) in arrow.params.iter().zip(parameter_types) {
-                let Pat::Ident(binding) = pat else {
-                    return Err("Promise callbacks require identifier parameters".to_string());
+                let source_name = match pat {
+                    Pat::Ident(binding) => binding.id.sym.to_string(),
+                    Pat::Object(pattern) => format!("__thaw_param_{}", pattern.span.lo.0),
+                    Pat::Array(pattern) => format!("__thaw_param_{}", pattern.span.lo.0),
+                    _ => return Err("unsupported Promise callback parameter pattern".into()),
                 };
-                let name = self.bind_local(binding.id.sym.as_ref(), ty.clone());
+                let name = self.bind_local(&source_name, ty.clone());
+                if !matches!(pat, Pat::Ident(_)) {
+                    destructuring.push((pat, name.clone(), ty.clone()));
+                }
                 params.push(HirParam {
                     name,
                     ty: ty.clone(),
                 });
             }
+            let mut prefix = Vec::new();
+            for (pattern, name, ty) in destructuring {
+                self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
+            }
             self.ret_type = expected_return.cloned().unwrap_or(HirType::Dynamic);
             let (body, inferred) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
-                    let body = self.lower_expr(expr)?;
-                    let inferred = self.infer_expr_type(&body)?;
+                    let expression = self.lower_expr(expr)?;
+                    let inferred = self.infer_expr_type(&expression)?;
+                    let body = if prefix.is_empty() {
+                        expression
+                    } else {
+                        prefix.push(HirStmt::Return(Some(expression)));
+                        HirExpr::Block(prefix)
+                    };
                     (body, inferred)
                 }
                 ArrowFunctionBody::FunctionBody(block) => {
-                    let stmts = self.lower_stmts(&block.stmts)?;
+                    let mut stmts = prefix;
+                    stmts.extend(self.lower_stmts(&block.stmts)?);
                     let inferred = self.infer_return_type(&stmts)?;
                     (HirExpr::Block(stmts), inferred)
                 }
@@ -6017,6 +6069,37 @@ mod tests {
         assert!(loops.iter().all(|body| matches!(
             body.first(),
             Some(HirStmt::Let(name, _, _)) if name.starts_with("__thaw_for_of_item_")
+        )));
+    }
+
+    #[test]
+    fn lowers_function_and_arrow_parameter_destructuring() {
+        let program = lower(
+            r#"function read(
+                { x, nested: { flag }, ...rest }:
+                    { x: number; nested: { flag: boolean }; label: string },
+                [first, ...tail]: [number, number, number]
+            ): number { return x + first + tail[0]; }
+            function main(): void {
+                const pick = ({ value }: { value: number }): number => value;
+                console.log(read(
+                    { x: 1, nested: { flag: true }, label: "ok" }, [2, 3, 4]
+                ));
+                console.log(pick({ value: 5 }));
+            }"#,
+        );
+        let read = program
+            .functions
+            .iter()
+            .find(|function| function.name == "read")
+            .unwrap();
+        assert!(read
+            .params
+            .iter()
+            .all(|param| param.name.starts_with("__thaw_param_")));
+        assert!(read.body.iter().any(|statement| matches!(
+            statement,
+            HirStmt::Let(name, HirType::Bool, _) if name == "flag"
         )));
     }
 
