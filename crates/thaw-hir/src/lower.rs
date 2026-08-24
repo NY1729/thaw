@@ -1596,7 +1596,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
         | HirExpr::OptionalSome(value, _)
-        | HirExpr::OptionalIsNone(value, _) => collect_referenced_bindings(value, names),
+        | HirExpr::OptionalIsNone(value, _)
+        | HirExpr::OptionalValue(value, _) => collect_referenced_bindings(value, names),
         HirExpr::Lambda(captures, _, _, _) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
         }
@@ -1678,7 +1679,8 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
         | HirExpr::OptionalSome(value, _)
-        | HirExpr::OptionalIsNone(value, _) => contains_await(value),
+        | HirExpr::OptionalIsNone(value, _)
+        | HirExpr::OptionalValue(value, _) => contains_await(value),
         HirExpr::PromiseThen(source, callback, _, _, _, _)
         | HirExpr::PromiseFinally(source, callback, _, _) => {
             contains_await(source) || contains_await(callback)
@@ -3135,6 +3137,14 @@ impl<'a> FnLowerer<'a> {
                 )?;
                 Ok(HirType::Bool)
             }
+            HirExpr::OptionalValue(value, payload) => {
+                self.expect_type(
+                    &HirType::Optional(Box::new(payload.clone())),
+                    value,
+                    "optional value extraction",
+                )?;
+                Ok(payload.clone())
+            }
             HirExpr::ArrayAlloc(length, element) => {
                 self.expect_type(&HirType::F64, length, "array allocation length")?;
                 Ok(HirType::Array(Box::new(element.clone())))
@@ -3818,6 +3828,29 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
 
+    fn lower_nullish_coalescing(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let HirType::Optional(payload) = lhs_type.clone() else {
+            // Native values other than Optional cannot be nullish. The RHS is
+            // deliberately omitted so its side effects remain short-circuited.
+            return Ok(lhs);
+        };
+        self.expect_type(payload.as_ref(), &rhs, "nullish fallback")?;
+        let name = format!("__thaw_nullish_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let left = HirExpr::Var(name.clone());
+        let result = HirExpr::Block(vec![HirStmt::If(
+            HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+            vec![HirStmt::Return(Some(rhs))],
+            vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                Box::new(left),
+                payload.as_ref().clone(),
+            )))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::Str => Ok(value),
@@ -4128,7 +4161,10 @@ impl<'a> FnLowerer<'a> {
                 let mut bindings = Vec::new();
                 if !matches!(
                     bin.op,
-                    BinaryOp::In | BinaryOp::LogicalAnd | BinaryOp::LogicalOr
+                    BinaryOp::In
+                        | BinaryOp::LogicalAnd
+                        | BinaryOp::LogicalOr
+                        | BinaryOp::NullishCoalescing
                 ) && contains_await(&rhs)
                 {
                     let lhs_type = self.infer_expr_type(&lhs)?;
@@ -4176,6 +4212,7 @@ impl<'a> FnLowerer<'a> {
                             bin.op == BinaryOp::LogicalAnd,
                         )?
                     }
+                    BinaryOp::NullishCoalescing => self.lower_nullish_coalescing(lhs, rhs)?,
                     BinaryOp::Lt => self.lower_relational(lhs, rhs, BinOp::Lt)?,
                     BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
                     BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,

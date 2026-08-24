@@ -83,6 +83,7 @@ const ARRAY_ELEM_BYTES: u64 = 8;
 /// (field count/order is static, part of the type, not a runtime value).
 const OBJECT_FIELD_BYTES: u64 = 8;
 const ASYNC_FRAME_BYTES: u64 = 24;
+const ASYNC_SLOT_BYTES: u64 = 16;
 const ASYNC_COMPLETION_OFFSET: u64 = 0;
 const ASYNC_STATE_OFFSET: u64 = 8;
 const ASYNC_WAITING_OFFSET: u64 = 16;
@@ -1238,14 +1239,14 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
+        let size = ty
+            .size_of()
+            .ok_or_else(|| format!("variable `{name}` has an unsized LLVM type"))?;
         let cell = self
             .builder
             .build_call(
                 alloc,
-                &[
-                    i64_type.const_int(8, false).into(),
-                    i64_type.const_int(8, false).into(),
-                ],
+                &[size.into(), i64_type.const_int(8, false).into()],
                 &format!("{name}_cell"),
             )
             .map_err(|error| error.to_string())?
@@ -1253,12 +1254,6 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_arena_alloc did not return a variable cell")?
             .into_pointer_value();
-        // Validate that this remains a one-word native value. Aggregate
-        // layouts are represented by pointers, so every supported local
-        // currently satisfies this invariant.
-        if ty.size_of().is_none() {
-            return Err(format!("variable `{name}` has an unsized LLVM type"));
-        }
         Ok(cell)
     }
 
@@ -3417,7 +3412,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("missing async rejection guard `{name}`"))?;
                 let slot = self.async_frame_field(
                     resume_frame,
-                    self.async_locals_offset(plan) + OBJECT_FIELD_BYTES * index as u64,
+                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
                     &format!("frame_{name}"),
                 )?;
                 let enabled = name == handler.catch_guard;
@@ -3436,7 +3431,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("missing async disabled guard `{name}`"))?;
                 let slot = self.async_frame_field(
                     resume_frame,
-                    self.async_locals_offset(plan) + OBJECT_FIELD_BYTES * index as u64,
+                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
                     &format!("frame_{name}"),
                 )?;
                 self.builder
@@ -3452,7 +3447,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 })?;
             let binding_slot = self.async_frame_field(
                 resume_frame,
-                self.async_locals_offset(plan) + OBJECT_FIELD_BYTES * binding_index as u64,
+                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * binding_index as u64,
                 &format!("frame_{}", handler.catch_binding),
             )?;
             self.builder
@@ -3732,7 +3727,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, (name, ty)) in plan.locals.iter().enumerate() {
             let slot = self.async_frame_field(
                 frame,
-                self.async_locals_offset(plan) + OBJECT_FIELD_BYTES * index as u64,
+                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
                 &format!("frame_{name}"),
             )?;
             self.variables
@@ -3865,8 +3860,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             })?;
                         let catch_slot = self.async_frame_field(
                             frame,
-                            self.async_locals_offset(plan)
-                                + OBJECT_FIELD_BYTES * catch_index as u64,
+                            self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * catch_index as u64,
                             "outer_catch_binding",
                         )?;
                         self.builder
@@ -3885,7 +3879,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             let guard_slot = self.async_frame_field(
                                 frame,
                                 self.async_locals_offset(plan)
-                                    + OBJECT_FIELD_BYTES * guard_index as u64,
+                                    + ASYNC_SLOT_BYTES * guard_index as u64,
                                 "outer_catch_guard",
                             )?;
                             self.builder
@@ -3959,7 +3953,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
                 let slot = self.async_frame_field(
                     frame,
-                    self.async_locals_offset(plan) + OBJECT_FIELD_BYTES * index as u64,
+                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
                     &format!("frame_{name}"),
                 )?;
                 self.builder
@@ -3979,12 +3973,12 @@ impl<'ctx> HirCompiler<'ctx> {
             + if plan.ret == HirType::Void {
                 0
             } else {
-                OBJECT_FIELD_BYTES
+                ASYNC_SLOT_BYTES
             }
     }
 
     fn async_frame_size(&self, plan: &FrameAsyncPlan) -> u64 {
-        self.async_locals_offset(plan) + OBJECT_FIELD_BYTES * plan.locals.len() as u64
+        self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * plan.locals.len() as u64
     }
 
     fn async_completion_result(
@@ -4332,6 +4326,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_not(present, "optional_is_none")
                     .map(Into::into)
+                    .map_err(|error| error.to_string())
+            }
+            HirExpr::OptionalValue(value, _) => {
+                let optional = self.compile_expr(value)?.into_struct_value();
+                self.builder
+                    .build_extract_value(optional, 1, "optional_value")
                     .map_err(|error| error.to_string())
             }
 
@@ -7488,6 +7488,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(HirType::Optional(Box::new(payload.clone())))
             }
             HirExpr::OptionalIsNone(_, _) => Some(HirType::Bool),
+            HirExpr::OptionalValue(_, payload) => Some(payload.clone()),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
             HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
@@ -12574,6 +12575,37 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_at"),
             "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n[object Object]\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\n"
+        );
+    }
+
+    #[test]
+    fn compiles_optional_nullish_coalescing() {
+        let source = r#"
+            function fallback(): number {
+                console.log("fallback");
+                return 9;
+            }
+            async function delayedFallback(): Promise<string> {
+                console.log("awaited fallback");
+                await sleep(1);
+                return "later";
+            }
+            async function main(): Promise<void> {
+                console.log([1, 2].find(value => value === 1) ?? fallback());
+                console.log([1, 2].find(value => value === 3) ?? fallback());
+                const missing: string | undefined = ["a"].find(value => value === "b");
+                const present: string | undefined = ["a"].find(value => value === "a");
+                console.log(present ?? "wrong");
+                console.log(missing ?? "default");
+                console.log(([2, 3].at(0) ?? 0) + ([2, 3].at(9) ?? 4));
+                console.log(present ?? await delayedFallback());
+                console.log(missing ?? await delayedFallback());
+                console.log(42 ?? fallback());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_nullish"),
+            "1\nfallback\n9\na\ndefault\n6\na\nawaited fallback\nlater\n42\n"
         );
     }
 

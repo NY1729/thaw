@@ -146,6 +146,7 @@ pub enum HirExpr {
     OptionalSome(Box<HirExpr>, HirType),
     OptionalNone(HirType),
     OptionalIsNone(Box<HirExpr>, HirType),
+    OptionalValue(Box<HirExpr>, HirType),
     Call(Box<HirExpr>, Vec<HirExpr>),
     /// A homogeneous `Promise.all` join. The element type is retained so
     /// codegen can copy and later load non-number result slots correctly.
@@ -365,7 +366,8 @@ pub fn set_ffi_error_abi(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner)
             | HirExpr::OptionalSome(inner, _)
-            | HirExpr::OptionalIsNone(inner, _) => visit_expr(inner, symbol, abi, found),
+            | HirExpr::OptionalIsNone(inner, _)
+            | HirExpr::OptionalValue(inner, _) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -518,7 +520,8 @@ pub fn set_ffi_ownership(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner)
             | HirExpr::OptionalSome(inner, _)
-            | HirExpr::OptionalIsNone(inner, _) => {
+            | HirExpr::OptionalIsNone(inner, _)
+            | HirExpr::OptionalValue(inner, _) => {
                 update_expr(inner, symbol, returns, errors, found)
             }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
@@ -686,7 +689,8 @@ pub fn set_ffi_string_abi(
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner)
             | HirExpr::OptionalSome(inner, _)
-            | HirExpr::OptionalIsNone(inner, _) => {
+            | HirExpr::OptionalIsNone(inner, _)
+            | HirExpr::OptionalValue(inner, _) => {
                 update_expr(inner, symbol, params, returns, calling_convention, found)
             }
             HirExpr::Lambda(_, _, _, body) => {
