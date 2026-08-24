@@ -8,6 +8,15 @@
   （特に16章・18章・19章・20章）、[thaw-llvm/hir_codegen.rs](../../crates/thaw-llvm/src/hir_codegen.rs)
   の `compile_call_dynamic`/`MODULE_INIT_SYMBOL` 周り。
 
+追記: `prebuild-install`方式にも対応した。npm install scriptや`node-gyp`は
+実行せず、package.jsonのGitHub repositoryと`binary.napi_versions`から
+対象資産を選択し、HTTPS取得、安全なtar展開、SHA-256記録を行う。
+`sqlite3@5.1.7`の公式N-API v6 Linux x64 prebuildで、実際のモジュール
+初期化と`Database`/`Statement`/`Backup`クラス登録、実行ファイルへの埋め込みを
+確認済み。これに必要だった`napi_get_global`、`napi_get_property_names`、
+`napi_get_uv_event_loop`もホストへ追加した。TypeScriptからsqlite3のクラスを
+直接構築する部分は、AOTフロントエンドのclass構文対応とは別の残課題である。
+
 ## 1. 何が難しいのか（おさらい）
 
 registry.md 16章で確認した通り、実際の npm ネイティブアドオン

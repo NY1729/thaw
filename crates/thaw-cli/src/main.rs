@@ -2573,6 +2573,163 @@ mod tests {
     }
 
     #[test]
+    fn registry_add_fetches_and_runs_bcrypt_when_enabled() {
+        if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("thaw-cli-auto-bcrypt-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let added = thaw_registry::add(&registry, "bcrypt@6.0.0").unwrap();
+        let native = added.native_addon.expect("a matching prebuild is bundled");
+        assert_eq!(native.platform, "linux");
+        assert_eq!(native.arch, "x64");
+        assert_eq!(native.libc, "glibc");
+        assert!(registry.join("bcrypt/native.node").is_file());
+        assert!(registry.join("bcrypt/native-addon.json").is_file());
+
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            r#"function main(): void {
+                const salt: Json = callNativeAddon(
+                    "gen_salt_sync",
+                    JSON.parse("[\"b\",4,{\"type\":\"Buffer\",\"data\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}]")
+                );
+                console.log(String(salt));
+                const hash: Json = callNativeAddon(
+                    "encrypt_sync",
+                    JSON.parse("[\"password\",\"$2b$04$abcdefghijklmnopqrstuu\"]")
+                );
+                console.log(String(hash));
+                console.log(Boolean(callNativeAddon(
+                    "compare_sync",
+                    JSON.parse("[\"wrong-password\",\"$2b$04$abcdefghijklmnopqrstuu\"]")
+                )));
+                const saltQueued = callNativeAddonWithCallback(
+                    "gen_salt",
+                    JSON.parse("[\"b\",4,{\"type\":\"Buffer\",\"data\":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(String(result));
+                        return result;
+                    }
+                );
+                const encryptQueued = callNativeAddonWithCallback(
+                    "encrypt",
+                    JSON.parse("[\"password\",\"$2b$04$abcdefghijklmnopqrstuu\"]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(String(result));
+                        return result;
+                    }
+                );
+                const compareQueued = callNativeAddonWithCallback(
+                    "compare",
+                    JSON.parse("[\"wrong-password\",\"$2b$04$abcdefghijklmnopqrstuu\"]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(Boolean(result));
+                        return result;
+                    }
+                );
+                const invalidQueued = callNativeAddonWithCallback(
+                    "encrypt",
+                    JSON.parse("[\"password\",\"invalid\"]"),
+                    (error: Json, result: Json): Json => {
+                        console.log(String(error));
+                        return error;
+                    }
+                );
+            }"#,
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["bcrypt".into()],
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let lines = stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 7, "{stdout}");
+        assert!(lines[0].starts_with("$2b$04$"), "{stdout}");
+        assert!(lines[1].starts_with("$2b$04$"), "{stdout}");
+        assert_eq!(lines[2], "false", "{stdout}");
+        assert!(
+            lines[3..].iter().any(|line| line.starts_with("$2b$04$")),
+            "{stdout}"
+        );
+        assert!(lines[3..].contains(&"false"), "{stdout}");
+        assert!(
+            lines[3..].iter().any(|line| line.contains("Invalid salt")),
+            "{stdout}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn registry_add_fetches_and_loads_sqlite3_when_enabled() {
+        if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-auto-sqlite3-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let added = thaw_registry::add(&registry, "sqlite3@5.1.7").unwrap();
+        let native = added
+            .native_addon
+            .expect("the official GitHub prebuild should be downloaded");
+        assert_eq!(native.platform, "linux");
+        assert_eq!(native.arch, "x64");
+        assert_eq!(native.libc, "glibc");
+        assert!(native.source.contains("TryGhost/node-sqlite3/releases"));
+
+        // The typed AOT frontend does not lower classes yet. A minimal
+        // declaration is enough to force the real addon initializer into
+        // this executable; class calls remain covered directly in thaw-napi.
+        std::fs::write(
+            registry.join("sqlite3/package.d.ts"),
+            "declare function Database(argsArray: Json): Json;\n",
+        )
+        .unwrap();
+        let source = dir.join("main.ts");
+        let output = dir.join("app");
+        std::fs::write(
+            &source,
+            "function main(): void { console.log(\"sqlite3-loaded\"); }\n",
+        )
+        .unwrap();
+        build(
+            &source,
+            &output,
+            &[],
+            &[],
+            &[],
+            &registry,
+            &["sqlite3".into()],
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "sqlite3-loaded\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn registry_add_fetches_and_runs_utf8_validate_when_enabled() {
         if std::env::var("THAW_RUN_NPM_INTEGRATION").as_deref() != Ok("1") {
             return;
