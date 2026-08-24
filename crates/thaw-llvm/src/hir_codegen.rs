@@ -12020,6 +12020,35 @@ mod tests {
     }
 
     #[test]
+    fn compiles_object_values_for_fixed_objects() {
+        let source = r#"
+            interface Config { first: number; second: string; enabled: boolean; }
+            function config(): Config {
+                console.log("receiver");
+                return { first: 1, second: "two", enabled: true };
+            }
+            async function delayed(): Promise<{ left: number; right: number }> {
+                console.log("awaited");
+                await sleep(1);
+                return { left: 3, right: 4 };
+            }
+            async function main(): Promise<void> {
+                const mixed: [number, string, boolean] = Object.values(config());
+                console.log(mixed.join("|"));
+                const numbers: number[] = Object.values({ left: 1, right: 2 });
+                console.log(numbers.join(","));
+                console.log(Object.values(await delayed()).join("+"));
+                const empty: {} = {};
+                console.log(Object.values(empty).length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_values"),
+            "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n"
+        );
+    }
+
+    #[test]
     fn compiles_utf16_string_search_methods() {
         let source = r#"
             function text(): string {

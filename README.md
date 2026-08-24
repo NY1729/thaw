@@ -454,6 +454,9 @@ The workspace crates have narrow responsibilities:
 - `Object.keys` returns an arena-owned string array for fixed-layout objects,
   preserving declaration/insertion order across property overrides and
   evaluating synchronous or awaited receivers exactly once
+- `Object.values` returns field values in the same order, retaining homogeneous
+  native arrays or heterogeneous typed tuples as appropriate, including empty
+  objects and synchronous/awaited receivers
 - `Object.hasOwn` checks fixed-layout own fields after native primitive-to-key
   string conversion, including empty objects and synchronous/awaited object
   plus key evaluation in source order
