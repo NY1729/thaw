@@ -490,6 +490,11 @@ The workspace crates have narrow responsibilities:
   contextual callbacks may change the final element type; captures, empty
   inner/outer arrays, nested aggregates, `thisArg` ordering and awaited
   receivers are supported
+- Nested homogeneous arrays implement `.flat()` with the default depth and
+  non-negative, fractional or negative numeric-literal depths. Each requested
+  static level is flattened into an arena-owned shallow result; depth zero and
+  already-flat arrays are copied, while dynamic depths remain an explicit
+  layout error because their result element type is not statically fixed
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays

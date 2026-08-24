@@ -7861,6 +7861,80 @@ impl<'a> FnLowerer<'a> {
                     self.expect_type(&element_type, &value, "array with value")?;
                     return self.lower_array_with(receiver, array_type, element_type, index, value);
                 }
+                if property.sym == *"flat" {
+                    if call.args.len() > 1 {
+                        return Err("native `.flat()` expects zero or one depth".into());
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array flat spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let mut current_type = self.infer_expr_type(&receiver)?;
+                    if !matches!(current_type, HirType::Array(_)) {
+                        return Err(format!(
+                            "`.flat()` requires a homogeneous array, got {current_type:?}"
+                        ));
+                    }
+                    let depth = if let Some(argument) = call.args.first() {
+                        let value = self.lower_expr(&argument.expr)?;
+                        self.expect_type(&HirType::F64, &value, "array flat depth")?;
+                        let constant = match value {
+                            HirExpr::Lit(HirLit::F64(value)) => Some(value),
+                            HirExpr::BinOp(BinOp::Sub, left, right) => match (*left, *right) {
+                                (HirExpr::Lit(HirLit::F64(0.0)), HirExpr::Lit(HirLit::F64(value))) => {
+                                    Some(-value)
+                                }
+                                _ => None,
+                            },
+                            HirExpr::Call(callee, arguments)
+                                if matches!(
+                                    callee.as_ref(),
+                                    HirExpr::Var(name) if name == "__thaw_number_neg"
+                                ) => match arguments.as_slice() {
+                                    [HirExpr::Lit(HirLit::F64(value))] => Some(-value),
+                                    _ => None,
+                                },
+                            _ => None,
+                        }
+                        .ok_or(
+                            "native `.flat()` depth must be a numeric literal so its result layout is static",
+                        )?;
+                        if constant.is_nan() || constant <= 0.0 {
+                            0usize
+                        } else if constant.is_infinite() {
+                            usize::MAX
+                        } else {
+                            constant.trunc() as usize
+                        }
+                    } else {
+                        1
+                    };
+                    let mut result = receiver;
+                    let mut flattened = false;
+                    for _ in 0..depth {
+                        let HirType::Array(element) = &current_type else {
+                            unreachable!()
+                        };
+                        let HirType::Array(inner) = element.as_ref() else {
+                            break;
+                        };
+                        let inner = inner.as_ref().clone();
+                        result = self.lower_array_flat_one(result, current_type, inner.clone())?;
+                        current_type = HirType::Array(Box::new(inner));
+                        flattened = true;
+                    }
+                    if !flattened {
+                        result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                            vec![
+                                result,
+                                HirExpr::Lit(HirLit::F64(0.0)),
+                                HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                            ],
+                        );
+                    }
+                    return Ok(result);
+                }
                 if property.sym == *"flatMap" {
                     if !(1..=2).contains(&call.args.len()) {
                         return Err(
