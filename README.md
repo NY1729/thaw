@@ -390,6 +390,9 @@ The workspace crates have narrow responsibilities:
   and variadic `hypot` use the platform libm ABI. Empty hypot calls, stable
   overflow handling, signed zero, non-finite values, coercion order and awaited
   operands follow JavaScript behavior
+- `Math.acosh`, `asinh`, `atanh`, `expm1` and `log1p` call their dedicated
+  libm operations, retaining near-zero precision, signed zero, domain errors,
+  numeric coercion and awaited operands
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
