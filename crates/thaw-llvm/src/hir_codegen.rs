@@ -5035,10 +5035,16 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$getter$") {
+        if signature.backend == DynamicBackend::Napi
+            && (signature.symbol.starts_with("$getter$")
+                || signature.symbol.starts_with("$staticgetter$"))
+        {
             return self.compile_typed_napi_getter(signature, args);
         }
-        if signature.backend == DynamicBackend::Napi && signature.symbol.starts_with("$setter$") {
+        if signature.backend == DynamicBackend::Napi
+            && (signature.symbol.starts_with("$setter$")
+                || signature.symbol.starts_with("$staticsetter$"))
+        {
             return self.compile_typed_napi_setter(signature, args);
         }
         if signature.backend == DynamicBackend::Napi
@@ -5263,13 +5269,44 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let [receiver, assigned] = args else {
-            return Err("typed N-API setter expects a receiver and value".into());
+        let is_static = signature.symbol.starts_with("$staticsetter$");
+        let (receiver_expr, assigned) = if is_static {
+            let [assigned] = args else {
+                return Err("typed N-API static setter expects one value".into());
+            };
+            (None, assigned)
+        } else {
+            let [receiver, assigned] = args else {
+                return Err("typed N-API setter expects a receiver and value".into());
+            };
+            (Some(receiver), assigned)
         };
-        let receiver = self.compile_expr(receiver)?;
+        let receiver = if let Some(receiver) = receiver_expr {
+            self.compile_expr(receiver)?
+        } else {
+            let class = signature
+                .symbol
+                .split('$')
+                .nth(2)
+                .ok_or("invalid typed N-API static setter symbol")?;
+            let class = self
+                .builder
+                .build_global_string_ptr(class, "napi_static_setter_class_name")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_napi_get_export").unwrap(),
+                    &[class.as_pointer_value().into()],
+                    "napi_static_setter_class",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+        };
         let assigned_type = signature
             .params
-            .get(1)
+            .get(usize::from(!is_static))
             .ok_or("typed N-API setter is missing its value type")?;
         let mut assigned_value = self.compile_expr(assigned)?;
         let array = self
@@ -5422,10 +5459,36 @@ impl<'ctx> HirCompiler<'ctx> {
         signature: &DynamicSignature,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let [receiver] = args else {
-            return Err("typed N-API getter expects one receiver".into());
+        let is_static = signature.symbol.starts_with("$staticgetter$");
+        let receiver = if is_static {
+            if !args.is_empty() {
+                return Err("typed N-API static getter expects no arguments".into());
+            }
+            let class = signature
+                .symbol
+                .split('$')
+                .nth(2)
+                .ok_or("invalid typed N-API static getter symbol")?;
+            let class = self
+                .builder
+                .build_global_string_ptr(class, "napi_static_getter_class_name")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module.get_function("thaw_napi_get_export").unwrap(),
+                    &[class.as_pointer_value().into()],
+                    "napi_static_getter_class",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+        } else {
+            let [receiver] = args else {
+                return Err("typed N-API getter expects one receiver".into());
+            };
+            self.compile_expr(receiver)?
         };
-        let receiver = self.compile_expr(receiver)?;
         let property = signature
             .symbol
             .split('$')
