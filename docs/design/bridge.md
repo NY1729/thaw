@@ -396,14 +396,17 @@ Version 4 preserves all version 3 fields and adds `aggregateReturnLayout` for
 fixed object returns. Its `fieldOffsets` array follows TypeScript declaration
 order; `size` and `alignment` describe the complete C object, including tail
 padding; and `indirect: true` selects an explicit hidden return-storage
-pointer. LLVM represents the value as a packed structure with byte-array
+pointer. `fieldLayouts` has one entry per field: scalar entries are `null`,
+while object entries recursively contain the child object's offsets, size,
+alignment, and optional child `fieldLayouts` (`indirect` defaults to `false`
+for children). LLVM represents the value as a packed structure with byte-array
 padding at the declared offsets and gives the storage the requested alignment.
 The implementation accepts direct and `thaw-result` portable/packed object
 returns whose fields are `boolean`, `number`, `bigint`/`i64`, or `string`.
 For `thaw-result`, LLVM also derives the outer value/error structure padding
 and alignment from the declared value layout. Invalid,
-overlapping, out-of-bounds, non-power-of-two, or mismatched layouts are hard
-errors. Nested explicit layouts remain a future extension.
+overlapping, out-of-bounds, non-power-of-two, missing-child, or mismatched
+layouts are hard errors.
 
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
@@ -412,9 +415,8 @@ Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
 parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
 variadic declaration. Extra values are passed as C `double`, default-promoted
 `int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
-subject to the ordinary marshal rules. Bitfields, nested explicit layouts,
-explicit register-class returns and other vararg types remain future
-extensions.
+subject to the ordinary marshal rules. Bitfields, explicit register-class
+returns and other vararg types remain future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`

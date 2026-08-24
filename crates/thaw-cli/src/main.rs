@@ -2449,6 +2449,105 @@ fn parse_ffi_ownership(
     }
 }
 
+fn parse_ffi_aggregate_layout(
+    value: &serde_json::Value,
+    symbol: &str,
+    path: &Path,
+    root: bool,
+) -> Result<thaw_hir::FfiAggregateLayout, String> {
+    let object = value.as_object().ok_or_else(|| {
+        format!(
+            "FFI metadata for `{symbol}` in `{}` requires aggregate layouts to be objects",
+            path.display()
+        )
+    })?;
+    let field_offsets = object
+        .get("fieldOffsets")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| {
+            format!(
+                "FFI metadata for `{symbol}` in `{}` requires `fieldOffsets` to be an array",
+                path.display()
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                format!(
+                    "FFI metadata for `{symbol}` in `{}` requires non-negative integer field offsets",
+                    path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let field_layouts = object
+        .get("fieldLayouts")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "FFI metadata for `{symbol}` in `{}` requires `fieldLayouts` to be an array",
+                        path.display()
+                    )
+                })?
+                .iter()
+                .map(|value| {
+                    if value.is_null() {
+                        Ok(None)
+                    } else {
+                        parse_ffi_aggregate_layout(value, symbol, path, false)
+                            .map(Box::new)
+                            .map(Some)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?
+        .unwrap_or_else(|| vec![None; field_offsets.len()]);
+    let size = object
+        .get("size")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| {
+            format!(
+                "FFI metadata for `{symbol}` in `{}` requires an integer aggregate layout `size`",
+                path.display()
+            )
+        })?;
+    let alignment = object
+        .get("alignment")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            format!(
+                "FFI metadata for `{symbol}` in `{}` requires a 32-bit integer aggregate layout `alignment`",
+                path.display()
+            )
+        })?;
+    let indirect = match object.get("indirect") {
+        Some(value) => value.as_bool().ok_or_else(|| {
+            format!(
+                "FFI metadata for `{symbol}` in `{}` requires aggregate layout `indirect` to be a boolean",
+                path.display()
+            )
+        })?,
+        None if root => {
+            return Err(format!(
+                "FFI metadata for `{symbol}` in `{}` requires `aggregateReturnLayout.indirect`",
+                path.display()
+            ))
+        }
+        None => false,
+    };
+    Ok(thaw_hir::FfiAggregateLayout {
+        field_offsets,
+        field_layouts,
+        size,
+        alignment,
+        indirect,
+    })
+}
+
 fn read_ffi_metadata(
     paths: &[PathBuf],
 ) -> Result<std::collections::HashMap<String, FfiMetadata>, String> {
@@ -2596,66 +2695,7 @@ fn read_ffi_metadata(
                 aggregate_return_layout: if version == Some(4) {
                     entry
                         .get("aggregateReturnLayout")
-                        .map(|value| {
-                            let object = value.as_object().ok_or_else(|| {
-                                format!(
-                                    "FFI metadata for `{symbol}` in `{}` requires `aggregateReturnLayout` to be an object",
-                                    path.display()
-                                )
-                            })?;
-                            let field_offsets = object
-                                .get("fieldOffsets")
-                                .and_then(|value| value.as_array())
-                                .ok_or_else(|| {
-                                    format!(
-                                        "FFI metadata for `{symbol}` in `{}` requires `aggregateReturnLayout.fieldOffsets` to be an array",
-                                        path.display()
-                                    )
-                                })?
-                                .iter()
-                                .map(|value| {
-                                    value.as_u64().ok_or_else(|| {
-                                        format!(
-                                            "FFI metadata for `{symbol}` in `{}` requires non-negative integer field offsets",
-                                            path.display()
-                                        )
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
-                            let size = object.get("size").and_then(|value| value.as_u64()).ok_or_else(
-                                || {
-                                    format!(
-                                        "FFI metadata for `{symbol}` in `{}` requires an integer `aggregateReturnLayout.size`",
-                                        path.display()
-                                    )
-                                },
-                            )?;
-                            let alignment = object
-                                .get("alignment")
-                                .and_then(|value| value.as_u64())
-                                .and_then(|value| u32::try_from(value).ok())
-                                .ok_or_else(|| {
-                                    format!(
-                                        "FFI metadata for `{symbol}` in `{}` requires a 32-bit integer `aggregateReturnLayout.alignment`",
-                                        path.display()
-                                    )
-                                })?;
-                            let indirect = object
-                                .get("indirect")
-                                .and_then(|value| value.as_bool())
-                                .ok_or_else(|| {
-                                    format!(
-                                        "FFI metadata for `{symbol}` in `{}` requires a boolean `aggregateReturnLayout.indirect`",
-                                        path.display()
-                                    )
-                                })?;
-                            Ok::<_, String>(thaw_hir::FfiAggregateLayout {
-                                field_offsets,
-                                size,
-                                alignment,
-                                indirect,
-                            })
-                        })
+                        .map(|value| parse_ffi_aggregate_layout(value, symbol, path, true))
                         .transpose()?
                 } else {
                     None
@@ -4280,7 +4320,7 @@ mod tests {
         let path = dir.join("ffi.json");
         std::fs::write(
             &path,
-            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"size":32,"alignment":32,"indirect":true}}}}"#,
+            r#"{"version":4,"functions":{"record":{"errorAbi":"direct","aggregateReturnAbi":"portable","aggregateReturnLayout":{"fieldOffsets":[0,16],"fieldLayouts":[null,{"fieldOffsets":[0],"size":8,"alignment":8}],"size":32,"alignment":32,"indirect":true}}}}"#,
         )
         .unwrap();
         let metadata = read_ffi_metadata(&[path]).unwrap();
@@ -4288,6 +4328,16 @@ mod tests {
             metadata["record"].aggregate_return_layout,
             Some(thaw_hir::FfiAggregateLayout {
                 field_offsets: vec![0, 16],
+                field_layouts: vec![
+                    None,
+                    Some(Box::new(thaw_hir::FfiAggregateLayout {
+                        field_offsets: vec![0],
+                        field_layouts: vec![None],
+                        size: 8,
+                        alignment: 8,
+                        indirect: false,
+                    })),
+                ],
                 size: 32,
                 alignment: 32,
                 indirect: true,
