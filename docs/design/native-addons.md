@@ -653,3 +653,7 @@ writable／enumerable／configurable filter、skip-strings／skip-symbols、numb
 従来の`napi_get_property_names`はenumerable string keyを返す標準設定として同じ実装へ委譲する。
 `napi_get_prototype`は`napi_new_instance`が保持するconstructor identityからclass prototypeを返す。
 prototypeを持たないhost objectではundefinedを返し、非object入力はobject-expected errorとする。
+instance生成時にprototype property／accessorを複製せず、instanceからprototypeへのidentity linkを
+保持する。get／has／set／accessor探索と`napi_get_all_property_names`は同じchainを辿るため、生成後の
+prototype更新が既存instanceへ反映され、own-only列挙・own-property判定・継承property shadowingを
+区別できる。call用Envとaddon module Envをまたぐprototype metadataも同じ探索規則で参照する。
