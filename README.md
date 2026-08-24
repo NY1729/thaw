@@ -145,6 +145,10 @@ The workspace crates have narrow responsibilities:
 - Object fields and array indexing/mutation
 - Fixed-shape object fields can also use static string-computed reads,
   assignments, compound assignments, and updates; JSON accepts string keys
+- Dynamic string-computed reads are supported for fixed objects whose fields
+  share one untagged native type. Object and key evaluate once; known keys
+  return a present optional value and unknown keys return `undefined`, including
+  when key evaluation suspends
 - Optional member, computed-member, and function calls are accepted for native
   types whose static layout excludes `null`/`undefined`; tagged optional fixed
   objects additionally short-circuit named and static string-computed field
@@ -1056,7 +1060,9 @@ an identifier or assign each element to an existing same-typed variable.
 accepts synchronous typed arrays, and routes rejection to async `try/catch`.
 `for...in` evaluates a fixed-shape object once and enumerates its statically
 known keys in layout order, with declaration/assignment heads and async bodies.
-Dynamic indexed reads such as `object[key]` remain a separate unsupported path.
+Dynamic indexed reads such as `object[key]` now work for uniform untagged
+fixed-shape objects. Heterogeneous and already-nullable field sets remain a
+separate typed-union problem.
 `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
