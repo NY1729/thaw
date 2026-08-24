@@ -296,6 +296,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::FfiCall(_, args)
             | HirExpr::DynamicCall(_, args)
             | HirExpr::ArrayLit(args)
+            | HirExpr::ArrayConcat(args, _)
             | HirExpr::PromiseAll(args, _)
             | HirExpr::PromiseAllTuple(args, _)
             | HirExpr::PromiseRace(args, _)
@@ -2241,6 +2242,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::FfiCall(_, args)
             | HirExpr::DynamicCall(_, args)
             | HirExpr::ArrayLit(args)
+            | HirExpr::ArrayConcat(args, _)
             | HirExpr::PromiseAll(args, _)
             | HirExpr::PromiseAllTuple(args, _)
             | HirExpr::PromiseRace(args, _)
@@ -4005,6 +4007,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::DynamicCall(sig, args) => self.compile_typed_dynamic_call(sig, args),
 
             HirExpr::ArrayLit(elems) => self.compile_array_lit(elems),
+            HirExpr::ArrayConcat(parts, _) => self.compile_array_concat(parts),
             HirExpr::Index(arr, idx) => {
                 let elem_ptr = self.compile_element_ptr(arr, idx)?;
                 self.builder
@@ -4341,6 +4344,99 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         Ok(base_ptr.into())
+    }
+
+    /// Evaluates each array part once from left to right and copies their
+    /// uniform eight-byte element slots into one arena-owned result array.
+    fn compile_array_concat(&mut self, parts: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let mut arrays = Vec::with_capacity(parts.len());
+        let mut total = i64_type.const_zero();
+        for part in parts {
+            let array = self.compile_expr(part)?.into_pointer_value();
+            let length = self
+                .builder
+                .build_load(i64_type, array, "spread_length")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            total = self
+                .builder
+                .build_int_add(total, length, "spread_total")
+                .map_err(|error| error.to_string())?;
+            arrays.push((array, length));
+        }
+
+        let element_bytes = i64_type.const_int(ARRAY_ELEM_BYTES, false);
+        let payload_size = self
+            .builder
+            .build_int_mul(total, element_bytes, "spread_payload_size")
+            .map_err(|error| error.to_string())?;
+        let allocation_size = self
+            .builder
+            .build_int_add(
+                payload_size,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "spread_allocation_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    allocation_size.into(),
+                    i64_type.const_int(ARRAY_ELEM_BYTES, false).into(),
+                ],
+                "spread_array_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a spread array")?
+            .into_pointer_value();
+        self.builder
+            .build_store(result, total)
+            .map_err(|error| error.to_string())?;
+
+        let mut destination_offset = i64_type.const_int(ARRAY_HEADER_BYTES, false);
+        for (array, length) in arrays {
+            let bytes = self
+                .builder
+                .build_int_mul(length, element_bytes, "spread_copy_size")
+                .map_err(|error| error.to_string())?;
+            let source = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        array,
+                        &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
+                        "spread_source",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let destination = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        result,
+                        &[destination_offset],
+                        "spread_destination",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_call(
+                    self.module.get_function("memcpy").unwrap(),
+                    &[destination.into(), source.into(), bytes.into()],
+                    "copy_spread_part",
+                )
+                .map_err(|error| error.to_string())?;
+            destination_offset = self
+                .builder
+                .build_int_add(destination_offset, bytes, "next_spread_destination")
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(result.into())
     }
 
     /// Computes the address of `array[index]` (past the length header).
@@ -9041,6 +9137,65 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "for_of_assignment"), "4\n5\n6\n6\n");
+    }
+
+    #[test]
+    fn compiles_array_spreads_for_all_native_element_shapes() {
+        let source = r#"
+            interface Item { value: number; }
+            function first(): number[] {
+                console.log("first");
+                return [2, 3];
+            }
+            function second(): number[] {
+                console.log("second");
+                return [5];
+            }
+            function main(): void {
+                const middle: number[] = [4];
+                const numbers: number[] = [1, ...first(), ...middle, ...second(), 6];
+                console.log(numbers.length);
+                console.log(numbers[0]);
+                console.log(numbers[5]);
+
+                const strings: string[] = ["a", ...["b", "c"]];
+                console.log(strings[1]);
+                const booleans: boolean[] = [true, ...[false]];
+                console.log(booleans[1]);
+                const extra: Item[] = [{ value: 2 }];
+                const objects: Item[] = [{ value: 1 }, ...extra];
+                console.log(objects[1].value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_spreads"),
+            "first\nsecond\n6\n1\n6\nb\nfalse\n2\n"
+        );
+    }
+
+    #[test]
+    fn frame_split_extracts_awaits_from_array_spreads_left_to_right() {
+        let source = r#"
+            async function part(): Promise<number[]> {
+                await sleep(1);
+                console.log("part");
+                return [2, 3];
+            }
+            async function value(): Promise<number> {
+                await sleep(1);
+                console.log("value");
+                return 4;
+            }
+            async function main(): Promise<void> {
+                const values: number[] = [1, ...(await part()), await value(), 5];
+                console.log(values.length);
+                console.log(values[3]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "await_array_spreads"),
+            "part\nvalue\n5\n4\n"
+        );
     }
 
     #[test]
