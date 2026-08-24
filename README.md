@@ -454,8 +454,8 @@ The workspace crates have narrow responsibilities:
 - `Object.keys` returns an arena-owned string array for fixed-layout objects,
   preserving declaration/insertion order across property overrides and
   evaluating synchronous or awaited receivers exactly once
-- Native strings implement `.indexOf()`, `.includes()`, `.startsWith()` and
-  `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
+- Native strings implement `.indexOf()`, `.lastIndexOf()`, `.includes()`,
+  `.startsWith()` and `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
   byte offsets. Search values and positions are coerced left-to-right, clamped
   positions and empty searches follow JavaScript behavior, and receivers may
   suspend with `await`

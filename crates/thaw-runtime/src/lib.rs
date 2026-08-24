@@ -1077,6 +1077,33 @@ pub unsafe extern "C" fn thaw_string_index_of(
 }
 
 #[no_mangle]
+/// Searches backward using JavaScript UTF-16 code-unit positions.
+///
+/// # Safety
+/// Both pointers must reference valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_string_last_index_of(
+    value: *const c_char,
+    search: *const c_char,
+    position: f64,
+) -> f64 {
+    let Some((value, search)) = (unsafe { utf16_strings(value, search) }) else {
+        return -1.0;
+    };
+    let position = clamped_string_position(position, value.len());
+    if search.is_empty() {
+        return position as f64;
+    }
+    if search.len() > value.len() {
+        return -1.0;
+    }
+    let start = position.min(value.len() - search.len());
+    (0..=start)
+        .rev()
+        .find(|&index| value.get(index..index + search.len()) == Some(search.as_slice()))
+        .map_or(-1.0, |index| index as f64)
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// Both pointers must reference valid NUL-terminated C strings.
