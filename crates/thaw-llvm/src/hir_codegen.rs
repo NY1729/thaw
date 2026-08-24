@@ -593,6 +593,20 @@ impl<'ctx> HirCompiler<'ctx> {
             array_reverse_type,
             Some(Linkage::External),
         );
+        let array_copy_within_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_copy_within",
+            array_copy_within_type,
+            Some(Linkage::External),
+        );
         for (name, needle_type, return_type) in [
             (
                 "thaw_number_array_index_of",
@@ -7546,6 +7560,26 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_array_reverse" => {
                 return self.compile_single_arg_call("thaw_array_reverse", args, "array reverse")
             }
+            "__thaw_array_copy_within" => {
+                if args.len() != 4 {
+                    return Err("array copyWithin expects four operands".to_string());
+                }
+                let mut arguments = Vec::with_capacity(4);
+                for argument in args {
+                    arguments.push(self.compile_expr(argument)?.into());
+                }
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_copy_within").unwrap(),
+                        &arguments,
+                        "array_copy_within",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array copyWithin returned no value".to_string());
+            }
             "__thaw_number_array_index_of"
             | "__thaw_number_array_includes"
             | "__thaw_string_array_index_of"
@@ -11483,6 +11517,41 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_reverse"),
             "4-3-2-1\n4,3,2,1\nfalse|false|true\n2\nawaited-array\ncba\n0\n"
+        );
+    }
+
+    #[test]
+    fn compiles_in_place_array_copy_within() {
+        let source = r#"
+            function values(): number[] {
+                console.log("receiver");
+                return [1, 2, 3, 4, 5];
+            }
+            function index(label: string, value: string): string {
+                console.log(label);
+                return value;
+            }
+            async function delayedEnd(): Promise<number> {
+                await sleep(1);
+                console.log("awaited-end");
+                return 4;
+            }
+            async function main(): Promise<void> {
+                const tail: number[] = [1, 2, 3, 4, 5];
+                console.log(tail.copyWithin(0, 3).join(","));
+                const overlap: number[] = [1, 2, 3, 4, 5];
+                overlap.copyWithin(1, 0, 4);
+                console.log(overlap.join(","));
+                const negative: number[] = [1, 2, 3, 4, 5];
+                console.log(negative.copyWithin(-2, -4, -1).join(","));
+                const words: string[] = ["a", "b", "c"];
+                console.log(words.copyWithin(1, 0).join(""));
+                console.log(values().copyWithin(index("target", "1"), index("start", "0"), await delayedEnd()).join("-"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_copy_within"),
+            "4,5,3,4,5\n1,1,2,3,4\n1,2,3,2,3\naab\nreceiver\ntarget\nstart\nawaited-end\n1-1-2-3-4\n"
         );
     }
 
