@@ -179,6 +179,8 @@ The workspace crates have narrow responsibilities:
 - Ambient declarations and C ABI calls; number-array parameters become
   `(pointer, length)`, object parameters become scalar fields, and metadata-
   selected portable array/object return structs are copied into the Thaw arena
+- Direct `void` FFI calls execute as statements; `thaw-result` void functions
+  return `{ error }` and propagate native failures through `try/catch/finally`
 - FFI metadata v3 selects null-terminated or `(pointer, length)` string ABIs
   per parameter and return, internal/portable aggregate returns, plus
   C/fast/cold LLVM calling conventions
@@ -606,6 +608,8 @@ The workspace crates have narrow responsibilities:
   message
 - Versioned FFI metadata can opt native functions into a typed
   `{ value, error }` result ABI whose errors propagate through Thaw catch paths
+- Void native functions use the corresponding `{ error }` result ABI, including
+  owned error copying and exactly-once destruction
 - Metadata v2 copies owned native string results/errors into the request arena
   and invokes their configured destructors exactly once
 
