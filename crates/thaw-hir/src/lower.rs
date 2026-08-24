@@ -1623,7 +1623,11 @@ fn collect_stmt_bindings(stmts: &[HirStmt], names: &mut BTreeSet<Symbol>) {
                 collect_stmt_bindings(body, names);
                 collect_stmt_bindings(catch_body, names);
             }
-            HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+            HirStmt::Return(None)
+            | HirStmt::Break
+            | HirStmt::Continue
+            | HirStmt::BreakDepth(_)
+            | HirStmt::ContinueDepth(_) => {}
         }
     }
 }
@@ -1657,7 +1661,10 @@ fn inject_finally_before_exits(
                 cond,
                 inject_finally_before_exits(body, finalizer, inject_throws),
             )),
-            HirStmt::Break | HirStmt::Continue => out.push(stmt),
+            HirStmt::Break
+            | HirStmt::Continue
+            | HirStmt::BreakDepth(_)
+            | HirStmt::ContinueDepth(_) => out.push(stmt),
             HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
                 inject_finally_before_exits(body, finalizer, false),
                 catch_name,
@@ -1675,25 +1682,43 @@ fn inject_finally_before_exits(
 /// belonging to this loop, but stop at nested loops whose `continue`s target
 /// the nested loop instead.
 fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> Vec<HirStmt> {
+    inject_before_target_continue(stmts, 0, &HirStmt::Expr(update.clone()))
+}
+
+fn inject_before_target_continue(
+    stmts: Vec<HirStmt>,
+    nested_depth: usize,
+    injected: &HirStmt,
+) -> Vec<HirStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
         match stmt {
             HirStmt::Continue => {
-                out.push(HirStmt::Expr(update.clone()));
+                if nested_depth == 0 {
+                    out.push(injected.clone());
+                }
                 out.push(HirStmt::Continue);
+            }
+            HirStmt::ContinueDepth(depth) => {
+                if depth == nested_depth {
+                    out.push(injected.clone());
+                }
+                out.push(HirStmt::ContinueDepth(depth));
             }
             HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
                 cond,
-                inject_for_update_before_continue(then_body, update),
-                inject_for_update_before_continue(else_body, update),
+                inject_before_target_continue(then_body, nested_depth, injected),
+                inject_before_target_continue(else_body, nested_depth, injected),
             )),
             HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
-                inject_for_update_before_continue(body, update),
+                inject_before_target_continue(body, nested_depth, injected),
                 catch_name,
-                inject_for_update_before_continue(catch_body, update),
+                inject_before_target_continue(catch_body, nested_depth, injected),
             )),
-            // A continue below this node belongs to the nested loop.
-            HirStmt::While(_, _) => out.push(stmt),
+            HirStmt::While(cond, body) => out.push(HirStmt::While(
+                cond,
+                inject_before_target_continue(body, nested_depth + 1, injected),
+            )),
             other => out.push(other),
         }
     }
@@ -1704,28 +1729,7 @@ fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> V
 /// loop with a condition guard at the tail. Source-level `continue` also has
 /// to execute that guard before starting the next iteration.
 fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, guard: &HirStmt) -> Vec<HirStmt> {
-    let mut out = Vec::new();
-    for stmt in stmts {
-        match stmt {
-            HirStmt::Continue => {
-                out.push(guard.clone());
-                out.push(HirStmt::Continue);
-            }
-            HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
-                cond,
-                inject_do_while_guard_before_continue(then_body, guard),
-                inject_do_while_guard_before_continue(else_body, guard),
-            )),
-            HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
-                inject_do_while_guard_before_continue(body, guard),
-                catch_name,
-                inject_do_while_guard_before_continue(catch_body, guard),
-            )),
-            HirStmt::While(_, _) => out.push(stmt),
-            other => out.push(other),
-        }
-    }
-    out
+    inject_before_target_continue(stmts, 0, guard)
 }
 
 /// Rewrites breaks that target a source switch into an assignment selecting
@@ -1846,9 +1850,21 @@ struct FnLowerer<'a> {
     generic_interfaces: &'a GenericInterfaces<'a>,
     ret_type: HirType,
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
+    loop_depth: usize,
+    labels: Vec<(Symbol, usize, bool)>,
 }
 
 impl<'a> FnLowerer<'a> {
+    fn stmt_is_iteration(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::While(_) | Stmt::DoWhile(_) | Stmt::For(_) | Stmt::ForIn(_) | Stmt::ForOf(_) => {
+                true
+            }
+            Stmt::Labeled(labeled) => Self::stmt_is_iteration(&labeled.body),
+            _ => false,
+        }
+    }
+
     fn new(
         signatures: &'a HashMap<Symbol, FnSignature>,
         interfaces: &'a HashMap<Symbol, HirType>,
@@ -1865,6 +1881,8 @@ impl<'a> FnLowerer<'a> {
             generic_interfaces,
             ret_type,
             call_constraints,
+            loop_depth: 0,
+            labels: Vec::new(),
         }
     }
 
@@ -1969,6 +1987,13 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn lower_loop_body(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
+        self.loop_depth += 1;
+        let result = self.lower_body(stmt);
+        self.loop_depth -= 1;
+        result
+    }
+
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
             Stmt::Return(ret) => {
@@ -2010,7 +2035,7 @@ impl<'a> FnLowerer<'a> {
             Stmt::While(while_stmt) => {
                 let cond = self.lower_expr(&while_stmt.test)?;
                 self.expect_type(&HirType::Bool, &cond, "while condition")?;
-                let body = self.lower_body(&while_stmt.body)?;
+                let body = self.lower_loop_body(&while_stmt.body)?;
                 Ok(vec![HirStmt::While(cond, body)])
             }
 
@@ -2018,7 +2043,7 @@ impl<'a> FnLowerer<'a> {
                 let cond = self.lower_expr(&do_while.test)?;
                 self.expect_type(&HirType::Bool, &cond, "do/while condition")?;
                 let guard = HirStmt::If(cond, Vec::new(), vec![HirStmt::Break]);
-                let mut body = self.lower_body(&do_while.body)?;
+                let mut body = self.lower_loop_body(&do_while.body)?;
                 body = inject_do_while_guard_before_continue(body, &guard);
                 body.push(guard);
                 Ok(vec![HirStmt::While(
@@ -2028,17 +2053,59 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::Break(break_stmt) => {
-                if break_stmt.label.is_some() {
-                    return Err("labeled `break` is not supported".into());
+                if let Some(label) = &break_stmt.label {
+                    let name = label.sym.as_ref();
+                    let (_, target_depth, _) = self
+                        .labels
+                        .iter()
+                        .rev()
+                        .find(|(candidate, _, _)| candidate == name)
+                        .ok_or_else(|| format!("unknown break label `{name}`"))?;
+                    return Ok(vec![HirStmt::BreakDepth(self.loop_depth - target_depth)]);
                 }
                 Ok(vec![HirStmt::Break])
             }
 
             Stmt::Continue(continue_stmt) => {
-                if continue_stmt.label.is_some() {
-                    return Err("labeled `continue` is not supported".into());
+                if let Some(label) = &continue_stmt.label {
+                    let name = label.sym.as_ref();
+                    let (_, target_depth, continuable) = self
+                        .labels
+                        .iter()
+                        .rev()
+                        .find(|(candidate, _, _)| candidate == name)
+                        .ok_or_else(|| format!("unknown continue label `{name}`"))?;
+                    if !continuable {
+                        return Err(format!("continue label `{name}` does not name a loop"));
+                    }
+                    return Ok(vec![HirStmt::ContinueDepth(
+                        self.loop_depth - target_depth,
+                    )]);
                 }
                 Ok(vec![HirStmt::Continue])
+            }
+
+            Stmt::Labeled(labeled) => {
+                let name = labeled.label.sym.to_string();
+                if self.labels.iter().any(|(candidate, _, _)| candidate == &name) {
+                    return Err(format!("duplicate active label `{name}`"));
+                }
+                let is_loop = Self::stmt_is_iteration(&labeled.body);
+                let target_depth = self.loop_depth + 1;
+                self.labels.push((name, target_depth, is_loop));
+                let lowered = if is_loop {
+                    self.lower_stmt_seq(&labeled.body)
+                } else {
+                    self.loop_depth += 1;
+                    let body_result = self.lower_body(&labeled.body);
+                    self.loop_depth -= 1;
+                    body_result.map(|mut body| {
+                        body.push(HirStmt::Break);
+                        vec![HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)]
+                    })
+                };
+                self.labels.pop();
+                lowered
             }
 
             Stmt::For(for_stmt) => {
@@ -2065,7 +2132,7 @@ impl<'a> FnLowerer<'a> {
                         None => HirExpr::Lit(HirLit::Bool(true)),
                     };
 
-                    let mut body = self.lower_body(&for_stmt.body)?;
+                    let mut body = self.lower_loop_body(&for_stmt.body)?;
                     if let Some(update) = &for_stmt.update {
                         let update = self.lower_expr(update)?;
                         body = inject_for_update_before_continue(body, &update);
@@ -2217,7 +2284,7 @@ impl<'a> FnLowerer<'a> {
                         }
                     };
                     let mut body = item_stmts;
-                    body.extend(self.lower_body(&for_of.body)?);
+                    body.extend(self.lower_loop_body(&for_of.body)?);
                     let update = HirExpr::Assign(
                         index_name.clone(),
                         Box::new(HirExpr::BinOp(
@@ -2362,7 +2429,7 @@ impl<'a> FnLowerer<'a> {
                         )),
                     );
                     let mut body = vec![binding_stmt];
-                    body.extend(self.lower_body(&for_in.body)?);
+                    body.extend(self.lower_loop_body(&for_in.body)?);
                     body = inject_for_update_before_continue(body, &update);
                     body.push(HirStmt::Expr(update));
                     Ok(vec![

@@ -332,6 +332,9 @@ The workspace crates have narrow responsibilities:
   parent branch, and conditions plus branch bodies may both suspend
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
+- Labeled statements support `break label`, and labeled iteration statements
+  support `continue label`. Multi-level exits preserve classic `for` updates
+  and propagate through nested synchronous and suspended async loop guards
 - `Promise.all` joins homogeneous Promise arrays concurrently. It supports
   number, string, boolean, object, and nested-array results, accepts both
   literals and array variables, and infers heterogeneous array literals as
