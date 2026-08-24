@@ -645,3 +645,6 @@ Envからの破棄だけを受理してcontextを一度解放する。callback s
 array elementへ同じintegrity levelを適用し、accessor setter呼び出しはJavaScript規約どおり維持する。
 `napi_define_properties`のwritable／enumerable／configurable bitはEnv metadataへ保持し、通常の
 set／deleteもdescriptor制約を迂回できない。seal／freeze時には既存propertyのbitを更新する。
+`napi_create_symbol`はdescriptionとは独立した一意なidentityを割り当てる。Object／Functionの
+property mapとdescriptor metadataはstring／Symbolの型付きkeyを共有し、同じdescriptionの
+Symbol同士および同名stringとの衝突を防ぐ。JSON変換ではJavaScriptと同様にSymbol keyを除外する。
