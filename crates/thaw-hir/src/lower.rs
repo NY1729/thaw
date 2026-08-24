@@ -3067,8 +3067,31 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Lit(HirLit::Str(type_name.into()))),
                             )),
                             vec![value],
-                        )
+                            )
                         }
+                    }
+                    UnaryOp::Void => {
+                        let body = HirExpr::Block(vec![HirStmt::Expr(value)]);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|name| {
+                                self.scope
+                                    .get(&name)
+                                    .cloned()
+                                    .map(|ty| HirParam { name, ty })
+                            })
+                            .collect();
+                        HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                HirType::Void,
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        )
                     }
                     other => return Err(format!("unsupported unary operator {other:?}")),
                 };
@@ -5301,6 +5324,26 @@ mod tests {
         assert!(matches!(
             &program.functions[0].body[2],
             HirStmt::Let(_, HirType::F64, HirExpr::PropAssign(_, _, field, _)) if field == "value"
+        ));
+    }
+
+    #[test]
+    fn lowers_void_to_an_evaluating_closure() {
+        let program = lower(
+            r#"function effect(): number { return 1; }
+            function main(): void { void effect(); }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[0],
+            HirStmt::Expr(HirExpr::Call(lambda, args))
+                if args.is_empty()
+                    && matches!(lambda.as_ref(), HirExpr::Lambda(_, params, HirType::Void, body)
+                        if params.is_empty() && matches!(body.as_ref(), HirExpr::Block(_)))
         ));
     }
 

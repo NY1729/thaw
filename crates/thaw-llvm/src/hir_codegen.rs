@@ -9668,6 +9668,35 @@ mod tests {
     }
 
     #[test]
+    fn compiles_void_expressions_with_await_and_rejection() {
+        let source = r#"
+            function effect(): number {
+                console.log("sync");
+                return 1;
+            }
+            async function asyncEffect(fail: boolean): Promise<number> {
+                await sleep(1);
+                if (fail) throw "failed";
+                console.log("async");
+                return 2;
+            }
+            async function main(): Promise<void> {
+                void effect();
+                void (await asyncEffect(false));
+                try {
+                    void (await asyncEffect(true));
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "void_expressions"),
+            "sync\nasync\nfailed\n"
+        );
+    }
+
+    #[test]
     fn logical_operators_short_circuit_sync_and_awaited_operands() {
         let source = r#"
             function flag(label: string, value: boolean): boolean {

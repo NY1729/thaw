@@ -491,6 +491,8 @@ JavaScript coercionは行わず、異なる型のoperandは明示的なコンパ
 `typeof`はtyped operandを一引数closureへ渡して必ず一度評価し、既知のnative型から
 `number`/`string`/`boolean`/`function`/`object`を返す。await operandも通常の引数抽出を
 通る。未解決dynamic型とvoid operandは、誤った結果を生成せず明示的なエラーにする。
+単項`void`は即時実行するvoid closure内でoperandを一度評価して結果を破棄する。operand内の
+awaitはtyped blocking await経路を通り、rejectは外側のtry/catchへそのまま伝播する。
 prefix `++`/`--`は更新後の値を返し、postfix形式は対象の旧値をtemporaryへ保存してから
 代入し旧値を返す。computed array targetではarray、index、旧値を順にnested closureへ
 束縛するため、それぞれ一度だけ評価され、awaitを含むindexも同じ順序を維持する。数値型の
