@@ -3339,6 +3339,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "number predicate")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_number_object_is" => {
+                        let [left, right] = args.as_slice() else {
+                            return Err("Object.is number comparison expects two operands".into());
+                        };
+                        self.expect_type(&HirType::F64, left, "Object.is left operand")?;
+                        self.expect_type(&HirType::F64, right, "Object.is right operand")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_number_neg" | "__thaw_math_abs" | "__thaw_math_floor"
                     | "__thaw_math_ceil" | "__thaw_math_trunc" | "__thaw_math_sqrt"
                     | "__thaw_math_sign" | "__thaw_math_round" | "__thaw_math_exp"
@@ -5853,6 +5861,53 @@ impl<'a> FnLowerer<'a> {
                             &[
                                 (object_name, object_type, object_value),
                                 (key_name, HirType::Str, key_value),
+                            ],
+                        );
+                    }
+                    if object.sym == *"Object" && property.sym == *"is" {
+                        let [left, right] = call.args.as_slice() else {
+                            return Err("`Object.is` expects exactly two arguments".into());
+                        };
+                        if left.spread.is_some() || right.spread.is_some() {
+                            return Err("Object.is spread is not supported".into());
+                        }
+                        let left_value = self.lower_expr(&left.expr)?;
+                        let right_value = self.lower_expr(&right.expr)?;
+                        let left_type = self.infer_expr_type(&left_value)?;
+                        let right_type = self.infer_expr_type(&right_value)?;
+                        if matches!(left_type, HirType::Json | HirType::Dynamic)
+                            || matches!(right_type, HirType::Json | HirType::Dynamic)
+                        {
+                            return Err("`Object.is` requires statically native operands".into());
+                        }
+                        let left_name = format!("__thaw_object_is_left_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let right_name = format!("__thaw_object_is_right_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(left_name.clone(), left_type.clone());
+                        self.scope.insert(right_name.clone(), right_type.clone());
+                        let result = if left_type != right_type {
+                            HirExpr::Lit(HirLit::Bool(false))
+                        } else if left_type == HirType::F64 {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_object_is".into())),
+                                vec![
+                                    HirExpr::Var(left_name.clone()),
+                                    HirExpr::Var(right_name.clone()),
+                                ],
+                            )
+                        } else {
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(left_name.clone())),
+                                Box::new(HirExpr::Var(right_name.clone())),
+                            )
+                        };
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[
+                                (left_name, left_type, left_value),
+                                (right_name, right_type, right_value),
                             ],
                         );
                     }

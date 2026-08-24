@@ -549,6 +549,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         let number_to_string_type = i8_ptr.fn_type(&[f64_type.into()], false);
         self.module.add_function(
+            "thaw_number_object_is",
+            i8_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_number_to_string",
             number_to_string_type,
             Some(Linkage::External),
@@ -7834,6 +7839,35 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
             "__thaw_number_is_integer" => return self.compile_integer_predicate(args, false),
             "__thaw_number_is_safe_integer" => return self.compile_integer_predicate(args, true),
+            "__thaw_number_object_is" => {
+                let [left, right] = args else {
+                    return Err("Object.is number comparison expects two operands".to_string());
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_number_object_is").unwrap(),
+                        &[left.into(), right.into()],
+                        "number_object_is",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Object.is number comparison returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result,
+                        self.context.i8_type().const_zero(),
+                        "number_object_is_bool",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_number_neg" => {
                 let [value] = args else {
                     return Err("unary minus expects one operand".to_string());
@@ -12088,6 +12122,50 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "object_entries"),
             "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\n"
+        );
+    }
+
+    #[test]
+    fn compiles_object_is_same_value_comparisons() {
+        let source = r#"
+            interface Item { value: number; }
+            function text(): string { return "same"; }
+            function left(): number {
+                console.log("left");
+                return 1;
+            }
+            async function right(): Promise<number> {
+                console.log("right");
+                await sleep(1);
+                return 1;
+            }
+            async function pending(): Promise<number> {
+                await sleep(1);
+                return 1;
+            }
+            async function main(): Promise<void> {
+                console.log(Object.is(0 / 0, 0 / 0));
+                console.log(Object.is(0, -0));
+                console.log(Object.is(-0, -0));
+                console.log(Object.is(1, 1));
+                console.log(Object.is("same", text()));
+                console.log(Object.is(true, true));
+                console.log(Object.is(1, "1"));
+                const item: Item = { value: 1 };
+                console.log(Object.is(item, item));
+                console.log(Object.is(item, { value: 1 }));
+                const array: number[] = [1];
+                console.log(Object.is(array, array));
+                console.log(Object.is(array, [1]));
+                const promise: Promise<number> = pending();
+                console.log(Object.is(promise, promise));
+                console.log(Object.is(promise, pending()));
+                console.log(Object.is(left(), await right()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_is"),
+            "true\nfalse\ntrue\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\nleft\nright\ntrue\n"
         );
     }
 
