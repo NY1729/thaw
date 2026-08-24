@@ -1011,6 +1011,12 @@ fn rewrite_external_class_methods(
                             let name = match &property.key {
                                 PropName::Ident(identifier) => identifier.sym.to_string(),
                                 PropName::Str(value) => value.value.to_string_lossy().into_owned(),
+                                PropName::Computed(computed) => match computed.expr.as_ref() {
+                                    Expr::Lit(Lit::Str(value)) => {
+                                        value.value.to_string_lossy().into_owned()
+                                    }
+                                    _ => return Some(thaw_hir::HirType::Object(Vec::new())),
+                                },
                                 _ => return Some(thaw_hir::HirType::Object(Vec::new())),
                             };
                             let Some(value_type) =
@@ -4413,7 +4419,7 @@ mod tests {
 
     #[test]
     fn selects_object_overloads_from_structural_property_types() {
-        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 });"#;
+        let source = r#"const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" });"#;
         let rewritten = rewrite_external_class_methods(
             source,
             &[("addon".into(), "NativeBox".into())],
@@ -4446,6 +4452,7 @@ mod tests {
         assert!(rewritten.contains("__configure_number(box, numeric)"));
         assert!(rewritten.contains("__configure_string(box, textual)"));
         assert!(rewritten.contains("__configure_number(box, { value: 7 })"));
+        assert!(rewritten.contains("__configure_string(box, { [\"value\"]: \"computed\" })"));
     }
 
     #[test]
