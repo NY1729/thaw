@@ -44,7 +44,7 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue, StructValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -665,6 +665,20 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_napi_call_method_result",
             result_type.fn_type(
                 &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_method_with_callback_result",
+            result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                ],
                 false,
             ),
             Some(Linkage::External),
@@ -5227,6 +5241,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let [receiver, method_args @ ..] = args else {
             return Err("typed N-API method expects a receiver".into());
         };
+        let callback = matches!(signature.params.last(), Some(HirType::Function(_, _)))
+            .then(|| method_args.last())
+            .flatten();
+        let marshalled_args = if callback.is_some() {
+            &method_args[..method_args.len() - 1]
+        } else {
+            method_args
+        };
         let receiver = self.compile_expr(receiver)?;
         let array = self
             .builder
@@ -5239,7 +5261,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        for (index, (argument, ty)) in method_args
+        for (index, (argument, ty)) in marshalled_args
             .iter()
             .zip(signature.params.iter().skip(1))
             .enumerate()
@@ -5311,24 +5333,32 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let result = self
-            .builder
-            .build_call(
-                self.module
-                    .get_function("thaw_napi_call_method_result")
-                    .unwrap(),
-                &[
-                    receiver.into(),
-                    method.as_pointer_value().into(),
-                    args_json.into(),
-                ],
-                "napi_method_result",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .unwrap()
-            .into_struct_value();
+        let result = if let Some(callback) = callback {
+            self.compile_typed_napi_method_callback(
+                receiver,
+                method.as_pointer_value(),
+                args_json,
+                callback,
+            )?
+        } else {
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_napi_call_method_result")
+                        .unwrap(),
+                    &[
+                        receiver.into(),
+                        method.as_pointer_value().into(),
+                        args_json.into(),
+                    ],
+                    "napi_method_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_struct_value()
+        };
         let value = self
             .builder
             .build_extract_value(result, 0, "napi_method_json")
@@ -5375,6 +5405,100 @@ impl<'ctx> HirCompiler<'ctx> {
                 "typed N-API method return does not support {other:?} yet"
             )),
         }
+    }
+
+    fn compile_typed_napi_method_callback(
+        &mut self,
+        receiver: BasicValueEnum<'ctx>,
+        method: PointerValue<'ctx>,
+        args_json: BasicValueEnum<'ctx>,
+        callback: &HirExpr,
+    ) -> Result<StructValue<'ctx>, String> {
+        let callback_type = match callback {
+            HirExpr::Lambda(_, params, ret, _) => HirType::Function(
+                params.iter().map(|param| param.ty.clone()).collect(),
+                Box::new(ret.clone()),
+            ),
+            HirExpr::Var(name) => self
+                .variable_hir_types
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("unknown callback `{name}`"))?,
+            _ => return Err("typed N-API method callback must be a function value".into()),
+        };
+        let HirType::Function(params, ret) = callback_type else {
+            return Err("typed N-API method callback must be a function".into());
+        };
+        if params != vec![HirType::Json, HirType::Json] || *ret != HirType::Json {
+            return Err("native addon callback must have type (Json, Json) => Json".into());
+        }
+        let closure = self.compile_expr(callback)?.into_pointer_value();
+        let callback_name = format!("__thaw_napi_method_callback_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let adapter_type = self
+            .context
+            .void_type()
+            .fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let adapter =
+            self.module
+                .add_function(&callback_name, adapter_type, Some(Linkage::Internal));
+        let return_block = self.builder.get_insert_block().unwrap();
+        let adapter_entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(adapter_entry);
+        let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
+        let error_string = adapter.get_nth_param(1).unwrap();
+        let result_string = adapter.get_nth_param(2).unwrap();
+        let parse = self.module.get_function("thaw_json_parse").unwrap();
+        let error_json = self
+            .builder
+            .build_call(parse, &[error_string.into()], "method_callback_error")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let result_json = self
+            .builder
+            .build_call(parse, &[result_string.into()], "method_callback_result")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let code = self
+            .builder
+            .build_load(ptr_type, context, "method_callback_code")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let closure_type = self.function_type(&params, &ret)?;
+        self.builder
+            .build_indirect_call(
+                closure_type,
+                code,
+                &[context.into(), error_json.into(), result_json.into()],
+                "invoke_thaw_method_callback",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder.build_return(None).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(return_block);
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_napi_call_method_with_callback_result")
+                    .unwrap(),
+                &[
+                    receiver.into(),
+                    method.into(),
+                    args_json.into(),
+                    adapter.as_global_value().as_pointer_value().into(),
+                    closure.into(),
+                ],
+                "napi_method_callback_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .map(|value| value.into_struct_value())
+            .ok_or_else(|| "native method callback returned no result".into())
     }
 
     fn compile_call_native_addon(

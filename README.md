@@ -436,8 +436,11 @@ CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 standalone executable. Automatic instance-method and callback syntax lowering
 now covers callback-free methods on variables directly initialized from an
 external constructor. A CLI E2E compiles and runs `new NativeBox(42)` followed
-by ordinary `box.get()` syntax through the typed HIR/LLVM N-API path. Callback
-arguments, getters, static methods, and aliased instances remain explicit gaps.
+by ordinary `box.get()` syntax through the typed HIR/LLVM N-API path. Instance
+methods whose final argument has the existing `(Json, Json) => Json` native
+callback shape also use the receiver's persistent N-API environment and retain
+`this`; the same E2E exercises `box.getLater(callback)`. Other callback shapes,
+getters, static methods, and aliased instances remain explicit gaps.
 `thaw registry add`
 automatically selects a compatible addon bundled under
 `prebuilds/<platform>-<arch>/`, copies it to
@@ -475,8 +478,9 @@ the real `Database`, `Statement`, and `Backup` classes, and an opt-in CLI E2E
 embeds it into an executable that starts after the registry is removed
 (`THAW_RUN_NPM_INTEGRATION=1 cargo test -p thaw-cli
 registry_add_fetches_and_loads_sqlite3_when_enabled -- --nocapture`). Typed
-construction is integrated, and callback-free instance methods are supported;
-sqlite3's callback-heavy overloads remain outside that automatic path.
+construction is integrated, callback-free instance methods are supported, and
+the existing two-JSON callback ABI works on instance methods. sqlite3's broader
+error-first callback shapes and overload selection remain outside that path.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
