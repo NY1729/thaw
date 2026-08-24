@@ -771,3 +771,16 @@ Value解放前に一度だけ実行する。
 `node_api_get_module_file_name`用にaddon load時のcanonical absolute pathを`file://` URLとしてEnvへ
 保持する。module初期化だけでなく、JSON bridgeがtop-level exportを新しいcall Envで呼ぶ場合も元の
 module EnvからURLを継承し、Env所有のNUL終端pointerを安定して返す。
+
+## 23. Node-API v10 surfaceとextended error
+
+現在のNode main headerに含まれるNode-API v10の公開symbolを全てhostからexportし、対象とする
+experimental SharedArrayBuffer、post-finalizer、module-file APIも提供する。これはNode／V8／libuvを
+内部に埋め込むという意味ではなく、Thawのvalue model、共有worker pool、明示poll、Env lifetime上で
+同じC ABIを提供する境界である。
+
+`napi_get_last_error_info`は固定の成功値ではなくEnvごとの状態を返す。引数・型・所有Env・handle
+lifecycle・queue操作の失敗は対応するstatus codeとprocess lifetimeで安定したC文字列messageを記録する。
+成功呼び出しは直前の失敗を消去しない。公開APIの早期returnも監査し、result pointerがnullの
+`napi_strict_equals`と`node_api_get_module_file_name`を含め、有効なEnvを受け取った失敗経路では
+extended errorを更新する。
