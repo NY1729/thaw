@@ -357,6 +357,33 @@ pub struct NapiPropertyDescriptor {
     data: *mut c_void,
 }
 
+unsafe fn validate_property_descriptors(
+    env: NapiEnv,
+    count: usize,
+    descriptors: *const NapiPropertyDescriptor,
+) -> NapiStatus {
+    if count == 0 {
+        return NAPI_OK;
+    }
+    if env.is_null() || descriptors.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    for descriptor in std::slice::from_raw_parts(descriptors, count) {
+        if descriptor.utf8name.is_null() && !value_belongs_to_environment(env, descriptor.name) {
+            return NAPI_INVALID_ARG;
+        }
+        if descriptor.method.is_none()
+            && descriptor.getter.is_none()
+            && descriptor.setter.is_none()
+            && !descriptor.value.is_null()
+            && !value_belongs_to_environment(env, descriptor.value)
+        {
+            return NAPI_INVALID_ARG;
+        }
+    }
+    NAPI_OK
+}
+
 #[repr(C)]
 pub struct NapiExtendedErrorInfo {
     error_message: *const c_char,
@@ -3557,24 +3584,14 @@ pub unsafe extern "C" fn napi_define_properties(
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return NAPI_OBJECT_EXPECTED;
     }
+    let status = validate_property_descriptors(env, count, descriptors);
+    if status != NAPI_OK {
+        return status;
+    }
     if count == 0 {
         return NAPI_OK;
     }
-    if descriptors.is_null() {
-        return NAPI_INVALID_ARG;
-    }
     for descriptor in std::slice::from_raw_parts(descriptors, count) {
-        if descriptor.utf8name.is_null() && !value_belongs_to_environment(env, descriptor.name) {
-            return NAPI_INVALID_ARG;
-        }
-        if descriptor.method.is_none()
-            && descriptor.getter.is_none()
-            && descriptor.setter.is_none()
-            && !descriptor.value.is_null()
-            && !value_belongs_to_environment(env, descriptor.value)
-        {
-            return NAPI_INVALID_ARG;
-        }
         let key = if !descriptor.utf8name.is_null() {
             env_mut(env).map(|env| {
                 env.alloc(Value::String(
@@ -3977,6 +3994,10 @@ pub unsafe extern "C" fn napi_define_class(
         || (property_count != 0 && properties.is_null())
     {
         return NAPI_INVALID_ARG;
+    }
+    let descriptor_status = validate_property_descriptors(env, property_count, properties);
+    if descriptor_status != NAPI_OK {
+        return descriptor_status;
     }
     let status = napi_create_function(env, name, length, constructor, data, result);
     if status != NAPI_OK {
@@ -7859,6 +7880,73 @@ mod tests {
                 napi_new_instance(env_ptr, function, 0, ptr::null(), &mut value_out),
                 NAPI_INVALID_ARG
             );
+        }
+    }
+
+    #[test]
+    fn descriptor_batches_are_validated_before_any_property_or_class_creation() {
+        unsafe extern "C" fn constructor(_env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+            ptr::null_mut()
+        }
+
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let object = env.alloc(Value::Object(HashMap::new()));
+            let value = env.alloc(Value::Number(1.0));
+            let mut foreign_env = Env::new();
+            let foreign_key = foreign_env.alloc(Value::String("foreign".into()));
+            let descriptors = [
+                NapiPropertyDescriptor {
+                    utf8name: c"first".as_ptr(),
+                    name: ptr::null_mut(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value,
+                    attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+                    data: ptr::null_mut(),
+                },
+                NapiPropertyDescriptor {
+                    utf8name: ptr::null(),
+                    name: foreign_key,
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value,
+                    attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+                    data: ptr::null_mut(),
+                },
+            ];
+            let values_before = env.values.len();
+            assert_eq!(
+                napi_define_properties(env_ptr, object, descriptors.len(), descriptors.as_ptr()),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(env.values.len(), values_before);
+            let mut present = true;
+            assert_eq!(
+                napi_has_named_property(env_ptr, object, c"first".as_ptr(), &mut present),
+                NAPI_OK
+            );
+            assert!(!present);
+
+            let mut class = ptr::null_mut();
+            assert_eq!(
+                napi_define_class(
+                    env_ptr,
+                    c"Batch".as_ptr(),
+                    5,
+                    Some(constructor),
+                    ptr::null_mut(),
+                    descriptors.len(),
+                    descriptors.as_ptr(),
+                    &mut class
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert!(class.is_null());
+            assert_eq!(env.values.len(), values_before);
         }
     }
 
