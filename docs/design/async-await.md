@@ -493,7 +493,8 @@ JavaScript coercionは行わず、異なる型のoperandは明示的なコンパ
 通る。未解決dynamic型とvoid operandは、誤った結果を生成せず明示的なエラーにする。
 prefix `++`/`--`は更新後の値を返し、postfix形式は対象の旧値をtemporaryへ保存してから
 代入し旧値を返す。computed array targetではarray、index、旧値を順にnested closureへ
-束縛するため、それぞれ一度だけ評価され、awaitを含むindexも同じ順序を維持する。
+束縛するため、それぞれ一度だけ評価され、awaitを含むindexも同じ順序を維持する。数値型の
+fixed object fieldも対象にでき、object式を先に一度だけ束縛してから同じ更新経路を通す。
 fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
 index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
 loop loweringを使う。

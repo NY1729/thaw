@@ -9641,6 +9641,33 @@ mod tests {
     }
 
     #[test]
+    fn compiles_number_field_updates_with_single_object_evaluation() {
+        let source = r#"
+            function pointSource(point: { value: number }): { value: number } {
+                console.log("source");
+                return point;
+            }
+            async function asyncPoint(point: { value: number }): Promise<{ value: number }> {
+                await sleep(1);
+                console.log("async-source");
+                return point;
+            }
+            async function main(): Promise<void> {
+                let point = { value: 3 };
+                console.log(pointSource(point).value++);
+                console.log(point.value);
+                console.log(++point.value);
+                console.log((await asyncPoint(point)).value--);
+                console.log(point.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "field_update_expression_values"),
+            "source\n3\n4\n5\nasync-source\n5\n4\n"
+        );
+    }
+
+    #[test]
     fn logical_operators_short_circuit_sync_and_awaited_operands() {
         let source = r#"
             function flag(label: string, value: boolean): boolean {
