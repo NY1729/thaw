@@ -42,6 +42,7 @@ const NAPI_WOULD_DEADLOCK: NapiStatus = 21;
 const NAPI_NUMBER_EXPECTED: NapiStatus = 6;
 const NAPI_STRING_EXPECTED: NapiStatus = 3;
 const NAPI_BOOLEAN_EXPECTED: NapiStatus = 7;
+const NAPI_DATE_EXPECTED: NapiStatus = 18;
 const NAPI_AUTO_LENGTH: usize = usize::MAX;
 
 const ASYNC_CREATED: u8 = 0;
@@ -190,6 +191,7 @@ pub enum Value {
     Null,
     Bool(bool),
     Number(f64),
+    Date(f64),
     String(String),
     Object(HashMap<String, NapiValue>),
     Array(Vec<NapiValue>),
@@ -718,7 +720,7 @@ unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
         Value::Undefined => JsonValue::Null,
         Value::Null => JsonValue::Null,
         Value::Bool(value) => JsonValue::Bool(*value),
-        Value::Number(value) => serde_json::Number::from_f64(*value)
+        Value::Number(value) | Value::Date(value) => serde_json::Number::from_f64(*value)
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),
         Value::String(value) | Value::Error(value) | Value::Symbol(value) => {
@@ -1367,6 +1369,50 @@ pub unsafe extern "C" fn napi_create_int64(
     out: *mut NapiValue,
 ) -> NapiStatus {
     napi_create_double(env, value as f64, out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_create_date(
+    env: NapiEnv,
+    value: f64,
+    out: *mut NapiValue,
+) -> NapiStatus {
+    let Ok(env) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    let value = env.alloc(Value::Date(value));
+    write_value(out, value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_is_date(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut bool,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    *out = matches!(value_ref(value), Ok(Value::Date(_)));
+    NAPI_OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn napi_get_date_value(
+    _env: NapiEnv,
+    value: NapiValue,
+    out: *mut f64,
+) -> NapiStatus {
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    match value_ref(value) {
+        Ok(Value::Date(milliseconds)) => {
+            *out = *milliseconds;
+            NAPI_OK
+        }
+        _ => NAPI_DATE_EXPECTED,
+    }
 }
 
 #[no_mangle]
@@ -3789,6 +3835,40 @@ mod tests {
             let mut signed64 = 0;
             assert_eq!(napi_get_value_int64(env_ptr, value, &mut signed64), NAPI_OK);
             assert_eq!(signed64, 9_007_199_254_740_991);
+        }
+    }
+
+    #[test]
+    fn date_values_preserve_milliseconds_and_object_type() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut date = ptr::null_mut();
+            assert_eq!(
+                napi_create_date(env_ptr, 1_725_000_000_123.5, &mut date),
+                NAPI_OK
+            );
+            let mut is_date = false;
+            assert_eq!(napi_is_date(env_ptr, date, &mut is_date), NAPI_OK);
+            assert!(is_date);
+            let mut milliseconds = 0.0;
+            assert_eq!(
+                napi_get_date_value(env_ptr, date, &mut milliseconds),
+                NAPI_OK
+            );
+            assert_eq!(milliseconds, 1_725_000_000_123.5);
+            let mut value_type = -1;
+            assert_eq!(napi_typeof(env_ptr, date, &mut value_type), NAPI_OK);
+            assert_eq!(value_type, 6);
+
+            let mut number = ptr::null_mut();
+            assert_eq!(napi_create_double(env_ptr, 1.0, &mut number), NAPI_OK);
+            assert_eq!(napi_is_date(env_ptr, number, &mut is_date), NAPI_OK);
+            assert!(!is_date);
+            assert_eq!(
+                napi_get_date_value(env_ptr, number, &mut milliseconds),
+                NAPI_DATE_EXPECTED
+            );
         }
     }
 

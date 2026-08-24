@@ -701,6 +701,7 @@ The workspace crates have narrow responsibilities:
   UTF-8, Latin-1 and UTF-16 string creation/extraction follow N-API length,
   truncation and null-termination rules. Signed/unsigned 32-bit and signed
   64-bit number constructors share the existing JavaScript-number conversion path.
+  Date values preserve millisecond timestamps and report JavaScript object type.
   Own-property checks and property deletion are supported for objects and functions
 - Garbage collection. Values owned by generated code use request-scoped arena
   allocation by design

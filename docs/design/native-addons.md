@@ -616,3 +616,5 @@ UTF-8に加えて`napi_create_string_latin1`、`napi_create_string_utf16`、
 Number表現へ統合し、対応するgetterとの境界値往復をhost testで固定する。
 `napi_has_own_property`と`napi_delete_property`はobject／functionの直接propertyとaccessorを
 操作し、prototype探索を行う`napi_has_property`とはown-property判定を分離する。
+`napi_create_date`、`napi_is_date`、`napi_get_date_value`はmillisecond timestampを専用Valueで
+保持し、`napi_typeof`ではJavaScriptと同じobjectを返す。非Date getterは`napi_date_expected`を返す。
