@@ -420,6 +420,16 @@ impl<'ctx> HirCompiler<'ctx> {
             .f64_type()
             .fn_type(&[self.context.f64_type().into()], false);
         for name in [
+            "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "cbrt",
+        ] {
+            self.module
+                .add_function(name, unary_f64_type, Some(Linkage::External));
+        }
+        for name in ["atan2", "hypot"] {
+            self.module
+                .add_function(name, pow_type, Some(Linkage::External));
+        }
+        for name in [
             "llvm.fabs.f64",
             "llvm.floor.f64",
             "llvm.ceil.f64",
@@ -5106,6 +5116,23 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(result.into())
     }
 
+    fn compile_math_hypot(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut result = self.context.f64_type().const_zero();
+        let hypot = self.module.get_function("hypot").unwrap();
+        for argument in args {
+            let argument = self.compile_expr(argument)?.into_float_value();
+            result = self
+                .builder
+                .build_call(hypot, &[result.into(), argument.into()], "math_hypot")
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("hypot returned no value")?
+                .into_float_value();
+        }
+        Ok(result.into())
+    }
+
     fn compile_math_sign(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let [value] = args else {
             return Err("Math.sign expects one operand".to_string());
@@ -7584,6 +7611,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     &format!("Math.{operation}"),
                 );
             }
+            "__thaw_math_tan" | "__thaw_math_asin" | "__thaw_math_acos" | "__thaw_math_atan"
+            | "__thaw_math_sinh" | "__thaw_math_cosh" | "__thaw_math_tanh" | "__thaw_math_cbrt" => {
+                let operation = name.trim_start_matches("__thaw_math_");
+                return self.compile_single_arg_call(operation, args, &format!("Math.{operation}"));
+            }
             "__thaw_math_pow" => {
                 let [left, right] = args else {
                     return Err("Math.pow expects two operands".to_string());
@@ -7602,8 +7634,27 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("pow returned no value".to_string());
             }
+            "__thaw_math_atan2" => {
+                let [left, right] = args else {
+                    return Err("Math.atan2 expects two operands".to_string());
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("atan2").unwrap(),
+                        &[left.into(), right.into()],
+                        "math_atan2",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("atan2 returned no value".to_string());
+            }
             "__thaw_math_min" => return self.compile_math_extreme(args, true),
             "__thaw_math_max" => return self.compile_math_extreme(args, false),
+            "__thaw_math_hypot" => return self.compile_math_hypot(args),
             "__thaw_math_sign" => return self.compile_math_sign(args),
             "__thaw_math_round" => return self.compile_math_round(args),
             "fetch" => return self.compile_single_arg_call("thaw_fetch_get", args, "fetch"),
@@ -11504,6 +11555,42 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "transcendental_math"),
             "true\ntrue\nvalue-evaluated\ntrue\nawaited-math\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_extended_libm_functions() {
+        let source = r#"
+            function value(label: string, result: string): string {
+                console.log(label);
+                return result;
+            }
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-hypot");
+                return "12";
+            }
+            async function main(): Promise<void> {
+                console.log(Math.tan(0) === 0);
+                console.log(Math.asin(0) === 0);
+                console.log(Math.acos(1) === 0);
+                console.log(Math.atan(0) === 0);
+                console.log(Math.sinh(0) === 0);
+                console.log(Math.cosh(0) === 1);
+                console.log(Math.tanh(0) === 0);
+                console.log(Math.cbrt(-8) === -2);
+                console.log((1 / Math.atan2(-0, 1)) < 0);
+                console.log(Math.atan2(0, -1) > 3);
+                console.log(Math.hypot() === 0);
+                console.log(Math.hypot(value("left", "3"), value("right", "4")) === 5);
+                console.log(Math.hypot("6", "8") === 10);
+                console.log(Number.isFinite(Math.hypot(Number("Infinity"), 0 / 0)));
+                console.log(Math.hypot(5, await delayed()) === 13);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "extended_libm"),
+            "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nleft\nright\ntrue\ntrue\nfalse\nawaited-hypot\ntrue\n"
         );
     }
 

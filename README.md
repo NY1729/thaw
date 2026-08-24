@@ -386,6 +386,10 @@ The workspace crates have narrow responsibilities:
 - `Math.exp`, `Math.log`, `Math.log2`, `Math.log10`, `Math.sin` and `Math.cos`
   lower to LLVM floating-point intrinsics after JavaScript numeric coercion;
   domain errors, infinities, `NaN`, single evaluation and `await` are preserved
+- `Math.tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `cbrt`, `atan2`
+  and variadic `hypot` use the platform libm ABI. Empty hypot calls, stable
+  overflow handling, signed zero, non-finite values, coercion order and awaited
+  operands follow JavaScript behavior
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
