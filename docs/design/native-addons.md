@@ -32,8 +32,13 @@ export handle取得とconstructor ABI呼び出しへloweringする。公式sqlit
 さらに、外部classのconstructorへ直接代入された変数を追跡し、callbackを含まない
 instance methodをtyped N-API callへ書き換える。数値を保持する自作`NativeBox`を
 `new NativeBox(42)`で構築し、通常構文の`box.get()`が`42`を返すところまでCLI、
-HIR、LLVM、N-API hostを通した実行ファイルE2Eで検証した。callback引数、getter、
-static method、aliasやpropertyを介したinstance追跡は引き続き残課題である。
+HIR、LLVM、N-API hostを通した実行ファイルE2Eで検証した。getter、static method、
+aliasやpropertyを介したinstance追跡は引き続き残課題である。
+既存の`(Json, Json) => Json` callback ABIについてはinstance methodにも接続した。
+receiverと同じ永続`napi_env`内にcallback functionを作り、`this`を維持してmethodを
+呼ぶ。自作addonの`box.getLater(callback)`を通常構文から実行し、callback結果と
+method戻り値の双方を検証した。任意のerror-first callback signatureとoverload解決は
+次の拡張対象である。
 
 ## 1. 何が難しいのか（おさらい）
 
