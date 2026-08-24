@@ -710,6 +710,8 @@ The workspace crates have narrow responsibilities:
   DataView uses the same backing storage with unaligned, byte-bounded views.
   External ArrayBuffer and Buffer values retain caller-owned memory without a
   copy, participate in views, and invoke their finalizers once at Env teardown.
+  Plain external values likewise preserve their data pointer and invoke an
+  optional finalizer with its original hint once at Env teardown.
   External-memory adjustments are tracked per Env with checked signed totals.
   ArrayBuffer detachment zeroes data/length for the backing value and existing
   TypedArray/DataView views while preserving external finalizer ownership.
