@@ -430,6 +430,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, pow_type, Some(Linkage::External));
         }
+        for name in ["thaw_math_fround", "thaw_math_clz32"] {
+            self.module
+                .add_function(name, unary_f64_type, Some(Linkage::External));
+        }
+        self.module
+            .add_function("thaw_math_imul", pow_type, Some(Linkage::External));
         for name in [
             "llvm.fabs.f64",
             "llvm.floor.f64",
@@ -7619,6 +7625,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 let operation = name.trim_start_matches("__thaw_math_");
                 return self.compile_single_arg_call(operation, args, &format!("Math.{operation}"));
             }
+            "__thaw_math_fround" | "__thaw_math_clz32" => {
+                let operation = name.trim_start_matches("__thaw_math_");
+                return self.compile_single_arg_call(
+                    &format!("thaw_math_{operation}"),
+                    args,
+                    &format!("Math.{operation}"),
+                );
+            }
             "__thaw_math_pow" => {
                 let [left, right] = args else {
                     return Err("Math.pow expects two operands".to_string());
@@ -7654,6 +7668,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("atan2 returned no value".to_string());
+            }
+            "__thaw_math_imul" => {
+                let [left, right] = args else {
+                    return Err("Math.imul expects two operands".to_string());
+                };
+                let left = self.compile_expr(left)?;
+                let right = self.compile_expr(right)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_math_imul").unwrap(),
+                        &[left.into(), right.into()],
+                        "math_imul",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Math.imul returned no value".to_string());
             }
             "__thaw_math_min" => return self.compile_math_extreme(args, true),
             "__thaw_math_max" => return self.compile_math_extreme(args, false),
@@ -11621,6 +11653,42 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "near_zero_libm"),
             "true\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\nawaited-log1p\ntrue\n"
+        );
+    }
+
+    #[test]
+    fn compiles_integer_and_single_precision_math_functions() {
+        let source = r#"
+            function value(label: string, result: string): string {
+                console.log(label);
+                return result;
+            }
+            async function delayed(): Promise<string> {
+                await sleep(1);
+                console.log("awaited-clz32");
+                return "16";
+            }
+            async function main(): Promise<void> {
+                const rounded: number = Math.fround(1.337);
+                console.log(rounded !== 1.337);
+                console.log(Math.fround(rounded) === rounded);
+                console.log((1 / Math.fround(-0)) < 0);
+                console.log(Number.isFinite(Math.fround(Number("Infinity"))));
+                console.log(Math.clz32(0));
+                console.log(Math.clz32(1));
+                console.log(Math.clz32(-1));
+                console.log(Math.clz32(15));
+                console.log(Math.clz32(0 / 0));
+                console.log(Math.imul(-1, 5));
+                console.log(Math.imul(2147483647, 2));
+                console.log(Math.imul(true, 7.9));
+                console.log(Math.imul(value("left", "3"), value("right", "4")));
+                console.log(Math.clz32(await delayed()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "integer_single_precision_math"),
+            "true\ntrue\ntrue\nfalse\n32\n31\n0\n28\n32\n-5\n-2\n7\nleft\nright\n12\nawaited-clz32\n27\n"
         );
     }
 
