@@ -648,7 +648,9 @@ The workspace crates have narrow responsibilities:
   API
 - Full ESM semantics: the parser-backed bundler covers live imports, JSON
   `with`/`assert` attributes, acyclic top-level await and same-package runtime
-  dynamic imports. Top-level-await cycles are explicit errors; `import.meta`,
+  dynamic imports. Relative-module bundling also supports namespace imports,
+  `export * as name`, default re-export aliases and anonymous default
+  functions. Top-level-await cycles are explicit errors; `import.meta`,
   star-export ambiguity, non-JSON attributes and runtime-computed external
   package imports remain outside the supported subset
 - `JsValue` retains callable/object identity across the native boundary,
