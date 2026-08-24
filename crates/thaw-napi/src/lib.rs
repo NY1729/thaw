@@ -2797,14 +2797,27 @@ pub unsafe extern "C" fn napi_create_array_with_length(
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_function(
     env: NapiEnv,
-    _name: *const c_char,
-    _length: usize,
+    name: *const c_char,
+    length: usize,
     callback: Option<NapiCallback>,
     data: *mut c_void,
     out: *mut NapiValue,
 ) -> NapiStatus {
     let Some(callback) = callback else {
         return NAPI_INVALID_ARG;
+    };
+    if out.is_null() {
+        return NAPI_INVALID_ARG;
+    }
+    let function_name = if name.is_null() {
+        String::new()
+    } else {
+        let bytes = if length == NAPI_AUTO_LENGTH {
+            CStr::from_ptr(name).to_bytes()
+        } else {
+            std::slice::from_raw_parts(name.cast::<u8>(), length)
+        };
+        String::from_utf8_lossy(bytes).into_owned()
     };
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -2815,6 +2828,25 @@ pub unsafe extern "C" fn napi_create_function(
         properties: HashMap::new(),
         _thaw_bridge: None,
     }));
+    let name_value = env.alloc(Value::String(function_name));
+    let length_value = env.alloc(Value::Number(0.0));
+    let Some(Value::Function(function)) = value.as_mut() else {
+        unreachable!();
+    };
+    function
+        .properties
+        .insert(PropertyKey::String("name".into()), name_value);
+    function
+        .properties
+        .insert(PropertyKey::String("length".into()), length_value);
+    for key in [
+        PropertyKey::String("name".into()),
+        PropertyKey::String("length".into()),
+    ] {
+        record_property_order(env, value as usize, &key);
+        env.property_attributes
+            .insert((value as usize, key), NAPI_CONFIGURABLE);
+    }
     write_value(out, value)
 }
 
@@ -3628,6 +3660,25 @@ pub unsafe extern "C" fn napi_define_class(
     if status != NAPI_OK {
         return status;
     }
+    let constructor_name = c"constructor";
+    let status = napi_set_named_property(env, prototype, constructor_name.as_ptr(), *result);
+    if status != NAPI_OK {
+        return status;
+    }
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
+    env_ref.property_attributes.insert(
+        ((*result) as usize, PropertyKey::String("prototype".into())),
+        0,
+    );
+    env_ref.property_attributes.insert(
+        (
+            prototype as usize,
+            PropertyKey::String("constructor".into()),
+        ),
+        NAPI_WRITABLE | NAPI_CONFIGURABLE,
+    );
     if property_count != 0 {
         for descriptor in std::slice::from_raw_parts(properties, property_count) {
             const NAPI_STATIC: u32 = 1 << 10;
@@ -6967,6 +7018,90 @@ mod tests {
             assert_eq!(napi_create_object(env_ptr, &mut plain), NAPI_OK);
             assert_eq!(napi_get_prototype(env_ptr, plain, &mut actual), NAPI_OK);
             assert!(matches!(value_ref(actual), Ok(Value::Undefined)));
+        }
+    }
+
+    #[test]
+    fn functions_and_classes_expose_standard_metadata_descriptors() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut function = ptr::null_mut();
+            assert_eq!(
+                napi_create_function(
+                    env_ptr,
+                    b"hello-extra".as_ptr().cast(),
+                    5,
+                    Some(thaw_compiled_callback),
+                    ptr::null_mut(),
+                    &mut function,
+                ),
+                NAPI_OK
+            );
+            let mut actual = ptr::null_mut();
+            assert_eq!(
+                napi_get_named_property(env_ptr, function, c"name".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(actual), Ok(Value::String(name)) if name == "hello"));
+            assert_eq!(
+                napi_get_named_property(env_ptr, function, c"length".as_ptr(), &mut actual),
+                NAPI_OK
+            );
+            assert!(matches!(value_ref(actual), Ok(Value::Number(0.0))));
+            let replacement = env.alloc(Value::String("changed".into()));
+            assert_eq!(
+                napi_set_named_property(env_ptr, function, c"name".as_ptr(), replacement),
+                NAPI_GENERIC_FAILURE
+            );
+            let name_key = env.alloc(Value::String("name".into()));
+            let mut deleted = false;
+            assert_eq!(
+                napi_delete_property(env_ptr, function, name_key, &mut deleted),
+                NAPI_OK
+            );
+            assert!(deleted);
+
+            let mut constructor = ptr::null_mut();
+            assert_eq!(
+                napi_define_class(
+                    env_ptr,
+                    c"Box".as_ptr(),
+                    3,
+                    Some(thaw_compiled_callback),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null(),
+                    &mut constructor,
+                ),
+                NAPI_OK
+            );
+            let mut prototype = ptr::null_mut();
+            assert_eq!(
+                napi_get_named_property(
+                    env_ptr,
+                    constructor,
+                    c"prototype".as_ptr(),
+                    &mut prototype,
+                ),
+                NAPI_OK
+            );
+            assert_eq!(
+                napi_get_named_property(env_ptr, prototype, c"constructor".as_ptr(), &mut actual,),
+                NAPI_OK
+            );
+            assert_eq!(actual, constructor);
+            assert_eq!(
+                napi_set_named_property(env_ptr, constructor, c"prototype".as_ptr(), prototype,),
+                NAPI_GENERIC_FAILURE
+            );
+            let prototype_key = env.alloc(Value::String("prototype".into()));
+            deleted = true;
+            assert_eq!(
+                napi_delete_property(env_ptr, constructor, prototype_key, &mut deleted),
+                NAPI_OK
+            );
+            assert!(!deleted);
         }
     }
 
