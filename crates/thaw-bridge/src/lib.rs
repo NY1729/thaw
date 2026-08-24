@@ -107,7 +107,7 @@ pub enum Classification {
     /// Every parameter and the return type mapped onto a native
     /// `HirType` -- compiles to a direct FFI call
     /// (`thaw_hir::HirExpr::FfiCall`), no QuickJS-NG involved.
-    FastPath(FfiSignature),
+    FastPath(Box<FfiSignature>),
     /// At least one parameter or the return type didn't map -- needs the
     /// QuickJS-NG fallback path (docs/design/bridge.md section 7, not
     /// implemented yet).
@@ -1172,7 +1172,7 @@ pub fn classify(func: &DtsFunction) -> Classification {
         }
     };
 
-    Classification::FastPath(FfiSignature {
+    Classification::FastPath(Box::new(FfiSignature {
         symbol: func.name.clone(),
         params,
         variadic,
@@ -1185,7 +1185,7 @@ pub fn classify(func: &DtsFunction) -> Classification {
         calling_convention: FfiCallingConvention::C,
         aggregate_return_abi: FfiAggregateAbi::Internal,
         aggregate_return_layout: None,
-    })
+    }))
 }
 
 /// Classifies every function in `functions`, but only once per distinct
@@ -1766,7 +1766,7 @@ mod tests {
         assert_eq!(funcs.len(), 1);
         assert_eq!(
             classify(&funcs[0]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "add".into(),
                 params: vec![HirType::F64, HirType::F64],
                 variadic: None,
@@ -1779,7 +1779,7 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
     }
 
@@ -1865,7 +1865,7 @@ mod tests {
 
         assert_eq!(
             classify(&funcs[0]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "sum".into(),
                 params: vec![HirType::Array(Box::new(HirType::F64))],
                 variadic: None,
@@ -1878,11 +1878,11 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
         assert_eq!(
             classify(&funcs[1]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "dist".into(),
                 params: vec![HirType::Object(vec![
                     ("x".into(), HirType::F64),
@@ -1898,7 +1898,7 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
     }
 
@@ -2082,7 +2082,7 @@ mod tests {
         assert_eq!(funcs.len(), 1);
         assert_eq!(
             classify(&funcs[0]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "dist".into(),
                 params: vec![HirType::Object(vec![
                     ("x".into(), HirType::F64),
@@ -2098,7 +2098,7 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
     }
 
@@ -2144,7 +2144,7 @@ mod tests {
         let funcs = parse_dts(source).unwrap();
         assert_eq!(
             classify(&funcs[0]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "len".into(),
                 params: vec![HirType::Object(vec![
                     (
@@ -2166,7 +2166,7 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
     }
 
@@ -2199,7 +2199,7 @@ mod tests {
         let funcs = parse_dts(source).unwrap();
         assert_eq!(
             classify(&funcs[0]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "unwrap".into(),
                 params: vec![HirType::Object(vec![("value".into(), HirType::F64)])],
                 variadic: None,
@@ -2212,7 +2212,7 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
     }
 
@@ -2262,7 +2262,7 @@ mod tests {
         let funcs = parse_dts(source).unwrap();
         assert_eq!(
             classify(&funcs[0]),
-            Classification::FastPath(FfiSignature {
+            Classification::FastPath(Box::new(FfiSignature {
                 symbol: "area".into(),
                 params: vec![HirType::Object(vec![
                     ("color".into(), HirType::F64),
@@ -2278,7 +2278,7 @@ mod tests {
                 calling_convention: FfiCallingConvention::C,
                 aggregate_return_abi: FfiAggregateAbi::Internal,
                 aggregate_return_layout: None,
-            })
+            }))
         );
     }
 
