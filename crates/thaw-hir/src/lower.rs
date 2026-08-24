@@ -3235,6 +3235,76 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn truthiness_expr(&self, value: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        let false_lit = || HirExpr::Lit(HirLit::Bool(false));
+        match ty {
+            HirType::Bool => Ok(value),
+            HirType::F64 => {
+                let is_zero = HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value.clone()),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                );
+                let not_nan =
+                    HirExpr::BinOp(BinOp::EqEqEq, Box::new(value.clone()), Box::new(value));
+                Ok(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(is_zero),
+                        Box::new(not_nan),
+                    )),
+                    Box::new(false_lit()),
+                ))
+            }
+            HirType::Str => Ok(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(value),
+                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                )),
+                Box::new(false_lit()),
+            )),
+            HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            HirType::Array(_)
+            | HirType::Tuple(_)
+            | HirType::Object(_)
+            | HirType::Promise(_)
+            | HirType::Function(_, _) => Ok(HirExpr::Lit(HirLit::Bool(true))),
+            other => Err(format!(
+                "logical truthiness is not defined for native type {other:?}"
+            )),
+        }
+    }
+
+    fn lower_logical_expr(
+        &mut self,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        is_and: bool,
+    ) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type != rhs_type {
+            return Err(format!(
+                "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"
+            ));
+        }
+        let name = format!("__thaw_logical_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let left = HirExpr::Var(name.clone());
+        let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
+        let (then_value, else_value) = if is_and { (rhs, left) } else { (left, rhs) };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            condition,
+            vec![HirStmt::Return(Some(then_value))],
+            vec![HirStmt::Return(Some(else_value))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
         match expr {
             Expr::Lit(Lit::Num(n)) => Ok(HirExpr::Lit(HirLit::F64(n.value))),
@@ -3317,38 +3387,11 @@ impl<'a> FnLowerer<'a> {
                         )?
                     }
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
-                        self.expect_type(&HirType::Bool, &lhs, "logical left operand")?;
-                        self.expect_type(&HirType::Bool, &rhs, "logical right operand")?;
-                        let (then_value, else_value) = if bin.op == BinaryOp::LogicalAnd {
-                            (rhs, HirExpr::Lit(HirLit::Bool(false)))
-                        } else {
-                            (HirExpr::Lit(HirLit::Bool(true)), rhs)
-                        };
-                        let body = HirExpr::Block(vec![HirStmt::If(
+                        self.lower_logical_expr(
                             lhs,
-                            vec![HirStmt::Return(Some(then_value))],
-                            vec![HirStmt::Return(Some(else_value))],
-                        )]);
-                        let mut referenced = BTreeSet::new();
-                        collect_referenced_bindings(&body, &mut referenced);
-                        let captures = referenced
-                            .into_iter()
-                            .filter_map(|name| {
-                                self.scope
-                                    .get(&name)
-                                    .cloned()
-                                    .map(|ty| HirParam { name, ty })
-                            })
-                            .collect();
-                        HirExpr::Call(
-                            Box::new(HirExpr::Lambda(
-                                captures,
-                                Vec::new(),
-                                HirType::Bool,
-                                Box::new(body),
-                            )),
-                            Vec::new(),
-                        )
+                            rhs,
+                            bin.op == BinaryOp::LogicalAnd,
+                        )?
                     }
                     BinaryOp::LtEq => HirExpr::BinOp(
                         BinOp::EqEqEq,
@@ -6429,10 +6472,10 @@ mod tests {
             let HirExpr::Call(callee, call_arguments) = &arguments[0] else {
                 panic!("expected immediately invoked logical closure");
             };
-            assert!(call_arguments.is_empty());
+            assert_eq!(call_arguments.len(), 1);
             assert!(matches!(
                 callee.as_ref(),
-                HirExpr::Lambda(_, _, HirType::Bool, _)
+                HirExpr::Lambda(_, params, HirType::Bool, _) if params.len() == 1
             ));
         }
     }
