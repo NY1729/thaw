@@ -375,6 +375,9 @@ pub struct Env {
     // Box keeps async_context pointers stable and retained long enough to reject reuse.
     #[allow(clippy::vec_box)]
     async_contexts: Vec<Box<AsyncContext>>,
+    // Box keeps deferred pointers stable and allows safe repeated-call rejection.
+    #[allow(clippy::vec_box)]
+    deferreds: Vec<Box<Deferred>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -445,6 +448,7 @@ impl Env {
             handle_scopes: Vec::new(),
             active_handle_scopes: Vec::new(),
             async_contexts: Vec::new(),
+            deferreds: Vec::new(),
         }
     }
 
@@ -6412,10 +6416,13 @@ pub unsafe extern "C" fn napi_create_promise(
     };
     let state = Rc::new(RefCell::new(PromiseState::Pending));
     *promise = env_ref.alloc(Value::Promise(Rc::clone(&state)));
-    *deferred = Box::into_raw(Box::new(Deferred {
+    let mut deferred_handle = Box::new(Deferred {
         env: env as usize,
         state,
-    }));
+    });
+    let deferred_ptr = (&mut *deferred_handle) as *mut Deferred;
+    env_ref.deferreds.push(deferred_handle);
+    *deferred = deferred_ptr;
     NAPI_OK
 }
 
@@ -6425,10 +6432,20 @@ unsafe fn settle_deferred(
     value: NapiValue,
     rejected: bool,
 ) -> NapiStatus {
-    let Some(deferred_ref) = deferred.as_ref() else {
+    if !value_belongs_to_environment(env, value) {
+        return NAPI_INVALID_ARG;
+    }
+    let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    if env.is_null() || value.is_null() || deferred_ref.env != env as usize {
+    let Some(deferred_ref) = env_ref
+        .deferreds
+        .iter_mut()
+        .find(|candidate| std::ptr::eq(candidate.as_ref(), deferred))
+    else {
+        return NAPI_INVALID_ARG;
+    };
+    if deferred_ref.env != env as usize {
         return NAPI_INVALID_ARG;
     }
     let mut state = deferred_ref.state.borrow_mut();
@@ -6440,8 +6457,6 @@ unsafe fn settle_deferred(
     } else {
         PromiseState::Resolved(value)
     };
-    drop(state);
-    drop(Box::from_raw(deferred));
     NAPI_OK
 }
 
@@ -9795,7 +9810,25 @@ mod tests {
             assert!(present);
             assert_eq!(napi_is_promise(env_ptr, array, &mut present), NAPI_OK);
             assert!(!present);
+            let mut other_env = Env::new();
+            let foreign_value = other_env.alloc(Value::Undefined);
+            assert_eq!(
+                napi_resolve_deferred(&mut other_env, deferred, foreign_value),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_resolve_deferred(env_ptr, deferred, foreign_value),
+                NAPI_INVALID_ARG
+            );
             assert_eq!(napi_resolve_deferred(env_ptr, deferred, value), NAPI_OK);
+            assert_eq!(
+                napi_resolve_deferred(env_ptr, deferred, value),
+                NAPI_GENERIC_FAILURE
+            );
+            assert_eq!(
+                napi_reject_deferred(env_ptr, deferred, value),
+                NAPI_GENERIC_FAILURE
+            );
         }
     }
 
