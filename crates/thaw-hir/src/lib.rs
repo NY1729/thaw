@@ -194,6 +194,9 @@ pub enum HirExpr {
     /// Allocates an uninitialized homogeneous array with a runtime length.
     /// Lowering fills every slot before exposing the value.
     ArrayAlloc(Box<HirExpr>, HirType),
+    /// Rewrites the visible length of an arena-owned array after lowering has
+    /// initialized a prefix of a larger allocation.
+    ArraySetLen(Box<HirExpr>, Box<HirExpr>, HirType),
     /// `array[index]`
     Index(Box<HirExpr>, Box<HirExpr>),
     /// `array[index]` with the statically resolved element type.
@@ -325,7 +328,8 @@ pub fn set_ffi_error_abi(
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
-            | HirExpr::TypedIndex(left, right, _) => {
+            | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::ArraySetLen(left, right, _) => {
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
             }
@@ -482,7 +486,8 @@ pub fn set_ffi_ownership(
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
-            | HirExpr::TypedIndex(left, right, _) => {
+            | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::ArraySetLen(left, right, _) => {
                 update_expr(left, symbol, returns, errors, found);
                 update_expr(right, symbol, returns, errors, found);
             }
@@ -641,7 +646,8 @@ pub fn set_ffi_string_abi(
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
-            | HirExpr::TypedIndex(left, right, _) => {
+            | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::ArraySetLen(left, right, _) => {
                 update_expr(left, symbol, params, returns, calling_convention, found);
                 update_expr(right, symbol, params, returns, calling_convention, found);
             }
