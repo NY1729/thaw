@@ -662,8 +662,10 @@ The workspace crates have narrow responsibilities:
   queries/fragments. Bare registry packages and subpaths resolve to their
   selected `bundle.js`, `native.node` or `native.a` artifact, while `node:`
   builtins preserve their URL. Other meta properties, non-JSON attributes and
-  genuinely runtime-computed external package imports remain outside the
-  supported subset. Expression-free
+  runtime-computed imports of undeclared packages/subpaths remain outside the
+  supported subset. A package with a nonliteral dynamic import pre-bundles
+  installed `dependencies`, `optionalDependencies`, and `peerDependencies`.
+  Expression-free
   templates, parentheses and string-only concatenations are folded and bundled;
   conditional branches and template interpolations composed from those values
   produce a bounded finite candidate set (up to 64 external specifiers)
