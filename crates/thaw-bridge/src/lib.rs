@@ -259,36 +259,8 @@ fn lower_dts_class(
                     interfaces,
                     generic_interfaces,
                 );
-                let rest_param = method.function.params.last().and_then(|param| {
-                    let Pat::Rest(rest) = &param.pat else {
-                        return None;
-                    };
-                    let name = match rest.arg.as_ref() {
-                        Pat::Ident(binding) => binding.id.sym.to_string(),
-                        _ => "rest".to_string(),
-                    };
-                    let ty = match rest.type_ann.as_ref() {
-                        Some(annotation) => match classify_ts_type(
-                            &annotation.type_ann,
-                            interfaces,
-                            generic_interfaces,
-                        ) {
-                            DtsType::Native(HirType::Array(element)) => DtsType::Native(*element),
-                            DtsType::Native(other) => DtsType::Unsupported(format!(
-                                "rest parameter must have an array type, found {other:?}"
-                            )),
-                            unsupported => unsupported,
-                        },
-                        None => {
-                            DtsType::Unsupported("missing rest parameter type annotation".into())
-                        }
-                    };
-                    Some((name, ty))
-                });
-                let mut params = function.params;
-                if rest_param.is_some() {
-                    params.pop();
-                }
+                let params = function.params;
+                let rest_param = function.rest_param;
                 methods.push(DtsMethod {
                     name: function.name,
                     params,
@@ -612,15 +584,15 @@ fn lower_dts_function(
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
-            Some(annotation) => {
-                match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
-                    DtsType::Native(HirType::Array(element)) => DtsType::Native(*element),
-                    DtsType::Native(other) => DtsType::Unsupported(format!(
-                        "rest parameter must have an array type, found {other:?}"
-                    )),
-                    unsupported => unsupported,
+            Some(annotation) => match annotation.type_ann.as_ref() {
+                TsType::TsArrayType(array) => {
+                    classify_ts_type(&array.elem_type, interfaces, generic_interfaces)
                 }
-            }
+                other => DtsType::Unsupported(format!(
+                    "rest parameter must have an array type, found {}",
+                    describe_ts_type(other)
+                )),
+            },
             None => DtsType::Unsupported("missing rest parameter type annotation".into()),
         };
         Some((name, ty))
@@ -1181,12 +1153,14 @@ pub fn classify(func: &DtsFunction) -> Classification {
 
     let variadic = match &func.rest_param {
         None => None,
-        Some((_, DtsType::Native(HirType::F64))) => Some(HirType::F64),
+        Some((_, DtsType::Native(ty @ (HirType::F64 | HirType::Bool | HirType::Str)))) => {
+            Some(ty.clone())
+        }
         Some((name, DtsType::Native(other))) => {
             return Classification::Fallback {
                 function: func.name.clone(),
                 reason: format!(
-                    "rest parameter `{name}`: native variadic ABI currently supports only number[], found {other:?}[]"
+                    "rest parameter `{name}`: native variadic ABI supports only number[], boolean[], or string[], found {other:?}[]"
                 ),
             }
         }
@@ -1829,14 +1803,40 @@ mod tests {
     }
 
     #[test]
-    fn non_number_rest_signature_falls_back() {
+    fn boolean_and_string_rest_signatures_classify_as_variadic_fast_paths() {
+        for (source, expected) in [
+            (
+                "export declare function all(...values: boolean[]): boolean;",
+                HirType::Bool,
+            ),
+            (
+                "export declare function join(...values: string[]): string;",
+                HirType::Str,
+            ),
+        ] {
+            let funcs = parse_dts(source).unwrap();
+            let classification = classify(&funcs[0]);
+            let Classification::FastPath(signature) = classification else {
+                panic!("supported rest signature should classify as FastPath: {classification:?}");
+            };
+            assert_eq!(signature.variadic, Some(expected));
+        }
+    }
+
+    #[test]
+    fn object_rest_signature_falls_back() {
         let funcs =
-            parse_dts("export declare function join(...values: string[]): string;").unwrap();
-        assert!(matches!(
-            classify(&funcs[0]),
-            Classification::Fallback { reason, .. }
-                if reason.contains("number[]")
-        ));
+            parse_dts("export declare function merge(...values: { value: number }[]): number;")
+                .unwrap();
+        let classification = classify(&funcs[0]);
+        assert!(
+            matches!(
+                classification,
+                Classification::Fallback { ref reason, .. }
+                    if reason.contains("supports only number[], boolean[], or string[]")
+            ),
+            "{classification:?}"
+        );
     }
 
     #[test]
@@ -2846,7 +2846,7 @@ mod tests {
                 constructor(filename: string);
                 constructor(filename: string, mode: number);
                 close(callback?: (error: Error | null) => void): void;
-                sum(...values: number[]): number;
+                sum(initial: number, ...values: number[]): number;
                 run(sql: string): this;
                 run(sql: string, params: any[]): this;
                 static verbose(): Database;
@@ -2892,7 +2892,10 @@ mod tests {
             .iter()
             .find(|method| method.name == "sum")
             .unwrap();
-        assert!(sum.params.is_empty());
+        assert_eq!(
+            sum.params,
+            vec![("initial".into(), DtsType::Native(HirType::F64))]
+        );
         assert_eq!(
             sum.rest_param,
             Some(("values".into(), DtsType::Native(HirType::F64)))

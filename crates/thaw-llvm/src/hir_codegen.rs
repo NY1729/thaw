@@ -10123,6 +10123,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_expr(arg)?;
                 match variadic {
                     HirType::F64 => compiled_args.push(value.into()),
+                    HirType::Bool => {
+                        let promoted = self
+                            .builder
+                            .build_int_z_extend(
+                                value.into_int_value(),
+                                self.context.i32_type(),
+                                "ffi_vararg_bool",
+                            )
+                            .map_err(|error| error.to_string())?;
+                        compiled_args.push(promoted.into());
+                    }
+                    HirType::Str => compiled_args.push(value.into()),
                     other => {
                         return Err(format!(
                             "FFI function `{}` has unsupported variadic element type {other:?}",
@@ -18120,16 +18132,30 @@ mod tests {
     fn ffi_variadic_number_rest_calls_real_c_varargs() {
         let source = r#"
             declare function native_sum(count: number, ...values: number[]): number;
+            declare function native_true_count(count: number, ...values: boolean[]): number;
+            declare function native_total_length(count: number, ...values: string[]): number;
 
             function main(): void {
                 console.log(native_sum(0));
                 console.log(native_sum(3, 2, 3, 5));
+                console.log(native_true_count(4, true, false, true, true));
+                console.log(native_total_length(3, "thaw", "ffi", "ok"));
             }
         "#;
         let module = thaw_parser::parse_typescript(source).unwrap();
         let program = thaw_hir::lower_module(&module).unwrap();
-        assert_eq!(program.extern_functions[0].params, vec![HirType::F64]);
-        assert_eq!(program.extern_functions[0].variadic, Some(HirType::F64));
+        assert!(program
+            .extern_functions
+            .iter()
+            .any(|signature| signature.variadic == Some(HirType::F64)));
+        assert!(program
+            .extern_functions
+            .iter()
+            .any(|signature| signature.variadic == Some(HirType::Bool)));
+        assert!(program
+            .extern_functions
+            .iter()
+            .any(|signature| signature.variadic == Some(HirType::Str)));
 
         let context = Context::create();
         let mut compiler = HirCompiler::new(&context, "ffi_variadic");
@@ -18146,12 +18172,24 @@ mod tests {
         compiler.write_object_file(&obj_path).unwrap();
         std::fs::write(
             &native_c_path,
-            "#include <stdarg.h>\n\
+            "#include <stdarg.h>\n#include <string.h>\n\
              double native_sum(double raw_count, ...) {\n\
                int count = (int)raw_count; double sum = 0; va_list args;\n\
                va_start(args, raw_count);\n\
                for (int i = 0; i < count; ++i) sum += va_arg(args, double);\n\
                va_end(args); return sum;\n\
+             }\n\
+             double native_true_count(double raw_count, ...) {\n\
+               int count = (int)raw_count; int found = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) found += va_arg(args, int) != 0;\n\
+               va_end(args); return found;\n\
+             }\n\
+             double native_total_length(double raw_count, ...) {\n\
+               int count = (int)raw_count; size_t length = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) length += strlen(va_arg(args, const char *));\n\
+               va_end(args); return (double)length;\n\
              }\n",
         )
         .unwrap();
@@ -18175,7 +18213,7 @@ mod tests {
             .success());
         let output = Command::new(&exe_path).output().unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n10\n");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n10\n3\n9\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 

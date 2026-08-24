@@ -179,8 +179,9 @@ The workspace crates have narrow responsibilities:
 - Ambient declarations and C ABI calls; number-array parameters become
   `(pointer, length)`, object parameters become scalar fields, and metadata-
   selected portable array/object return structs are copied into the Thaw arena
-- Ambient and `.d.ts` Fast-path declarations ending in `...values: number[]`
-  lower to real C varargs and pass each extra value as a `double`
+- Ambient and `.d.ts` Fast-path declarations ending in number, boolean or
+  string array rest parameters lower to real C varargs. Extras are passed as
+  `double`, C-promoted `int`, or NUL-terminated `const char *`, respectively
 - Direct `void` FFI calls execute as statements; `thaw-result` void functions
   return `{ error }` and propagate native failures through `try/catch/finally`
 - FFI metadata v3 selects null-terminated or `(pointer, length)` string ABIs
@@ -704,8 +705,8 @@ The workspace crates have narrow responsibilities:
 - A fully general ABI-description format. Version 3 covers string layouts,
   number-array and flat object-string result ownership, common LLVM calling
   conventions and ordinary or packed aggregate returns, but explicit field
-  offsets/alignment, bitfields, non-number varargs/default argument promotions
-  and recursively nested aggregate ownership are not yet described
+  offsets/alignment, bitfields, other vararg types and recursively nested
+  aggregate ownership are not yet described
 - Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
   exports the complete Node-API v10 symbol surface used by the current headers,
   plus the implemented experimental SharedArrayBuffer/finalizer/module-file

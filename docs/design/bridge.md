@@ -351,7 +351,7 @@ extern "C" fn thaw_dynamic_call(
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignment、
-  bitfield、number以外のvariadic既定引数昇格、nested aggregate ownershipは未対応。
+  bitfield、number／boolean／string以外のvariadic、nested aggregate ownershipは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -393,12 +393,13 @@ native archives.
 Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
-Versions 1 and 2 remain backward-compatible. A trailing TypeScript
-`...values: number[]` rest parameter is represented as an LLVM variadic
-declaration, with every extra value passed as a C `double`; the fixed arguments
-remain subject to the ordinary marshal rules. Explicit field offsets/alignment,
-bitfields, non-number default argument promotions and recursively nested
-aggregate ownership remain future extensions.
+Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
+parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
+variadic declaration. Extra values are passed as C `double`, default-promoted
+`int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
+subject to the ordinary marshal rules. Explicit field offsets/alignment,
+bitfields, other vararg types and recursively nested aggregate ownership remain
+future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
