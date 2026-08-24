@@ -369,8 +369,11 @@ optional destructor. For non-null C strings, LLVM copies `strlen(ptr) + 1`
 bytes into `thaw_arena_alloc` before invoking the destructor. The copy therefore
 survives native deallocation and remains valid through return and catch/finally
 paths. Null pointers are preserved and never passed to a destructor. Ownership
-metadata supports `string` and `number[]` returns; unsupported ownership
-combinations are compilation errors. A `number[]` return uses
+metadata supports `string`, `number[]`, and flat portable/packed object returns
+whose fields are scalars or strings; unsupported ownership combinations are
+compilation errors. Object ownership is applied independently to each string
+field, so every non-null pointer is copied and its optional destructor is
+called exactly once. A `number[]` return uses
 `struct { double *data; int64_t len; }`; the data is copied into the arena and
 its configured destructor is invoked exactly once.
 
@@ -391,7 +394,8 @@ Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
 Versions 1 and 2 remain backward-compatible. Explicit field offsets/alignment,
-bitfields, variadics and nested aggregate ownership remain future extensions.
+bitfields, variadics and recursively nested aggregate ownership remain future
+extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
