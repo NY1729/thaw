@@ -12012,13 +12012,15 @@ mod tests {
                 console.log(Object.keys(config()).join(","));
                 console.log(Object.keys({ first: 1, second: 2, first: 3 }).join("-"));
                 console.log(Object.keys(await delayed()).join("|"));
+                console.log(Object.getOwnPropertyNames(config()).join("/"));
+                console.log(Reflect.ownKeys(await delayed()).join("+"));
                 const empty: {} = {};
                 console.log(Object.keys(empty).length);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "object_keys"),
-            "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\n0\n"
+            "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\n"
         );
     }
 
