@@ -226,6 +226,27 @@ pub unsafe extern "C" fn thaw_string_to_number(value: *const c_char) -> f64 {
     javascript_string_number(&text)
 }
 
+#[no_mangle]
+/// Compares UTF-8 native strings using JavaScript's UTF-16 code-unit order.
+///
+/// # Safety
+///
+/// Both pointers must reference valid NUL-terminated C strings.
+pub unsafe extern "C" fn thaw_string_compare(left: *const c_char, right: *const c_char) -> i32 {
+    if left.is_null() || right.is_null() {
+        return 0;
+    }
+    let left = unsafe { CStr::from_ptr(left) }.to_string_lossy();
+    let right = unsafe { CStr::from_ptr(right) }.to_string_lossy();
+    let left = left.encode_utf16().collect::<Vec<_>>();
+    let right = right.encode_utf16().collect::<Vec<_>>();
+    match left.cmp(&right) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 
@@ -2598,6 +2619,24 @@ mod tests {
         assert!(javascript_string_number("+0x1").is_nan());
         assert!(javascript_string_number("inf").is_nan());
         assert!(javascript_string_number("-0").is_sign_negative());
+    }
+
+    #[test]
+    fn compares_strings_in_javascript_utf16_order() {
+        let supplementary = CString::new("\u{10000}").unwrap();
+        let bmp = CString::new("\u{e000}").unwrap();
+        assert_eq!(
+            unsafe { thaw_string_compare(supplementary.as_ptr(), bmp.as_ptr()) },
+            -1
+        );
+        assert_eq!(
+            unsafe { thaw_string_compare(bmp.as_ptr(), supplementary.as_ptr()) },
+            1
+        );
+        assert_eq!(
+            unsafe { thaw_string_compare(bmp.as_ptr(), bmp.as_ptr()) },
+            0
+        );
     }
 
     fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {

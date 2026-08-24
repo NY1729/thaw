@@ -2986,7 +2986,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         Ok(HirType::Bool)
                     }
-                    BinOp::Lt | BinOp::Gt => {
+                    BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         if !matches!(left_ty, HirType::F64 | HirType::Dynamic)
                             || !matches!(right_ty, HirType::F64 | HirType::Dynamic)
                         {
@@ -3071,6 +3071,16 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::Str, argument, "string number conversion")?;
                         return Ok(HirType::F64);
+                    }
+                    "__thaw_string_lt" | "__thaw_string_gt" | "__thaw_string_lte"
+                    | "__thaw_string_gte" => {
+                        if args.len() != 2 {
+                            return Err("string comparison expects two operands".into());
+                        }
+                        for argument in args {
+                            self.expect_type(&HirType::Str, argument, "string comparison")?;
+                        }
+                        return Ok(HirType::Bool);
                     }
                     "fetch" => return Ok(HirType::Str),
                     "sleep" => return Ok(HirType::Promise(Box::new(HirType::Void))),
@@ -3365,25 +3375,51 @@ impl<'a> FnLowerer<'a> {
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
-        let to_number = |value: HirExpr, ty: &HirType| -> Result<HirExpr, String> {
-            match ty {
-                HirType::F64 => Ok(value),
-                HirType::Bool => Ok(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
-                    vec![value],
-                )),
-                HirType::Str => Ok(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
-                    vec![value],
-                )),
-                other => Err(format!(
-                    "abstract equality cannot convert native type {other:?}"
-                )),
-            }
-        };
-        lhs = to_number(lhs, &lhs_type)?;
-        rhs = to_number(rhs, &rhs_type)?;
+        lhs = self.coerce_primitive_to_number(lhs)?;
+        rhs = self.coerce_primitive_to_number(rhs)?;
         Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)))
+    }
+
+    fn coerce_primitive_to_number(&self, value: HirExpr) -> Result<HirExpr, String> {
+        match self.infer_expr_type(&value)? {
+            HirType::F64 => Ok(value),
+            HirType::Bool => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
+                vec![value],
+            )),
+            HirType::Str => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                vec![value],
+            )),
+            other => Err(format!(
+                "numeric conversion is not defined for native type {other:?}"
+            )),
+        }
+    }
+
+    fn lower_relational(&self, lhs: HirExpr, rhs: HirExpr, op: BinOp) -> Result<HirExpr, String> {
+        if self.infer_expr_type(&lhs)? == HirType::Str
+            && self.infer_expr_type(&rhs)? == HirType::Str
+        {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var(
+                    match op {
+                        BinOp::Lt => "__thaw_string_lt",
+                        BinOp::Gt => "__thaw_string_gt",
+                        BinOp::LtEq => "__thaw_string_lte",
+                        BinOp::GtEq => "__thaw_string_gte",
+                        _ => unreachable!(),
+                    }
+                    .to_string(),
+                )),
+                vec![lhs, rhs],
+            ));
+        }
+        Ok(HirExpr::BinOp(
+            op,
+            Box::new(self.coerce_primitive_to_number(lhs)?),
+            Box::new(self.coerce_primitive_to_number(rhs)?),
+        ))
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
@@ -3527,24 +3563,10 @@ impl<'a> FnLowerer<'a> {
                             bin.op == BinaryOp::LogicalAnd,
                         )?
                     }
-                    BinaryOp::LtEq => HirExpr::BinOp(
-                        BinOp::EqEqEq,
-                        Box::new(HirExpr::BinOp(
-                            BinOp::Gt,
-                            Box::new(lhs),
-                            Box::new(rhs),
-                        )),
-                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                    ),
-                    BinaryOp::GtEq => HirExpr::BinOp(
-                        BinOp::EqEqEq,
-                        Box::new(HirExpr::BinOp(
-                            BinOp::Lt,
-                            Box::new(lhs),
-                            Box::new(rhs),
-                        )),
-                        Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                    ),
+                    BinaryOp::Lt => self.lower_relational(lhs, rhs, BinOp::Lt)?,
+                    BinaryOp::Gt => self.lower_relational(lhs, rhs, BinOp::Gt)?,
+                    BinaryOp::LtEq => self.lower_relational(lhs, rhs, BinOp::LtEq)?,
+                    BinaryOp::GtEq => self.lower_relational(lhs, rhs, BinOp::GtEq)?,
                     BinaryOp::NotEqEq => HirExpr::BinOp(
                         BinOp::EqEqEq,
                         Box::new(HirExpr::BinOp(
