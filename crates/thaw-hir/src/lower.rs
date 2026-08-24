@@ -2868,6 +2868,40 @@ impl<'a> FnLowerer<'a> {
                 let lhs = self.lower_expr(&bin.left)?;
                 let rhs = self.lower_expr(&bin.right)?;
                 let value = match bin.op {
+                    BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
+                        self.expect_type(&HirType::Bool, &lhs, "logical left operand")?;
+                        self.expect_type(&HirType::Bool, &rhs, "logical right operand")?;
+                        let (then_value, else_value) = if bin.op == BinaryOp::LogicalAnd {
+                            (rhs, HirExpr::Lit(HirLit::Bool(false)))
+                        } else {
+                            (HirExpr::Lit(HirLit::Bool(true)), rhs)
+                        };
+                        let body = HirExpr::Block(vec![HirStmt::If(
+                            lhs,
+                            vec![HirStmt::Return(Some(then_value))],
+                            vec![HirStmt::Return(Some(else_value))],
+                        )]);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|name| {
+                                self.scope
+                                    .get(&name)
+                                    .cloned()
+                                    .map(|ty| HirParam { name, ty })
+                            })
+                            .collect();
+                        HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                HirType::Bool,
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        )
+                    }
                     BinaryOp::LtEq => HirExpr::BinOp(
                         BinOp::EqEqEq,
                         Box::new(HirExpr::BinOp(
@@ -4846,6 +4880,31 @@ mod tests {
             assert!(matches!(
                 arguments[0],
                 HirExpr::BinOp(..) | HirExpr::Lit(..)
+            ));
+        }
+    }
+
+    #[test]
+    fn lowers_boolean_logical_operators_to_short_circuit_closures() {
+        let program = lower(
+            r#"function main(): void {
+                const a = true;
+                const b = false;
+                console.log(a && b);
+                console.log(a || b);
+            }"#,
+        );
+        for statement in &program.functions[0].body[2..] {
+            let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
+                panic!("expected console call");
+            };
+            let HirExpr::Call(callee, call_arguments) = &arguments[0] else {
+                panic!("expected immediately invoked logical closure");
+            };
+            assert!(call_arguments.is_empty());
+            assert!(matches!(
+                callee.as_ref(),
+                HirExpr::Lambda(_, _, HirType::Bool, _)
             ));
         }
     }
