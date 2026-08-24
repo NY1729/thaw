@@ -4102,6 +4102,54 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        if let AssignTarget::Pat(pattern) = &assign.left {
+            if assign.op != AssignOp::Assign {
+                return Err("destructuring only supports simple `=` assignment".into());
+            }
+            let pattern = match pattern {
+                swc_ecma_ast::AssignTargetPat::Array(pattern) => Pat::Array(pattern.clone()),
+                swc_ecma_ast::AssignTargetPat::Object(pattern) => Pat::Object(pattern.clone()),
+                swc_ecma_ast::AssignTargetPat::Invalid(_) => {
+                    return Err("invalid destructuring assignment target".into())
+                }
+            };
+            let value = self.lower_expr(&assign.right)?;
+            let ty = if matches!(pattern, Pat::Array(_)) {
+                if let HirExpr::ArrayLit(elements) = &value {
+                    HirType::Tuple(
+                        elements
+                            .iter()
+                            .map(|element| self.infer_expr_type(element))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                } else {
+                    self.infer_expr_type(&value)?
+                }
+            } else {
+                self.infer_expr_type(&value)?
+            };
+            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) {
+                return Err(format!(
+                    "destructuring assignment requires a fixed-shape object or tuple, got {ty:?}"
+                ));
+            }
+            let temporary = format!("__thaw_destructure_assign_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(temporary.clone(), ty.clone());
+            let mut statements = Vec::new();
+            self.lower_assignment_pattern(
+                &pattern,
+                HirExpr::Var(temporary.clone()),
+                &ty,
+                &mut statements,
+            )?;
+            statements.push(HirStmt::Return(Some(HirExpr::Var(temporary.clone()))));
+            return self.wrap_call_argument_bindings(
+                HirExpr::Block(statements),
+                &[(temporary, ty, value)],
+            );
+        }
+
         let mut target = self.lower_assign_target(&assign.left)?;
         let rhs = self.lower_expr(&assign.right)?;
         let mut bindings = Vec::new();
@@ -4174,6 +4222,178 @@ impl<'a> FnLowerer<'a> {
 
         let result = build_assign(target, value);
         self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    fn lower_assignment_pattern(
+        &mut self,
+        pattern: &Pat,
+        value: HirExpr,
+        ty: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        match pattern {
+            Pat::Ident(binding) => {
+                let name = self.resolve_binding(binding.id.sym.as_ref());
+                let expected = self
+                    .scope
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| format!("assignment to unknown binding `{name}`"))?;
+                let value = self.coerce_to_declared(&expected, value)?;
+                statements.push(HirStmt::Expr(HirExpr::Assign(name, Box::new(value))));
+                Ok(())
+            }
+            Pat::Object(pattern) => {
+                let HirType::Object(fields) = ty else {
+                    return Err(format!("object pattern cannot destructure {ty:?}"));
+                };
+                let mut used = BTreeSet::new();
+                for property in &pattern.props {
+                    match property {
+                        ObjectPatProp::Assign(property) => {
+                            if property.value.is_some() {
+                                return Err(
+                                    "destructuring defaults require undefined support".into()
+                                );
+                            }
+                            let key = property.key.id.sym.to_string();
+                            let field_type = fields
+                                .iter()
+                                .find(|(name, _)| name == &key)
+                                .map(|(_, ty)| ty.clone())
+                                .ok_or_else(|| format!("object has no field `{key}`"))?;
+                            used.insert(key.clone());
+                            self.lower_assignment_pattern(
+                                &Pat::Ident(property.key.clone()),
+                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key),
+                                &field_type,
+                                statements,
+                            )?;
+                        }
+                        ObjectPatProp::KeyValue(property) => {
+                            let key =
+                                match &property.key {
+                                    PropName::Ident(key) => key.sym.to_string(),
+                                    PropName::Str(key) => key.value.to_string_lossy().into_owned(),
+                                    PropName::Computed(computed) => match computed.expr.as_ref() {
+                                        Expr::Lit(Lit::Str(key)) => {
+                                            key.value.to_string_lossy().into_owned()
+                                        }
+                                        _ => return Err(
+                                            "computed destructuring keys must be string literals"
+                                                .into(),
+                                        ),
+                                    },
+                                    _ => return Err("unsupported object destructuring key".into()),
+                                };
+                            let field_type = fields
+                                .iter()
+                                .find(|(name, _)| name == &key)
+                                .map(|(_, ty)| ty.clone())
+                                .ok_or_else(|| format!("object has no field `{key}`"))?;
+                            used.insert(key.clone());
+                            self.lower_assignment_pattern(
+                                &property.value,
+                                HirExpr::PropAccess(Box::new(value.clone()), ty.clone(), key),
+                                &field_type,
+                                statements,
+                            )?;
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            let remaining = fields
+                                .iter()
+                                .filter(|(name, _)| !used.contains(name))
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let rest_value = HirExpr::ObjectLit(
+                                remaining
+                                    .iter()
+                                    .map(|(name, _)| {
+                                        (
+                                            name.clone(),
+                                            HirExpr::PropAccess(
+                                                Box::new(value.clone()),
+                                                ty.clone(),
+                                                name.clone(),
+                                            ),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            self.lower_assignment_pattern(
+                                &rest.arg,
+                                rest_value,
+                                &HirType::Object(remaining),
+                                statements,
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Pat::Array(pattern) => {
+                let HirType::Tuple(elements) = ty else {
+                    return Err(format!(
+                        "array pattern requires a fixed-length tuple, got {ty:?}"
+                    ));
+                };
+                for (index, element_pattern) in pattern.elems.iter().enumerate() {
+                    let Some(element_pattern) = element_pattern else {
+                        continue;
+                    };
+                    if let Pat::Rest(rest) = element_pattern {
+                        let remaining = elements[index..].to_vec();
+                        let rest_value = HirExpr::ArrayLit(
+                            remaining
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, element)| {
+                                    HirExpr::TypedIndex(
+                                        Box::new(value.clone()),
+                                        Box::new(HirExpr::Lit(HirLit::F64(
+                                            (index + offset) as f64,
+                                        ))),
+                                        element.clone(),
+                                    )
+                                })
+                                .collect(),
+                        );
+                        let rest_type = if remaining
+                            .first()
+                            .is_some_and(|first| remaining.iter().all(|element| element == first))
+                        {
+                            HirType::Array(Box::new(
+                                remaining.first().cloned().unwrap_or(HirType::F64),
+                            ))
+                        } else {
+                            HirType::Tuple(remaining)
+                        };
+                        self.lower_assignment_pattern(
+                            &rest.arg, rest_value, &rest_type, statements,
+                        )?;
+                        break;
+                    }
+                    let element_type = elements
+                        .get(index)
+                        .cloned()
+                        .ok_or_else(|| format!("tuple pattern index {index} is out of bounds"))?;
+                    self.lower_assignment_pattern(
+                        element_pattern,
+                        HirExpr::TypedIndex(
+                            Box::new(value.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            element_type.clone(),
+                        ),
+                        &element_type,
+                        statements,
+                    )?;
+                }
+                Ok(())
+            }
+            Pat::Assign(_) => Err("destructuring defaults require undefined support".into()),
+            Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
+            _ => Err("unsupported destructuring assignment target".into()),
+        }
     }
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
@@ -5709,6 +5929,36 @@ mod tests {
             statement,
             HirStmt::Let(name, HirType::Array(element), _) if name == "tail" && element.as_ref() == &HirType::F64
         )));
+    }
+
+    #[test]
+    fn lowers_fixed_layout_destructuring_assignments() {
+        let program = lower(
+            r#"function source(): { x: number; label: string } {
+                return { x: 1, label: "ok" };
+            }
+            function main(): void {
+                let x = 0;
+                let label = "";
+                const returned = ({ x, label } = source());
+                let first = 0;
+                let tail = [0, 0];
+                [first, ...tail] = [2, 3, 4];
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[2],
+            HirStmt::Let(_, HirType::Object(_), HirExpr::Call(_, _))
+        ));
+        assert!(matches!(
+            main.body.last(),
+            Some(HirStmt::Expr(HirExpr::Call(_, _)))
+        ));
     }
 
     #[test]
