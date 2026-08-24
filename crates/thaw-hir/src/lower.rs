@@ -1642,7 +1642,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         HirExpr::BinOp(_, left, right)
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
-        | HirExpr::ArraySetLen(left, right, _) => {
+        | HirExpr::ArraySetLen(left, right, _)
+        | HirExpr::DynamicPropAccess(left, right, _, _) => {
             collect_referenced_bindings(left, names);
             collect_referenced_bindings(right, names);
         }
@@ -1734,6 +1735,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
+        | HirExpr::DynamicPropAccess(left, right, _, _)
         | HirExpr::JsonIndex(left, right) => contains_await(left) || contains_await(right),
         HirExpr::Call(callee, args) => contains_await(callee) || args.iter().any(contains_await),
         HirExpr::PromiseAll(values, _)
@@ -4132,6 +4134,9 @@ impl<'a> FnLowerer<'a> {
                     "cannot access `.{field}` on a value of type {other:?}"
                 )),
             },
+            HirExpr::DynamicPropAccess(_, _, _, payload) => {
+                Ok(HirType::Optional(Box::new(payload.clone())))
+            }
             HirExpr::PropAssign(_, _, _, value) => self.infer_expr_type(value),
             HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) => Ok(HirType::Json),
             HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
@@ -5849,19 +5854,44 @@ impl<'a> FnLowerer<'a> {
                         ))
                     }
                     HirType::Object(fields) => {
-                        let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() else {
-                            return Err("computed object key must be a string literal".into());
-                        };
-                        let key = key.value.to_string_lossy().into_owned();
-                        if fields.iter().any(|(name, _)| name == &key) {
-                            Ok(HirExpr::PropAccess(
-                                Box::new(obj),
-                                HirType::Object(fields),
-                                key,
-                            ))
-                        } else {
-                            Err(format!("object has no field `{key}`"))
+                        if let Expr::Lit(Lit::Str(key)) = computed.expr.as_ref() {
+                            let key = key.value.to_string_lossy().into_owned();
+                            if fields.iter().any(|(name, _)| name == &key) {
+                                return Ok(HirExpr::PropAccess(
+                                    Box::new(obj),
+                                    HirType::Object(fields),
+                                    key,
+                                ));
+                            }
+                            return Err(format!("object has no field `{key}`"));
                         }
+                        let Some((_, payload)) = fields.first() else {
+                            return Err("cannot dynamically index an empty object".into());
+                        };
+                        let payload = payload.clone();
+                        if fields.iter().any(|(_, ty)| ty != &payload) {
+                            return Err(
+                                "dynamic object index requires every field to have the same type"
+                                    .into(),
+                            );
+                        }
+                        if matches!(
+                            &payload,
+                            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+                        ) {
+                            return Err(
+                                "dynamic object index of tagged nullable fields is not supported"
+                                    .into(),
+                            );
+                        }
+                        let key = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::Str, &key, "computed object key")?;
+                        Ok(HirExpr::DynamicPropAccess(
+                            Box::new(obj),
+                            Box::new(key),
+                            fields,
+                            payload,
+                        ))
                     }
                     HirType::Json => match computed.expr.as_ref() {
                         Expr::Lit(Lit::Str(key)) => Ok(HirExpr::JsonGet(
@@ -11525,6 +11555,20 @@ mod tests {
         ));
         assert!(matches!(&body[3], HirStmt::Expr(HirExpr::Call(_, _))));
         assert!(matches!(&body[4], HirStmt::Expr(HirExpr::Call(_, _))));
+    }
+
+    #[test]
+    fn dynamic_computed_object_reads_require_uniform_fields() {
+        let module = thaw_parser::parse_typescript(
+            r#"function read(key: string): number | undefined {
+                const mixed = { value: 1, label: "one" };
+                return mixed[key];
+            }"#,
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("requires every field to have the same type"));
     }
 
     #[test]

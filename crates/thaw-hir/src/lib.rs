@@ -292,6 +292,7 @@ pub enum HirExpr {
     /// offset in the arena-allocated buffer) so codegen doesn't need to
     /// re-derive it.
     PropAccess(Box<HirExpr>, HirType, Symbol),
+    DynamicPropAccess(Box<HirExpr>, Box<HirExpr>, Vec<(Symbol, HirType)>, HirType),
     /// `object.field = value` (and desugared compound forms). Evaluates to
     /// `value`. Same `HirType` bookkeeping as `PropAccess`.
     PropAssign(Box<HirExpr>, HirType, Symbol, Box<HirExpr>),
@@ -397,7 +398,8 @@ pub fn set_ffi_error_abi(
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
-            | HirExpr::ArraySetLen(left, right, _) => {
+            | HirExpr::ArraySetLen(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _) => {
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
             }
@@ -573,7 +575,8 @@ pub fn set_ffi_ownership(
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
-            | HirExpr::ArraySetLen(left, right, _) => {
+            | HirExpr::ArraySetLen(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _) => {
                 update_expr(left, symbol, returns, errors, found);
                 update_expr(right, symbol, returns, errors, found);
             }
@@ -785,7 +788,8 @@ pub fn set_ffi_string_abi(
             HirExpr::BinOp(_, left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
-            | HirExpr::ArraySetLen(left, right, _) => {
+            | HirExpr::ArraySetLen(left, right, _)
+            | HirExpr::DynamicPropAccess(left, right, _, _) => {
                 update_expr(
                     left,
                     symbol,
