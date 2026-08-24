@@ -1141,6 +1141,11 @@ fn lower_ts_type(
     generic_interfaces: &GenericInterfaces,
 ) -> Result<HirType, String> {
     match ty {
+        TsType::TsParenthesizedType(parenthesized) => lower_ts_type(
+            &parenthesized.type_ann,
+            interfaces,
+            generic_interfaces,
+        ),
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => Ok(HirType::F64),
             TsKeywordTypeKind::TsStringKeyword => Ok(HirType::Str),
@@ -1463,6 +1468,13 @@ fn resolve_ts_type_with_substitution(
     }
 
     match ty {
+        TsType::TsParenthesizedType(parenthesized) => resolve_ts_type_with_substitution(
+            &parenthesized.type_ann,
+            substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        ),
         TsType::TsArrayType(arr) => {
             Ok(HirType::Array(Box::new(resolve_ts_type_with_substitution(
                 &arr.elem_type,
@@ -4552,10 +4564,7 @@ impl<'a> FnLowerer<'a> {
 
             Expr::OptChain(chain) => match chain.base.as_ref() {
                 OptChainBase::Member(member) => self.lower_optional_member_read(member),
-                OptChainBase::Call(call) => {
-                    let call = CallExpr::from(call.clone());
-                    self.lower_call(&call)
-                }
+                OptChainBase::Call(call) => self.lower_optional_call(call),
             },
 
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
@@ -10084,6 +10093,72 @@ impl<'a> FnLowerer<'a> {
         };
         let result = HirExpr::Call(Box::new(HirExpr::Var(lowered_name)), args);
         self.wrap_call_argument_bindings(result, &argument_bindings)
+    }
+
+    fn lower_optional_call(&mut self, call: &swc_ecma_ast::OptCall) -> Result<HirExpr, String> {
+        let callee = self.lower_expr(&call.callee)?;
+        let callee_type = self.infer_expr_type(&callee)?;
+        let HirType::Optional(payload) = callee_type.clone() else {
+            return self.lower_call(&CallExpr::from(call.clone()));
+        };
+        let HirType::Function(params, return_type) = payload.as_ref() else {
+            return Err(format!(
+                "optional call requires a function payload, got {payload:?}"
+            ));
+        };
+        if call.type_args.is_some() {
+            return Err("optional native calls do not accept type arguments".into());
+        }
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("optional native call spread arguments are not supported".into());
+        }
+        if params.len() != call.args.len() {
+            return Err(format!(
+                "optional function expects {} argument(s), got {}",
+                params.len(),
+                call.args.len()
+            ));
+        }
+        let arguments = call
+            .args
+            .iter()
+            .zip(params)
+            .map(|(argument, expected)| {
+                let value = self.lower_expr(&argument.expr)?;
+                self.coerce_to_declared(expected, value)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let name = format!("__thaw_optional_callee_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), callee_type.clone());
+        let bound = HirExpr::Var(name.clone());
+        let function = HirExpr::OptionalValue(Box::new(bound.clone()), payload.as_ref().clone());
+        let invoked = HirExpr::Call(Box::new(function), arguments);
+        let result = if return_type.as_ref() == &HirType::Void {
+            HirExpr::Block(vec![HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))],
+                vec![
+                    HirStmt::Expr(invoked),
+                    HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined))),
+                ],
+            )])
+        } else {
+            let (result_payload, present) = match return_type.as_ref() {
+                HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
+                output => (
+                    output.clone(),
+                    HirExpr::OptionalSome(Box::new(invoked), output.clone()),
+                ),
+            };
+            HirExpr::Block(vec![HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
+                vec![HirStmt::Return(Some(HirExpr::OptionalNone(result_payload)))],
+                vec![HirStmt::Return(Some(present))],
+            )])
+        };
+        self.wrap_call_argument_bindings(result, &[(name, callee_type, callee)])
     }
 }
 
