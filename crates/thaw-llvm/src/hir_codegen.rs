@@ -11983,6 +11983,43 @@ mod tests {
     }
 
     #[test]
+    fn compiles_object_has_own_for_fixed_objects() {
+        let source = r#"
+            interface Config { first: number; second: string; }
+            function config(): Config {
+                console.log("object");
+                return { first: 1, second: "two" };
+            }
+            function key(): string {
+                console.log("key");
+                return "second";
+            }
+            async function delayedConfig(): Promise<Config> {
+                console.log("awaited-object");
+                await sleep(1);
+                return { first: 3, second: "four" };
+            }
+            async function delayedKey(): Promise<string> {
+                console.log("awaited-key");
+                await sleep(1);
+                return "first";
+            }
+            async function main(): Promise<void> {
+                console.log(Object.hasOwn(config(), key()));
+                console.log(Object.hasOwn({ first: 1 }, "missing"));
+                console.log(Object.hasOwn({ "1": 1 }, 1));
+                const empty: {} = {};
+                console.log(Object.hasOwn(empty, "value"));
+                console.log(Object.hasOwn(await delayedConfig(), await delayedKey()));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_has_own"),
+            "object\nkey\ntrue\nfalse\ntrue\nfalse\nawaited-object\nawaited-key\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_utf16_string_search_methods() {
         let source = r#"
             function text(): string {

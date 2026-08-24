@@ -5722,6 +5722,53 @@ impl<'a> FnLowerer<'a> {
                         self.scope.insert(name.clone(), ty.clone());
                         return self.wrap_call_argument_bindings(keys, &[(name, ty, value)]);
                     }
+                    if object.sym == *"Object" && property.sym == *"hasOwn" {
+                        let [object, key] = call.args.as_slice() else {
+                            return Err("`Object.hasOwn` expects exactly two arguments".into());
+                        };
+                        if object.spread.is_some() || key.spread.is_some() {
+                            return Err("Object.hasOwn spread is not supported".into());
+                        }
+                        let object_value = self.lower_expr(&object.expr)?;
+                        let object_type = self.infer_expr_type(&object_value)?;
+                        let HirType::Object(fields) = &object_type else {
+                            return Err(format!(
+                                "`Object.hasOwn` currently requires a fixed object, got {object_type:?}"
+                            ));
+                        };
+                        let field_names = fields
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>();
+                        let key_value = self.lower_expr(&key.expr)?;
+                        let key_value = self.coerce_primitive_to_string(key_value)?;
+                        let object_name = format!("__thaw_has_own_object_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let key_name = format!("__thaw_has_own_key_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(object_name.clone(), object_type.clone());
+                        self.scope.insert(key_name.clone(), HirType::Str);
+                        let mut comparisons = field_names.into_iter().map(|field| {
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(key_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::Str(field))),
+                            )
+                        });
+                        let mut result = comparisons
+                            .next()
+                            .unwrap_or(HirExpr::Lit(HirLit::Bool(false)));
+                        for comparison in comparisons {
+                            result = self.lower_logical_expr(result, comparison, false)?;
+                        }
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[
+                                (object_name, object_type, object_value),
+                                (key_name, HirType::Str, key_value),
+                            ],
+                        );
+                    }
                     if object.sym == *"Number"
                         && matches!(property.sym.as_ref(), "parseFloat" | "parseInt")
                     {
