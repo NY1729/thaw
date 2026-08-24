@@ -694,6 +694,8 @@ generic property APIはArray／Buffer／ArrayBuffer／SharedArrayBuffer／TypedA
 Error／Dateにもnamed／Symbol data propertyとaccessorを保持する。prototype探索、own判定、descriptor属性、
 列挙順、delete、seal／freezeはplain Object／Functionと同じmetadata経路を使う。Arrayのcanonical数値名は
 element slotへ接続する。
+`napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
+存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
 exception経路へ統合する。`node_api_symbol_for`はprocess-wide description→identity registryを持ち、
 同じEnvでは同じhandle、Envをまたいでも同じSymbol identityを割り当てる。通常の
