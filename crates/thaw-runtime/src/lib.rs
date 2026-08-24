@@ -111,6 +111,121 @@ pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     destination.cast()
 }
 
+fn javascript_string_number(text: &str) -> f64 {
+    let text =
+        text.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');
+    if text.is_empty() {
+        return 0.0;
+    }
+    match text {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
+    }
+    if let Some(digits) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        return power_of_two_radix_number(digits, 4);
+    }
+    if let Some(digits) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+        return power_of_two_radix_number(digits, 3);
+    }
+    if let Some(digits) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+        return power_of_two_radix_number(digits, 1);
+    }
+
+    let bytes = text.as_bytes();
+    let mut index = usize::from(matches!(bytes.first(), Some(b'+') | Some(b'-')));
+    let mut integer_digits = 0;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        integer_digits += 1;
+        index += 1;
+    }
+    let mut fraction_digits = 0;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            fraction_digits += 1;
+            index += 1;
+        }
+    }
+    if integer_digits + fraction_digits == 0 {
+        return f64::NAN;
+    }
+    if matches!(bytes.get(index), Some(b'e') | Some(b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+') | Some(b'-')) {
+            index += 1;
+        }
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return f64::NAN;
+        }
+    }
+    if index != bytes.len() {
+        return f64::NAN;
+    }
+    text.parse().unwrap_or(f64::NAN)
+}
+
+fn power_of_two_radix_number(digits: &str, bits_per_digit: usize) -> f64 {
+    if digits.is_empty() {
+        return f64::NAN;
+    }
+    let radix = 1u32 << bits_per_digit;
+    let mut bits = Vec::with_capacity(digits.len() * bits_per_digit);
+    for character in digits.chars() {
+        let Some(value) = character.to_digit(radix) else {
+            return f64::NAN;
+        };
+        for shift in (0..bits_per_digit).rev() {
+            bits.push((value & (1 << shift)) != 0);
+        }
+    }
+    let Some(first_one) = bits.iter().position(|bit| *bit) else {
+        return 0.0;
+    };
+    let bits = &bits[first_one..];
+    if bits.len() <= 53 {
+        return bits
+            .iter()
+            .fold(0u64, |value, bit| (value << 1) | u64::from(*bit)) as f64;
+    }
+
+    let mut significand = bits[..53]
+        .iter()
+        .fold(0u64, |value, bit| (value << 1) | u64::from(*bit));
+    let halfway = bits[53];
+    let sticky = bits[54..].iter().any(|bit| *bit);
+    if halfway && (sticky || significand & 1 != 0) {
+        significand += 1;
+    }
+    let mut exponent = bits.len() - 1;
+    if significand == 1u64 << 53 {
+        significand >>= 1;
+        exponent += 1;
+    }
+    if exponent > 1023 {
+        return f64::INFINITY;
+    }
+    let exponent_bits = ((exponent as u64 + 1023) << 52) & 0x7ff0_0000_0000_0000;
+    let fraction_bits = significand & 0x000f_ffff_ffff_ffff;
+    f64::from_bits(exponent_bits | fraction_bits)
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid NUL-terminated C string.
+pub unsafe extern "C" fn thaw_string_to_number(value: *const c_char) -> f64 {
+    if value.is_null() {
+        return f64::NAN;
+    }
+    let text = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    javascript_string_number(&text)
+}
+
 pub const THAW_FD_READABLE: u8 = 1;
 pub const THAW_FD_WRITABLE: u8 = 2;
 
@@ -2453,6 +2568,36 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(javascript_number_string(value), expected, "value={value:?}");
         }
+    }
+
+    #[test]
+    fn parses_strings_with_javascript_number_grammar() {
+        let cases = [
+            ("", 0.0),
+            ("  \n\t", 0.0),
+            ("42", 42.0),
+            ("+1.5", 1.5),
+            (".25", 0.25),
+            ("2.", 2.0),
+            ("1e3", 1000.0),
+            ("0xff", 255.0),
+            ("\u{feff}1\u{feff}", 1.0),
+            ("0x10000000000000000", 18_446_744_073_709_551_616.0),
+            ("0x20000000000001", 9_007_199_254_740_992.0),
+            ("0x20000000000003", 9_007_199_254_740_996.0),
+            ("0o10", 8.0),
+            ("0b101", 5.0),
+            ("Infinity", f64::INFINITY),
+            ("-Infinity", f64::NEG_INFINITY),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(javascript_string_number(text), expected, "text={text:?}");
+        }
+        assert!(javascript_string_number("nope").is_nan());
+        assert!(javascript_string_number("1e").is_nan());
+        assert!(javascript_string_number("+0x1").is_nan());
+        assert!(javascript_string_number("inf").is_nan());
+        assert!(javascript_string_number("-0").is_sign_negative());
     }
 
     fn thaw_runtime_run_until_resolved(promise: *const ThawPromise) -> *const u8 {
