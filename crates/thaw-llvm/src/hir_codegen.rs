@@ -8892,6 +8892,22 @@ mod tests {
     }
 
     #[test]
+    fn compiles_do_while_with_continue_and_break() {
+        let source = r#"
+            function main(): void {
+                let i = 0;
+                do {
+                    i++;
+                    if (i === 1) continue;
+                    console.log(i);
+                    if (i === 3) break;
+                } while (i < 5);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "do_while"), "2\n3\n");
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
@@ -10792,6 +10808,23 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "await_while_loop"), "3\n3\n");
+    }
+
+    #[test]
+    fn frame_split_supports_await_and_continue_in_do_while_loop() {
+        let source = r#"
+            async function main(): Promise<void> {
+                let i = 0;
+                do {
+                    await sleep(1);
+                    i++;
+                    if (i === 1) continue;
+                    console.log(i);
+                } while (i < 3);
+                console.log("done");
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "await_do_while"), "2\n3\ndone\n");
     }
 
     #[test]

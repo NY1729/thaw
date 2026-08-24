@@ -1680,6 +1680,34 @@ fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> V
     out
 }
 
+/// A `do { body } while (condition)` is represented as an unconditional HIR
+/// loop with a condition guard at the tail. Source-level `continue` also has
+/// to execute that guard before starting the next iteration.
+fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, guard: &HirStmt) -> Vec<HirStmt> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Continue => {
+                out.push(guard.clone());
+                out.push(HirStmt::Continue);
+            }
+            HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
+                cond,
+                inject_do_while_guard_before_continue(then_body, guard),
+                inject_do_while_guard_before_continue(else_body, guard),
+            )),
+            HirStmt::Try(body, catch_name, catch_body) => out.push(HirStmt::Try(
+                inject_do_while_guard_before_continue(body, guard),
+                catch_name,
+                inject_do_while_guard_before_continue(catch_body, guard),
+            )),
+            HirStmt::While(_, _) => out.push(stmt),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn compound_op(op: AssignOp) -> Option<BinOp> {
     match op {
         AssignOp::AddAssign => Some(BinOp::Add),
@@ -1882,6 +1910,19 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&HirType::Bool, &cond, "while condition")?;
                 let body = self.lower_body(&while_stmt.body)?;
                 Ok(vec![HirStmt::While(cond, body)])
+            }
+
+            Stmt::DoWhile(do_while) => {
+                let cond = self.lower_expr(&do_while.test)?;
+                self.expect_type(&HirType::Bool, &cond, "do/while condition")?;
+                let guard = HirStmt::If(cond, Vec::new(), vec![HirStmt::Break]);
+                let mut body = self.lower_body(&do_while.body)?;
+                body = inject_do_while_guard_before_continue(body, &guard);
+                body.push(guard);
+                Ok(vec![HirStmt::While(
+                    HirExpr::Lit(HirLit::Bool(true)),
+                    body,
+                )])
             }
 
             Stmt::Break(break_stmt) => {
@@ -4308,6 +4349,37 @@ mod tests {
         assert!(matches!(
             body.last(),
             Some(HirStmt::Expr(HirExpr::Assign(name, _))) if name == "i"
+        ));
+    }
+
+    #[test]
+    fn desugars_do_while_and_checks_condition_before_continue() {
+        let program = lower(
+            r#"function main(): void {
+                let i = 0;
+                do {
+                    i++;
+                    if (i < 2) continue;
+                    console.log(i);
+                } while (i < 3);
+            }"#,
+        );
+        let HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body) = &program.functions[0].body[1]
+        else {
+            panic!("expected unconditional desugared loop");
+        };
+        let guard_count = body
+            .iter()
+            .filter(|stmt| matches!(stmt, HirStmt::If(_, _, else_body) if else_body == &[HirStmt::Break]))
+            .count();
+        assert_eq!(guard_count, 1, "expected the ordinary tail guard");
+        let HirStmt::If(_, continue_body, _) = &body[1] else {
+            panic!("expected source if statement");
+        };
+        assert!(matches!(
+            continue_body.as_slice(),
+            [HirStmt::If(_, _, else_body), HirStmt::Continue]
+                if else_body == &[HirStmt::Break]
         ));
     }
 
