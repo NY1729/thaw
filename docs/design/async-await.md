@@ -457,6 +457,9 @@ array/object literal内のawaitは左から右へ抽出され、ネストしたi
 TypeScript moduleを束ねたLambda実行テストでPromiseのfield保持とimport境界を検証する。
 `do/while`は末尾条件guardを持つ無条件whileへlowerし、`continue`の直前にも同じguardを
 挿入するため、同期・suspendする本体のどちらでも条件評価順を維持する。
+typed arrayの`for...of`はiterableを一度だけ内部localへ保存し、index付きwhileへlowerする。
+loop bindingは各反復でtyped indexから更新し、continueではindex更新を先に実行するため、
+async bodyでも通常のfor-of順序を保つ。
 
 ## 12. Promise constructorとcontinuation chain
 

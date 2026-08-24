@@ -28,7 +28,7 @@ use std::fmt;
 use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, ComputedPropName, Decl,
-    Expr, FnDecl, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
+    Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp, Module, ModuleItem,
     ObjectLit as SwcObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement,
     UpdateOp, VarDecl, VarDeclOrExpr,
@@ -1974,6 +1974,98 @@ impl<'a> FnLowerer<'a> {
                     Ok(out)
                 })();
                 self.bindings = saved;
+                lowered
+            }
+
+            Stmt::ForOf(for_of) => {
+                if for_of.is_await {
+                    return Err("`for await...of` is not supported yet".into());
+                }
+                let saved = self.bindings.clone();
+                let saved_scope = self.scope.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let values = self.lower_expr(&for_of.right)?;
+                    let HirType::Array(element) = self.infer_expr_type(&values)? else {
+                        return Err("`for...of` currently requires a typed array".into());
+                    };
+                    let ForHead::VarDecl(decl) = &for_of.left else {
+                        return Err("`for...of` currently requires a variable declaration".into());
+                    };
+                    let [binding] = decl.decls.as_slice() else {
+                        return Err("`for...of` requires exactly one loop binding".into());
+                    };
+                    if binding.init.is_some() {
+                        return Err("`for...of` loop bindings cannot have an initializer".into());
+                    }
+                    let Pat::Ident(binding) = &binding.name else {
+                        return Err("`for...of` requires an identifier loop binding".into());
+                    };
+                    let item_ty = match &binding.type_ann {
+                        Some(annotation) => {
+                            let declared = lower_ts_type(
+                                &annotation.type_ann,
+                                self.interfaces,
+                                self.generic_interfaces,
+                            )?;
+                            if declared != *element {
+                                return Err(format!(
+                                    "`for...of` binding has type {declared:?}, expected {:?}",
+                                    element
+                                ));
+                            }
+                            declared
+                        }
+                        None => element.as_ref().clone(),
+                    };
+                    let values_name = self.bind_local(
+                        "__thaw_for_of_values",
+                        HirType::Array(element.clone()),
+                    );
+                    let index_name = self.bind_local("__thaw_for_of_index", HirType::F64);
+                    let item_name = self.bind_local(binding.id.sym.as_ref(), item_ty.clone());
+                    let mut body = vec![HirStmt::Let(
+                        item_name,
+                        item_ty.clone(),
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(values_name.clone())),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            item_ty,
+                        ),
+                    )];
+                    body.extend(self.lower_body(&for_of.body)?);
+                    let update = HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    );
+                    body = inject_for_update_before_continue(body, &update);
+                    body.push(HirStmt::Expr(update));
+                    Ok(vec![
+                        HirStmt::Let(
+                            values_name.clone(),
+                            HirType::Array(element),
+                            values,
+                        ),
+                        HirStmt::Let(
+                            index_name.clone(),
+                            HirType::F64,
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ),
+                        HirStmt::While(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(HirExpr::Var(index_name)),
+                                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(values_name)))),
+                            ),
+                            body,
+                        ),
+                    ])
+                })();
+                self.bindings = saved;
+                self.scope = saved_scope;
                 lowered
             }
 
@@ -4380,6 +4472,30 @@ mod tests {
             continue_body.as_slice(),
             [HirStmt::If(_, _, else_body), HirStmt::Continue]
                 if else_body == &[HirStmt::Break]
+        ));
+    }
+
+    #[test]
+    fn desugars_for_of_to_single_evaluation_index_loop() {
+        let program = lower(
+            r#"function values(): number[] { return [1, 2, 3]; }
+               function main(): void {
+                   for (const value of values()) { console.log(value); }
+               }"#,
+        );
+        let body = &program.functions[1].body;
+        assert_eq!(body.len(), 3);
+        assert!(matches!(
+            &body[0],
+            HirStmt::Let(_, HirType::Array(element), HirExpr::Call(_, _))
+                if element.as_ref() == &HirType::F64
+        ));
+        let HirStmt::While(_, loop_body) = &body[2] else {
+            panic!("expected indexed while loop");
+        };
+        assert!(matches!(
+            &loop_body[0],
+            HirStmt::Let(_, HirType::F64, HirExpr::TypedIndex(_, _, HirType::F64))
         ));
     }
 

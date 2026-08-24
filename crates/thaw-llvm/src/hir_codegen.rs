@@ -8908,6 +8908,24 @@ mod tests {
     }
 
     #[test]
+    fn compiles_for_of_with_single_source_evaluation_continue_and_break() {
+        let source = r#"
+            function values(): number[] {
+                console.log("values");
+                return [1, 2, 3, 4];
+            }
+            function main(): void {
+                for (const value of values()) {
+                    if (value === 2) continue;
+                    console.log(value);
+                    if (value === 3) break;
+                }
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "for_of"), "values\n1\n3\n");
+    }
+
+    #[test]
     fn compiles_try_catch_within_a_single_function() {
         let source = r#"
             function main(): void {
@@ -10825,6 +10843,27 @@ mod tests {
             }
         "#;
         assert_eq!(compile_and_run(source, "await_do_while"), "2\n3\ndone\n");
+    }
+
+    #[test]
+    fn frame_split_supports_await_in_string_for_of_loop() {
+        let source = r#"
+            async function main(): Promise<void> {
+                const values: string[] = ["first", "skip", "last"];
+                let index = 0;
+                for (const value of values) {
+                    await sleep(1);
+                    index++;
+                    if (index === 2) continue;
+                    console.log(value);
+                }
+                console.log("done");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "await_for_of"),
+            "first\nlast\ndone\n"
+        );
     }
 
     #[test]
