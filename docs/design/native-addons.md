@@ -674,3 +674,7 @@ JSON表現可能なprimitive／Array／ObjectはN-API host Valueへ変換し、u
 JSON.stringifyが値を返さない結果はundefinedとする。syntax error／throw／stringify例外はError Valueを
 pending exceptionへ設定して`napi_pending_exception`を返す。これによりNode 22文書のNode-API v8
 runtime function一覧はすべてhost symbolとして公開される。
+Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
+exception経路へ統合する。`node_api_symbol_for`はprocess-wide description→identity registryを持ち、
+同じEnvでは同じhandle、Envをまたいでも同じSymbol identityを割り当てる。通常の
+`napi_create_symbol`は同じdescriptionでも常に別identityのまま維持する。
