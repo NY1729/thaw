@@ -697,6 +697,9 @@ element slotへ接続する。
 owned／external／ArrayBuffer-view Bufferのcanonical数値propertyは実際のbyte backingへ接続する。
 get／set／has／列挙はview offsetとdetach状態を反映し、代入値はJavaScriptのUint8 modulo変換を通す。
 範囲内indexは固定propertyとしてdeleteできず、範囲外indexは生成されない。
+TypedArrayの全11 kindも同じindex APIへ統合し、signed／unsigned modulo、Uint8Clampedのties-to-even、
+Float32／Float64、BigInt64／BigUint64の変換を行う。byte offsetとunaligned backingを保持し、detach後は
+indexを存在しないものとして扱い、範囲内のattached indexはdeleteできない。
 `napi_delete_property`／`napi_delete_element`はresult=nullを受理する。sealされたreceiverでも継承または
 存在しないkeyのdeleteは成功し、own keyだけをconfigurable／seal規則に従って拒否する。
 Node-API v9の`node_api_create_syntax_error`／`node_api_throw_syntax_error`を既存Error／pending
