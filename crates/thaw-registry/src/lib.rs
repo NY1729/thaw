@@ -1135,6 +1135,16 @@ fn declared_runtime_dependencies(package_dir: &Path) -> Vec<String> {
     dependencies
 }
 
+fn split_module_suffix(specifier: &str) -> (&str, &str) {
+    specifier
+        .char_indices()
+        .find_map(|(index, character)| {
+            (character == '?' || (character == '#' && index > 0)).then_some(index)
+        })
+        .map(|index| specifier.split_at(index))
+        .unwrap_or((specifier, ""))
+}
+
 fn runtime_export_specifiers(
     package_name: &str,
     package_dir: &Path,
@@ -1351,10 +1361,11 @@ fn bundle_commonjs_package(
             .filter(|spec| spec.starts_with("./") || spec.starts_with("../"))
             .cloned()
         {
+            let (resolution_spec, suffix) = split_module_suffix(&spec);
             let combined = if requiring_dir.as_os_str().is_empty() {
-                spec.clone()
+                resolution_spec.to_string()
             } else {
-                format!("{}/{spec}", requiring_dir.display())
+                format!("{}/{resolution_spec}", requiring_dir.display())
             };
             let normalized = normalize_path_string(&combined);
             // An unresolvable relative require (e.g. it targets a
@@ -1365,7 +1376,7 @@ fn bundle_commonjs_package(
             if let Ok((resolved_relative, resolved_abs)) =
                 resolve_module_path(&pkg_dir, &normalized)
             {
-                let resolved_key = format!("{pkg_name}/{resolved_relative}");
+                let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
                 requires.push((spec, resolved_key.clone()));
                 if !visited.contains(&resolved_key) {
                     visited.push(resolved_key.clone());
@@ -1384,11 +1395,12 @@ fn bundle_commonjs_package(
             .filter(|spec| !(spec.starts_with("./") || spec.starts_with("../")))
             .cloned()
         {
-            if spec.starts_with('#') {
+            let (resolution_spec, suffix) = split_module_suffix(&spec);
+            if resolution_spec.starts_with('#') {
                 if let Some((resolved_relative, resolved_abs)) =
-                    resolve_package_import(&pkg_dir, &spec)
+                    resolve_package_import(&pkg_dir, resolution_spec)
                 {
-                    let resolved_key = format!("{pkg_name}/{resolved_relative}");
+                    let resolved_key = format!("{pkg_name}/{resolved_relative}{suffix}");
                     requires.push((spec, resolved_key.clone()));
                     if !visited.contains(&resolved_key) {
                         visited.push(resolved_key.clone());
@@ -1403,9 +1415,9 @@ fn bundle_commonjs_package(
                 continue;
             }
             if let Some((dep_name, dep_relative, dep_abs, dep_dir)) =
-                resolve_bare_require(node_modules_dir, &spec)
+                resolve_bare_require(node_modules_dir, resolution_spec)
             {
-                let dep_key = format!("{dep_name}/{dep_relative}");
+                let dep_key = format!("{dep_name}/{dep_relative}{suffix}");
                 requires.push((spec, dep_key.clone()));
                 if !visited.contains(&dep_key) {
                     visited.push(dep_key.clone());
@@ -1416,8 +1428,12 @@ fn bundle_commonjs_package(
             }
             // Not a real npm package under `node_modules_dir` -- maybe a
             // Node core builtin Thaw has a polyfill for.
-            if let Some(builtin_source) = builtin_module_source(&spec) {
-                let builtin_key = format!("node:{spec}");
+            if let Some(builtin_source) = builtin_module_source(resolution_spec) {
+                let builtin_key = if resolution_spec.starts_with("node:") {
+                    format!("{resolution_spec}{suffix}")
+                } else {
+                    format!("node:{resolution_spec}{suffix}")
+                };
                 requires.push((spec, builtin_key.clone()));
                 if !visited.contains(&builtin_key) {
                     visited.push(builtin_key.clone());
@@ -4145,7 +4161,7 @@ mod tests {
         fs::write(
             dir.join("index.js"),
             "import { increment, value } from '#counter';\n\
-             import data from './data.json' with { type: 'json' };\n\
+             import data from './data.json?payload' with { type: 'json' };\n\
              import { fromA } from './a.js';\n\
              export default async function run() {\n\
                increment();\n\
@@ -4175,7 +4191,7 @@ mod tests {
         let empty_node_modules = temp_registry("esm_mixed_graph_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 6);
+        assert_eq!(file_count, 6, "{bundle}");
         let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
@@ -4259,6 +4275,12 @@ mod tests {
         );
         assert!(modern.attribute_error.is_none());
 
+        let queried = analyze_module(
+            "import data from './data.json?payload' with { type: 'json' }; export default data;",
+        );
+        assert!(queried.attribute_error.is_none());
+        assert_eq!(queried.specs, vec!["./data.json?payload"]);
+
         let legacy = analyze_module(
             "import data from './data.json' assert { type: 'json' }; export default data;",
         );
@@ -4336,6 +4358,47 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("runRuntimeImport").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
+        assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn module_query_and_fragment_are_part_of_cache_identity() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("module_url_identity");
+        fs::write(
+            dir.join("index.js"),
+            "export default async function run() {
+               const first = await import('./feature.js?one');
+               const again = await import('./feature.js?one');
+               const second = await import('./feature.js#two');
+               return first === again && first !== second && first.value === 1 && second.value === 2 ? 42 : 0;
+             }",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("feature.js"),
+            "globalThis.__thawModuleIdentity = (globalThis.__thawModuleIdentity || 0) + 1; export const value = globalThis.__thawModuleIdentity;",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("module_url_identity_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(name); }};\n\
+             {bundle}\n\
+             globalThis.runModuleIdentity = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("runModuleIdentity").unwrap();
         let args = CString::new("[]").unwrap();
         let result = thaw_quickjs::thaw_js_call(function.as_ptr(), args.as_ptr());
         assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "42");

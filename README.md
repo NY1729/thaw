@@ -667,6 +667,9 @@ The workspace crates have narrow responsibilities:
   installed `dependencies`, `optionalDependencies`, and `peerDependencies`,
   including exact and file-backed wildcard entries from each dependency's
   conditional `exports` map.
+  Module specifier queries and fragments are excluded from filesystem
+  resolution but retained in cache keys, so repeated imports of the same URL
+  share one namespace while distinct suffixes create distinct module instances.
   Expression-free
   templates, parentheses and string-only concatenations are folded and bundled;
   conditional branches and template interpolations composed from those values
