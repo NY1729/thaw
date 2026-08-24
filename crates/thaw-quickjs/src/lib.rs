@@ -234,6 +234,26 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Evaluates a script in the shared embedded context and returns its result as
+/// JSON. JavaScript values for which `JSON.stringify` returns `undefined`
+/// produce `None`; exceptions retain their JavaScript message.
+pub fn eval_json(source: &str) -> Result<Option<String>, String> {
+    with_context(|ctx| {
+        let value = ctx
+            .eval::<Value<'_>, _>(source)
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_exception(&ctx),
+                error => error.to_string(),
+            })?;
+        ctx.json_stringify(value)
+            .map(|value| value.map(|value| value.to_string().unwrap_or_default()))
+            .map_err(|error| match error {
+                rquickjs::Error::Exception => describe_exception(&ctx),
+                error => error.to_string(),
+            })
+    })
+}
+
 /// Calls a top-level function (previously loaded via `thaw_js_load`) named
 /// `func_name`, with `args_json` a JSON-encoded array of arguments.
 /// Returns the JSON-encoded result (or an error object -- see the module

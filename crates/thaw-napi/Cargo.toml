@@ -10,3 +10,4 @@ crate-type = ["staticlib", "rlib"]
 libc = "0.2"
 serde_json = "1"
 tempfile = "3"
+thaw-quickjs = { path = "../thaw-quickjs" }

@@ -1239,6 +1239,7 @@ dependencies = [
  "libc",
  "serde_json",
  "tempfile",
+ "thaw-quickjs",
 ]
 
 [[package]]

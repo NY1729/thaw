@@ -735,6 +735,9 @@ The workspace crates have narrow responsibilities:
   Asynchronous environment cleanup hooks retain addon libraries until their
   opaque handles are explicitly completed, with reverse-order invocation and
   pre-teardown removal.
+  `napi_run_script` evaluates JavaScript in the embedded persistent QuickJS
+  context, converts JSON-representable results into host values and reports
+  JavaScript exceptions through the pending-exception channel.
   Error, TypeError and RangeError creation/throwing share pending-exception
   tracking, and `napi_is_error` recognizes host-created errors.
   Own-property checks and property deletion are supported for objects and functions
