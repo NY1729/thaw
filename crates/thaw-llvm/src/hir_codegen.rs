@@ -12836,6 +12836,37 @@ mod tests {
     }
 
     #[test]
+    fn compiles_optional_object_member_access() {
+        let source = r#"
+            interface Item {
+                value: number;
+                label: string | undefined;
+            }
+            function item(present: boolean): Item | undefined {
+                if (present) return { value: 4, label: "ok" };
+                return undefined;
+            }
+            async function delayed(present: boolean): Promise<Item | undefined> {
+                await sleep(1);
+                return item(present);
+            }
+            async function main(): Promise<void> {
+                console.log(item(true)?.value);
+                console.log(item(false)?.value);
+                console.log(item(true)?.["value"]);
+                console.log(item(true)?.label);
+                console.log(item(false)?.label);
+                console.log((await delayed(true))?.value);
+                console.log((await delayed(false))?.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_object_member"),
+            "4\nundefined\n4\nok\nundefined\n4\nundefined\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_for_each() {
         let source = r#"
             interface Item { value: number; }

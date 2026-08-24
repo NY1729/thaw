@@ -145,7 +145,9 @@ The workspace crates have narrow responsibilities:
 - Fixed-shape object fields can also use static string-computed reads,
   assignments, compound assignments, and updates; JSON accepts string keys
 - Optional member, computed-member, and function calls are accepted for native
-  types whose static layout excludes `null`/`undefined`
+  types whose static layout excludes `null`/`undefined`; tagged optional fixed
+  objects additionally short-circuit named and static string-computed field
+  reads and flatten already-optional fields
 - String-literal `in` checks use fixed object shapes while still evaluating
   both operands once in source order
 - Comma/sequence expressions evaluate every operand from left to right and
@@ -613,8 +615,9 @@ The workspace crates have narrow responsibilities:
   variables in the corresponding `if` branch, including negated comparisons;
   terminating guard clauses and subsequent assignments update the narrowed
   state. Logical `&&`/`||` propagate safe narrowing into their short-circuited
-  RHS and the implied `if` branch. General optional-chain short-circuiting
-  still requires native `null` plus broader control-flow unwrapping
+  RHS and the implied `if` branch. Optional chaining now short-circuits tagged
+  fixed-object field reads; arrays, strings, method/function calls and native
+  `null` still require broader optional-chain lowering
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
