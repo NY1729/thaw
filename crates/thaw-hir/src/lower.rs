@@ -3135,6 +3135,22 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
+                    "__thaw_number_array_fill"
+                    | "__thaw_pointer_array_fill"
+                    | "__thaw_bool_array_fill" => {
+                        if args.len() != 4 {
+                            return Err("array fill expects four operands".into());
+                        }
+                        let ty = self.infer_expr_type(&args[0])?;
+                        let HirType::Array(element) = &ty else {
+                            return Err("array fill requires a homogeneous array".into());
+                        };
+                        self.expect_type(element, &args[1], "fill value")?;
+                        for argument in &args[2..] {
+                            self.expect_type(&HirType::F64, argument, "fill index")?;
+                        }
+                        return Ok(ty);
+                    }
                     "__thaw_array_slice" => {
                         if args.len() != 3 {
                             return Err("array slice expects three operands".into());
@@ -5697,6 +5713,61 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_array_copy_within".to_string())),
                         arguments,
                     );
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"fill" {
+                    if !(1..=3).contains(&call.args.len()) {
+                        return Err("native `.fill()` expects one to three arguments".into());
+                    }
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        return Err("array fill spread is not supported".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let HirType::Array(element) = &receiver_type else {
+                        return Err(format!(
+                            "`.fill()` requires a homogeneous array, got {receiver_type:?}"
+                        ));
+                    };
+                    let element = element.as_ref().clone();
+                    let value = self.lower_expr(&call.args[0].expr)?;
+                    self.expect_type(&element, &value, "fill value")?;
+                    let mut indices = Vec::with_capacity(2);
+                    for argument in &call.args[1..] {
+                        let value = self.lower_expr(&argument.expr)?;
+                        indices.push(self.coerce_primitive_to_number(value)?);
+                    }
+                    if indices.is_empty() {
+                        indices.push(HirExpr::Lit(HirLit::F64(0.0)));
+                    }
+                    if indices.len() == 1 {
+                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                    }
+                    let runtime = match &element {
+                        HirType::F64 => "__thaw_number_array_fill",
+                        HirType::Bool => "__thaw_bool_array_fill",
+                        _ => "__thaw_pointer_array_fill",
+                    };
+                    let receiver_name = format!("__thaw_fill_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), receiver_type.clone());
+                    let value_name = format!("__thaw_fill_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(value_name.clone(), element.clone());
+                    let mut bindings = vec![
+                        (receiver_name.clone(), receiver_type, receiver),
+                        (value_name.clone(), element, value),
+                    ];
+                    let mut arguments = vec![HirExpr::Var(receiver_name), HirExpr::Var(value_name)];
+                    for (position, index) in indices.into_iter().enumerate() {
+                        let name = format!("__thaw_fill_index_{}_{}", position, self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::F64);
+                        arguments.push(HirExpr::Var(name.clone()));
+                        bindings.push((name, HirType::F64, index));
+                    }
+                    let result = HirExpr::Call(Box::new(HirExpr::Var(runtime.into())), arguments);
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"reverse" {

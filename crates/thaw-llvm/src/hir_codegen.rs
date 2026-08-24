@@ -607,6 +607,17 @@ impl<'ctx> HirCompiler<'ctx> {
             array_copy_within_type,
             Some(Linkage::External),
         );
+        for (name, value_type) in [
+            ("thaw_number_array_fill", f64_type.into()),
+            ("thaw_pointer_array_fill", i8_ptr.into()),
+            ("thaw_bool_array_fill", i8_type.into()),
+        ] {
+            let ty = i8_ptr.fn_type(
+                &[i8_ptr.into(), value_type, f64_type.into(), f64_type.into()],
+                false,
+            );
+            self.module.add_function(name, ty, Some(Linkage::External));
+        }
         let array_slice_type =
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false);
         self.module.add_function(
@@ -7597,6 +7608,41 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array copyWithin returned no value".to_string());
             }
+            "__thaw_number_array_fill" | "__thaw_pointer_array_fill" | "__thaw_bool_array_fill" => {
+                if args.len() != 4 {
+                    return Err("array fill expects four operands".to_string());
+                }
+                let mut arguments = Vec::with_capacity(4);
+                for (index, argument) in args.iter().enumerate() {
+                    let mut value = self.compile_expr(argument)?;
+                    if index == 1 && name == "__thaw_bool_array_fill" {
+                        value = self
+                            .builder
+                            .build_int_z_extend(
+                                value.into_int_value(),
+                                self.context.i8_type(),
+                                "array_fill_bool",
+                            )
+                            .map_err(|error| error.to_string())?
+                            .into();
+                    }
+                    arguments.push(value.into());
+                }
+                let runtime = name.trim_start_matches("__thaw_");
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function(&format!("thaw_{runtime}"))
+                            .unwrap(),
+                        &arguments,
+                        "array_fill",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array fill returned no value".to_string());
+            }
             "__thaw_array_slice" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
@@ -11624,6 +11670,33 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_copy_within"),
             "4,5,3,4,5\n1,1,2,3,4\n1,2,3,2,3\naab\nreceiver\ntarget\nstart\nawaited-end\n1-1-2-3-4\n"
+        );
+    }
+
+    #[test]
+    fn compiles_in_place_native_array_fill() {
+        let source = r#"
+            interface Item { value: number; }
+            async function end(): Promise<number> { await sleep(1); return -1; }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, 2, 3, 4];
+                console.log(numbers.fill(9, 1, 3).join(","));
+                const words: string[] = ["a", "b", "c"];
+                words.fill("x", -2);
+                console.log(words.join(""));
+                const flags: boolean[] = [true, false, true];
+                flags.fill(false);
+                console.log(flags.join("-"));
+                const item: Item = { value: 7 };
+                const objects: Item[] = [{ value: 1 }, { value: 2 }];
+                objects.fill(item, 0, await end());
+                item.value = 8;
+                console.log(objects[0].value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_fill"),
+            "1,9,9,4\naxx\nfalse-false-false\n8\n"
         );
     }
 
