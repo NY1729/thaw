@@ -251,6 +251,9 @@ pub enum HirStmt {
     While(HirExpr, Vec<HirStmt>),
     Break,
     Continue,
+    /// Break/continue an enclosing loop, where zero is the innermost loop.
+    BreakDepth(usize),
+    ContinueDepth(usize),
     Throw(HirExpr),
     /// `throw` unwinds through generated Thaw function calls to the nearest
     /// lexical `try`. Codegen implements this with a pending-exception slot,
@@ -406,7 +409,11 @@ pub fn set_ffi_error_abi(
                     visit_stmts(body, symbol, abi, found);
                     visit_stmts(catch_body, symbol, abi, found);
                 }
-                HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+                HirStmt::Return(None)
+                | HirStmt::Break
+                | HirStmt::Continue
+                | HirStmt::BreakDepth(_)
+                | HirStmt::ContinueDepth(_) => {}
             }
         }
     }
@@ -543,7 +550,11 @@ pub fn set_ffi_ownership(
                     update_stmts(body, symbol, returns, errors, found);
                     update_stmts(catch_body, symbol, returns, errors, found);
                 }
-                HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+                HirStmt::Return(None)
+                | HirStmt::Break
+                | HirStmt::Continue
+                | HirStmt::BreakDepth(_)
+                | HirStmt::ContinueDepth(_) => {}
             }
         }
     }
@@ -741,7 +752,11 @@ pub fn set_ffi_string_abi(
                         found,
                     );
                 }
-                HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
+                HirStmt::Return(None)
+                | HirStmt::Break
+                | HirStmt::Continue
+                | HirStmt::BreakDepth(_)
+                | HirStmt::ContinueDepth(_) => {}
             }
         }
     }

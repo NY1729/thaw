@@ -330,6 +330,9 @@ ifの条件式にあるawaitも同じ方法で抽出し、resume後に分岐を�
 Promise自体を生成しない。条件とthen/else本体の両方にawaitがある場合にも対応する。
 ネストしたwhileは親guardからloop-enabled guardを作り、内側ループ専用の条件状態、
 本体guard、後退edgeを再帰的に生成する。親が非選択なら内側の条件Promiseも作らない。
+ラベル付きbreak/continueはHIRに対象ループまでの相対深度を保持する。async frameでは
+対象までのbody guardを落とし、breakは対象を含むloop guard、continueは内側のloop guard
+だけを落とす。これにより複数段の脱出と外側ループの継続をawaitの前後で同じ意味に保つ。
 例外を投げないtry/finallyはlowering済みHIRのfinally複製を利用し、try本体を通常の
 async状態列へ展開する。正常完了ではtry後のfinalizer、returnではreturn直前へ注入済みの
 finalizerが実行される。throw/rejectionを伴うtry/catch/finallyも、await状態ごとの
