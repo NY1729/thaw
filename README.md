@@ -393,6 +393,9 @@ The workspace crates have narrow responsibilities:
 - `Math.acosh`, `asinh`, `atanh`, `expm1` and `log1p` call their dedicated
   libm operations, retaining near-zero precision, signed zero, domain errors,
   numeric coercion and awaited operands
+- `Math.fround`, `clz32` and `imul` implement float32 rounding and exact
+  ECMAScript ToUint32/wrapping multiplication semantics, including negative
+  zero, non-finite inputs, signed 32-bit results, coercion order and `await`
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,

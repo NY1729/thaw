@@ -340,6 +340,30 @@ pub unsafe extern "C" fn thaw_parse_int(value: *const c_char, radix: f64) -> f64
     javascript_parse_int(&text, radix)
 }
 
+fn javascript_to_uint32(value: f64) -> u32 {
+    if !value.is_finite() || value == 0.0 {
+        0
+    } else {
+        value.trunc().rem_euclid(4_294_967_296.0) as u32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_math_fround(value: f64) -> f64 {
+    f64::from(value as f32)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_math_clz32(value: f64) -> f64 {
+    f64::from(javascript_to_uint32(value).leading_zeros())
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_math_imul(left: f64, right: f64) -> f64 {
+    let result = javascript_to_uint32(left).wrapping_mul(javascript_to_uint32(right));
+    f64::from(result as i32)
+}
+
 #[no_mangle]
 /// Compares UTF-8 native strings using JavaScript's UTF-16 code-unit order.
 ///

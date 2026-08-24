@@ -3169,6 +3169,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "Math operand")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_math_fround" | "__thaw_math_clz32" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("unary Math function expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, argument, "Math operand")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_math_pow" => {
                         if args.len() != 2 {
                             return Err("Math.pow expects two operands".into());
@@ -3184,6 +3191,15 @@ impl<'a> FnLowerer<'a> {
                         }
                         for argument in args {
                             self.expect_type(&HirType::F64, argument, "Math.atan2 operand")?;
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_math_imul" => {
+                        if args.len() != 2 {
+                            return Err("Math.imul expects two operands".into());
+                        }
+                        for argument in args {
+                            self.expect_type(&HirType::F64, argument, "Math.imul operand")?;
                         }
                         return Ok(HirType::F64);
                     }
@@ -5233,6 +5249,8 @@ impl<'a> FnLowerer<'a> {
                                 | "atanh"
                                 | "expm1"
                                 | "log1p"
+                                | "fround"
+                                | "clz32"
                         )
                     {
                         let [argument] = call.args.as_slice() else {
@@ -5254,11 +5272,11 @@ impl<'a> FnLowerer<'a> {
                     if object.sym == *"Math"
                         && matches!(
                             property.sym.as_ref(),
-                            "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot"
+                            "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul"
                         )
                     {
                         let expected = match property.sym.as_ref() {
-                            "pow" | "atan2" => Some(2),
+                            "pow" | "atan2" | "imul" => Some(2),
                             "sign" | "round" => Some(1),
                             _ => None,
                         };
