@@ -648,3 +648,6 @@ set／deleteもdescriptor制約を迂回できない。seal／freeze時には既
 `napi_create_symbol`はdescriptionとは独立した一意なidentityを割り当てる。Object／Functionの
 property mapとdescriptor metadataはstring／Symbolの型付きkeyを共有し、同じdescriptionの
 Symbol同士および同名stringとの衝突を防ぐ。JSON変換ではJavaScriptと同様にSymbol keyを除外する。
+`napi_get_all_property_names`はstring／Symbol key、arrayの数値index、own/include-prototype mode、
+writable／enumerable／configurable filter、skip-strings／skip-symbols、number-to-string変換を扱う。
+従来の`napi_get_property_names`はenumerable string keyを返す標準設定として同じ実装へ委譲する。
