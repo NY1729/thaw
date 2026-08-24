@@ -459,7 +459,8 @@ TypeScript moduleを束ねたLambda実行テストでPromiseのfield保持とimp
 挿入するため、同期・suspendする本体のどちらでも条件評価順を維持する。
 typed arrayの`for...of`はiterableを一度だけ内部localへ保存し、index付きwhileへlowerする。
 loop bindingは各反復でtyped indexから更新し、continueではindex更新を先に実行するため、
-async bodyでも通常のfor-of順序を保つ。
+async bodyでも通常のfor-of順序を保つ。宣言bindingに加え、既存の同型localを指定する
+assignment headも同じloweringを共有し、ループ終了後に最後の要素を保持する。
 
 ## 12. Promise constructorとcontinuation chain
 
