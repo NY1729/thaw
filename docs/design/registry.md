@@ -1029,7 +1029,9 @@ attributeを明示エラーにする。dynamic importは実行時式を`requireA
 文字列から決まる外部packageはまだ対象外である。user moduleの静的なrelative/absolute
 `import.meta.resolve()`はsource directory基準でpathを正規化し、query/fragmentを保った
 `file://` URLへ変換する。Node互換の`import.meta.filename`/`dirname`はpercent encodeしない
-絶対filesystem pathへ変換する。bare packageのresolveとその他のmeta propertyはまだ対象外である。
+絶対filesystem pathへ変換する。bare registry package/subpathは選択済みの`bundle.js`、
+`native.node`、`native.a`の実pathへ解決し、`node:` builtinはspecifier自体をURLとして保つ。
+その他のmeta propertyはまだ対象外である。
 
 ## 北極星: 「npm と同じ感覚で使える」こと
 
