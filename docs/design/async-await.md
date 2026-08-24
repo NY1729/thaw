@@ -488,6 +488,9 @@ bitwise/shift演算`|`/`^`/`&`/`<<`/`>>`/`>>>`と各compound assignmentはnumber
 `==`/`!=`は両operandのnative型が同じ場合に限り、既存の厳密等価比較へ正規化する。
 number/booleanは値、stringは内容、array/objectは参照identityを比較する。型をまたぐ
 JavaScript coercionは行わず、異なる型のoperandは明示的なコンパイルエラーにする。
+`typeof`はtyped operandを一引数closureへ渡して必ず一度評価し、既知のnative型から
+`number`/`string`/`boolean`/`function`/`object`を返す。await operandも通常の引数抽出を
+通る。未解決dynamic型とvoid operandは、誤った結果を生成せず明示的なエラーにする。
 fixed-shape objectの`for...in`はobject式を一度だけ保持し、静的field名のstring配列を
 index loopで列挙する。宣言/代入head、break/continue、awaitを含むbodyはfor-ofと同じ
 loop loweringを使う。

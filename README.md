@@ -128,7 +128,7 @@ The workspace crates have narrow responsibilities:
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
-  `+`/`-`/`!`/`~`, strict equality/inequality, same-type `==`/`!=`, and
+  `+`/`-`/`!`/`~`/`typeof`, strict equality/inequality, same-type `==`/`!=`, and
   ordered comparisons, `if`, `while`, classic
   `for`, `do/while`, and typed-array `for...of`
 - Object fields and array indexing/mutation

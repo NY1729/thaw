@@ -9586,6 +9586,31 @@ mod tests {
     }
 
     #[test]
+    fn compiles_typeof_for_native_values_and_awaits() {
+        let source = r#"
+            async function numberValue(): Promise<number> {
+                await sleep(1);
+                console.log("evaluated");
+                return 2;
+            }
+            function callback(value: number): number { return value; }
+            async function main(): Promise<void> {
+                console.log(typeof (await numberValue()));
+                console.log(typeof "text");
+                console.log(typeof true);
+                console.log(typeof callback);
+                console.log(typeof [1, 2]);
+                console.log(typeof { value: 1 });
+                console.log(typeof numberValue());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "typed_typeof"),
+            "evaluated\nnumber\nstring\nboolean\nfunction\nobject\nobject\nobject\n"
+        );
+    }
+
+    #[test]
     fn logical_operators_short_circuit_sync_and_awaited_operands() {
         let source = r#"
             function flag(label: string, value: boolean): boolean {

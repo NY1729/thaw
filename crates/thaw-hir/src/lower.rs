@@ -1792,6 +1792,28 @@ fn lower_bin_op(op: BinaryOp) -> Result<BinOp, String> {
     }
 }
 
+fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
+    match ty {
+        HirType::F64 | HirType::I64 => Some("number"),
+        HirType::Str => Some("string"),
+        HirType::Bool => Some("boolean"),
+        HirType::Function(_, _) => Some("function"),
+        HirType::Array(_)
+        | HirType::Tuple(_)
+        | HirType::Object(_)
+        | HirType::Json
+        | HirType::Promise(_) => Some("object"),
+        HirType::Union(elements) => {
+            let first = elements.first().and_then(native_typeof_name)?;
+            elements
+                .iter()
+                .all(|element| native_typeof_name(element) == Some(first))
+                .then_some(first)
+        }
+        HirType::Void | HirType::Dynamic | HirType::JsValue => None,
+    }
+}
+
 /// Lowers one function body. Holds the type scope (params + `let`s seen so
 /// far) and the whole module's function signatures, needed to resolve
 /// member access (`arr.length` vs `obj.field`) and to type-check/reorder
@@ -3008,6 +3030,47 @@ impl<'a> FnLowerer<'a> {
                             Box::new(value),
                             Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
                         )
+                    }
+                    UnaryOp::TypeOf => {
+                        let operand_type = if let HirExpr::Var(name) = &value {
+                            self.signatures.get(name).map(|signature| {
+                                let ret = if signature.is_async {
+                                    HirType::Promise(Box::new(signature.ret.clone()))
+                                } else {
+                                    signature.ret.clone()
+                                };
+                                HirType::Function(signature.params.clone(), Box::new(ret))
+                            })
+                        } else {
+                            None
+                        }
+                        .map(Ok)
+                        .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        let Some(type_name) = native_typeof_name(&operand_type) else {
+                            return Err(format!(
+                                "`typeof` requires one statically known runtime category, got {operand_type:?}"
+                            ));
+                        };
+                        if matches!(&value, HirExpr::Var(_))
+                            && matches!(operand_type, HirType::Function(_, _))
+                        {
+                            HirExpr::Lit(HirLit::Str(type_name.into()))
+                        } else {
+                        let parameter = format!("__thaw_typeof_{}", self.next_binding);
+                        self.next_binding += 1;
+                        HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                Vec::new(),
+                                vec![HirParam {
+                                    name: parameter,
+                                    ty: operand_type,
+                                }],
+                                HirType::Str,
+                                Box::new(HirExpr::Lit(HirLit::Str(type_name.into()))),
+                            )),
+                            vec![value],
+                        )
+                        }
                     }
                     other => return Err(format!("unsupported unary operator {other:?}")),
                 };
@@ -5097,6 +5160,37 @@ mod tests {
             HirStmt::Expr(HirExpr::Call(_, args))
                 if matches!(&args[0], HirExpr::BinOp(BinOp::BitXor, _, rhs)
                     if matches!(rhs.as_ref(), HirExpr::Lit(HirLit::F64(value)) if *value == -1.0))
+        ));
+    }
+
+    #[test]
+    fn lowers_typeof_to_an_evaluating_typed_closure() {
+        let program = lower(
+            r#"function value(): number { return 1; }
+            function callback(value: number): number { return value; }
+            function main(): void {
+                console.log(typeof value());
+                console.log(typeof callback);
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[0],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::Call(lambda, values)
+                    if matches!(lambda.as_ref(), HirExpr::Lambda(_, params, HirType::Str, body)
+                        if params.len() == 1
+                            && matches!(body.as_ref(), HirExpr::Lit(HirLit::Str(value)) if value == "number"))
+                        && matches!(values.as_slice(), [HirExpr::Call(_, _)]))
+        ));
+        assert!(matches!(
+            &main.body[1],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::Lit(HirLit::Str(value)) if value == "function")
         ));
     }
 
