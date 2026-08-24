@@ -547,6 +547,16 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_to_string_type, Some(Linkage::External));
         }
+        let array_join_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        for name in [
+            "thaw_number_array_join",
+            "thaw_string_array_join",
+            "thaw_bool_array_join",
+            "thaw_object_array_join",
+        ] {
+            self.module
+                .add_function(name, array_join_type, Some(Linkage::External));
+        }
 
         let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
@@ -7369,6 +7379,29 @@ impl<'ctx> HirCompiler<'ctx> {
                     "String(object[])",
                 )
             }
+            "__thaw_number_array_join"
+            | "__thaw_string_array_join"
+            | "__thaw_bool_array_join"
+            | "__thaw_object_array_join" => {
+                let runtime = name.trim_start_matches("__thaw_");
+                let runtime = format!("thaw_{runtime}");
+                let [array, separator] = args else {
+                    return Err("array join expects an array and separator".to_string());
+                };
+                let array = self.compile_expr(array)?;
+                let separator = self.compile_expr(separator)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &[array.into(), separator.into()],
+                        "array_join",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array join returned no value".to_string());
+            }
             "__thaw_object_to_string" => return self.compile_object_to_string(args),
             "__thaw_number_is_nan" => return self.compile_number_predicate(args, false),
             "__thaw_number_is_finite" => return self.compile_number_predicate(args, true),
@@ -11004,6 +11037,43 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_to_string_methods"),
             "42.5\ntrue\nword\n1,2.5\n3,x,false\nobject-method-receiver\n[object Object]\nawaited-method-receiver\n9\n"
+        );
+    }
+
+    #[test]
+    fn compiles_native_array_join() {
+        let source = r#"
+            function separator(): string {
+                console.log("separator-evaluated");
+                return " | ";
+            }
+            function tupleValue(): [number, string, boolean, number[]] {
+                console.log("receiver-evaluated");
+                return [7, "x", false, [8, 9]];
+            }
+            async function delayed(): Promise<number[]> {
+                await sleep(1);
+                console.log("array-awaited");
+                return [4, 5, 6];
+            }
+            async function main(): Promise<void> {
+                const numbers: number[] = [1, -0, 2.5];
+                const words: string[] = ["a", "", "c"];
+                const flags: boolean[] = [true, false];
+                const objects: { value: number }[] = [{ value: 1 }, { value: 2 }];
+                const empty: number[] = [];
+                console.log(numbers.join());
+                console.log(words.join("-"));
+                console.log(flags.join(""));
+                console.log(objects.join(" / "));
+                console.log(tupleValue().join(separator()));
+                console.log(empty.join("ignored"));
+                console.log((await delayed()).join("+"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "array_join"),
+            "1,0,2.5\na--c\ntruefalse\n[object Object] / [object Object]\nreceiver-evaluated\nseparator-evaluated\n7 | x | false | 8,9\n\narray-awaited\n4+5+6\n"
         );
     }
 
