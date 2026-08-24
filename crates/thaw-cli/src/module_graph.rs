@@ -217,6 +217,7 @@ struct RenameReferences<'a> {
     names: &'a HashMap<String, String>,
     namespaces: &'a HashMap<String, HashMap<String, String>>,
     import_meta_url: &'a str,
+    import_meta_main: bool,
     module_path: &'a Path,
     external_resolutions: &'a HashMap<String, String>,
 }
@@ -268,6 +269,13 @@ impl VisitMut for RenameReferences<'_> {
         let thaw_parser::ast::MemberProp::Ident(property) = &member.prop else {
             return;
         };
+        if property.sym == *"main" {
+            *expr = Expr::Lit(thaw_parser::ast::Lit::Bool(thaw_parser::ast::Bool {
+                span: member.span,
+                value: self.import_meta_main,
+            }));
+            return;
+        }
         let value = match property.sym.as_ref() {
             "url" => self.import_meta_url.to_string(),
             "filename" => self.module_path.to_string_lossy().into_owned(),
@@ -516,6 +524,7 @@ pub fn bundle(
                         names: &names,
                         namespaces: &namespaces,
                         import_meta_url: &import_meta_url,
+                        import_meta_main: is_entry,
                         module_path: &modules[index].path,
                         external_resolutions,
                     });
@@ -532,6 +541,7 @@ pub fn bundle(
                         names: &names,
                         namespaces: &namespaces,
                         import_meta_url: &import_meta_url,
+                        import_meta_main: is_entry,
                         module_path: &modules[index].path,
                         external_resolutions,
                     });
@@ -627,6 +637,7 @@ pub fn bundle(
                                 names: &names,
                                 namespaces: &namespaces,
                                 import_meta_url: &import_meta_url,
+                                import_meta_main: is_entry,
                                 module_path: &modules[index].path,
                                 external_resolutions,
                             });
@@ -655,6 +666,7 @@ pub fn bundle(
                                 names: &names,
                                 namespaces: &namespaces,
                                 import_meta_url: &import_meta_url,
+                                import_meta_main: is_entry,
                                 module_path: &modules[index].path,
                                 external_resolutions,
                             });
