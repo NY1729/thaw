@@ -3275,6 +3275,7 @@ impl<'a> FnLowerer<'a> {
                         });
                     }
                     "__thaw_string_index_of"
+                    | "__thaw_string_last_index_of"
                     | "__thaw_string_includes"
                     | "__thaw_string_starts_with"
                     | "__thaw_string_ends_with" => {
@@ -3284,11 +3285,16 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, &args[0], "string search receiver")?;
                         self.expect_type(&HirType::Str, &args[1], "string search needle")?;
                         self.expect_type(&HirType::F64, &args[2], "string search position")?;
-                        return Ok(if name == "__thaw_string_index_of" {
-                            HirType::F64
-                        } else {
-                            HirType::Bool
-                        });
+                        return Ok(
+                            if matches!(
+                                name.as_str(),
+                                "__thaw_string_index_of" | "__thaw_string_last_index_of"
+                            ) {
+                                HirType::F64
+                            } else {
+                                HirType::Bool
+                            },
+                        );
                     }
                     "__thaw_string_trim"
                     | "__thaw_string_trim_start"
@@ -6163,9 +6169,6 @@ impl<'a> FnLowerer<'a> {
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == HirType::Str {
-                        if property.sym == *"lastIndexOf" {
-                            return Err("string `.lastIndexOf()` is not implemented yet".into());
-                        }
                         let needle = self.lower_expr(&call.args[0].expr)?;
                         let needle = self.coerce_primitive_to_string(needle)?;
                         let position = if let Some(argument) = call.args.get(1) {
@@ -6178,15 +6181,40 @@ impl<'a> FnLowerer<'a> {
                         };
                         let suffix = match property.sym.as_ref() {
                             "indexOf" => "index_of",
+                            "lastIndexOf" => "last_index_of",
                             "includes" => "includes",
                             "startsWith" => "starts_with",
                             "endsWith" => "ends_with",
                             _ => unreachable!(),
                         };
-                        return Ok(HirExpr::Call(
+                        let receiver_name =
+                            format!("__thaw_string_search_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let needle_name =
+                            format!("__thaw_string_search_needle_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let position_name =
+                            format!("__thaw_string_search_position_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
+                        self.scope.insert(needle_name.clone(), HirType::Str);
+                        self.scope.insert(position_name.clone(), HirType::F64);
+                        let result = HirExpr::Call(
                             Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
-                            vec![receiver, needle, position],
-                        ));
+                            vec![
+                                HirExpr::Var(receiver_name.clone()),
+                                HirExpr::Var(needle_name.clone()),
+                                HirExpr::Var(position_name.clone()),
+                            ],
+                        );
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[
+                                (receiver_name, HirType::Str, receiver),
+                                (needle_name, HirType::Str, needle),
+                                (position_name, HirType::F64, position),
+                            ],
+                        );
                     }
                     if matches!(property.sym.as_ref(), "startsWith" | "endsWith") {
                         return Err(format!(
