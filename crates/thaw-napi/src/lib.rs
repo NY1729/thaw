@@ -6191,8 +6191,8 @@ pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, context: *mut c_void) 
 pub unsafe extern "C" fn napi_create_threadsafe_function(
     env: NapiEnv,
     function: NapiValue,
-    _async_resource: NapiValue,
-    _async_resource_name: NapiValue,
+    async_resource: NapiValue,
+    async_resource_name: NapiValue,
     max_queue_size: usize,
     initial_thread_count: usize,
     thread_finalize_data: *mut c_void,
@@ -6201,15 +6201,23 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
     call_js_callback: Option<NapiThreadsafeFunctionCallJs>,
     result: *mut *mut ThreadsafeFunction,
 ) -> NapiStatus {
-    if env.is_null()
-        || result.is_null()
+    if result.is_null()
         || initial_thread_count == 0
         || (function.is_null() && call_js_callback.is_none())
+        || (!function.is_null() && !value_belongs_to_environment(env, function))
+        || (!async_resource.is_null() && !value_belongs_to_environment(env, async_resource))
+        || (!async_resource_name.is_null()
+            && !value_belongs_to_environment(env, async_resource_name))
     {
         return NAPI_INVALID_ARG;
     }
     if !function.is_null() && !matches!(value_ref(function), Ok(Value::Function(_))) {
         return NAPI_INVALID_ARG;
+    }
+    if !async_resource_name.is_null()
+        && !matches!(value_ref(async_resource_name), Ok(Value::String(_)))
+    {
+        return NAPI_STRING_EXPECTED;
     }
     let threadsafe = Box::new(ThreadsafeFunction {
         env: env as usize,
@@ -6501,15 +6509,25 @@ pub unsafe extern "C" fn napi_reject_deferred(
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_async_work(
     env: NapiEnv,
-    _async_resource: NapiValue,
-    _async_resource_name: NapiValue,
+    async_resource: NapiValue,
+    async_resource_name: NapiValue,
     execute: Option<NapiAsyncExecuteCallback>,
     complete: Option<NapiAsyncCompleteCallback>,
     data: *mut c_void,
     result: *mut *mut AsyncWork,
 ) -> NapiStatus {
-    if execute.is_none() || result.is_null() {
+    if execute.is_none()
+        || result.is_null()
+        || (!async_resource.is_null() && !value_belongs_to_environment(env, async_resource))
+        || (!async_resource_name.is_null()
+            && !value_belongs_to_environment(env, async_resource_name))
+    {
         return NAPI_INVALID_ARG;
+    }
+    if !async_resource_name.is_null()
+        && !matches!(value_ref(async_resource_name), Ok(Value::String(_)))
+    {
+        return NAPI_STRING_EXPECTED;
     }
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
@@ -10731,6 +10749,101 @@ mod tests {
                 assert_eq!(napi_delete_async_work(&mut env, blocker), NAPI_OK);
                 drop(Box::from_raw(gate_data));
             }
+        }
+    }
+
+    #[test]
+    fn async_creation_validates_resources_names_and_callback_environment() {
+        unsafe {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut foreign_env = Env::new();
+            let foreign_resource = foreign_env.alloc(Value::Object(HashMap::new()));
+            let foreign_name = foreign_env.alloc(Value::String("foreign-work".into()));
+            let number_name = env.alloc(Value::Number(1.0));
+            let mut work = ptr::null_mut();
+            assert_eq!(
+                napi_create_async_work(
+                    env_ptr,
+                    foreign_resource,
+                    ptr::null_mut(),
+                    Some(probe_execute),
+                    None,
+                    ptr::null_mut(),
+                    &mut work
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_async_work(
+                    env_ptr,
+                    ptr::null_mut(),
+                    foreign_name,
+                    Some(probe_execute),
+                    None,
+                    ptr::null_mut(),
+                    &mut work
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_async_work(
+                    env_ptr,
+                    ptr::null_mut(),
+                    number_name,
+                    Some(probe_execute),
+                    None,
+                    ptr::null_mut(),
+                    &mut work
+                ),
+                NAPI_STRING_EXPECTED
+            );
+
+            let mut foreign_function = ptr::null_mut();
+            assert_eq!(
+                napi_create_function(
+                    &mut foreign_env,
+                    c"foreign".as_ptr(),
+                    7,
+                    Some(threadsafe_js_callback),
+                    ptr::null_mut(),
+                    &mut foreign_function
+                ),
+                NAPI_OK
+            );
+            let mut threadsafe = ptr::null_mut();
+            assert_eq!(
+                napi_create_threadsafe_function(
+                    env_ptr,
+                    foreign_function,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                    1,
+                    ptr::null_mut(),
+                    None,
+                    ptr::null_mut(),
+                    None,
+                    &mut threadsafe
+                ),
+                NAPI_INVALID_ARG
+            );
+            assert_eq!(
+                napi_create_threadsafe_function(
+                    env_ptr,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    number_name,
+                    0,
+                    1,
+                    ptr::null_mut(),
+                    None,
+                    ptr::null_mut(),
+                    Some(threadsafe_call_js),
+                    &mut threadsafe
+                ),
+                NAPI_STRING_EXPECTED
+            );
         }
     }
 

@@ -723,6 +723,8 @@ The workspace crates have narrow responsibilities:
   resolve/reject calls fail safely, and settlement values must share the Env.
   Async-work handles likewise remain Env-owned after deletion, making foreign
   Env access and repeated queue, cancel or delete operations safe state errors.
+  Async-work and thread-safe-function creation validates supplied async
+  resources, resource-name strings and callback functions against the Env.
   Object seal/freeze integrity levels apply consistently to named properties,
   generic property keys, deletion, functions and array elements. Descriptor
   writable/enumerable/configurable bits are retained for defined properties.

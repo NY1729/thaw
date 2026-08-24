@@ -693,6 +693,7 @@ Array／Buffer／ArrayBuffer／view／Function／Promise／Error／Dateを含む
 `napi_create_external`はdataと任意のfinalizer／hintをEnvに保持し、Env破棄時に一度だけ実行する。
 Promise deferred handleもEnv終了まで保持し、別Env・foreign value・二重resolve／rejectを安全に拒否する。
 async work handleもEnv終了まで安定アドレスで保持し、delete後の再利用と別Envからの操作を拒否する。
+async work／thread-safe function作成時に指定されたresource、resource name、callback functionも所有Envと型を検証する。
 `napi_typeof`はExternalを専用の`napi_external`として返す。date／array／promise／buffer／arraybuffer／
 shared-arraybuffer／typedarray／dataview／errorのpredicateはnull Env／Value／resultをinvalid-argとする。
 scalar／string／Date／BigInt／collection／Buffer／ArrayBuffer／viewのgetterとpredicateは、別Envが所有する
