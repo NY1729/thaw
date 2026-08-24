@@ -988,6 +988,9 @@ fn rewrite_external_class_methods(
     ) -> Option<String> {
         match expression {
             Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
+            Expr::Member(member) => member_assignment_path(member)
+                .map(|(root, path)| instance_path_key(&root, &path))
+                .and_then(|key| variables.get(&key).cloned()),
             Expr::Paren(parenthesized) => {
                 source_instance_class(&parenthesized.expr, classes, variables)
             }
@@ -996,6 +999,104 @@ fn rewrite_external_class_methods(
                 source_instance_class(&assertion.expr, classes, variables)
             }
             _ => constructed_class(expression, classes).map(str::to_owned),
+        }
+    }
+
+    fn instance_path_key(root: &str, path: &[String]) -> String {
+        let mut key = root.to_string();
+        for property in path {
+            key.push('\u{1f}');
+            key.push_str(property);
+        }
+        key
+    }
+
+    fn invalidate_instance_path(
+        variables: &mut std::collections::HashMap<String, String>,
+        key: &str,
+    ) {
+        let descendant = format!("{key}\u{1f}");
+        variables.retain(|candidate, _| candidate != key && !candidate.starts_with(&descendant));
+    }
+
+    fn instance_receiver(expression: &Expr) -> Option<(String, String)> {
+        match expression {
+            Expr::Ident(identifier) => {
+                let name = identifier.sym.to_string();
+                Some((name.clone(), name))
+            }
+            Expr::Member(member) => {
+                let (key, rendered) = instance_receiver(&member.obj)?;
+                match &member.prop {
+                    MemberProp::Ident(property) => Some((
+                        format!("{key}\u{1f}{}", property.sym),
+                        format!("{rendered}.{}", property.sym),
+                    )),
+                    MemberProp::Computed(computed) => {
+                        let Expr::Lit(Lit::Str(property)) = computed.expr.as_ref() else {
+                            return None;
+                        };
+                        let property = property.value.to_string_lossy().into_owned();
+                        Some((
+                            format!("{key}\u{1f}{property}"),
+                            format!("{rendered}[{}]", serde_json::to_string(&property).ok()?),
+                        ))
+                    }
+                    MemberProp::PrivateName(_) => None,
+                }
+            }
+            Expr::Paren(parenthesized) => instance_receiver(&parenthesized.expr),
+            Expr::TsAs(assertion) => instance_receiver(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => instance_receiver(&assertion.expr),
+            _ => None,
+        }
+    }
+
+    fn collect_object_instance_classes(
+        expression: &Expr,
+        prefix: &str,
+        classes: &[ClassConstructorRewrite],
+        variables: &std::collections::HashMap<String, String>,
+        additions: &mut Vec<(String, String)>,
+    ) {
+        let Expr::Object(object) = expression else {
+            return;
+        };
+        for property in &object.props {
+            let PropOrSpread::Prop(property) = property else {
+                continue;
+            };
+            let (name, value): (String, &Expr) = match property.as_ref() {
+                Prop::KeyValue(property) => {
+                    let Some(name) = (match &property.key {
+                        PropName::Ident(identifier) => Some(identifier.sym.to_string()),
+                        PropName::Str(value) => Some(value.value.to_string_lossy().into_owned()),
+                        PropName::Computed(computed) => match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Str(value)) => {
+                                Some(value.value.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    (name, property.value.as_ref())
+                }
+                Prop::Shorthand(identifier) => {
+                    let key = format!("{prefix}\u{1f}{}", identifier.sym);
+                    if let Some(class) = variables.get(identifier.sym.as_str()) {
+                        additions.push((key, class.clone()));
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let key = format!("{prefix}\u{1f}{name}");
+            if let Some(class) = source_instance_class(value, classes, variables) {
+                additions.push((key.clone(), class));
+            }
+            collect_object_instance_classes(value, &key, classes, variables, additions);
         }
     }
 
@@ -1509,11 +1610,21 @@ fn rewrite_external_class_methods(
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
+                invalidate_instance_path(&mut self.variables, binding.id.sym.as_str());
                 if let Some(class) =
                     source_instance_class(initializer, self.classes, &self.variables)
                 {
                     self.variables.insert(binding.id.sym.to_string(), class);
                 }
+                let mut property_classes = Vec::new();
+                collect_object_instance_classes(
+                    initializer,
+                    binding.id.sym.as_str(),
+                    self.classes,
+                    &self.variables,
+                    &mut property_classes,
+                );
+                self.variables.extend(property_classes);
                 if matches!(initializer.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
                     self.callbacks.insert(binding.id.sym.to_string());
                 }
@@ -1529,10 +1640,10 @@ fn rewrite_external_class_methods(
         fn visit_call_expr(&mut self, call: &CallExpr) {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(member) = callee.as_ref() {
-                    if let (Expr::Ident(receiver), MemberProp::Ident(method)) =
-                        (member.obj.as_ref(), &member.prop)
+                    if let (Some((receiver_key, receiver_source)), MemberProp::Ident(method)) =
+                        (instance_receiver(&member.obj), &member.prop)
                     {
-                        if let Some(class) = self.variables.get(receiver.sym.as_str()) {
+                        if let Some(class) = self.variables.get(&receiver_key) {
                             let has_callback = call.args.last().is_some_and(|argument| {
                                 matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
                                     || matches!(argument.expr.as_ref(), Expr::Ident(identifier) if self.callbacks.contains(identifier.sym.as_str()))
@@ -1583,9 +1694,9 @@ fn rewrite_external_class_methods(
                                 let span = member.span();
                                 self.edits.push((span.lo.0, span.hi.0, helper.clone()));
                                 let insertion = if call.args.is_empty() {
-                                    receiver.sym.to_string()
+                                    receiver_source
                                 } else {
-                                    format!("{}, ", receiver.sym)
+                                    format!("{receiver_source}, ")
                                 };
                                 self.edits.push((span.hi.0 + 1, span.hi.0 + 1, insertion));
                             }
@@ -1603,6 +1714,9 @@ fn rewrite_external_class_methods(
                     source_expr_type(&assignment.right, &self.value_types, self.function_types)
                 })
                 .flatten();
+            let assigned_class = (assignment.op == AssignOp::Assign)
+                .then(|| source_instance_class(&assignment.right, self.classes, &self.variables))
+                .flatten();
             let AssignTarget::Simple(target) = &assignment.left else {
                 return;
             };
@@ -1614,15 +1728,12 @@ fn rewrite_external_class_methods(
                         self.value_types.remove(binding.id.sym.as_str());
                     }
                     if assignment.op == AssignOp::Assign {
-                        if let Some(class) =
-                            source_instance_class(&assignment.right, self.classes, &self.variables)
-                        {
+                        invalidate_instance_path(&mut self.variables, binding.id.sym.as_str());
+                        if let Some(class) = assigned_class {
                             self.variables.insert(binding.id.sym.to_string(), class);
-                        } else {
-                            self.variables.remove(binding.id.sym.as_str());
                         }
                     } else {
-                        self.variables.remove(binding.id.sym.as_str());
+                        invalidate_instance_path(&mut self.variables, binding.id.sym.as_str());
                     }
                     if assignment.op == AssignOp::Assign
                         && matches!(assignment.right.as_ref(), Expr::Arrow(_) | Expr::Fn(_))
@@ -1637,6 +1748,11 @@ fn rewrite_external_class_methods(
                         Some(path) => path,
                         None => return,
                     };
+                    let instance_key = instance_path_key(&root, &path);
+                    invalidate_instance_path(&mut self.variables, &instance_key);
+                    if let Some(class) = assigned_class {
+                        self.variables.insert(instance_key, class);
+                    }
                     let Some(value) = inferred else {
                         self.value_types.remove(&root);
                         return;
@@ -4311,6 +4427,50 @@ mod tests {
         assert_eq!(
             rewritten,
             "const box = new NativeBox(42); const alias = box; __thaw_get(alias); let assigned = alias; __thaw_get(assigned); assigned = box; __thaw_get(assigned); assigned = unknown; assigned.get();"
+        );
+    }
+
+    #[test]
+    fn tracks_external_class_instances_through_object_properties() {
+        let source = "const box = new NativeBox(42); const holder = { box }; holder.box.get(); holder[\"box\"].get(); const nested = { inner: { value: new NativeBox(7) } }; nested.inner.value.get(); holder.box = box; holder.box.get(); holder.box = unknown; holder.box.get();";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[(
+                "NativeBox".into(),
+                "get".into(),
+                "__thaw_get".into(),
+                0,
+                false,
+                vec![],
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const box = new NativeBox(42); const holder = { box }; __thaw_get(holder.box); __thaw_get(holder[\"box\"]); const nested = { inner: { value: new NativeBox(7) } }; __thaw_get(nested.inner.value); holder.box = box; __thaw_get(holder.box); holder.box = unknown; holder.box.get();"
+        );
+    }
+
+    #[test]
+    fn joins_object_property_instance_facts_across_branches() {
+        let source = "const box = new NativeBox(42); let holder = { box }; if (flag) { holder.box = box; } else { holder.box = box; } holder.box.get(); if (flag) { holder.box = box; } else { holder.box = unknown; } holder.box.get(); holder = unknown; holder.box.get();";
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[(
+                "NativeBox".into(),
+                "get".into(),
+                "__thaw_get".into(),
+                0,
+                false,
+                vec![],
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            "const box = new NativeBox(42); let holder = { box }; if (flag) { holder.box = box; } else { holder.box = box; } __thaw_get(holder.box); if (flag) { holder.box = box; } else { holder.box = unknown; } holder.box.get(); holder = unknown; holder.box.get();"
         );
     }
 
