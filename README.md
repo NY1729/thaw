@@ -317,6 +317,12 @@ The workspace crates have narrow responsibilities:
   follows AbortSignals, inherits or overrides other Requests, moves inherited
   bodies, clones through `tee()`, and enforces GET/HEAD and streaming-duplex
   body rules while sharing the Response body consumers
+- Global `fetch()` is installed only when a bundled module references it. It
+  sends HTTP/HTTPS `Request` methods, headers and byte bodies through the Node
+  transport, exposes the reply as a `Response` with a `ReadableStream` body,
+  preserves repeated response headers, follows up to 20 relative or absolute
+  redirects with standard POST rewriting, supports `manual`/`error` redirect
+  modes, and rejects with the AbortSignal reason or a transport `TypeError`
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the

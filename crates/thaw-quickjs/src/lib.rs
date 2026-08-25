@@ -4401,6 +4401,13 @@ const PLATFORM_GLOBALS: &str = r#"
       static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); return new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); }
       get [Symbol.toStringTag]() { return 'Response'; }
     }
+    Object.defineProperty(globalThis, '__thaw_set_response_metadata', {
+      configurable: true,
+      value(response, url, redirected) {
+        const record = responseData.get(response); if (!record) throw new TypeError('invalid Response receiver');
+        record.url = String(url); record.redirected = Boolean(redirected); return response;
+      }
+    });
     const requestData = new WeakMap();
     const consumeRequestBody = async request => {
       const record = requestData.get(request); if (!record) throw new TypeError('invalid Request receiver');
