@@ -657,8 +657,9 @@ The workspace crates have narrow responsibilities:
   tuples, broad union/intersection support, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
-  reflection, declaration merging, and heterogeneous enums remain outside the
-  native constant subset
+  reflection and heterogeneous enums remain outside the native constant
+  subset. Compatible declarations merge in source order, with duplicate
+  member names and mixed native layouts rejected
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel
   collisions. Nullish coalescing and `??=` unwrap or update the payload with
