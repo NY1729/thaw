@@ -2015,43 +2015,73 @@ fn resolve_generic_alias(
             "generic type alias `{name}` is (indirectly) self-referential"
         ));
     }
-    let parameter_names = decl
+    let parameters = &decl
         .type_params
         .as_ref()
         .expect("caller only reaches generic aliases")
-        .params
-        .iter()
-        .map(|parameter| parameter.name.sym.to_string())
-        .collect::<Vec<_>>();
+        .params;
     let arguments = ty_ref
         .type_params
         .as_ref()
         .map(|parameters| parameters.params.as_slice())
         .unwrap_or_default();
-    if arguments.len() != parameter_names.len() {
+    let required = parameters
+        .iter()
+        .take_while(|parameter| parameter.default.is_none())
+        .count();
+    if arguments.len() < required || arguments.len() > parameters.len() {
+        let expected = if required == parameters.len() {
+            required.to_string()
+        } else {
+            format!("{required}..={}", parameters.len())
+        };
         return Err(format!(
-            "type alias `{name}` expects {} type argument(s), got {}",
-            parameter_names.len(),
+            "type alias `{name}` expects {expected} type argument(s), got {}",
             arguments.len()
         ));
     }
-    let arguments = arguments
-        .iter()
-        .map(|argument| match outer_substitution {
-            Some(outer) => resolve_ts_type_with_substitution(
-                argument,
-                outer,
+    let mut substitution = HashMap::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let concrete = if let Some(argument) = arguments.get(index) {
+            match outer_substitution {
+                Some(outer) => resolve_ts_type_with_substitution(
+                    argument,
+                    outer,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?,
+                None => lower_ts_type(argument, interfaces, generic_interfaces)?,
+            }
+        } else {
+            resolve_ts_type_with_substitution(
+                parameter
+                    .default
+                    .as_ref()
+                    .expect("arity validation requires a default"),
+                &substitution,
                 interfaces,
                 generic_interfaces,
                 in_progress,
-            ),
-            None => lower_ts_type(argument, interfaces, generic_interfaces),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let substitution = parameter_names
-        .into_iter()
-        .zip(arguments)
-        .collect::<HashMap<_, _>>();
+            )?
+        };
+        if let Some(constraint) = &parameter.constraint {
+            let constraint = resolve_ts_type_with_substitution(
+                constraint,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            if !type_satisfies_constraint(&concrete, &constraint) {
+                return Err(format!(
+                    "type argument {concrete:?} does not satisfy constraint {constraint:?} for `{}` in alias `{name}`",
+                    parameter.name.sym
+                ));
+            }
+        }
+        substitution.insert(parameter.name.sym.to_string(), concrete);
+    }
     in_progress.push(name.to_string());
     let result = resolve_ts_type_with_substitution(
         &decl.type_ann,
@@ -2062,6 +2092,27 @@ fn resolve_generic_alias(
     );
     in_progress.pop();
     result
+}
+
+fn type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> bool {
+    if actual == constraint || constraint == &HirType::Dynamic {
+        return true;
+    }
+    match constraint {
+        HirType::Union(elements) => elements
+            .iter()
+            .any(|element| type_satisfies_constraint(actual, element)),
+        HirType::Object(required) => match actual {
+            HirType::Object(fields) => required.iter().all(|(name, ty)| {
+                fields
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .is_some_and(|(_, actual)| type_satisfies_constraint(actual, ty))
+            }),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Like `lower_ts_type`, but a bare `TsTypeRef` matching one of `Name`'s
@@ -12927,6 +12978,14 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("generic type alias `Loop` is (indirectly) self-referential"));
+
+        let module = thaw_parser::parse_typescript(
+            "type Numeric<T extends number> = { value: T }; function bad(value: Numeric<string>): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("does not satisfy constraint F64"));
     }
 
     #[test]

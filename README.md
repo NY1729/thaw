@@ -145,7 +145,9 @@ The workspace crates have narrow responsibilities:
 - Generic `type` aliases substitute concrete arguments through nested object,
   alias, array, optional/nullable union, function, and promise layouts. They
   participate in generic-function call-site inference, validate arity and
-  reject direct or indirect generic-alias cycles
+  reject direct or indirect generic-alias cycles. Trailing type-parameter
+  defaults may reference earlier parameters, and concrete primitive/union or
+  structural-object constraints are validated at each instantiation
 - Heterogeneous native unions use an explicit tag and word payload across
   locals, function parameters/returns, fixed-shape object fields, nested calls,
   async frames, and homogeneous arrays (including index updates and spread
