@@ -13909,6 +13909,38 @@ mod tests {
     }
 
     #[test]
+    fn compiles_forward_type_aliases_across_native_layouts() {
+        let source = r#"
+            type RecordValue = Named & { count: number };
+            type Named = { name: string };
+            type Choice = string | number;
+            type ChoiceList = Choice[];
+            function record(name: string, count: number): RecordValue {
+                return { count, name };
+            }
+            function choose(flag: boolean): Choice {
+                return flag ? "selected" : 8;
+            }
+            async function delayed(value: Choice): Promise<Choice> {
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                const item: RecordValue = record("alias", 3);
+                console.log(item.name + String(item.count));
+                const values: ChoiceList = [choose(true), choose(false)];
+                console.log(values[0]);
+                console.log(values[1]);
+                console.log(await delayed("later"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "forward_type_aliases"),
+            "alias3\nselected\n8\nlater\n"
+        );
+    }
+
+    #[test]
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }
