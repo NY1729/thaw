@@ -3190,6 +3190,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              Server.prototype.address = function() { return this._address; }; Server.prototype.getConnections = function(callback) { queueMicrotask(() => callback(null, this.connections)); }; Server.prototype.close = function(callback) { if (typeof callback === 'function') this.once('close', callback); if (this._handle) __thaw_tls_server_close(this._handle); this._handle = 0; this.listening = false; queueMicrotask(() => this.emit('close')); return this; }; Server.prototype.ref = function() { this._refed = true; return this; }; Server.prototype.unref = function() { this._refed = false; return this; }; function createServer(options, listener) { return new Server(options, listener); }
              var connectWithoutIdentity = TLSSocket.prototype.connect; TLSSocket.prototype.connect = function(options, listener) { options = options || {}; if (options.cert === undefined && options.key === undefined) return connectWithoutIdentity.call(this, options, listener); var cert = options.cert, key = options.key; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; var nativeConnect = __thaw_tls_connect; __thaw_tls_connect = function(host, port, servername, ca) { return __thaw_tls_connect_with_identity(host, port, servername, ca, cert === undefined ? '' : Buffer.from(cert).toString('hex'), key === undefined ? '' : Buffer.from(key).toString('hex')); }; try { return connectWithoutIdentity.call(this, options, listener); } finally { __thaw_tls_connect = nativeConnect; } };
              var listenWithoutClientAuth = Server.prototype.listen; Server.prototype.listen = function() { if (!this._options.requestCert) return listenWithoutClientAuth.apply(this, arguments); var ca = this._options.ca; if (Array.isArray(ca)) ca = ca[0]; var caHex = ca === undefined ? '' : Buffer.from(ca).toString('hex'); var rejectUnauthorized = this._options.rejectUnauthorized !== false; var nativeListen = __thaw_tls_server_listen; __thaw_tls_server_listen = function(host, port, cert, key) { return __thaw_tls_server_listen_with_ca(host, port, cert, key, caHex, rejectUnauthorized); }; try { return listenWithoutClientAuth.apply(this, arguments); } finally { __thaw_tls_server_listen = nativeListen; } };
+             Server.prototype.listen = function(port, host, callback) { var options = typeof port === 'object' ? port : { port: port, host: host }; if (typeof host === 'function') callback = host; if (typeof callback === 'function') this.once('listening', callback); var hostname = String(options.host || '127.0.0.1'); var cert = this._options.cert, key = this._options.key, ca = this._options.ca; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; if (Array.isArray(ca)) ca = ca[0]; if (cert === undefined || key === undefined) { queueMicrotask(() => this.emit('error', new Error('cert and key are required'))); return this; } var certHex = Buffer.from(cert).toString('hex'), keyHex = Buffer.from(key).toString('hex'); var outcome = this._options.requestCert ? __thaw_tls_server_listen_with_ca(hostname, Number(options.port), certHex, keyHex, ca === undefined ? '' : Buffer.from(ca).toString('hex'), this._options.rejectUnauthorized !== false) : __thaw_tls_server_listen(hostname, Number(options.port), certHex, keyHex); if (outcome.indexOf('ok:') !== 0) { queueMicrotask(() => this.emit('error', new Error(outcome.substring(4)))); return this; } var fields = outcome.split(':'); this._handle = Number(fields[1]); this._address = { address: hostname, family: hostname.indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(fields[2]) }; this.listening = true; var server = this; function pump() { if (!server._handle || !server.listening) return; if (server.maxConnections > 0 && server.connections >= server.maxConnections) { setTimeout(pump, 1); return; } var accepted = __thaw_tls_server_poll_accept(server._handle); if (accepted === 'err:pending') { setTimeout(pump, 1); return; } if (accepted.indexOf('ok:') !== 0) { server.emit('tlsClientError', new Error(accepted.substring(4))); if (server._handle) setTimeout(pump, 1); return; } var peer = accepted.split(':'); var socket = new TLSSocket(); socket._handle = Number(peer[1]); socket.authorized = true; socket.readable = true; socket.writable = true; socket.remoteAddress = peer[2]; socket.remotePort = Number(peer[3]); socket.remoteFamily = peer[2].indexOf(':') >= 0 ? 'IPv6' : 'IPv4'; server.connections++; socket.once('close', function() { server.connections = Math.max(0, server.connections - 1); }); server.emit('secureConnection', socket); var incoming = __thaw_tls_server_read(socket._handle); if (incoming.indexOf('ok:') === 0) { var data = Buffer.from(incoming.substring(3), 'hex'); if (data.length) { socket.bytesRead += data.length; socket.emit('data', data); } socket.emit('end'); } else socket.emit('error', new Error(incoming.substring(4))); if (server._handle) setTimeout(pump, 0); } queueMicrotask(function() { server.emit('listening'); pump(); }); return this; };
              module.exports.Server = Server; module.exports.createServer = createServer;
 "#,
         )),
@@ -6205,27 +6206,31 @@ mod tests {
                 .unwrap(),
         );
         let client = std::thread::spawn(move || {
-            let socket = (0..50)
-                .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
-                    Ok(socket) => Some(socket),
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_millis(10));
-                        None
-                    }
+            (0..3)
+                .map(|index| {
+                    let socket = (0..50)
+                        .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                            Ok(socket) => Some(socket),
+                            Err(_) => {
+                                std::thread::sleep(Duration::from_millis(10));
+                                None
+                            }
+                        })
+                        .expect("TLS server did not start");
+                    let connection = ClientConnection::new(
+                        Arc::clone(&config),
+                        ServerName::try_from("localhost".to_string()).unwrap(),
+                    )
+                    .unwrap();
+                    let mut stream = StreamOwned::new(connection, socket);
+                    stream.write_all(format!("ping{index}").as_bytes()).unwrap();
+                    stream.conn.send_close_notify();
+                    stream.flush().unwrap();
+                    let mut response = Vec::new();
+                    stream.read_to_end(&mut response).unwrap();
+                    response
                 })
-                .expect("TLS server did not start");
-            let connection = ClientConnection::new(
-                config,
-                ServerName::try_from("localhost".to_string()).unwrap(),
-            )
-            .unwrap();
-            let mut stream = StreamOwned::new(connection, socket);
-            stream.write_all(b"ping").unwrap();
-            stream.conn.send_close_notify();
-            stream.flush().unwrap();
-            let mut response = Vec::new();
-            stream.read_to_end(&mut response).unwrap();
-            response
+                .collect::<Vec<_>>()
         });
         let to_hex = |value: &[u8]| {
             value.iter().fold(String::new(), |mut output, byte| {
@@ -6238,7 +6243,7 @@ mod tests {
         let key_hex = to_hex(&fs::read(&key_pem).unwrap());
         let client_ca_hex = to_hex(&fs::read(&client_cert_pem).unwrap());
         let dir = temp_registry("builtin_tls_server");
-        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function(port, certHex, keyHex, clientCaHex) { var events = []; var server; var closed = new Promise(function(resolve, reject) { server = tls.createServer({ cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ca: Buffer.from(clientCaHex, 'hex'), requestCert: true, rejectUnauthorized: true }, function(socket) { events.push('secureConnection'); socket.on('error', reject); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); socket.end('pong', function() { server.close(); }); }); }); server.on('listening', function() { events.push('listening'); }); server.on('error', reject); server.on('tlsClientError', reject); server.on('close', function() { events.push('close'); resolve(); }); server.listen(port, '127.0.0.1'); }); await closed; return [events, server.listening, server.address().port, server.connections]; };").unwrap();
+        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function(port, certHex, keyHex, clientCaHex) { var events = [], handled = 0, server; var closed = new Promise(function(resolve, reject) { server = tls.createServer({ cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ca: Buffer.from(clientCaHex, 'hex'), requestCert: true, rejectUnauthorized: true }, function(socket) { events.push('secureConnection'); socket.on('error', reject); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); handled++; socket.end('pong', function() { if (handled === 3) server.close(); }); }); }); server.on('listening', function() { events.push('listening'); }); server.on('error', reject); server.on('tlsClientError', reject); server.on('close', function() { events.push('close'); resolve(); }); server.listen(port, '127.0.0.1'); }); await closed; return [events, server.listening, server.address().port, server.connections]; };").unwrap();
         let empty_node_modules = temp_registry("builtin_tls_server_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -6255,9 +6260,11 @@ mod tests {
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(
             result,
-            format!(r#"[["listening","secureConnection","data:ping","close"],false,{port},1]"#)
+            format!(
+                r#"[["listening","secureConnection","data:ping0","secureConnection","data:ping1","secureConnection","data:ping2","close"],false,{port},0]"#
+            )
         );
-        assert_eq!(client.join().unwrap(), b"pong");
+        assert_eq!(client.join().unwrap(), vec![b"pong", b"pong", b"pong"]);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
         let _ = fs::remove_dir_all(&certificate_dir);
