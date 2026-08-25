@@ -3782,6 +3782,17 @@ impl<'a> FnLowerer<'a> {
                 }
             };
         }
+        if let (HirType::Array(element), HirExpr::ArrayLit(values)) = (declared, &value) {
+            let values = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    self.coerce_to_declared(element, value.clone())
+                        .map_err(|error| format!("array element {index}: {error}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(HirExpr::ArrayLit(values));
+        }
         if let (HirType::Tuple(expected), HirExpr::ArrayLit(values)) = (declared, &value) {
             if expected.len() != values.len() {
                 return Err(format!(
@@ -5551,7 +5562,7 @@ impl<'a> FnLowerer<'a> {
                     let Some(element) = element else {
                         return Err("elisions are not supported in array literals".into());
                     };
-                    let value = self.lower_expr(&element.expr)?;
+                    let mut value = self.lower_expr(&element.expr)?;
                     if element.spread.is_some() {
                         if !pending.is_empty() {
                             parts.push(HirExpr::ArrayLit(std::mem::take(&mut pending)));
@@ -5574,9 +5585,14 @@ impl<'a> FnLowerer<'a> {
                         let actual = self.infer_expr_type(&value)?;
                         if let Some(expected) = &element_type {
                             if expected != &actual {
-                                return Err(format!(
-                                    "array element type {actual:?} does not match {expected:?}"
-                                ));
+                                if matches!(expected, HirType::Union(members) if members.contains(&actual))
+                                {
+                                    value = self.coerce_to_declared(expected, value)?;
+                                } else {
+                                    return Err(format!(
+                                        "array element type {actual:?} does not match {expected:?}"
+                                    ));
+                                }
                             }
                         } else {
                             element_type = Some(actual);
@@ -6611,7 +6627,7 @@ impl<'a> FnLowerer<'a> {
         let object = self.lower_expr(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
         match &object_type {
-            HirType::Array(element) if element.as_ref() == &HirType::F64 => {
+            HirType::Array(_) => {
                 let index = self.lower_expr(&computed.expr)?;
                 self.expect_type(&HirType::F64, &index, "index expression")?;
                 Ok(Target::Index(object, Box::new(index)))
