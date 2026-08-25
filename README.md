@@ -347,7 +347,9 @@ The workspace crates have narrow responsibilities:
   synchronously validate required callbacks, stage counts and stream values
   with Node error codes. `finished()` always defers its callback, removes all
   observers when `cleanup` is requested, and treats an errored close as
-  completion when `error: false` is selected. Promise `finished()` aborts its wait without destroying
+  completion when `error: false` is selected. Promise pipeline's `end: false`
+  resolves when the upstream readable ends while leaving its destination open
+  and writable. Promise `finished()` aborts its wait without destroying
   the observed stream. `stream.compose()` joins transform stages behind one
   Duplex interface, while `Duplex.from()` adapts readable/writable pairs,
   Promises, sync and async iterables, and async-generator transforms. Stream
