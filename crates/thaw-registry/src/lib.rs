@@ -3712,6 +3712,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function workerNotRunning() { return threadMessagingError('ERR_WORKER_NOT_RUNNING', 'Worker instance is not running'); } Worker.prototype.cpuUsage = function(previous) { if (this._exited) return Promise.reject(workerNotRunning()); var current = { user: 0, system: 0 }; if (previous) { current.user = Math.max(0, current.user - Number(previous.user || 0)); current.system = Math.max(0, current.system - Number(previous.system || 0)); } return Promise.resolve(current); }; Worker.prototype.getHeapStatistics = function() { if (this._exited) return Promise.reject(workerNotRunning()); return Promise.resolve({ total_heap_size: 0, total_heap_size_executable: 0, total_physical_size: 0, total_available_size: 0, used_heap_size: 0, heap_size_limit: Number.MAX_SAFE_INTEGER, malloced_memory: 0, peak_malloced_memory: 0, does_zap_garbage: 0, number_of_native_contexts: 1, number_of_detached_contexts: 0, total_global_handles_size: 0, used_global_handles_size: 0, external_memory: 0 }); }; Worker.prototype.getHeapSnapshot = function() { if (this._exited) return Promise.reject(workerNotRunning()); var snapshot = new WorkerReadable(); queueMicrotask(function() { snapshot.push(JSON.stringify({ snapshot: { meta: {}, node_count: 0, edge_count: 0 }, nodes: [], edges: [], strings: [] })); snapshot.push(null); }); return Promise.resolve(snapshot); }; Worker.prototype.startCpuProfile = function() { if (this._exited) return Promise.reject(workerNotRunning()); var stopped = false; return Promise.resolve({ stop: function() { if (stopped) return Promise.reject(new Error('CPU profile has already been stopped')); stopped = true; return Promise.resolve({ nodes: [], startTime: 0, endTime: 0, samples: [], timeDeltas: [] }); } }); };
              var EvalWorker = Worker; function createNativeWorker(source, options) { if (!canUseNativeWorker(source, options)) return null; var worker = Object.create(EvalWorker.prototype); worker._events = Object.create(null); worker.threadId = nextWorkerId++; worker.threadName = options.name === undefined ? '' : String(options.name); globalThis.__thaw_next_worker_id = nextWorkerId; worker.resourceLimits = Object.assign({}, options.resourceLimits || {}); worker.performance = { eventLoopUtilization: function() { return { idle: 0, active: 0, utilization: 0 }; } }; return startNativeWorker(worker, source, options) ? worker : null; } function decodeWorkerDataUrl(value) { var text = String(value); if (!text.startsWith('data:')) return null; var comma = text.indexOf(','); if (comma < 0) throw new TypeError('Invalid Worker data URL'); var metadata = text.slice(5, comma).toLowerCase(), payload = text.slice(comma + 1), parts = metadata.split(';'), mediaType = parts[0] || 'text/plain'; if (mediaType !== 'text/javascript' && mediaType !== 'application/javascript') throw new TypeError('Worker data URL must contain JavaScript'); try { return parts.indexOf('base64') >= 0 ? Buffer.from(payload, 'base64').toString('utf8') : decodeURIComponent(payload); } catch (error) { throw new TypeError('Invalid Worker data URL payload'); } } function readRuntimeWorkerFile(value) { var filename = String(value); if (filename.startsWith('file:')) { try { filename = decodeURIComponent(new URL(filename).pathname); } catch (error) { throw new TypeError('Invalid Worker file URL'); } } var source = __thaw_worker_read_source(filename), slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash), prefix = '(function(){ var __thawBuiltinRequire = require, __thawRuntimeCache = Object.create(null); function __thawNormalize(path) { var absolute = path.charAt(0) === "/", output = []; path.split("/").forEach(function(part) { if (!part || part === ".") return; if (part === "..") output.pop(); else output.push(part); }); return (absolute ? "/" : "") + output.join("/"); } function __thawLoad(base, request) { if (request.slice(0, 2) !== "./" && request.slice(0, 3) !== "../" && request.charAt(0) !== "/") return __thawBuiltinRequire(request); var target = __thawNormalize(request.charAt(0) === "/" ? request : base + "/" + request), candidates = /\\.[^/]+$/.test(target) ? [target] : [target, target + ".js", target + ".json", target + "/index.js", target + "/index.json"], loaded, filename; for (var index = 0; index < candidates.length; index++) { try { loaded = __thaw_worker_read_source(candidates[index]); filename = candidates[index]; break; } catch (error) {} } if (filename === undefined) throw new Error("Cannot find module \'" + request + "\'"); if (__thawRuntimeCache[filename]) return __thawRuntimeCache[filename].exports; var module = __thawRuntimeCache[filename] = { exports: {} }, slash = filename.lastIndexOf("/"), dirname = slash < 0 ? "." : filename.slice(0, slash), localRequire = function(name) { return __thawLoad(dirname, String(name)); }; if (/\\.json$/.test(filename)) module.exports = JSON.parse(loaded); else Function("module", "exports", "require", "__filename", "__dirname", loaded)(module, module.exports, localRequire, filename, dirname); return module.exports; } require = function(request) { return __thawLoad(__dirname, String(request)); }; })();\n'; return 'var __filename = ' + JSON.stringify(filename) + '; var __dirname = ' + JSON.stringify(dirname) + ';\n' + prefix + source; } Worker = function Worker(filename, options) { options = options || {}; var source = options.eval ? String(filename) : decodeWorkerDataUrl(filename); if (source === null) source = readRuntimeWorkerFile(filename); var nativeWorker = createNativeWorker(source, options); if (nativeWorker) return nativeWorker; var workerOptions = options.eval ? options : Object.assign({}, options, { eval: true }); return new EvalWorker(source, workerOptions); }; Worker.prototype = EvalWorker.prototype;
              var readRuntimeWorkerFileWithoutDirectoryResolution = readRuntimeWorkerFile; readRuntimeWorkerFile = function(value) { var source = readRuntimeWorkerFileWithoutDirectoryResolution(value), basicCandidates = 'candidates = /\\.[^/]+$/.test(target) ? [target] : [target, target + ".js", target + ".json", target + "/index.js", target + "/index.json"], loaded, filename;', nodeCandidates = 'candidates = /\\.[^/]+$/.test(target) ? [target] : [target, target + ".js", target + ".cjs", target + ".json", target + "/index.js", target + "/index.cjs", target + "/index.json"], loaded, filename; if (!/\\.[^/]+$/.test(target)) { try { var manifest = JSON.parse(__thaw_worker_read_source(target + "/package.json")); if (typeof manifest.main === "string" && manifest.main) return __thawLoad(target, "./" + manifest.main); } catch (error) {} }'; return source.replace(basicCandidates, nodeCandidates); };
+             var readRuntimeWorkerFileWithoutBareResolution = readRuntimeWorkerFile; readRuntimeWorkerFile = function(value) { var source = readRuntimeWorkerFileWithoutBareResolution(value), builtinOnly = 'if (request.slice(0, 2) !== "./" && request.slice(0, 3) !== "../" && request.charAt(0) !== "/") return __thawBuiltinRequire(request);', nodeModulesFallback = 'if (request.slice(0, 2) !== "./" && request.slice(0, 3) !== "../" && request.charAt(0) !== "/") { try { return __thawBuiltinRequire(request); } catch (builtinError) { var parts = request.split("/"), packageParts = request.charAt(0) === "@" ? parts.slice(0, 2) : parts.slice(0, 1), packageName = packageParts.join("/"), subpath = parts.slice(packageParts.length).join("/"), directory = base; while (directory) { var packageRoot = directory + "/node_modules/" + packageName, packageFound = false; try { __thaw_worker_read_source(packageRoot + "/package.json"); packageFound = true; } catch (lookupError) {} if (packageFound) return subpath ? __thawLoad(packageRoot, "./" + subpath) : __thawLoad(directory + "/node_modules", "./" + packageName); var slash = directory.lastIndexOf("/"); if (slash <= 0) break; directory = directory.slice(0, slash); } throw builtinError; } }'; return source.replace(builtinOnly, nodeModulesFallback); };
              settleNativeDirect = function(request, errorText) { var pending = nativeDirectPending.get(Number(request)); if (!pending) return; nativeDirectPending.delete(Number(request)); if (pending.timer) clearTimeout(pending.timer); if (!errorText) { pending.resolve(); return; } var separator = errorText.indexOf(':'), code = separator < 0 ? errorText : errorText.slice(0, separator), message = separator < 0 ? errorText : errorText.slice(separator + 1), error = new Error(message); error.code = code; if (code === 'ERR_WORKER_MESSAGING_ERRORED') error.cause = new Error(message); pending.reject(error); }; module.exports.Worker = Worker; module.exports.postMessageToThread = postMessageToThread;
 "#,
         )),
@@ -6316,31 +6317,44 @@ mod tests {
     fn worker_threads_load_runtime_computed_absolute_paths() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_worker_runtime_path");
-        let worker_path = dir.join("dynamic-worker.js");
+        let worker_dir = dir.join("workers/nested");
+        fs::create_dir_all(&worker_dir).unwrap();
+        let worker_path = worker_dir.join("dynamic-worker.js");
         fs::write(
-            dir.join("worker-value.js"),
+            worker_dir.join("worker-value.js"),
             "module.exports = require('./worker-package') + 1;",
         )
         .unwrap();
-        fs::create_dir_all(dir.join("worker-package/lib")).unwrap();
+        fs::create_dir_all(worker_dir.join("worker-package/lib")).unwrap();
         fs::write(
-            dir.join("worker-package/package.json"),
+            worker_dir.join("worker-package/package.json"),
             r#"{"main":"lib/value"}"#,
         )
         .unwrap();
         fs::write(
-            dir.join("worker-package/lib/value.cjs"),
+            worker_dir.join("worker-package/lib/value.cjs"),
             "module.exports = require('../worker-data.json').value;",
         )
         .unwrap();
         fs::write(
-            dir.join("worker-package/worker-data.json"),
+            worker_dir.join("worker-package/worker-data.json"),
             r#"{"value":41}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("node_modules/runtime-worker-dependency")).unwrap();
+        fs::write(
+            dir.join("node_modules/runtime-worker-dependency/package.json"),
+            r#"{"main":"entry.cjs"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("node_modules/runtime-worker-dependency/entry.cjs"),
+            "module.exports = 8;",
         )
         .unwrap();
         fs::write(
             &worker_path,
-            "var wt = require('node:worker_threads'); wt.parentPort.postMessage([wt.workerData, __filename, __dirname, typeof __thaw_worker_spawn, require('./worker-value')]); wt.parentPort.close();",
+            "var wt = require('node:worker_threads'); wt.parentPort.postMessage([wt.workerData, __filename, __dirname, typeof __thaw_worker_spawn, require('./worker-value'), require('runtime-worker-dependency')]); wt.parentPort.close();",
         )
         .unwrap();
         fs::write(
@@ -6360,7 +6374,7 @@ mod tests {
         let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
         let expected = serde_json::json!([
-            [23, path, dir.to_string_lossy(), "function", 42],
+            [23, path, worker_dir.to_string_lossy(), "function", 42, 8],
             0,
             "number"
         ])
