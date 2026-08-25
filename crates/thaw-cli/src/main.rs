@@ -3760,6 +3760,7 @@ mod tests {
                     clearTimeout(cancelled);
                     const cancelledImmediate = setImmediate(() => events.push('cancelled-immediate'));
                     clearImmediate(cancelledImmediate);
+                    process.nextTick(value => events.push(value), 'nextTick');
                     queueMicrotask(() => events.push('microtask'));
                     setImmediate(value => events.push(value), 'immediate');
                     let ticks = 0;
@@ -3797,7 +3798,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "microtask,immediate:2:雪\n"
+            "nextTick,microtask,immediate:2:雪\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

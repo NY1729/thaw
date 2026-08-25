@@ -294,6 +294,9 @@ The workspace crates have narrow responsibilities:
   forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
   `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM
   removal, and fatal decoding errors
+- The ambient `process` global and importable `node:process`/`process` module
+  share a microtask-backed `nextTick` that is asynchronous and forwards
+  callback arguments
 - `node:fs` exposes native synchronous UTF-8 `existsSync`, `readFileSync`,
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
 - `node:http` exposes native `serveOnce(port, body)` and
