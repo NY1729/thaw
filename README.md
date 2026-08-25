@@ -352,7 +352,9 @@ The workspace crates have narrow responsibilities:
   and writable. Promise `finished()` aborts its wait without destroying
   the observed stream. `stream.compose()` joins transform stages behind one
   Duplex interface, while `Duplex.from()` adapts readable/writable pairs,
-  Promises, sync and async iterables, and async-generator transforms. Stream
+  Promises, sync and async iterables, and async-generator transforms. Both APIs
+  reject missing, directionally invalid or unsupported inputs synchronously
+  with Node-compatible error codes. Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
   errored state, with the original destruction error retained on the stream.
   Default byte/object high-water marks are queryable and configurable for new
