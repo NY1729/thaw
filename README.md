@@ -399,6 +399,11 @@ The workspace crates have narrow responsibilities:
   all three `prevent*` options and releasing both locks. `pipeThrough()`
   validates locked endpoints synchronously and forwards transform failures to
   both its returned readable and the original source cancellation.
+  `ReadableStream.tee()` retains the source lock, delivers each chunk to both
+  branches with shared object identity, propagates close/error to both sides,
+  and defers one-sided cancellation until the other branch finishes; when both
+  branches cancel, their reasons are forwarded to the source as an ordered
+  pair.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
