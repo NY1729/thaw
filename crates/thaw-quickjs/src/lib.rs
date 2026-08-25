@@ -113,6 +113,33 @@ const PLATFORM_GLOBALS: &str = r#"
     nextTick
   });
 
+  if (typeof globalThis.DOMException !== 'function') {
+    const legacyCodes = {
+      IndexSizeError: 1, HierarchyRequestError: 3, WrongDocumentError: 4,
+      InvalidCharacterError: 5, NoModificationAllowedError: 7,
+      NotFoundError: 8, NotSupportedError: 9, InUseAttributeError: 10,
+      InvalidStateError: 11, SyntaxError: 12, InvalidModificationError: 13,
+      NamespaceError: 14, InvalidAccessError: 15, TypeMismatchError: 17,
+      SecurityError: 18, NetworkError: 19, AbortError: 20,
+      URLMismatchError: 21, QuotaExceededError: 22, TimeoutError: 23,
+      InvalidNodeTypeError: 24, DataCloneError: 25
+    };
+    class DOMException extends Error {
+      constructor(message = '', name = 'Error') {
+        super(String(message));
+        this.name = String(name);
+        this.code = legacyCodes[this.name] || 0;
+      }
+    }
+    for (const [name, code] of Object.entries(legacyCodes)) {
+      const constant = name.replace(/Error$/, '')
+        .replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase() + '_ERR';
+      Object.defineProperty(DOMException, constant, { value: code });
+      Object.defineProperty(DOMException.prototype, constant, { value: code });
+    }
+    globalThis.DOMException = DOMException;
+  }
+
   const base64Alphabet =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   globalThis.btoa = input => {
@@ -123,7 +150,8 @@ const PLATFORM_GLOBALS: &str = r#"
       const second = offset + 1 < text.length ? text.charCodeAt(offset + 1) : 0;
       const third = offset + 2 < text.length ? text.charCodeAt(offset + 2) : 0;
       if (first > 255 || second > 255 || third > 255) {
-        throw new TypeError('btoa input must contain only Latin-1 characters');
+        throw new DOMException('btoa input must contain only Latin-1 characters',
+                               'InvalidCharacterError');
       }
       const bits = first << 16 | second << 8 | third;
       output += base64Alphabet[bits >> 18 & 63];
@@ -136,11 +164,11 @@ const PLATFORM_GLOBALS: &str = r#"
   globalThis.atob = input => {
     const encoded = String(input).replace(/[\t\n\f\r ]/g, '');
     if (encoded.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
-      throw new TypeError('invalid base64 input');
+      throw new DOMException('invalid base64 input', 'InvalidCharacterError');
     }
     const unpadded = encoded.replace(/=+$/, '');
     if (encoded.includes('=') && encoded.length % 4 !== 0) {
-      throw new TypeError('invalid base64 padding');
+      throw new DOMException('invalid base64 padding', 'InvalidCharacterError');
     }
     let output = '';
     let bits = 0;
@@ -179,7 +207,8 @@ const PLATFORM_GLOBALS: &str = r#"
       const clone = input => {
         if (input === null || typeof input !== 'object') {
           if (typeof input === 'function' || typeof input === 'symbol') {
-            throw new TypeError('value cannot be structured-cloned');
+            throw new DOMException('value cannot be structured-cloned',
+                                   'DataCloneError');
           }
           return input;
         }
@@ -224,14 +253,10 @@ const PLATFORM_GLOBALS: &str = r#"
   }
   if (typeof globalThis.AbortController !== 'function') {
     const abortError = message => {
-      const error = new Error(message || 'This operation was aborted');
-      error.name = 'AbortError';
-      return error;
+      return new DOMException(message || 'This operation was aborted', 'AbortError');
     };
     const timeoutError = () => {
-      const error = new Error('The operation timed out');
-      error.name = 'TimeoutError';
-      return error;
+      return new DOMException('The operation timed out', 'TimeoutError');
     };
     class AbortSignal {
       constructor() {
@@ -1267,9 +1292,9 @@ mod tests {
             load(
                 "function base64() {\n\
                    let invalid = false;\n\
-                   try { atob('%%%'); } catch (error) { invalid = error instanceof TypeError; }\n\
+                   try { atob('%%%'); } catch (error) { invalid = error instanceof DOMException && error.name === 'InvalidCharacterError' && error.code === DOMException.INVALID_CHARACTER_ERR; }\n\
                    let invalidUnicode = false;\n\
-                   try { btoa('雪'); } catch (error) { invalidUnicode = error instanceof TypeError; }\n\
+                   try { btoa('雪'); } catch (error) { invalidUnicode = error instanceof DOMException && error.name === 'InvalidCharacterError'; }\n\
                    return [btoa('hello\\u00ff'), atob('aGVs bG//\\n'), invalid, invalidUnicode];\n\
                  }"
             ),
@@ -1303,7 +1328,7 @@ mod tests {
                    const copy = structuredClone(source);\n\
                    copy.nested.value = 7; copy.bytes[0] = 8;\n\
                    let rejected = false;\n\
-                   try { structuredClone(() => 1); } catch (error) { rejected = error instanceof TypeError; }\n\
+                   try { structuredClone(() => 1); } catch (error) { rejected = error instanceof DOMException && error.name === 'DataCloneError' && error.code === DOMException.DATA_CLONE_ERR; }\n\
                    return [copy !== source, copy.self === copy, source.nested.value, source.bytes[0], copy.map.get('key'), copy.set.has(5), copy.date.getTime(), rejected];\n\
                  }"
             ),
@@ -1331,16 +1356,17 @@ mod tests {
                    const combined = AbortSignal.any([first.signal, second.signal]);\n\
                    second.abort('combined');\n\
                    const preAborted = AbortSignal.any([AbortSignal.abort('pre')]);\n\
+                   const defaultAbort = AbortSignal.abort();\n\
                    let invalidAny = false;\n\
                    try { AbortSignal.any([first.signal, {}]); } catch (error) { invalidAny = error instanceof TypeError; }\n\
-                   return [events.join(','), controller.signal.reason, thrown, timed.aborted, timed.reason.name, combined.aborted, combined.reason, preAborted.reason, invalidAny];\n\
+                   return [events.join(','), controller.signal.reason, thrown, timed.aborted, timed.reason.name, timed.reason.code, combined.aborted, combined.reason, preAborted.reason, defaultAbort.reason.name, defaultAbort.reason.code, invalidAny];\n\
                  }"
             ),
             1
         );
         assert_eq!(
             call("abortSignals", "[]"),
-            r#"["property,once","reason","reason",true,"TimeoutError",true,"combined","pre",true]"#
+            r#"["property,once","reason","reason",true,"TimeoutError",23,true,"combined","pre","AbortError",20,true]"#
         );
     }
 
