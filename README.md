@@ -294,6 +294,9 @@ The workspace crates have narrow responsibilities:
   and introspection; native `new EventEmitter()` class bridging remains outside
   this import surface. The URL module shares the global constructors and
   provides file-URL conversion plus HTTP-option projection
+- `node:path` covers POSIX resolve/join/normalize, relative paths, component
+  parsing/formatting, extensions and suffix removal, with a matching minimal
+  `win32` namespace for cross-platform package logic
 - `node:string_decoder` preserves incomplete UTF-8, UTF-16LE and Base64 input
   across chunk boundaries and flushes incomplete terminal input from `end()`
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
