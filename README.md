@@ -343,7 +343,8 @@ The workspace crates have narrow responsibilities:
 - `node:v8` provides cycle-preserving serialization for common JavaScript
   values and the heap/code-statistics shapes used by runtime probes
 - `node:zlib` provides gzip, zlib and raw-deflate compression/decompression
-  through synchronous and callback APIs
+  through synchronous, callback and buffered Transform stream APIs, including
+  the `createGzip()`/`createGunzip()`/deflate factory and constructor families
 - `MessageChannel`/`MessagePort` provide structured-cloned asynchronous and
   synchronous delivery and transfer-list ownership moves with detached source
   ports, while `BroadcastChannel` distributes isolated copies
