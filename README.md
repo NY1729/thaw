@@ -373,7 +373,8 @@ The workspace crates have narrow responsibilities:
   runtime-computed absolute paths and `file:` URLs from the host filesystem,
   with cached relative CommonJS/JSON dependencies, `.cjs`, directory indexes
   and `package.json` `main` entries resolved from each file; bare package
-  requests search ancestor `node_modules` directories from the Worker file
+  requests search ancestor `node_modules` directories from the Worker file and
+  honor exact root/subpath `exports` with `require`/`node`/`default` conditions
   (embedding arbitrary runtime-selected files into one binary remains
   impossible without declaring their candidate set); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
