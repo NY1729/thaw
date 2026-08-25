@@ -54,6 +54,13 @@ type TlsServerStreamTable = (u32, HashMap<u32, TlsServerStream>);
 struct TlsListener {
     socket: TcpListener,
     config: Arc<ServerConfig>,
+    local_certificate: Vec<u8>,
+}
+
+#[derive(Default)]
+struct TlsCertificates {
+    peer: Option<Vec<u8>>,
+    local: Option<Vec<u8>>,
 }
 
 fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
@@ -98,6 +105,8 @@ thread_local! {
     static TLS_STREAMS: RefCell<TlsStreamTable> = RefCell::new((1, HashMap::new()));
     static TLS_SERVER_STREAMS: RefCell<TlsServerStreamTable> = RefCell::new((1, HashMap::new()));
     static TLS_LISTENERS: RefCell<(u32, HashMap<u32, TlsListener>)> = RefCell::new((1, HashMap::new()));
+    static TLS_CLIENT_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
+    static TLS_SERVER_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -370,6 +379,7 @@ fn tls_connect(options: TlsClientOptions<'_>) -> String {
         }
     }
     let builder = ClientConfig::builder().with_root_certificates(roots);
+    let mut local_certificate = None;
     let config = if cert_spec.is_empty() && key_spec.is_empty() {
         builder.with_no_client_auth()
     } else if cert_spec.is_empty() || key_spec.is_empty() {
@@ -379,6 +389,9 @@ fn tls_connect(options: TlsClientOptions<'_>) -> String {
             Ok(certificates) => certificates,
             Err(error) => return format!("err:{error}"),
         };
+        local_certificate = certificates
+            .first()
+            .map(|certificate| certificate.as_ref().to_vec());
         let key = match decode_private_key(key_spec) {
             Ok(key) => key,
             Err(error) => return format!("err:{error}"),
@@ -409,10 +422,23 @@ fn tls_connect(options: TlsClientOptions<'_>) -> String {
             return format!("err:{error}");
         }
     }
+    let peer_certificate = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .map(|certificate| certificate.as_ref().to_vec());
     TLS_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let handle = streams.0;
         streams.0 = streams.0.wrapping_add(1).max(1);
+        TLS_CLIENT_CERTIFICATES.with(|certificates| {
+            certificates.borrow_mut().insert(
+                handle,
+                TlsCertificates {
+                    peer: peer_certificate,
+                    local: local_certificate,
+                },
+            );
+        });
         streams
             .1
             .insert(handle, StreamOwned::new(connection, socket));
@@ -456,6 +482,10 @@ fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
         Ok(certificates) => certificates,
         Err(error) => return format!("err:{error}"),
     };
+    let local_certificate = certificates
+        .first()
+        .map(|certificate| certificate.as_ref().to_vec())
+        .unwrap_or_default();
     let private_key = match decode_private_key(key_spec) {
         Ok(private_key) => private_key,
         Err(error) => return format!("err:{error}"),
@@ -508,7 +538,14 @@ fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
         let mut listeners = listeners.borrow_mut();
         let handle = listeners.0;
         listeners.0 = listeners.0.wrapping_add(1).max(1);
-        listeners.1.insert(handle, TlsListener { socket, config });
+        listeners.1.insert(
+            handle,
+            TlsListener {
+                socket,
+                config,
+                local_certificate,
+            },
+        );
         format!("ok:{handle}:{actual_port}")
     })
 }
@@ -527,7 +564,14 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
             let _ = listener.socket.set_nonblocking(false);
         }
         accepted
-            .map(|(socket, peer)| (socket, peer, Arc::clone(&listener.config)))
+            .map(|(socket, peer)| {
+                (
+                    socket,
+                    peer,
+                    Arc::clone(&listener.config),
+                    listener.local_certificate.clone(),
+                )
+            })
             .map_err(|error| {
                 if nonblocking && error.kind() == io::ErrorKind::WouldBlock {
                     "pending".to_string()
@@ -536,7 +580,7 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
                 }
             })
     });
-    let (mut socket, peer, config) = match accepted {
+    let (mut socket, peer, config, local_certificate) = match accepted {
         Ok(accepted) => accepted,
         Err(error) => return format!("err:{error}"),
     };
@@ -550,10 +594,23 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
             return format!("err:{error}");
         }
     }
+    let peer_certificate = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .map(|certificate| certificate.as_ref().to_vec());
     TLS_SERVER_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let stream_handle = streams.0;
         streams.0 = streams.0.wrapping_add(1).max(1);
+        TLS_SERVER_CERTIFICATES.with(|certificates| {
+            certificates.borrow_mut().insert(
+                stream_handle,
+                TlsCertificates {
+                    peer: peer_certificate,
+                    local: Some(local_certificate),
+                },
+            );
+        });
         streams
             .1
             .insert(stream_handle, StreamOwned::new(connection, socket));
@@ -629,6 +686,9 @@ fn tls_write(handle: u32, value: &[u8]) -> String {
 fn tls_finish(handle: u32) -> String {
     let client_result = TLS_STREAMS.with(|streams| {
         let mut stream = streams.borrow_mut().1.remove(&handle)?;
+        TLS_CLIENT_CERTIFICATES.with(|certificates| {
+            certificates.borrow_mut().remove(&handle);
+        });
         stream.conn.send_close_notify();
         if let Err(error) = stream.flush() {
             return Some(format!("err:{error}"));
@@ -644,6 +704,9 @@ fn tls_finish(handle: u32) -> String {
             let Some(mut stream) = streams.borrow_mut().1.remove(&handle) else {
                 return "err:socket is closed".to_string();
             };
+            TLS_SERVER_CERTIFICATES.with(|certificates| {
+                certificates.borrow_mut().remove(&handle);
+            });
             stream.conn.send_close_notify();
             if let Err(error) = stream.flush() {
                 return format!("err:{error}");
@@ -664,6 +727,12 @@ fn tls_destroy(handle: u32) {
     TLS_SERVER_STREAMS.with(|streams| {
         streams.borrow_mut().1.remove(&handle);
     });
+    TLS_CLIENT_CERTIFICATES.with(|certificates| {
+        certificates.borrow_mut().remove(&handle);
+    });
+    TLS_SERVER_CERTIFICATES.with(|certificates| {
+        certificates.borrow_mut().remove(&handle);
+    });
 }
 
 fn tls_alpn(handle: u32) -> String {
@@ -683,6 +752,26 @@ fn tls_alpn(handle: u32) -> String {
                 .and_then(|stream| stream.conn.alpn_protocol().map(hex_encode))
                 .unwrap_or_default()
         })
+    })
+}
+
+fn tls_certificate(handle: u32, peer: bool) -> String {
+    let read = |certificates: &HashMap<u32, TlsCertificates>| {
+        certificates
+            .get(&handle)
+            .and_then(|pair| {
+                if peer {
+                    pair.peer.as_deref()
+                } else {
+                    pair.local.as_deref()
+                }
+            })
+            .map(hex_encode)
+    };
+    let client = TLS_CLIENT_CERTIFICATES.with(|certificates| read(&certificates.borrow()));
+    client.unwrap_or_else(|| {
+        TLS_SERVER_CERTIFICATES
+            .with(|certificates| read(&certificates.borrow()).unwrap_or_default())
     })
 }
 
@@ -990,6 +1079,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         .expect("failed to create JavaScript TLS closer");
                 let tls_alpn_function = Function::new(ctx.clone(), |handle: u32| tls_alpn(handle))
                     .expect("failed to create JavaScript TLS ALPN reader");
+                let tls_peer_certificate_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, true))
+                        .expect("failed to create JavaScript TLS peer certificate reader");
+                let tls_local_certificate_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, false))
+                        .expect("failed to create JavaScript TLS local certificate reader");
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
@@ -1138,6 +1233,15 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_tls_alpn", tls_alpn_function)
                     .expect("failed to install JavaScript TLS ALPN reader");
+                ctx.globals()
+                    .set("__thaw_tls_peer_certificate", tls_peer_certificate_function)
+                    .expect("failed to install JavaScript TLS peer certificate reader");
+                ctx.globals()
+                    .set(
+                        "__thaw_tls_local_certificate",
+                        tls_local_certificate_function,
+                    )
+                    .expect("failed to install JavaScript TLS local certificate reader");
                 ctx.globals()
                     .set("__thaw_tls_server_listen", tls_server_listen_function)
                     .expect("failed to install JavaScript TLS listener");
