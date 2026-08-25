@@ -360,6 +360,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .any(|(_, value)| Self::expr_awaits_frame_source(value, frame_functions)),
             HirExpr::PropAccess(obj, _, _)
             | HirExpr::ArrayLen(obj)
+            | HirExpr::EnumReverseLookup(obj, _)
             | HirExpr::JsonAsNumber(obj)
             | HirExpr::JsonAsString(obj)
             | HirExpr::JsonAsBool(obj) => Self::expr_awaits_frame_source(obj, frame_functions),
@@ -2781,6 +2782,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     || Self::expr_awaits_named_async(right, frame_names)
             }
             HirExpr::Assign(_, value) => Self::expr_awaits_named_async(value, frame_names),
+            HirExpr::EnumReverseLookup(value, _) => {
+                Self::expr_awaits_named_async(value, frame_names)
+            }
             HirExpr::Call(callee, args) => {
                 Self::expr_awaits_named_async(callee, frame_names)
                     || args
@@ -2930,6 +2934,7 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::PromiseAnyArray(value, _)
             | HirExpr::PromiseAllSettledArray(value, _)
             | HirExpr::ArrayLen(value)
+            | HirExpr::EnumReverseLookup(value, _)
             | HirExpr::JsonGet(value, _)
             | HirExpr::JsonAsNumber(value)
             | HirExpr::JsonAsString(value)
@@ -4902,6 +4907,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::DynamicPropAccess(obj, key, fields, result) => {
                 self.compile_dynamic_prop_access(obj, key, fields, result)
             }
+            HirExpr::EnumReverseLookup(index, entries) => {
+                self.compile_enum_reverse_lookup(index, entries)
+            }
             HirExpr::PropAssign(obj, object_ty, field, value) => {
                 let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
                 let val = self.compile_expr(value)?;
@@ -5067,6 +5075,68 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(merge);
         self.builder
             .build_load(result_type, result_slot, "dynamic_property_optional")
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_enum_reverse_lookup(
+        &mut self,
+        index: &HirExpr,
+        entries: &[(f64, String)],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let index = self.compile_expr(index)?.into_float_value();
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or("enum reverse lookup is outside a function")?;
+        let result_type = self.basic_type(&HirType::Optional(Box::new(HirType::Str)))?;
+        let result = self
+            .builder
+            .build_alloca(result_type, "enum_reverse_result")
+            .map_err(|error| error.to_string())?;
+        let none = self.compile_optional_none(&HirType::Str)?;
+        self.builder
+            .build_store(result, none)
+            .map_err(|error| error.to_string())?;
+        let merge = self
+            .context
+            .append_basic_block(function, "enum_reverse_merge");
+        for (number, name) in entries {
+            let matched = self
+                .context
+                .append_basic_block(function, "enum_reverse_match");
+            let next = self
+                .context
+                .append_basic_block(function, "enum_reverse_next");
+            let matches = self
+                .builder
+                .build_float_compare(
+                    FloatPredicate::OEQ,
+                    index,
+                    self.context.f64_type().const_float(*number),
+                    "enum_reverse_equals",
+                )
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(matches, matched, next)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(matched);
+            let name = self.compile_expr(&HirExpr::Lit(HirLit::Str(name.clone())))?;
+            let some = self.build_optional_value(name, &HirType::Str, true)?;
+            self.builder
+                .build_store(result, some)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(next);
+        }
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge);
+        self.builder
+            .build_load(result_type, result, "enum_reverse_optional")
             .map_err(|error| error.to_string())
     }
 
@@ -8273,6 +8343,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .find(|(name, _)| name == field)
                 .map(|(_, ty)| ty.clone()),
             HirExpr::DynamicPropAccess(_, _, _, result) => Some(result.clone()),
+            HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::Lambda(_, params, ret, _) => Some(HirType::Function(
@@ -13199,25 +13270,36 @@ mod tests {
     #[test]
     fn compiles_numeric_and_string_enums_as_typed_constants() {
         let source = r#"
+            function lookup(): number {
+                console.log("lookup");
+                return 4;
+            }
+            async function delayedIndex(): Promise<number> {
+                await sleep(1);
+                return 6;
+            }
             function adjust(direction: Direction): number {
                 return direction + Direction.Next;
             }
             function label(value: Label): string { return value; }
-            function main(): void {
+            async function main(): Promise<void> {
                 console.log(Direction.None);
                 console.log(Direction.Up);
                 console.log(Direction.Next);
                 console.log(Direction["Mask"]);
+                console.log(Direction[lookup()]);
+                console.log(Direction[99]);
+                console.log(Direction[await delayedIndex()]);
                 console.log(adjust(Direction.None));
                 console.log(label(Label.Ready));
                 console.log(Label.Alias === Label.Ready);
             }
-            enum Direction { None, Up = 4, Next = Up + 2, Mask = 1 << 3 }
+            enum Direction { None, Up = 4, Next = Up + 2, Mask = 1 << 3, Alias = 4 }
             enum Label { Ready = "ready", Alias = Ready }
         "#;
         assert_eq!(
             compile_and_run(source, "typed_enums"),
-            "0\n4\n6\n8\n6\nready\ntrue\n"
+            "0\n4\n6\n8\nlookup\nAlias\nundefined\nNext\n6\nready\ntrue\n"
         );
     }
 

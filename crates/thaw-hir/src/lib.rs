@@ -294,6 +294,9 @@ pub enum HirExpr {
     /// re-derive it.
     PropAccess(Box<HirExpr>, HirType, Symbol),
     DynamicPropAccess(Box<HirExpr>, Box<HirExpr>, Vec<(Symbol, HirType)>, HirType),
+    /// Runtime numeric-enum reverse lookup. Known values produce a present
+    /// string and unknown values produce `undefined`.
+    EnumReverseLookup(Box<HirExpr>, Vec<(f64, Symbol)>),
     /// `object.field = value` (and desugared compound forms). Evaluates to
     /// `value`. Same `HirType` bookkeeping as `PropAccess`.
     PropAssign(Box<HirExpr>, HirType, Symbol, Box<HirExpr>),
@@ -424,6 +427,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayAlloc(inner, _)
             | HirExpr::ArrayLen(inner)
+            | HirExpr::EnumReverseLookup(inner, _)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner)
@@ -590,6 +594,7 @@ pub fn set_ffi_ownership(
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayAlloc(inner, _)
             | HirExpr::ArrayLen(inner)
+            | HirExpr::EnumReverseLookup(inner, _)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner)
@@ -819,6 +824,7 @@ pub fn set_ffi_string_abi(
             | HirExpr::Assign(_, inner)
             | HirExpr::ArrayAlloc(inner, _)
             | HirExpr::ArrayLen(inner)
+            | HirExpr::EnumReverseLookup(inner, _)
             | HirExpr::JsonAsNumber(inner)
             | HirExpr::JsonAsString(inner)
             | HirExpr::JsonAsBool(inner)

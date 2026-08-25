@@ -172,6 +172,7 @@ pub fn lower_module_with_source_map(
 }
 
 type EnumValues = HashMap<(Symbol, Symbol), HirLit>;
+type EnumReverseValues = HashMap<Symbol, Vec<(f64, Symbol)>>;
 
 fn enum_member_name(id: &swc_ecma_ast::TsEnumMemberId) -> Symbol {
     match id {
@@ -284,8 +285,11 @@ fn eval_enum_initializer(
     }
 }
 
-fn collect_enums(module: &Module) -> Result<(EnumValues, HashMap<Symbol, HirType>), String> {
+fn collect_enums(
+    module: &Module,
+) -> Result<(EnumValues, EnumReverseValues, HashMap<Symbol, HirType>), String> {
     let mut values = EnumValues::new();
+    let mut reverse_values = EnumReverseValues::new();
     let mut types = HashMap::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(declaration))) = item else {
@@ -313,6 +317,9 @@ fn collect_enums(module: &Module) -> Result<(EnumValues, HashMap<Symbol, HirType
             let ty = match &value {
                 HirLit::F64(number) => {
                     next_number = Some(number + 1.0);
+                    let reverse = reverse_values.entry(name.clone()).or_default();
+                    reverse.retain(|(existing, _)| existing != number);
+                    reverse.push((*number, member_name.clone()));
                     HirType::F64
                 }
                 HirLit::Str(_) => {
@@ -340,12 +347,12 @@ fn collect_enums(module: &Module) -> Result<(EnumValues, HashMap<Symbol, HirType
             enum_type.ok_or_else(|| format!("enum `{name}` must contain at least one member"))?;
         types.insert(name, ty);
     }
-    Ok((values, types))
+    Ok((values, reverse_values, types))
 }
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
-    let (enum_values, enum_types) = collect_enums(module)?;
+    let (enum_values, enum_reverse_values, enum_types) = collect_enums(module)?;
     for (name, ty) in enum_types {
         if interfaces.insert(name.clone(), ty).is_some() {
             return Err(format!(
@@ -500,6 +507,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 &interfaces,
                 &generic_interfaces,
                 &enum_values,
+                &enum_reverse_values,
                 Some(&call_constraints),
             )?;
             if signatures[&name].ret == HirType::Dynamic && function.ret != HirType::Dynamic {
@@ -598,6 +606,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 &interfaces,
                 &generic_interfaces,
                 &enum_values,
+                &enum_reverse_values,
                 None,
             )
         })
@@ -636,6 +645,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             &interfaces,
             &generic_interfaces,
             &enum_values,
+            &enum_reverse_values,
             Some(&nested_constraints),
         )?;
         completed.push((name, types));
@@ -968,6 +978,7 @@ fn infer_generic_type_tuple(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_generic_instance(
     fn_decl: &FnDecl,
     types: &[HirType],
@@ -975,6 +986,7 @@ fn lower_generic_instance(
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
     enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let base_name = fn_decl.ident.sym.to_string();
@@ -1016,6 +1028,7 @@ fn lower_generic_instance(
         interfaces,
         generic_interfaces,
         enum_values,
+        enum_reverse_values,
         ret.clone(),
         call_constraints,
     );
@@ -1224,6 +1237,7 @@ fn lower_fn_decl(
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
     enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let name = fn_decl.ident.sym.to_string();
@@ -1259,6 +1273,7 @@ fn lower_fn_decl(
         interfaces,
         generic_interfaces,
         enum_values,
+        enum_reverse_values,
         declared_ret.clone(),
         call_constraints,
     );
@@ -1872,6 +1887,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::PromiseAllSettledArray(value, _)
         | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)
+        | HirExpr::EnumReverseLookup(value, _)
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
@@ -1965,6 +1981,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::Assign(_, value)
         | HirExpr::ArrayAlloc(value, _)
         | HirExpr::ArrayLen(value)
+        | HirExpr::EnumReverseLookup(value, _)
         | HirExpr::PropAccess(value, _, _)
         | HirExpr::JsonGet(value, _)
         | HirExpr::JsonAsNumber(value)
@@ -2311,6 +2328,7 @@ struct FnLowerer<'a> {
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'a>,
     enum_values: &'a EnumValues,
+    enum_reverse_values: &'a EnumReverseValues,
     ret_type: HirType,
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     loop_depth: usize,
@@ -2333,6 +2351,7 @@ impl<'a> FnLowerer<'a> {
         interfaces: &'a HashMap<Symbol, HirType>,
         generic_interfaces: &'a GenericInterfaces<'a>,
         enum_values: &'a EnumValues,
+        enum_reverse_values: &'a EnumReverseValues,
         ret_type: HirType,
         call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     ) -> Self {
@@ -2347,6 +2366,7 @@ impl<'a> FnLowerer<'a> {
             interfaces,
             generic_interfaces,
             enum_values,
+            enum_reverse_values,
             ret_type,
             call_constraints,
             loop_depth: 0,
@@ -4329,6 +4349,7 @@ impl<'a> FnLowerer<'a> {
                 Ok(*element)
             }
             HirExpr::ArrayLen(_) => Ok(HirType::F64),
+            HirExpr::EnumReverseLookup(_, _) => Ok(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::EnvVar(_) => Ok(HirType::Str),
             HirExpr::ObjectLit(fields) => {
                 let fields = fields
@@ -6042,6 +6063,23 @@ impl<'a> FnLowerer<'a> {
                 {
                     return Err(format!(
                         "enum `{}` has no member `{member_name}`",
+                        enum_name.sym
+                    ));
+                }
+            }
+            if let MemberProp::Computed(computed) = &member.prop {
+                if let Some(entries) = self.enum_reverse_values.get(enum_name.sym.as_str()) {
+                    let index = self.lower_expr(&computed.expr)?;
+                    self.expect_type(&HirType::F64, &index, "numeric enum reverse lookup")?;
+                    return Ok(HirExpr::EnumReverseLookup(Box::new(index), entries.clone()));
+                }
+                if self
+                    .enum_values
+                    .keys()
+                    .any(|(candidate, _)| candidate == enum_name.sym.as_str())
+                {
+                    return Err(format!(
+                        "string enum `{}` does not support numeric reverse lookup",
                         enum_name.sym
                     ));
                 }
@@ -11885,11 +11923,32 @@ mod tests {
                    function main(): void { console.log(Value.Missing); }"#,
                 "has no member `Missing`",
             ),
+            (
+                r#"enum Text { Present = "present" }
+                   function main(): void { console.log(Text[0]); }"#,
+                "does not support numeric reverse lookup",
+            ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn lowers_runtime_numeric_enum_reverse_lookup_as_optional_string() {
+        let program = lower(
+            r#"enum Status { Idle, Ready = 4, Alias = 4 }
+               function read(index: number): string | undefined {
+                   return Status[index];
+               }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Return(Some(HirExpr::EnumReverseLookup(index, entries)))
+                if matches!(index.as_ref(), HirExpr::Var(name) if name == "index")
+                    && entries == &vec![(0.0, "Idle".into()), (4.0, "Alias".into())]
+        ));
     }
 
     #[test]
@@ -12896,6 +12955,7 @@ mod tests {
                 &HashMap::new(),
                 &GenericInterfaces::new(),
                 &EnumValues::new(),
+                &EnumReverseValues::new(),
                 HirType::Void,
                 None,
             )
