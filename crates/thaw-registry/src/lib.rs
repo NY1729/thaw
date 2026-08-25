@@ -1346,6 +1346,7 @@ fn rewrite_static_worker_urls(
     struct WorkerBindings {
         constructors: BTreeSet<String>,
         namespaces: BTreeSet<String>,
+        path_namespaces: BTreeSet<String>,
     }
     impl Visit for WorkerBindings {
         fn visit_import_decl(&mut self, declaration: &ImportDecl) {
@@ -1400,10 +1401,28 @@ fn rewrite_static_worker_urls(
                 }
                 _ => return,
             };
-            let is_worker_threads = matches!(
+            let required_module = match call.args.first().map(|argument| argument.expr.as_ref()) {
+                Some(Expr::Lit(Lit::Str(value))) => value.value.as_str(),
+                _ => None,
+            };
+            let is_require = matches!(
                 &call.callee,
                 Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(name) if name.sym == "require")
-            ) && matches!(call.args.first().map(|argument| argument.expr.as_ref()), Some(Expr::Lit(Lit::Str(value))) if matches!(value.value.as_str(), Some("worker_threads" | "node:worker_threads")));
+            );
+            if is_require
+                && matches!(required_module, Some("path" | "node:path"))
+                && property.is_none()
+            {
+                if let Pat::Ident(binding) = &declaration.name {
+                    self.path_namespaces.insert(binding.id.sym.to_string());
+                }
+                return;
+            }
+            let is_worker_threads = is_require
+                && matches!(
+                    required_module,
+                    Some("worker_threads" | "node:worker_threads")
+                );
             if !is_worker_threads {
                 return;
             }
@@ -1455,6 +1474,7 @@ fn rewrite_static_worker_urls(
     fn static_worker_path(
         expression: &Expr,
         constants: &BTreeMap<String, String>,
+        path_namespaces: &BTreeSet<String>,
     ) -> Option<String> {
         match expression {
             Expr::Lit(Lit::Str(path)) => Some(path.value.to_string_lossy().into_owned()),
@@ -1470,17 +1490,53 @@ fn rewrite_static_worker_urls(
                             .unwrap_or_else(|| quasi.raw.to_string()),
                     );
                     if let Some(expression) = template.exprs.get(index) {
-                        path.push_str(&static_worker_path(expression, constants)?);
+                        path.push_str(&static_worker_path(expression, constants, path_namespaces)?);
                     }
                 }
                 Some(path)
             }
-            Expr::Paren(parenthesized) => static_worker_path(&parenthesized.expr, constants),
+            Expr::Paren(parenthesized) => {
+                static_worker_path(&parenthesized.expr, constants, path_namespaces)
+            }
             Expr::Bin(binary) if binary.op == thaw_parser::ast::BinaryOp::Add => Some(format!(
                 "{}{}",
-                static_worker_path(&binary.left, constants)?,
-                static_worker_path(&binary.right, constants)?
+                static_worker_path(&binary.left, constants, path_namespaces)?,
+                static_worker_path(&binary.right, constants, path_namespaces)?
             )),
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Member(member) = callee.as_ref() else {
+                    return None;
+                };
+                let Expr::Ident(namespace) = member.obj.as_ref() else {
+                    return None;
+                };
+                let MemberProp::Ident(operation) = &member.prop else {
+                    return None;
+                };
+                if !path_namespaces.contains(namespace.sym.as_ref())
+                    || !matches!(operation.sym.as_ref(), "join" | "resolve")
+                {
+                    return None;
+                }
+                let mut parts = Vec::new();
+                for (index, argument) in call.args.iter().enumerate() {
+                    if index == 0
+                        && matches!(argument.expr.as_ref(), Expr::Ident(name) if name.sym == "__dirname")
+                    {
+                        continue;
+                    }
+                    parts.push(static_worker_path(
+                        &argument.expr,
+                        constants,
+                        path_namespaces,
+                    )?);
+                }
+                let normalized = normalize_path_string(&parts.join("/"));
+                (!normalized.is_empty()).then(|| format!("./{normalized}"))
+            }
             _ => None,
         }
     }
@@ -1488,6 +1544,7 @@ fn rewrite_static_worker_urls(
     fn top_level_worker_path_constants(
         module: &thaw_parser::ast::Module,
         binding_counts: &BTreeMap<String, usize>,
+        path_namespaces: &BTreeSet<String>,
     ) -> BTreeMap<String, String> {
         let mut constants = BTreeMap::new();
         for item in &module.body {
@@ -1506,7 +1563,7 @@ fn rewrite_static_worker_urls(
                 if binding_counts.get(binding.id.sym.as_ref()) != Some(&1) {
                     continue;
                 }
-                if let Some(path) = static_worker_path(initializer, &constants) {
+                if let Some(path) = static_worker_path(initializer, &constants, path_namespaces) {
                     constants.insert(binding.id.sym.to_string(), path);
                 }
             }
@@ -1526,6 +1583,7 @@ fn rewrite_static_worker_urls(
         constructors: BTreeSet<String>,
         namespaces: BTreeSet<String>,
         path_constants: BTreeMap<String, String>,
+        path_namespaces: BTreeSet<String>,
         spans: Vec<WorkerUrlSpan>,
     }
     impl Visit for WorkerUrls {
@@ -1548,7 +1606,9 @@ fn rewrite_static_worker_urls(
             let Some(first) = arguments.first() else {
                 return;
             };
-            if let Some(path) = static_worker_path(&first.expr, &self.path_constants) {
+            if let Some(path) =
+                static_worker_path(&first.expr, &self.path_constants, &self.path_namespaces)
+            {
                 if !static_file_options(arguments) {
                     expression.visit_children_with(self);
                     return;
@@ -1601,11 +1661,13 @@ fn rewrite_static_worker_urls(
     module.visit_with(&mut bindings);
     let mut binding_counts = BindingCounts::default();
     module.visit_with(&mut binding_counts);
-    let path_constants = top_level_worker_path_constants(&module, &binding_counts.0);
+    let path_constants =
+        top_level_worker_path_constants(&module, &binding_counts.0, &bindings.path_namespaces);
     let mut workers = WorkerUrls {
         constructors: bindings.constructors,
         namespaces: bindings.namespaces,
         path_constants,
+        path_namespaces: bindings.path_namespaces,
         spans: Vec::new(),
     };
     module.visit_with(&mut workers);
@@ -3856,7 +3918,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
     for module in modules {
         let asynchronous = if module.async_module { "async " } else { "" };
         out.push_str(&format!(
-            "{}: {asynchronous}function(module, exports, require, requireAsync) {{\n{}\n}},\n",
+            "{}: {asynchronous}function(module, exports, require, requireAsync, __filename, __dirname) {{\n{}\n}},\n",
             js_string_literal(&module.key),
             module.source
         ));
@@ -3906,7 +3968,8 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20\x20\x20var value = __thaw_bundle_require(target.key, target.factory);\n\
          \x20\x20\x20\x20\x20\x20return __thaw_bundle_cache[target.key].ready.then(function() { return value; });\n\
          \x20\x20\x20\x20};\n\
-         \x20\x20\x20\x20var initialized = __thaw_bundle_factories[factoryKey](mod, mod.exports, localRequire, localRequireAsync);\n\
+         \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
+         \x20\x20\x20\x20var initialized = __thaw_bundle_factories[factoryKey](mod, mod.exports, localRequire, localRequireAsync, filename, dirname);\n\
          \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
@@ -4711,6 +4774,41 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn bundled_modules_receive_node_filename_and_dirname() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("bundle_module_paths");
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(
+            dir.join("lib/index.js"),
+            "var child = require('./child'); module.exports = function() { return [__filename, __dirname, child]; };",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("lib/child.js"),
+            "module.exports = [__filename, __dirname];",
+        )
+        .unwrap();
+        let node_modules = temp_registry("bundle_module_paths_node_modules");
+        let (bundle, _, _, _) =
+            bundle_commonjs_package(&node_modules, "pkg", &dir, "lib/index.js").unwrap();
+        let script = CString::new(format!(
+            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.readModulePaths = module.exports;"
+        ))
+        .unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        let function = CString::new("readModulePaths").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["/thaw_modules/pkg/lib/index.js","/thaw_modules/pkg/lib",["/thaw_modules/pkg/lib/child.js","/thaw_modules/pkg/lib"]]"#
+        );
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(node_modules);
     }
 
     /// `bundle_commonjs_package`'s version-recording half (the other half
@@ -5932,13 +6030,13 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; const workerFile = './' + 'worker.js'; function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); return events; };",
+            "var Worker = require('node:worker_threads').Worker; var path = require('node:path'); const workerFile = './' + 'worker.js'; const joinedWorkerFile = path.join(__dirname, 'worker.js'); function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); await run(new Worker(joinedWorkerFile, { workerData: 2 }), events); return events; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 4);
+        assert_eq!(file_count, 5);
         fs::remove_dir_all(&dir).unwrap();
         let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileWorker = module.exports;");
         let source = CString::new(script).unwrap();
@@ -5947,7 +6045,7 @@ mod tests {
         let arguments = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-        assert_eq!(result, "[42,0,22,0,10,0,6,0]");
+        assert_eq!(result, "[42,0,22,0,10,0,6,0,4,0]");
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
 
