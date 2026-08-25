@@ -2461,7 +2461,8 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         // finds the same object either way. Only the couple of fields a
         // real package has actually been found to read.
         "process" => Some(
-            "var __thaw_process = { argv: [], env: {}, platform: 'linux', version: '', versions: {}, cwd: function() { return '/'; }, nextTick: function(fn) { fn(); } };\n\
+            "var __thaw_process = globalThis.process || { argv: [], env: {}, platform: 'linux', version: '', versions: {}, cwd: function() { return '/'; }, nextTick: function(fn) { var args = Array.prototype.slice.call(arguments, 1); Promise.resolve().then(function() { fn.apply(undefined, args); }); } };\n\
+             if (!__thaw_process.cwd) __thaw_process.cwd = function() { return '/'; };\n\
              module.exports = __thaw_process;\n\
              module.exports.default = __thaw_process;\n\
              module.exports.__esModule = true;\n",

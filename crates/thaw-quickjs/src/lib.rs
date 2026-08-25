@@ -93,6 +93,25 @@ const PLATFORM_GLOBALS: &str = r#"
     }
     Promise.resolve().then(callback);
   };
+  const nextTick = (callback, ...args) => {
+    if (typeof callback !== 'function') {
+      throw new TypeError('process.nextTick callback must be a function');
+    }
+    queueMicrotask(() => callback(...args));
+  };
+  if (typeof globalThis.process === 'undefined') globalThis.process = {};
+  Object.assign(globalThis.process, {
+    argv: globalThis.process.argv || [],
+    env: globalThis.process.env || {},
+    platform: globalThis.process.platform || 'linux',
+    version: globalThis.process.version || '',
+    execPath: globalThis.process.execPath || '/usr/bin/node',
+    config: globalThis.process.config || { variables: {} },
+    versions: Object.assign({ node: '', modules: '', uv: '' },
+                            globalThis.process.versions || {}),
+    cwd: globalThis.process.cwd || (() => '/'),
+    nextTick
+  });
   globalThis.__thaw_next_timer_delay = () => {
     let due = Infinity;
     for (const timer of timers.values()) due = Math.min(due, timer.due);
@@ -1023,6 +1042,21 @@ mod tests {
             1
         );
         assert_eq!(call("eventOrder", "[]"), r#"["sync","microtask","timer"]"#);
+    }
+
+    #[test]
+    fn process_next_tick_is_async_and_forwards_arguments() {
+        assert_eq!(
+            load(
+                "function tickOrder() { return new Promise(resolve => {\n\
+                   const events = ['sync'];\n\
+                   process.nextTick((left, right) => { events.push(left + right); resolve(events); }, 'next', 'Tick');\n\
+                   events.push('after');\n\
+                 }); }"
+            ),
+            1
+        );
+        assert_eq!(call("tickOrder", "[]"), r#"["sync","after","nextTick"]"#);
     }
 
     #[test]
