@@ -13984,6 +13984,26 @@ mod tests {
     }
 
     #[test]
+    fn compiles_constrained_generic_functions() {
+        let source = r#"
+            function numeric<T extends number>(value: T): T { return value; }
+            function scalar<T extends number | string>(value: T): T { return value; }
+            function named<T extends { name: string }>(value: T): T { return value; }
+            function choose<T, U extends T>(left: T, right: U): U { return right; }
+            function main(): void {
+                console.log(numeric(6));
+                console.log(scalar("value"));
+                console.log(named({ name: "object", count: 2 }).name);
+                console.log(choose("left", "right"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "constrained_generic_functions"),
+            "6\nvalue\nobject\nright\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };

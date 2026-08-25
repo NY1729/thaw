@@ -79,6 +79,7 @@ struct FnSignature {
     is_extern: bool,
     source_range: (u32, u32),
     generic_type_params: Vec<Symbol>,
+    generic_type_constraints: Vec<Option<Box<TsType>>>,
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_return_type: Option<Box<TsType>>,
 }
@@ -385,6 +386,17 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 }
                 let type_substitution = function_type_substitution(func);
                 let generic_type_params = validate_generic_function(fn_decl)?;
+                let generic_type_constraints = func
+                    .type_params
+                    .as_ref()
+                    .map(|parameters| {
+                        parameters
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.constraint.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let generic_param_patterns = if generic_type_params.is_empty() {
                     Vec::new()
                 } else {
@@ -474,6 +486,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
                         generic_type_params,
+                        generic_type_constraints,
                         generic_param_patterns,
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                     },
@@ -1071,12 +1084,14 @@ fn match_generic_pattern(
 fn infer_generic_type_tuple(
     signature: &FnSignature,
     actual_params: &[HirType],
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
 ) -> Result<Vec<HirType>, String> {
     let mut inferred = HashMap::new();
     for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
         match_generic_pattern(pattern, actual, &mut inferred)?;
     }
-    signature
+    let types = signature
         .generic_type_params
         .iter()
         .map(|name| {
@@ -1084,7 +1099,36 @@ fn infer_generic_type_tuple(
                 format!("cannot infer generic type parameter `{name}` from this call")
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    let substitution = signature
+        .generic_type_params
+        .iter()
+        .cloned()
+        .zip(types.iter().cloned())
+        .collect::<HashMap<_, _>>();
+    for ((name, actual), constraint) in signature
+        .generic_type_params
+        .iter()
+        .zip(&types)
+        .zip(&signature.generic_type_constraints)
+    {
+        let Some(constraint) = constraint else {
+            continue;
+        };
+        let constraint = resolve_ts_type_with_substitution(
+            constraint,
+            &substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        if !type_satisfies_constraint(actual, &constraint) {
+            return Err(format!(
+                "inferred type {actual:?} does not satisfy constraint {constraint:?} for `{name}`"
+            ));
+        }
+    }
+    Ok(types)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5315,7 +5359,12 @@ impl<'a> FnLowerer<'a> {
                                 .iter()
                                 .map(|arg| self.infer_expr_type(arg))
                                 .collect::<Result<Vec<_>, _>>()?;
-                            let types = infer_generic_type_tuple(sig, &actual)?;
+                            let types = infer_generic_type_tuple(
+                                sig,
+                                &actual,
+                                self.interfaces,
+                                self.generic_interfaces,
+                            )?;
                             let substitution = sig
                                 .generic_type_params
                                 .iter()
@@ -12038,8 +12087,13 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .map(|arg| self.infer_expr_type(arg))
                 .collect::<Result<Vec<_>, _>>()?;
-            let types = infer_generic_type_tuple(signature, &actual)
-                .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
+            let types = infer_generic_type_tuple(
+                signature,
+                &actual,
+                self.interfaces,
+                self.generic_interfaces,
+            )
+            .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
             if !types.contains(&HirType::Dynamic) {
                 for ty in &types {
                     if !supports_generic_native_layout(ty) {
@@ -12524,6 +12578,42 @@ mod tests {
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("conflicting call-site types"), "{error}");
         assert!(error.contains("F64") && error.contains("Str"), "{error}");
+    }
+
+    #[test]
+    fn enforces_declared_generic_function_constraints() {
+        let primitive = thaw_parser::parse_typescript(
+            r#"
+            function numeric<T extends number>(value: T): T { return value; }
+            function main(): void { numeric("wrong"); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&primitive).unwrap_err();
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
+
+        let dependent = thaw_parser::parse_typescript(
+            r#"
+            function choose<T, U extends T>(left: T, right: U): U { return right; }
+            function main(): void { choose(1, "wrong"); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&dependent).unwrap_err();
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
+
+        let structural = thaw_parser::parse_typescript(
+            r#"
+            function named<T extends { name: string }>(value: T): T { return value; }
+            function main(): void { named({ value: 1 }); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&structural).unwrap_err();
+        assert!(
+            error.contains("does not satisfy constraint Object"),
+            "{error}"
+        );
     }
 
     #[test]
