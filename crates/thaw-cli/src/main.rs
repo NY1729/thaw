@@ -3775,7 +3775,8 @@ mod tests {
                             copied.nested.value = 2;
                             const controller = new AbortController();
                             controller.abort('stopped');
-                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text + ':' + btoa('hi') + ':' + atob('aGk=') + ':' + (performance.now() >= 0) + ':' + original.nested.value + ':' + copied.nested.value + ':' + controller.signal.aborted + ':' + controller.signal.reason), 0);
+                            const combined = AbortSignal.any([controller.signal]);
+                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text + ':' + btoa('hi') + ':' + atob('aGk=') + ':' + (performance.now() >= 0) + ':' + original.nested.value + ':' + copied.nested.value + ':' + combined.aborted + ':' + combined.reason), 0);
                         }
                     }, 1);
                 });
