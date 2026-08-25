@@ -216,6 +216,8 @@ pub enum HirExpr {
     UnionValue(Box<HirExpr>, usize, Vec<HirType>),
     /// Strict equality between a tagged union and one concrete member value.
     UnionMemberIsEqual(Box<HirExpr>, Box<HirExpr>, usize, Vec<HirType>),
+    /// Strict equality between two values with the same tagged union type.
+    UnionIsEqual(Box<HirExpr>, Box<HirExpr>, Vec<HirType>),
     Call(Box<HirExpr>, Vec<HirExpr>),
     /// A homogeneous `Promise.all` join. The element type is retained so
     /// codegen can copy and later load non-number result slots correctly.
@@ -410,6 +412,7 @@ pub fn set_ffi_error_abi(
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::UnionMemberIsEqual(left, right, _, _)
+            | HirExpr::UnionIsEqual(left, right, _)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
@@ -592,6 +595,7 @@ pub fn set_ffi_ownership(
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::UnionMemberIsEqual(left, right, _, _)
+            | HirExpr::UnionIsEqual(left, right, _)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
@@ -812,6 +816,7 @@ pub fn set_ffi_string_abi(
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::UnionMemberIsEqual(left, right, _, _)
+            | HirExpr::UnionIsEqual(left, right, _)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
