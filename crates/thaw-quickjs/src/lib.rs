@@ -29,7 +29,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
 use std::time::Duration;
 
@@ -75,6 +75,7 @@ thread_local! {
     static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
     static NET_STREAMS: RefCell<(u32, HashMap<u32, TcpStream>)> = RefCell::new((1, HashMap::new()));
     static NET_LISTENERS: RefCell<(u32, HashMap<u32, TcpListener>)> = RefCell::new((1, HashMap::new()));
+    static UDP_SOCKETS: RefCell<(u32, HashMap<u32, UdpSocket>)> = RefCell::new((1, HashMap::new()));
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -186,6 +187,68 @@ fn net_read_all(handle: u32) -> String {
 fn net_close_listener(handle: u32) {
     NET_LISTENERS.with(|listeners| {
         listeners.borrow_mut().1.remove(&handle);
+    });
+}
+
+fn udp_bind(host: &str, port: u16) -> String {
+    match UdpSocket::bind((host, port)) {
+        Ok(socket) => {
+            let address = match socket.local_addr() {
+                Ok(address) => address,
+                Err(error) => return format!("err|{error}"),
+            };
+            let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+            UDP_SOCKETS.with(|sockets| {
+                let mut sockets = sockets.borrow_mut();
+                let handle = sockets.0;
+                sockets.0 = sockets.0.wrapping_add(1).max(1);
+                sockets.1.insert(handle, socket);
+                format!("ok|{handle}|{}|{}", address.ip(), address.port())
+            })
+        }
+        Err(error) => format!("err|{error}"),
+    }
+}
+
+fn udp_send(handle: u32, value: &[u8], host: &str, port: u16) -> String {
+    UDP_SOCKETS.with(|sockets| {
+        let sockets = sockets.borrow();
+        let Some(socket) = sockets.1.get(&handle) else {
+            return "err|socket is closed".to_string();
+        };
+        socket
+            .send_to(value, (host, port))
+            .map(|written| format!("ok|{written}"))
+            .unwrap_or_else(|error| format!("err|{error}"))
+    })
+}
+
+fn udp_receive(handle: u32) -> String {
+    UDP_SOCKETS.with(|sockets| {
+        let sockets = sockets.borrow();
+        let Some(socket) = sockets.1.get(&handle) else {
+            return "err|socket is closed".to_string();
+        };
+        let mut value = vec![0u8; 65_536];
+        match socket.recv_from(&mut value) {
+            Ok((length, peer)) => {
+                value.truncate(length);
+                format!(
+                    "ok|{}|{}|{}|{}",
+                    hex_encode(&value),
+                    peer.ip(),
+                    peer.port(),
+                    length
+                )
+            }
+            Err(error) => format!("err|{error}"),
+        }
+    })
+}
+
+fn udp_close(handle: u32) {
+    UDP_SOCKETS.with(|sockets| {
+        sockets.borrow_mut().1.remove(&handle);
     });
 }
 
@@ -335,6 +398,23 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tcp_close_listener =
                     Function::new(ctx.clone(), |handle: u32| net_close_listener(handle))
                         .expect("failed to create JavaScript TCP listener closer");
+                let udp_bind_function = Function::new(ctx.clone(), |host: String, port: u32| {
+                    udp_bind(&host, port as u16)
+                })
+                .expect("failed to create JavaScript UDP binder");
+                let udp_send_function = Function::new(
+                    ctx.clone(),
+                    |handle: u32, value: String, host: String, port: u32| {
+                        udp_send(handle, &hex_decode(&value), &host, port as u16)
+                    },
+                )
+                .expect("failed to create JavaScript UDP sender");
+                let udp_receive_function =
+                    Function::new(ctx.clone(), |handle: u32| udp_receive(handle))
+                        .expect("failed to create JavaScript UDP receiver");
+                let udp_close_function =
+                    Function::new(ctx.clone(), |handle: u32| udp_close(handle))
+                        .expect("failed to create JavaScript UDP closer");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -371,6 +451,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_net_close_listener", tcp_close_listener)
                     .expect("failed to install JavaScript TCP listener closer");
+                ctx.globals()
+                    .set("__thaw_udp_bind", udp_bind_function)
+                    .expect("failed to install JavaScript UDP binder");
+                ctx.globals()
+                    .set("__thaw_udp_send", udp_send_function)
+                    .expect("failed to install JavaScript UDP sender");
+                ctx.globals()
+                    .set("__thaw_udp_receive", udp_receive_function)
+                    .expect("failed to install JavaScript UDP receiver");
+                ctx.globals()
+                    .set("__thaw_udp_close", udp_close_function)
+                    .expect("failed to install JavaScript UDP closer");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
