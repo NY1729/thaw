@@ -10738,6 +10738,35 @@ mod tests {
     }
 
     #[test]
+    fn global_response_consumes_clones_and_constructs_bodies() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_global_response");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var text = new Response('hello'), textBefore = [text.status, text.statusText, text.ok, text.type, text.url, text.redirected, text.headers.get('content-type'), text.body.constructor.name, text.bodyUsed], textValue = await text.text(), textAfter = text.bodyUsed, params = new Response(new URLSearchParams({ a: 'two words' })), paramsForm = await params.formData(), binary = new Response(new Uint8Array([1, 2, 3])), binaryBytes = Array.from(await binary.bytes()), original = new Response('clone'), clone = original.clone(), cloneValues = [await original.text(), await clone.text()], empty = new Response(null, { status: 204 }), emptyText = await empty.text(), json = Response.json({ a: 1 }), jsonValue = [json.headers.get('content-type'), await json.text()], redirect = Response.redirect('https://example.com/a', 307), failure = Response.error(), consumed = new Response('used'); await consumed.text(); var cloneError, statusError, bodyStatusError; try { consumed.clone(); } catch (error) { cloneError = error.name; } try { new Response(null, { status: 199 }); } catch (error) { statusError = error.name; } try { new Response('x', { status: 204 }); } catch (error) { bodyStatusError = error.name; } var blobResponse = new Response(new Blob(['blob'], { type: 'text/custom' })), blob = await blobResponse.blob(); return [textBefore, textValue, textAfter, params.headers.get('content-type'), paramsForm.get('a'), binaryBytes, cloneValues, emptyText, empty.bodyUsed, jsonValue, redirect.status, redirect.headers.get('location'), failure.status, failure.type, failure.ok, failure.body, cloneError, statusError, bodyStatusError, blob.type, await blob.text(), Object.prototype.toString.call(text)]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_global_response_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseResponse = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseResponse").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[200,"",true,"default","",false,"text/plain;charset=UTF-8","ReadableStream",false],"hello",true,"application/x-www-form-urlencoded;charset=UTF-8","two words",[1,2,3],["clone","clone"],"",false,["application/json","{\"a\":1}"],307,"https://example.com/a",0,"error",false,null,"TypeError","RangeError","TypeError","text/custom","blob","[object Response]"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_text_decoder_streaming");
