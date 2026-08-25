@@ -370,6 +370,8 @@ The workspace crates have narrow responsibilities:
   spread arguments, array/Promise callback use and `typeof` observation
 - Anonymous generic function expressions use the same local polymorphic
   template, callable-assignment validation and contextual callback paths
+- Named function expressions use the same path when their internal name is not
+  recursively referenced; recursive local function values remain unsupported
 - User-defined function parameters with a monomorphic function type provide
   the same contextual specialization for named generic functions, local
   generic arrows and inline generic arrows
