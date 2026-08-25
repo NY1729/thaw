@@ -778,6 +778,55 @@ fn classify_ts_type(
                 .unwrap_or_else(|| DtsType::Unsupported("empty union type is not supported".into()))
         }
 
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
+            intersection,
+        )) => {
+            let mut native = Vec::new();
+            for element in &intersection.types {
+                match classify_ts_type(element, interfaces, generic_interfaces) {
+                    DtsType::Native(ty) => native.push(ty),
+                    DtsType::Unsupported(_) => {
+                        return DtsType::Unsupported(format!(
+                            "unsupported type `{}`",
+                            describe_ts_type(ty)
+                        ))
+                    }
+                }
+            }
+            let Some(first) = native.first() else {
+                return DtsType::Unsupported("empty intersection type is not supported".into());
+            };
+            if native.iter().all(|element| element == first) {
+                return DtsType::Native(first.clone());
+            }
+            if native
+                .iter()
+                .all(|element| matches!(element, HirType::Object(_)))
+            {
+                let mut merged = Vec::new();
+                for element in native {
+                    let HirType::Object(fields) = element else {
+                        unreachable!()
+                    };
+                    for (name, ty) in fields {
+                        if let Some((_, existing)) =
+                            merged.iter().find(|(existing, _)| existing == &name)
+                        {
+                            if existing != &ty {
+                                return DtsType::Unsupported(format!(
+                                    "intersection field `{name}` has conflicting native layouts"
+                                ));
+                            }
+                        } else {
+                            merged.push((name, ty));
+                        }
+                    }
+                }
+                return DtsType::Native(HirType::Object(merged));
+            }
+            DtsType::Unsupported(format!("unsupported type `{}`", describe_ts_type(ty)))
+        }
+
         TsType::TsArrayType(arr) => {
             match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
                 DtsType::Native(HirType::F64) => {
@@ -2126,6 +2175,27 @@ mod tests {
             vec![HirType::Str, HirType::F64, HirType::Bool]
         );
         assert_eq!(signature.ret, HirType::Str);
+    }
+
+    #[test]
+    fn classifies_compatible_object_intersections_as_fast_path() {
+        let functions = parse_dts(
+            r#"export declare function inspect(
+                value: { name: string } & { count: number } & { enabled: boolean }
+            ): number;"#,
+        )
+        .unwrap();
+        let Classification::FastPath(signature) = classify(&functions[0]) else {
+            panic!("compatible object intersection should use FastPath");
+        };
+        assert_eq!(
+            signature.params[0],
+            HirType::Object(vec![
+                ("name".into(), HirType::Str),
+                ("count".into(), HirType::F64),
+                ("enabled".into(), HirType::Bool),
+            ])
+        );
     }
 
     #[test]
