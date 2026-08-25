@@ -440,6 +440,8 @@ The workspace crates have narrow responsibilities:
   are exposed through synchronous, callback and Promise APIs
 - Stats timestamps come from host metadata, and `utimes` updates access and
   modification times through sync, callback, Promise and FileHandle APIs
+- Unix ownership metadata and `chown`/`lchown` operations are host-backed
+  across synchronous, callback, Promise and FileHandle APIs
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
   classes with ranged/chunked reads, append mode, byte counters and
   open/ready/finish/end/close lifecycle events
