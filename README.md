@@ -341,7 +341,9 @@ The workspace crates have narrow responsibilities:
   buffered and future chunks, reject stream errors and destroy on early return;
   callback and Promise pipelines accept AbortSignal options, remove settlement
   listeners, destroy every stage with the same error and preserve original
-  transform failures. Promise `finished()` aborts its wait without destroying
+  transform failures. A source, transform or destination that closes before
+  its required side completes rejects once with `ERR_STREAM_PREMATURE_CLOSE`
+  and destroys the remaining stages. Promise `finished()` aborts its wait without destroying
   the observed stream. `stream.compose()` joins transform stages behind one
   Duplex interface, while `Duplex.from()` adapts readable/writable pairs,
   Promises, sync and async iterables, and async-generator transforms. Stream
