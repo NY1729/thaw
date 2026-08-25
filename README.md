@@ -375,6 +375,8 @@ The workspace crates have narrow responsibilities:
   `ERR_STREAM_CANNOT_PIPE`, and `_undestroy()` resets lifecycle state;
   readable/writable buffer inspection and `readableDidRead` reflect live
   state, while `readable.compose()` builds an abortable composed Duplex;
+  legacy base `Stream.pipe()` forwards manually emitted data, honors
+  `{ end: false }`, propagates backpressure and removes lifecycle listeners;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles

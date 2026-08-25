@@ -3583,6 +3583,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              Stream.prototype.emit = function(event) { var name = event; if (name === 'data') this._readableDidRead = true; var entries = (this._events[name] || []).slice(); var args = Array.prototype.slice.call(arguments, 1); if (name === 'error' && entries.length === 0) { if (args[0] instanceof Error) throw args[0]; var unhandled = new Error('Unhandled error' + (args.length ? ': ' + String(args[0]) : '')); unhandled.code = 'ERR_UNHANDLED_ERROR'; unhandled.context = args[0]; throw unhandled; } entries.forEach(function(entry) { (entry.wrapper || entry.listener).apply(this, args); }, this); return entries.length > 0; };\n\
              Stream.prototype.destroy = function(error) { if (this.destroyed) return this; this.destroyed = true; if (this.readable === true && !this.readableEnded) this.readableAborted = true; if (this.writable === true && !this.writableFinished) this.writableAborted = true; this.readable = false; this.writable = false; var self = this, completed = false; function finish(finalError) { if (completed) return; completed = true; self.closed = true; finalError = finalError || error; var thrown; if (finalError) { self.errored = finalError; try { self.emit('error', finalError); } catch (emitError) { thrown = emitError; } } self.emit('close'); if (thrown) throw thrown; } if (typeof this._destroy === 'function') { try { this._destroy(error || null, finish); } catch (destroyError) { if (completed) throw destroyError; finish(destroyError); } } else finish(error); return this; };\
              Stream.prototype._undestroy = function() { this.destroyed = false; this.closed = false; this.errored = null; if (this.readableEnded !== undefined) { this.readableAborted = false; this.readable = !this.readableEnded; } if (this.writableEnded !== undefined) { this.writableAborted = false; this.writable = !this.writableEnded; this._destroyError = null; } return this; };\
+             Stream.prototype.pipe = function(destination, options) { var source = this, ended = false; function onData(chunk) { if (destination.writable === false) return; if (destination.write(chunk) === false && source.pause) source.pause(); } function onDrain() { if (source.resume) source.resume(); } function onEnd() { if (ended) return; ended = true; cleanup(); if (!options || options.end !== false) destination.end(); } function onClose() { if (ended) return; ended = true; cleanup(); if (destination.destroy) destination.destroy(); } function onError(error) { cleanup(); if (destination.destroy) destination.destroy(error); } function cleanup() { source.removeListener('data', onData); source.removeListener('end', onEnd); source.removeListener('close', onClose); source.removeListener('error', onError); destination.removeListener('drain', onDrain); } source.on('data', onData); source.once('end', onEnd); source.once('close', onClose); source.once('error', onError); destination.on('drain', onDrain); destination.emit('pipe', source); return destination; };\
              function inherit(child, parent) { child.prototype = Object.create(parent.prototype); child.prototype.constructor = child; }\n\
              function Readable(options) { Stream.call(this); options = options || {}; this.readable = true; this.readableEnded = false; this.readableAborted = false; this.readableFlowing = null; this.readableEncoding = null; this._decoder = null; this._readableObjectMode = Boolean(options.objectMode || options.readableObjectMode); this.readableObjectMode = this._readableObjectMode; this.readableHighWaterMark = resolveHighWaterMark(options, this._readableObjectMode); this.readableLength = 0; this._paused = false; this._chunks = []; this._read = typeof options.read === 'function' ? options.read : function() {}; this._destroy = typeof options.destroy === 'function' ? options.destroy : null; configureConstruct(this, options); }\
              inherit(Readable, Stream);\n\
@@ -6291,6 +6292,32 @@ mod tests {
             result,
             r#"[[false,2,"a"],"ab",[true,0],[1,"second","utf8"],[2,4]]"#
         );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn legacy_stream_pipe_forwards_manual_events_and_options() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_legacy_stream_pipe");
+        fs::write(
+            dir.join("index.js"),
+            "var stream = require('node:stream'); module.exports = function () { var source = new stream.Stream(), values = [], pipeSource, destination = new stream.Writable({ write: function(chunk, encoding, callback) { values.push(chunk.toString()); callback(); } }); destination.on('pipe', function(value) { pipeSource = value; }); var returned = source.pipe(destination); source.emit('data', Buffer.from('a')); source.emit('data', Buffer.from('b')); source.emit('end'); var openSource = new stream.Stream(), openEnded = false, openDestination = new stream.Writable({ write: function(chunk, encoding, callback) { callback(); } }); openDestination.on('finish', function() { openEnded = true; }); openSource.pipe(openDestination, { end: false }); openSource.emit('end'); return [returned === destination, pipeSource === source, values, destination.writableEnded, destination.writableFinished, openDestination.writableEnded, openEnded, source.listenerCount('data'), openSource.listenerCount('end')]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_legacy_stream_pipe_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseLegacyStreamPipe = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseLegacyStreamPipe").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[true,true,["a","b"],true,true,false,false,0,0]"#);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
