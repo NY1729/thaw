@@ -13915,6 +13915,11 @@ mod tests {
             type Named = { name: string };
             type Choice = string | number;
             type ChoiceList = Choice[];
+            type Label = string;
+            interface AliasItem {
+                label: Label;
+                choices: ChoiceList;
+            }
             function record(name: string, count: number): RecordValue {
                 return { count, name };
             }
@@ -13932,11 +13937,18 @@ mod tests {
                 console.log(values[0]);
                 console.log(values[1]);
                 console.log(await delayed("later"));
+                const interfaceItem: AliasItem = {
+                    choices: ["first", 2],
+                    label: "interface"
+                };
+                console.log(interfaceItem.label);
+                console.log(interfaceItem.choices[0]);
+                console.log(interfaceItem.choices[1]);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "forward_type_aliases"),
-            "alias3\nselected\n8\nlater\n"
+            "alias3\nselected\n8\nlater\ninterface\nfirst\n2\n"
         );
     }
 
