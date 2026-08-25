@@ -236,18 +236,9 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                         )?;
                         match ty {
                             HirType::Array(element)
-                                if matches!(
-                                    *element,
-                                    HirType::F64
-                                        | HirType::Bool
-                                        | HirType::Str
-                                        | HirType::JsValue
-                                ) =>
-                            {
-                                Ok(*element)
-                            }
+                                if supports_ffi_variadic_element(&element) => Ok(*element),
                             other => Err(format!(
-                                "ambient variadic function `{name}` requires a number[], boolean[], string[], or JsValue[] rest parameter, found {other:?}"
+                                "ambient variadic function `{name}` has unsupported rest element layout {other:?}"
                             )),
                         }
                     }).transpose()?
@@ -470,6 +461,20 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         functions: specialized,
         extern_functions,
     })
+}
+
+fn supports_ffi_variadic_element(ty: &HirType) -> bool {
+    match ty {
+        HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
+        HirType::Array(element) => element.as_ref() == &HirType::F64,
+        HirType::Object(fields) => fields.iter().all(|(_, field)| {
+            matches!(
+                field,
+                HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
+            )
+        }),
+        _ => false,
+    }
 }
 
 fn validate_generic_function(fn_decl: &FnDecl) -> Result<Vec<Symbol>, String> {
@@ -13114,15 +13119,12 @@ mod tests {
     #[test]
     fn rejects_unsupported_ambient_variadic_element_types() {
         let module = thaw_parser::parse_typescript(
-            r#"declare function native_merge(...values: { value: number }[]): number;
-               function main(): void { console.log(native_merge({ value: 1 })); }"#,
+            r#"declare function native_merge(...values: { nested: { value: number } }[]): number;
+               function main(): void { console.log(native_merge({ nested: { value: 1 } })); }"#,
         )
         .unwrap();
         let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("requires a number[], boolean[], string[], or JsValue[] rest parameter"),
-            "{error}"
-        );
+        assert!(error.contains("unsupported rest element layout"), "{error}");
     }
 
     #[test]
