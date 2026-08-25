@@ -257,6 +257,7 @@ const PLATFORM_GLOBALS: &str = r#"
     globalThis.URLSearchParams = class URLSearchParams {
       constructor(init = '') {
         this.__thawEntries = [];
+        this.__thawUpdate = null;
         if (typeof init === 'string') {
           const source = init.charAt(0) === '?' ? init.substring(1) : init;
           if (source !== '') for (const field of source.split('&')) {
@@ -277,7 +278,11 @@ const PLATFORM_GLOBALS: &str = r#"
         }
       }
       get size() { return this.__thawEntries.length; }
-      append(name, value) { this.__thawEntries.push([String(name), String(value)]); }
+      __thawChanged() { if (this.__thawUpdate) this.__thawUpdate(this.toString()); }
+      append(name, value) {
+        this.__thawEntries.push([String(name), String(value)]);
+        this.__thawChanged();
+      }
       delete(name, value) {
         const key = String(name);
         if (arguments.length < 2) this.__thawEntries = this.__thawEntries.filter(entry => entry[0] !== key);
@@ -285,6 +290,7 @@ const PLATFORM_GLOBALS: &str = r#"
           const expected = String(value);
           this.__thawEntries = this.__thawEntries.filter(entry => entry[0] !== key || entry[1] !== expected);
         }
+        this.__thawChanged();
       }
       get(name) {
         const key = String(name);
@@ -310,11 +316,13 @@ const PLATFORM_GLOBALS: &str = r#"
           this.__thawEntries[first][1] = replacement;
           this.__thawEntries = this.__thawEntries.filter((entry, index) => entry[0] !== key || index === first);
         }
+        this.__thawChanged();
       }
       sort() {
         this.__thawEntries = this.__thawEntries.map((entry, index) => [entry, index])
           .sort((left, right) => left[0][0] < right[0][0] ? -1 : left[0][0] > right[0][0] ? 1 : left[1] - right[1])
           .map(item => item[0]);
+        this.__thawChanged();
       }
       entries() { return this.__thawEntries.map(entry => entry.slice())[Symbol.iterator](); }
       keys() { return this.__thawEntries.map(entry => entry[0])[Symbol.iterator](); }
@@ -324,6 +332,115 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       toString() { return this.__thawEntries.map(entry => encodeFormPart(entry[0]) + '=' + encodeFormPart(entry[1])).join('&'); }
       [Symbol.iterator]() { return this.entries(); }
+    };
+  }
+  if (typeof globalThis.URL !== 'function') {
+    const normalizePath = path => {
+      const absolute = path.charAt(0) === '/';
+      const trailing = path.endsWith('/') || path.endsWith('/.') || path.endsWith('/..');
+      const output = [];
+      for (const part of path.split('/')) {
+        if (part === '' || part === '.') continue;
+        if (part === '..') output.pop(); else output.push(part);
+      }
+      let result = (absolute ? '/' : '') + output.join('/');
+      if (trailing && result !== '/') result += '/';
+      return result || (absolute ? '/' : '');
+    };
+    const parseAuthority = authority => {
+      let userinfo = '', host = authority;
+      const at = authority.lastIndexOf('@');
+      if (at >= 0) { userinfo = authority.substring(0, at); host = authority.substring(at + 1); }
+      let username = '', password = '';
+      const colon = userinfo.indexOf(':');
+      if (colon < 0) username = userinfo;
+      else { username = userinfo.substring(0, colon); password = userinfo.substring(colon + 1); }
+      let hostname = host, port = '';
+      if (host.charAt(0) === '[') {
+        const close = host.indexOf(']');
+        if (close < 0) throw new TypeError('Invalid URL');
+        hostname = host.substring(0, close + 1);
+        if (host.charAt(close + 1) === ':') port = host.substring(close + 2);
+      } else {
+        const hostColon = host.lastIndexOf(':');
+        if (hostColon >= 0) { hostname = host.substring(0, hostColon); port = host.substring(hostColon + 1); }
+      }
+      if (port !== '' && !/^\d+$/.test(port)) throw new TypeError('Invalid URL');
+      return { username, password, hostname: hostname.toLowerCase(), port };
+    };
+    globalThis.URL = class URL {
+      constructor(input, base) {
+        const value = String(input);
+        const absolute = value.match(/^([A-Za-z][A-Za-z\d+.-]*:)(?:\/\/([^\/?#]*))?([^?#]*)(\?[^#]*)?(#.*)?$/);
+        if (absolute) {
+          this.__thawProtocol = absolute[1].toLowerCase();
+          const authority = absolute[2] === undefined ? '' : absolute[2];
+          const parsed = parseAuthority(authority);
+          this.__thawUsername = parsed.username;
+          this.__thawPassword = parsed.password;
+          this.__thawHostname = parsed.hostname;
+          this.__thawPort = parsed.port;
+          this.__thawPathname = normalizePath(absolute[3] || (authority !== '' ? '/' : ''));
+          this.__thawSearch = absolute[4] || '';
+          this.__thawHash = absolute[5] || '';
+        } else {
+          if (base === undefined) throw new TypeError('Invalid URL');
+          const parent = base instanceof URL ? base : new URL(base);
+          this.__thawProtocol = parent.protocol;
+          this.__thawUsername = parent.username;
+          this.__thawPassword = parent.password;
+          this.__thawHostname = parent.hostname;
+          this.__thawPort = parent.port;
+          const match = value.match(/^([^?#]*)(\?[^#]*)?(#.*)?$/);
+          const relativePath = match[1];
+          if (relativePath === '') this.__thawPathname = parent.pathname;
+          else if (relativePath.charAt(0) === '/') this.__thawPathname = normalizePath(relativePath);
+          else this.__thawPathname = normalizePath(parent.pathname.substring(0, parent.pathname.lastIndexOf('/') + 1) + relativePath);
+          this.__thawSearch = match[2] !== undefined ? match[2] : (relativePath === '' ? parent.search : '');
+          this.__thawHash = match[3] || '';
+        }
+        this.__thawNormalizePort();
+        this.__thawRefreshParams();
+      }
+      __thawNormalizePort() {
+        if ((this.__thawProtocol === 'http:' && this.__thawPort === '80')
+            || (this.__thawProtocol === 'https:' && this.__thawPort === '443')) this.__thawPort = '';
+      }
+      __thawRefreshParams() {
+        const params = new URLSearchParams(this.__thawSearch);
+        params.__thawUpdate = value => { this.__thawSearch = value === '' ? '' : '?' + value; };
+        this.__thawSearchParams = params;
+      }
+      get protocol() { return this.__thawProtocol; }
+      set protocol(value) { this.__thawProtocol = String(value).replace(/:$/, '').toLowerCase() + ':'; this.__thawNormalizePort(); }
+      get username() { return this.__thawUsername; }
+      set username(value) { this.__thawUsername = String(value); }
+      get password() { return this.__thawPassword; }
+      set password(value) { this.__thawPassword = String(value); }
+      get hostname() { return this.__thawHostname; }
+      set hostname(value) { this.__thawHostname = String(value).toLowerCase(); }
+      get port() { return this.__thawPort; }
+      set port(value) { const port = String(value); if (port !== '' && !/^\d+$/.test(port)) return; this.__thawPort = port; this.__thawNormalizePort(); }
+      get host() { return this.hostname + (this.port ? ':' + this.port : ''); }
+      set host(value) { const parsed = parseAuthority(String(value)); this.__thawHostname = parsed.hostname; this.__thawPort = parsed.port; this.__thawNormalizePort(); }
+      get pathname() { return this.__thawPathname; }
+      set pathname(value) { this.__thawPathname = normalizePath(String(value).charAt(0) === '/' ? String(value) : '/' + String(value)); }
+      get search() { return this.__thawSearch; }
+      set search(value) { const search = String(value); this.__thawSearch = search === '' ? '' : (search.charAt(0) === '?' ? search : '?' + search); this.__thawRefreshParams(); }
+      get searchParams() { return this.__thawSearchParams; }
+      get hash() { return this.__thawHash; }
+      set hash(value) { const hash = String(value); this.__thawHash = hash === '' ? '' : (hash.charAt(0) === '#' ? hash : '#' + hash); }
+      get origin() { return this.__thawHostname === '' || this.__thawProtocol === 'file:' ? 'null' : this.protocol + '//' + this.host; }
+      get href() {
+        const credentials = this.username || this.password ? this.username + (this.password ? ':' + this.password : '') + '@' : '';
+        const authority = this.hostname !== '' || this.protocol === 'file:' ? '//' + credentials + this.host : '';
+        return this.protocol + authority + this.pathname + this.search + this.hash;
+      }
+      set href(value) { const replacement = new URL(value); Object.assign(this, replacement); this.__thawRefreshParams(); }
+      toString() { return this.href; }
+      toJSON() { return this.href; }
+      static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
+      static parse(input, base) { try { return new URL(input, base); } catch (_) { return null; } }
     };
   }
   if (typeof globalThis.Event !== 'function') {
@@ -1474,6 +1591,29 @@ mod tests {
         assert_eq!(
             call("queryParams", "[]"),
             r#"[["1","1,2",true,4],"a=3&b=two+words&snow=%E9%9B%AA","a,b,snow","a:3:true|b:two words:true|snow:雪:true","x=1&y=false","z=5"]"#
+        );
+    }
+
+    #[test]
+    fn url_resolves_relative_paths_and_synchronizes_search_params() {
+        assert_eq!(
+            load(
+                "function urls() {\n\
+                   const url = new URL('../next?x=1#part', 'https://User:Pass@Example.COM:443/a/b/file');\n\
+                   url.searchParams.append('x', 2);\n\
+                   url.searchParams.set('space', 'two words');\n\
+                   const first = [url.href, url.origin, url.protocol, url.username, url.password, url.host, url.hostname, url.port, url.pathname, url.search, url.hash, url.toJSON()];\n\
+                   url.search = '?fresh=yes';\n\
+                   const oldParamsDetached = url.searchParams.get('x') === null && url.searchParams.get('fresh') === 'yes';\n\
+                   url.host = 'Other.test:8080'; url.pathname = 'root/./child/../end'; url.hash = 'done';\n\
+                   return [first, oldParamsDetached, url.href, URL.canParse('/ok', 'https://example.test'), URL.canParse('/bad'), URL.parse('bad')];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("urls", "[]"),
+            r##"[["https://User:Pass@example.com/a/next?x=1&x=2&space=two+words#part","https://example.com","https:","User","Pass","example.com","example.com","","/a/next","?x=1&x=2&space=two+words","#part","https://User:Pass@example.com/a/next?x=1&x=2&space=two+words#part"],true,"https://User:Pass@other.test:8080/root/end?fresh=yes#done",true,false,null]"##
         );
     }
 
