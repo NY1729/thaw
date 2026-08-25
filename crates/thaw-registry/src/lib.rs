@@ -1336,7 +1336,8 @@ fn rewrite_static_worker_urls(
     use std::collections::BTreeSet;
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        Callee, Expr, ImportDecl, ImportSpecifier, Lit, MemberProp, NewExpr, Pat, VarDeclarator,
+        Callee, Expr, ExprOrSpread, ImportDecl, ImportSpecifier, Lit, MemberProp, NewExpr, Pat,
+        Prop, PropName, PropOrSpread, VarDeclarator,
     };
     use thaw_parser::common::Spanned;
 
@@ -1416,10 +1417,44 @@ fn rewrite_static_worker_urls(
         }
     }
 
+    struct WorkerUrlSpan {
+        lo: u32,
+        hi: u32,
+        import_meta_base: Option<(u32, u32)>,
+        relative: String,
+    }
+
+    fn static_file_options(arguments: &[ExprOrSpread]) -> bool {
+        let Some(options) = arguments.get(1) else {
+            return true;
+        };
+        if matches!(options.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == "undefined")
+        {
+            return true;
+        }
+        let Expr::Object(options) = options.expr.as_ref() else {
+            return false;
+        };
+        for property in &options.props {
+            let PropOrSpread::Prop(property) = property else {
+                return false;
+            };
+            let Prop::KeyValue(property) = property.as_ref() else {
+                continue;
+            };
+            let is_eval = matches!(&property.key, PropName::Ident(name) if name.sym == "eval")
+                || matches!(&property.key, PropName::Str(name) if name.value.as_str() == Some("eval"));
+            if is_eval {
+                return matches!(property.value.as_ref(), Expr::Lit(Lit::Bool(value)) if !value.value);
+            }
+        }
+        true
+    }
+
     struct WorkerUrls {
         constructors: BTreeSet<String>,
         namespaces: BTreeSet<String>,
-        spans: Vec<(u32, u32, u32, u32, String)>,
+        spans: Vec<WorkerUrlSpan>,
     }
     impl Visit for WorkerUrls {
         fn visit_new_expr(&mut self, expression: &NewExpr) {
@@ -1441,6 +1476,19 @@ fn rewrite_static_worker_urls(
             let Some(first) = arguments.first() else {
                 return;
             };
+            if let Expr::Lit(Lit::Str(path)) = first.expr.as_ref() {
+                if static_file_options(arguments) {
+                    let span = first.expr.span();
+                    self.spans.push(WorkerUrlSpan {
+                        lo: span.lo.0,
+                        hi: span.hi.0,
+                        import_meta_base: None,
+                        relative: path.value.to_string_lossy().into_owned(),
+                    });
+                }
+                expression.visit_children_with(self);
+                return;
+            }
             let Expr::New(url) = first.expr.as_ref() else {
                 expression.visit_children_with(self);
                 return;
@@ -1462,13 +1510,12 @@ fn rewrite_static_worker_urls(
             };
             let span = first.expr.span();
             let base_span = url_arguments[1].expr.span();
-            self.spans.push((
-                span.lo.0,
-                span.hi.0,
-                base_span.lo.0,
-                base_span.hi.0,
-                path.value.to_string_lossy().into_owned(),
-            ));
+            self.spans.push(WorkerUrlSpan {
+                lo: span.lo.0,
+                hi: span.hi.0,
+                import_meta_base: Some((base_span.lo.0, base_span.hi.0)),
+                relative: path.value.to_string_lossy().into_owned(),
+            });
             expression.visit_children_with(self);
         }
     }
@@ -1487,25 +1534,33 @@ fn rewrite_static_worker_urls(
     if workers.spans.is_empty() {
         return Ok(source.to_string());
     }
-    workers.spans.sort_by_key(|(lo, _, _, _, _)| *lo);
+    workers.spans.sort_by_key(|span| span.lo);
     let directory = module_path.parent().unwrap_or(Path::new(""));
     let mut output = String::with_capacity(source.len());
     let mut worker_requires = Vec::new();
     let mut cursor = 0usize;
-    for (lo, hi, base_lo, base_hi, relative) in workers.spans {
+    for worker in workers.spans {
+        let WorkerUrlSpan {
+            lo,
+            hi,
+            import_meta_base,
+            relative,
+        } = worker;
         if !(relative.starts_with("./") || relative.starts_with("../")) {
             continue;
         }
-        let base_lo = source_map
-            .lookup_byte_offset(thaw_parser::common::BytePos(base_lo))
-            .pos
-            .0 as usize;
-        let base_hi = source_map
-            .lookup_byte_offset(thaw_parser::common::BytePos(base_hi))
-            .pos
-            .0 as usize;
-        if source[base_lo..base_hi].trim() != "import.meta.url" {
-            continue;
+        if let Some((base_lo, base_hi)) = import_meta_base {
+            let base_lo = source_map
+                .lookup_byte_offset(thaw_parser::common::BytePos(base_lo))
+                .pos
+                .0 as usize;
+            let base_hi = source_map
+                .lookup_byte_offset(thaw_parser::common::BytePos(base_hi))
+                .pos
+                .0 as usize;
+            if source[base_lo..base_hi].trim() != "import.meta.url" {
+                continue;
+            }
         }
         let worker_path = directory.join(&relative);
         let worker_source = fs::read_to_string(&worker_path).map_err(|error| {
@@ -5796,7 +5851,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var worker = new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }); var events = []; await new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); return events; };",
+            "var Worker = require('node:worker_threads').Worker; function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); return events; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
@@ -5811,7 +5866,7 @@ mod tests {
         let arguments = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-        assert_eq!(result, "[42,0]");
+        assert_eq!(result, "[42,0,22,0]");
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
 
@@ -5822,6 +5877,10 @@ mod tests {
         let rewritten = rewrite_static_worker_urls(source, &dir.join("index.js"), "pkg", &dir)
             .expect("an unrelated Worker must not attempt to read its URL");
         assert_eq!(rewritten, source);
+        let eval_source = "var Worker = require('node:worker_threads').Worker; new Worker('./missing.js', { eval: true });";
+        let rewritten = rewrite_static_worker_urls(eval_source, &dir.join("index.js"), "pkg", &dir)
+            .expect("eval Worker source must not be treated as a file");
+        assert_eq!(rewritten, eval_source);
         let _ = fs::remove_dir_all(dir);
     }
 
