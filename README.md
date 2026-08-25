@@ -399,6 +399,9 @@ The workspace crates have narrow responsibilities:
   `unshift()` accepts binary views, validates invalid chunks, permits prepend
   after EOF is queued but rejects it after the `end` event, while explicit
   `resume()` drains data even without a data listener;
+  `unpipe(destination)` and `unpipe()` detach actual transfer/error/drain
+  listeners, emit one `unpipe` event per destination and retain per-destination
+  backpressure until every blocked writable drains;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
