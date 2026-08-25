@@ -393,6 +393,8 @@ The workspace crates have narrow responsibilities:
   surrogate-safe UCS-2/code-point conversion
 - `node:dgram` binds real UDP4/UDP6 sockets and exposes message/send/listening/
   close events, connected destinations, address metadata and buffer controls
+- `node:stream/consumers` collects event streams or async iterables as Buffer,
+  text, JSON, ArrayBuffer or Blob; Blob/File support includes slicing and bytes
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
