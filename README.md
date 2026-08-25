@@ -396,6 +396,9 @@ The workspace crates have narrow responsibilities:
   concrete type pattern. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
+- Generic callable assignment preserves and compares optional-parameter
+  positions instead of treating required and optional implementations as the
+  same shape; calls that supply all optional arguments use normal specialization
 - Callable assignment compares the effective Promise-wrapped return of named
   async generic functions, rejecting synchronous aliases while accepting an
   explicit `Promise<T>` callable contract without adding a second Promise layer
