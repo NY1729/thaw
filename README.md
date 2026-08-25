@@ -138,8 +138,10 @@ The workspace crates have narrow responsibilities:
   across native calls, `.d.ts` Fast paths, and async frames; duplicate fields
   must have the same native type
 - Non-generic top-level `type` aliases resolve through forward alias chains and
-  previously resolved interfaces, covering primitive, object, array, union,
-  intersection, function, and promise layouts; alias cycles are explicit errors
+  mutually forward-referenced interfaces, covering primitive, object, array,
+  union, intersection, function, and promise layouts. Nested alias references
+  inside object/array/tuple/function types are pre-resolved, and mixed
+  alias/interface cycles are explicit errors
 - Heterogeneous native unions use an explicit tag and word payload across
   locals, function parameters/returns, fixed-shape object fields, nested calls,
   async frames, and homogeneous arrays (including index updates and spread
