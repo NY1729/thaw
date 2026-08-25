@@ -228,6 +228,11 @@ const PLATFORM_GLOBALS: &str = r#"
       error.name = 'AbortError';
       return error;
     };
+    const timeoutError = () => {
+      const error = new Error('The operation timed out');
+      error.name = 'TimeoutError';
+      return error;
+    };
     class AbortSignal {
       constructor() {
         this.aborted = false;
@@ -271,9 +276,35 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       static timeout(milliseconds) {
         const signal = new AbortSignal();
-        setTimeout(() => signal.__thawAbort(abortError('The operation timed out')),
-                   milliseconds);
+        setTimeout(() => signal.__thawAbort(timeoutError()), milliseconds);
         return signal;
+      }
+      static any(signals) {
+        const combined = new AbortSignal();
+        const subscriptions = [];
+        const sources = [...signals];
+        for (const signal of sources) {
+          if (!signal || typeof signal.addEventListener !== 'function') {
+            throw new TypeError('AbortSignal.any expects AbortSignal values');
+          }
+        }
+        const finish = signal => {
+          if (combined.aborted) return;
+          combined.__thawAbort(signal.reason);
+          for (const [source, listener] of subscriptions) {
+            source.removeEventListener('abort', listener);
+          }
+        };
+        for (const signal of sources) {
+          if (signal.aborted) {
+            finish(signal);
+            break;
+          }
+          const listener = () => finish(signal);
+          subscriptions.push([signal, listener]);
+          signal.addEventListener('abort', listener, { once: true });
+        }
+        return combined;
       }
     }
     class AbortController {
@@ -1295,14 +1326,21 @@ mod tests {
                    try { controller.signal.throwIfAborted(); } catch (error) { thrown = error; }\n\
                    const timed = AbortSignal.timeout(0);\n\
                    await new Promise(resolve => timed.addEventListener('abort', resolve));\n\
-                   return [events.join(','), controller.signal.reason, thrown, timed.aborted, timed.reason.name];\n\
+                   const first = new AbortController();\n\
+                   const second = new AbortController();\n\
+                   const combined = AbortSignal.any([first.signal, second.signal]);\n\
+                   second.abort('combined');\n\
+                   const preAborted = AbortSignal.any([AbortSignal.abort('pre')]);\n\
+                   let invalidAny = false;\n\
+                   try { AbortSignal.any([first.signal, {}]); } catch (error) { invalidAny = error instanceof TypeError; }\n\
+                   return [events.join(','), controller.signal.reason, thrown, timed.aborted, timed.reason.name, combined.aborted, combined.reason, preAborted.reason, invalidAny];\n\
                  }"
             ),
             1
         );
         assert_eq!(
             call("abortSignals", "[]"),
-            r#"["property,once","reason","reason",true,"AbortError"]"#
+            r#"["property,once","reason","reason",true,"TimeoutError",true,"combined","pre",true]"#
         );
     }
 
