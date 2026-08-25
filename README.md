@@ -397,6 +397,8 @@ The workspace crates have narrow responsibilities:
   text, JSON, ArrayBuffer or Blob; Blob/File support includes slicing and bytes
 - `node:stream/web` shares global Readable/Writable/Transform streams with
   readers, writers, piping, async iteration, queuing strategies and text codecs
+- Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
+  native gzip, deflate and raw-deflate implementation
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
