@@ -14118,6 +14118,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_async_functions_and_callbacks() {
+        let source = r#"
+            async function delayed<T>(value: T): Promise<T> {
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(await delayed<number>(14));
+                console.log(await delayed("async"));
+                const delayedNumber: (value: number) => Promise<number> = delayed<number>;
+                console.log(await delayedNumber(15));
+                const chained: number = await new Promise<number>((resolve, reject) => {
+                    resolve(16);
+                }).then(delayed);
+                console.log(chained);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_async_functions"),
+            "14\nasync\n15\n16\n"
+        );
+    }
+
+    #[test]
     fn compiles_annotated_contextual_generic_arrows() {
         let source = r#"
             function main(): void {

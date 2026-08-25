@@ -368,6 +368,9 @@ The workspace crates have narrow responsibilities:
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
+- Named async generic functions specialize for inferred or explicit types and
+  retain exactly one Promise layer when used directly, as instantiated function
+  values, or as assimilated Promise callbacks
 - Generic variables nested in number arrays and fixed-layout numeric objects
   are inferred recursively and encoded into specialization symbols
 - Function type variables used as arguments to named generic interfaces such

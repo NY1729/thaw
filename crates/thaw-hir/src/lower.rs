@@ -6992,7 +6992,7 @@ impl<'a> FnLowerer<'a> {
             self.generic_interfaces,
             &mut Vec::new(),
         )?;
-        if signature.is_async {
+        if signature.is_async && !matches!(ret, HirType::Promise(_)) {
             ret = HirType::Promise(Box::new(ret));
         }
         if let Some(constraints) = self.call_constraints {
@@ -7250,7 +7250,7 @@ impl<'a> FnLowerer<'a> {
                             self.generic_interfaces,
                             &mut Vec::new(),
                         )?;
-                        if signature.is_async {
+                        if signature.is_async && !matches!(ret, HirType::Promise(_)) {
                             ret = HirType::Promise(Box::new(ret));
                         }
                         let specialized = specialized_generic_function_name(
