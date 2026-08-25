@@ -390,6 +390,10 @@ The workspace crates have narrow responsibilities:
   owning writer serializes abort behind pending writes, calls the underlying
   abort algorithm before settling the write, and rejects later writes and its
   `closed` Promise with the original reason.
+  Releasing a Web reader rejects and removes its pending reads; releasing a
+  writer leaves already-queued writes alive while rejecting subsequent calls,
+  `ready`, and `closed` with `ERR_INVALID_STATE`. Both streams can then be
+  locked by a replacement reader or writer.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers

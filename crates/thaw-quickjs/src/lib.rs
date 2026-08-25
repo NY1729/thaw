@@ -3737,6 +3737,7 @@ const PLATFORM_GLOBALS: &str = r#"
     };
   }
   if (typeof globalThis.ReadableStream !== 'function') {
+    const webInvalidState = message => { const error = new TypeError(message); error.code = 'ERR_INVALID_STATE'; return error; };
     class ReadableStreamDefaultController {
       constructor(stream) { this._stream = stream; }
       enqueue(chunk) {
@@ -3758,16 +3759,16 @@ const PLATFORM_GLOBALS: &str = r#"
     class ReadableStreamDefaultReader {
       constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._reader = this; this.closed = stream._closed; }
       read() {
-        const stream = this._stream; if (!stream) return Promise.reject(new TypeError('reader is released'));
+        const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
         if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
         if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
         if (stream._state === 'errored') return Promise.reject(stream._error);
-        const result = new Promise((resolve, reject) => stream._reads.push({ resolve, reject }));
+        const result = new Promise((resolve, reject) => stream._reads.push({ reader: this, resolve, reject }));
         if (typeof stream._source.pull === 'function') Promise.resolve(stream._source.pull(stream._controller)).catch(error => stream._controller.error(error));
         return result;
       }
-      cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(new TypeError('reader is released')); }
-      releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
+      cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
+      releaseLock() { if (!this._stream) return; const stream = this._stream, error = webInvalidState('Reader was released'); stream._reads = stream._reads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); stream._reader = null; this._stream = null; this.closed = Promise.reject(error); this.closed.catch(() => {}); }
     }
     globalThis.ReadableStream = class ReadableStream {
       constructor(source = {}) {
@@ -3789,10 +3790,10 @@ const PLATFORM_GLOBALS: &str = r#"
     globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
     class WritableStreamDefaultWriter {
       constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._writer = this; this.ready = Promise.resolve(); this.closed = stream._closed; }
-      write(chunk) { return this._stream._write(chunk); }
-      close() { return this._stream ? this._stream._close() : Promise.reject(new TypeError('writer is released')); }
-      abort(reason) { return this._stream ? this._stream._abort(reason) : Promise.reject(new TypeError('writer is released')); }
-      releaseLock() { if (this._stream) this._stream._writer = null; this._stream = null; }
+      write(chunk) { return this._stream ? this._stream._write(chunk) : Promise.reject(webInvalidState('Writer is released')); }
+      close() { return this._stream ? this._stream._close() : Promise.reject(webInvalidState('Writer is released')); }
+      abort(reason) { return this._stream ? this._stream._abort(reason) : Promise.reject(webInvalidState('Writer is released')); }
+      releaseLock() { if (!this._stream) return; const error = webInvalidState('Writer was released'); this._stream._writer = null; this._stream = null; this.ready = Promise.reject(error); this.closed = Promise.reject(error); this.ready.catch(() => {}); this.closed.catch(() => {}); }
       get desiredSize() { return this._stream && this._stream._state === 'writable' ? 1 : null; }
     }
     globalThis.WritableStream = class WritableStream {
