@@ -386,6 +386,8 @@ The workspace crates have narrow responsibilities:
   Non-generic alias chains ending in either callable form are resolved across
   multiple links and forward declarations; parentheses around callable types,
   alias targets and variable annotations do not change classification
+- Empty interfaces with one callable `extends` base inherit its polymorphic
+  signature through multiple levels and forward declarations
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
