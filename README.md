@@ -341,6 +341,8 @@ The workspace crates have narrow responsibilities:
   exposes nodeTiming, event-loop utilization and delay histogram shapes
 - `node:v8` provides cycle-preserving serialization for common JavaScript
   values and the heap/code-statistics shapes used by runtime probes
+- `node:zlib` provides gzip, zlib and raw-deflate compression/decompression
+  through synchronous and callback APIs
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
