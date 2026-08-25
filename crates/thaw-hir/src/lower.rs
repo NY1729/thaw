@@ -1096,69 +1096,91 @@ fn resolve_interfaces(
     module: &Module,
 ) -> Result<(HashMap<Symbol, HirType>, GenericInterfaces<'_>), String> {
     let mut raw: HashMap<Symbol, &TsInterfaceDecl> = HashMap::new();
+    let mut aliases = HashMap::new();
     let mut generic: GenericInterfaces = HashMap::new();
     for item in &module.body {
-        if let ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) = item {
-            let name = iface.id.sym.to_string();
-            if iface.type_params.is_some() {
-                generic.insert(name, iface.as_ref());
-            } else {
-                raw.insert(name, iface.as_ref());
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) => {
+                let name = iface.id.sym.to_string();
+                if iface.type_params.is_some() {
+                    generic.insert(name, iface.as_ref());
+                } else {
+                    raw.insert(name, iface.as_ref());
+                }
             }
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
+                let name = alias.id.sym.to_string();
+                if alias.type_params.is_some() {
+                    return Err(format!("generic type alias `{name}` is not supported yet"));
+                }
+                aliases.insert(name, alias.as_ref());
+            }
+            _ => {}
         }
     }
 
-    let mut resolved = HashMap::new();
-    let names: Vec<Symbol> = raw.keys().cloned().collect();
-    for name in names {
-        resolve_interface(&name, &raw, &mut resolved, &mut Vec::new())?;
+    if let Some(name) = raw.keys().find(|name| aliases.contains_key(*name)) {
+        return Err(format!(
+            "type alias `{name}` conflicts with an interface declaration"
+        ));
     }
-    let mut pending = module
-        .body
-        .iter()
-        .filter_map(|item| match item {
-            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => Some(alias.as_ref()),
-            _ => None,
-        })
+
+    let mut resolved = HashMap::new();
+    let names = raw
+        .keys()
+        .chain(aliases.keys())
+        .cloned()
         .collect::<Vec<_>>();
-    while !pending.is_empty() {
-        let previous_len = pending.len();
-        let mut next = Vec::new();
-        let mut errors = Vec::new();
-        for alias in pending {
-            let name = alias.id.sym.to_string();
-            if alias.type_params.is_some() {
-                return Err(format!("generic type alias `{name}` is not supported yet"));
-            }
-            if resolved.contains_key(&name) {
-                return Err(format!(
-                    "type alias `{name}` conflicts with another type declaration"
-                ));
-            }
-            match lower_ts_type(&alias.type_ann, &resolved, &generic) {
-                Ok(ty) => {
-                    resolved.insert(name, ty);
-                }
-                Err(error) => {
-                    next.push(alias);
-                    errors.push((name, error));
-                }
-            }
-        }
-        if next.len() == previous_len {
-            let (name, error) = errors.into_iter().next().unwrap();
-            return Err(format!(
-                "type alias `{name}` could not be resolved: {error}"
-            ));
-        }
-        pending = next;
+    for name in names {
+        resolve_named_type(&name, &raw, &aliases, &mut resolved, &mut Vec::new())?;
     }
     Ok((resolved, generic))
+}
+
+fn resolve_named_type(
+    name: &str,
+    interfaces: &HashMap<Symbol, &TsInterfaceDecl>,
+    aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    resolved: &mut HashMap<Symbol, HirType>,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    if let Some(ty) = resolved.get(name) {
+        return Ok(ty.clone());
+    }
+    if in_progress.iter().any(|active| active == name) {
+        if interfaces.contains_key(name) {
+            return resolve_interface(name, interfaces, aliases, resolved, in_progress);
+        }
+        let mut cycle = in_progress.clone();
+        cycle.push(name.to_string());
+        return Err(format!(
+            "type declaration cycle `{}` cannot use Thaw's fixed-size native layout",
+            cycle.join(" -> ")
+        ));
+    }
+    if interfaces.contains_key(name) {
+        resolve_interface(name, interfaces, aliases, resolved, in_progress)
+    } else if let Some(alias) = aliases.get(name) {
+        in_progress.push(name.to_string());
+        let ty = resolve_type_with_interfaces(
+            &alias.type_ann,
+            interfaces,
+            aliases,
+            resolved,
+            in_progress,
+        )?;
+        in_progress.pop();
+        resolved.insert(name.to_string(), ty.clone());
+        Ok(ty)
+    } else {
+        Err(format!("unknown type declaration `{name}`"))
+    }
 }
 
 fn resolve_interface(
     name: &str,
     raw: &HashMap<Symbol, &TsInterfaceDecl>,
+    aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
     resolved: &mut HashMap<Symbol, HirType>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<HirType, String> {
@@ -1202,7 +1224,7 @@ fn resolve_interface(
         };
         let base_name = base_ident.sym.to_string();
         let HirType::Object(base_fields) =
-            resolve_interface(&base_name, raw, resolved, in_progress)?
+            resolve_interface(&base_name, raw, aliases, resolved, in_progress)?
         else {
             unreachable!("resolve_interface always returns HirType::Object or an Err")
         };
@@ -1238,7 +1260,8 @@ fn resolve_interface(
         let ann = prop.type_ann.as_ref().ok_or_else(|| {
             format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
         })?;
-        let field_ty = resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress)?;
+        let field_ty =
+            resolve_type_with_interfaces(&ann.type_ann, raw, aliases, resolved, in_progress)?;
         fields.push((field_name, field_ty));
     }
 
@@ -1256,24 +1279,105 @@ fn resolve_interface(
 fn resolve_type_with_interfaces(
     ty: &TsType,
     raw: &HashMap<Symbol, &TsInterfaceDecl>,
+    aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
     resolved: &mut HashMap<Symbol, HirType>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<HirType, String> {
-    if let TsType::TsTypeRef(ty_ref) = ty {
-        if let swc_ecma_ast::TsEntityName::Ident(id) = &ty_ref.type_name {
-            let ref_name = id.sym.as_str();
-            if raw.contains_key(ref_name) {
-                return resolve_interface(ref_name, raw, resolved, in_progress);
+    resolve_type_dependencies(ty, raw, aliases, resolved, in_progress)?;
+    lower_ts_type(ty, resolved, &GenericInterfaces::new())
+}
+
+fn resolve_type_dependencies(
+    ty: &TsType,
+    interfaces: &HashMap<Symbol, &TsInterfaceDecl>,
+    aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    resolved: &mut HashMap<Symbol, HirType>,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<(), String> {
+    match ty {
+        TsType::TsTypeRef(reference) => {
+            if let swc_ecma_ast::TsEntityName::Ident(id) = &reference.type_name {
+                let name = id.sym.as_str();
+                if interfaces.contains_key(name) || aliases.contains_key(name) {
+                    resolve_named_type(name, interfaces, aliases, resolved, in_progress)?;
+                }
+            }
+            if let Some(arguments) = &reference.type_params {
+                for argument in &arguments.params {
+                    resolve_type_dependencies(
+                        argument,
+                        interfaces,
+                        aliases,
+                        resolved,
+                        in_progress,
+                    )?;
+                }
             }
         }
+        TsType::TsParenthesizedType(parenthesized) => resolve_type_dependencies(
+            &parenthesized.type_ann,
+            interfaces,
+            aliases,
+            resolved,
+            in_progress,
+        )?,
+        TsType::TsArrayType(array) => {
+            resolve_type_dependencies(&array.elem_type, interfaces, aliases, resolved, in_progress)?
+        }
+        TsType::TsTupleType(tuple) => {
+            for element in &tuple.elem_types {
+                resolve_type_dependencies(&element.ty, interfaces, aliases, resolved, in_progress)?;
+            }
+        }
+        TsType::TsUnionOrIntersectionType(value) => {
+            let elements = match value {
+                TsUnionOrIntersectionType::TsUnionType(union) => &union.types,
+                TsUnionOrIntersectionType::TsIntersectionType(intersection) => &intersection.types,
+            };
+            for element in elements {
+                resolve_type_dependencies(element, interfaces, aliases, resolved, in_progress)?;
+            }
+        }
+        TsType::TsTypeLit(literal) => {
+            for member in &literal.members {
+                if let TsTypeElement::TsPropertySignature(property) = member {
+                    if let Some(annotation) = &property.type_ann {
+                        resolve_type_dependencies(
+                            &annotation.type_ann,
+                            interfaces,
+                            aliases,
+                            resolved,
+                            in_progress,
+                        )?;
+                    }
+                }
+            }
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            for parameter in &function.params {
+                if let TsFnParam::Ident(parameter) = parameter {
+                    if let Some(annotation) = &parameter.type_ann {
+                        resolve_type_dependencies(
+                            &annotation.type_ann,
+                            interfaces,
+                            aliases,
+                            resolved,
+                            in_progress,
+                        )?;
+                    }
+                }
+            }
+            resolve_type_dependencies(
+                &function.type_ann.type_ann,
+                interfaces,
+                aliases,
+                resolved,
+                in_progress,
+            )?;
+        }
+        _ => {}
     }
-    // Not an interface reference -- fall through to the ordinary rules.
-    // Any nested `TsTypeRef` to another (non-generic) interface inside
-    // e.g. an object type literal's field is still caught, since
-    // `lower_ts_type` also consults `resolved` for `TsTypeRef` lookups.
-    // No generic interfaces here by design -- see the scope note on
-    // `GenericInterfaces`.
-    lower_ts_type(ty, resolved, &GenericInterfaces::new())
+    Ok(())
 }
 
 fn lower_fn_decl(
@@ -12480,7 +12584,28 @@ mod tests {
         let module = thaw_parser::parse_typescript("type A = B; type B = A;").unwrap();
         assert!(lower_module(&module)
             .unwrap_err()
-            .contains("type alias `A` could not be resolved"));
+            .contains("type declaration cycle"));
+
+        let mixed = lower(
+            r#"interface Item { label: Label; count: Count }
+               type Count = number;
+               type Label = string;
+               function item(value: Item): string { return value.label; }"#,
+        );
+        assert_eq!(
+            mixed.functions[0].params[0].ty,
+            HirType::Object(vec![
+                ("label".into(), HirType::Str),
+                ("count".into(), HirType::F64),
+            ])
+        );
+
+        let module =
+            thaw_parser::parse_typescript("type Link = Node; interface Node { next: Link; }")
+                .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("self-referential"));
     }
 
     #[test]
