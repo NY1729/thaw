@@ -427,6 +427,8 @@ The workspace crates have narrow responsibilities:
   Buffer/string reads and writes, append, directory creation/enumeration,
   Stats/Dirent predicates, rename, unlink and recursive removal with
   Node-shaped host errors
+- Recursive `readdir` returns root-relative names or parent-aware Dirents,
+  supports Buffer encoding, and does not descend through symbolic links
 - Copying, canonical path resolution and unique temporary-directory creation
   are available through synchronous, callback and Promise APIs
 - `COPYFILE_EXCL` rejects existing destinations with `EEXIST`, while forced
