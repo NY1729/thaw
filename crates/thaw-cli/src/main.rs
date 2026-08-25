@@ -3826,6 +3826,7 @@ mod tests {
                 import * as querystring from "node:querystring";
                 import { EventEmitter } from "node:events";
                 import { strictEqual } from "node:assert/strict";
+                import { StringDecoder } from "node:string_decoder";
                 import { pathToFileURL, fileURLToPath, urlToHttpOptions } from "node:url";
                 function main(): void {
                     console.log(String(path.join(JSON.parse("[\"a\",\"b\"]"))));
