@@ -14025,6 +14025,32 @@ mod tests {
     }
 
     #[test]
+    fn compiles_explicit_generic_function_type_arguments() {
+        let source = r#"
+            function identity<T>(value: T): T { return value; }
+            function pair<T, U = string>(left: T, right: U): { left: T; right: U } {
+                return { left, right };
+            }
+            function numeric<T extends number = number>(): T { return 10; }
+            function empty<T>(): T[] { return []; }
+            function main(): void {
+                console.log(identity<string>("explicit"));
+                console.log(identity<number>(7));
+                const value = pair<number>(4, "default");
+                console.log(value.left);
+                console.log(value.right);
+                console.log(numeric<number>());
+                console.log(empty<number>().length);
+                console.log(empty<string>().length);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "explicit_generic_function_types"),
+            "explicit\n7\n4\ndefault\n10\n0\n0\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
