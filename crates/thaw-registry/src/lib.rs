@@ -161,6 +161,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "process" => {
             "export declare function cwd(argsArray: any): any;\nexport declare function chdir(argsArray: any): void;\nexport declare function uptime(argsArray: any): any;\nexport declare function hrtime(argsArray: any): any;\nexport declare function memoryUsage(argsArray: any): any;\nexport declare function cpuUsage(argsArray: any): any;\nexport declare function emitWarning(argsArray: any): void;\n"
         }
+        "child_process" => {
+            "export declare function spawnSync(argsArray: any): any;\nexport declare function execFileSync(argsArray: any): any;\nexport declare function execSync(argsArray: any): any;\n"
+        }
         "punycode" => {
             "export declare function encode(argsArray: any): string;\nexport declare function decode(argsArray: any): string;\nexport declare function toASCII(argsArray: any): string;\nexport declare function toUnicode(argsArray: any): string;\n"
         }
@@ -3164,6 +3167,16 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = __thaw_process;\n\
              module.exports.default = __thaw_process;\n\
              module.exports.__esModule = true;\n",
+        ),
+        "child_process" => Some(
+            r#"function normalize(command, args, options) { if (!Array.isArray(args)) { options = args || {}; args = []; } else options = options || {}; command = String(command); args = args.map(String); if (options.shell) { var shell = typeof options.shell === 'string' ? options.shell : '/bin/sh', joined = [command].concat(args).map(function(value) { return "'" + value.replace(/'/g, "'\\''") + "'"; }).join(' '); command = shell; args = ['-c', joined]; } var environment; if (options.env) { environment = {}; Object.keys(options.env).forEach(function(name) { if (options.env[name] !== undefined) environment[name] = String(options.env[name]); }); } var input = options.input === undefined ? undefined : Buffer.from(options.input, options.encoding).toString('hex'); return { command: command, args: args, options: { cwd: options.cwd === undefined ? undefined : String(options.cwd), env: environment, input: input }, original: options }; }
+             function processError(record, normalized) { var error = new Error(record.error || ('Command failed: ' + normalized.command)); error.code = record.code || null; error.errno = record.errno === undefined ? null : record.errno; error.path = record.path || normalized.command; error.spawnargs = normalized.args.slice(); error.status = record.status === undefined ? null : record.status; error.signal = record.signal === undefined ? null : record.signal; return error; }
+             function decode(record, options) { var encoding = options.encoding === undefined ? null : options.encoding, stdout = Buffer.from(record.stdout || '', 'hex'), stderr = Buffer.from(record.stderr || '', 'hex'); if (encoding && encoding !== 'buffer') { stdout = stdout.toString(encoding); stderr = stderr.toString(encoding); } return { pid: record.pid || 0, output: [null, stdout, stderr], stdout: stdout, stderr: stderr, status: record.status === undefined ? null : record.status, signal: record.signal === undefined ? null : record.signal, error: record.error ? processError(record, { command: record.path || '', args: [] }) : undefined }; }
+             function spawnSync(command, args, options) { var normalized = normalize(command, args, options), record = JSON.parse(__thaw_child_process_sync(normalized.command, JSON.stringify(normalized.args), JSON.stringify(normalized.options))), result = decode(record, normalized.original), maxBuffer = normalized.original.maxBuffer === undefined ? 1048576 : Number(normalized.original.maxBuffer); if (!result.error && result.stdout.length + result.stderr.length > maxBuffer) { var error = new Error('spawnSync ' + normalized.command + ' ENOBUFS'); error.code = 'ENOBUFS'; result.error = error; result.status = null; } return result; }
+             function execFileSync(file, args, options) { var normalized = normalize(file, args, options), result = spawnSync(file, args, options); if (result.error || result.status !== 0) { var error = result.error || processError({ status: result.status, signal: result.signal }, normalized); error.stdout = result.stdout; error.stderr = result.stderr; error.output = result.output; error.pid = result.pid; throw error; } return result.stdout; }
+             function execSync(command, options) { options = options || {}; return execFileSync(options.shell || '/bin/sh', ['-c', String(command)], Object.assign({}, options, { shell: false })); }
+             module.exports = { spawnSync: spawnSync, execFileSync: execFileSync, execSync: execSync }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
         ),
         "punycode" => Some(
             "var base = 36, tMin = 1, tMax = 26, skew = 38, damp = 700, initialBias = 72, initialN = 128, delimiter = '-'; function adapt(delta, points, first) { delta = first ? Math.floor(delta / damp) : delta >> 1; delta += Math.floor(delta / points); var k = 0; while (delta > Math.floor(((base - tMin) * tMax) / 2)) { delta = Math.floor(delta / (base - tMin)); k += base; } return k + Math.floor(((base - tMin + 1) * delta) / (delta + skew)); } function encodeDigit(value) { return String.fromCharCode(value + 22 + 75 * (value < 26)); } function decodeDigit(code) { if (code >= 48 && code <= 57) return code - 22; if (code >= 65 && code <= 90) return code - 65; if (code >= 97 && code <= 122) return code - 97; return base; } function codePoints(value) { return Array.from(String(value)).map(function(character) { return character.codePointAt(0); }); }\n\
@@ -6867,6 +6880,36 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,true,true,true,null,["one","two"],"example.com:8080::4",true,7,9,0,"https:",443,250,true,true,["ERR_INVALID_HTTP_TOKEN","ERR_INVALID_CHAR","ERR_HTTP_INVALID_HEADER_VALUE"]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn child_process_sync_apis_execute_and_report_node_shaped_results() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_child_process_sync");
+        fs::write(
+            dir.join("index.js"),
+            r#"var cp = require('node:child_process'); module.exports = function (cwd) { var failed = cp.spawnSync('/bin/sh', ['-c', 'printf out; printf err >&2; exit 3'], { encoding: 'utf8', cwd: cwd }); var input = cp.spawnSync('/bin/sh', ['-c', 'cat'], { input: Buffer.from('stdin') }); var environment = cp.execFileSync('/bin/sh', ['-c', 'printf "$VALUE"'], { encoding: 'utf8', env: { VALUE: 'env-ok' } }); var shell = cp.execSync('printf shell-ok', { encoding: 'utf8' }); var missing = cp.spawnSync('/thaw/does-not-exist', []); var thrown; try { cp.execFileSync('/bin/sh', ['-c', 'printf bad >&2; exit 7'], { encoding: 'utf8' }); } catch (error) { thrown = [error.status, error.stderr, error.stdout, error.pid > 0]; } var overflow = cp.spawnSync('/bin/sh', ['-c', 'printf 12345'], { maxBuffer: 4 }); return [failed.status, failed.signal, failed.stdout, failed.stderr, failed.output[1], failed.pid > 0, Buffer.isBuffer(input.stdout), input.stdout.toString(), input.stderr.length, environment, shell, missing.status, missing.error.code, missing.error.path, thrown, overflow.status, overflow.error.code]; };"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_child_process_sync_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessSync = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseChildProcessSync").unwrap();
+        let arguments =
+            CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+                .unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[3,null,"out","err","out",true,true,"stdin",0,"env-ok","shell-ok",null,"ENOENT","/thaw/does-not-exist",[7,"bad","",true],null,"ENOBUFS"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

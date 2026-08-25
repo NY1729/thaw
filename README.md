@@ -478,6 +478,10 @@ The workspace crates have narrow responsibilities:
   connection naming, socket accounting and lifecycle helpers. Public
   `validateHeaderName()`/`validateHeaderValue()` and every `setHeader()` reject
   invalid tokens, control characters and undefined values with Node error codes
+- `node:child_process` provides real host-backed synchronous `spawnSync()`,
+  `execFileSync()` and `execSync()` with argument arrays, shell execution,
+  stdin, cwd, replacement environments, Buffer/string output, exit status,
+  stderr-bearing thrown errors, ENOENT and `maxBuffer` reporting
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,

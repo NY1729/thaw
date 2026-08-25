@@ -31,6 +31,9 @@ use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -1663,6 +1666,87 @@ fn poll_host_workers() -> String {
     })
 }
 
+fn run_child_process(command: String, arguments_json: String, options_json: String) -> String {
+    let arguments: Vec<String> = serde_json::from_str(&arguments_json).unwrap_or_default();
+    let options: serde_json::Value = serde_json::from_str(&options_json).unwrap_or_default();
+    let mut child = Command::new(&command);
+    child.args(arguments);
+    if let Some(cwd) = options.get("cwd").and_then(|value| value.as_str()) {
+        child.current_dir(cwd);
+    }
+    if let Some(environment) = options.get("env").and_then(|value| value.as_object()) {
+        child.env_clear();
+        for (name, value) in environment {
+            if let Some(value) = value.as_str() {
+                child.env(name, value);
+            }
+        }
+    }
+    child.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let input = options
+        .get("input")
+        .and_then(|value| value.as_str())
+        .map(hex_decode);
+    if input.is_some() {
+        child.stdin(Stdio::piped());
+    }
+    let spawned = child.spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            let code = if error.kind() == io::ErrorKind::NotFound {
+                "ENOENT"
+            } else if error.kind() == io::ErrorKind::PermissionDenied {
+                "EACCES"
+            } else {
+                "UNKNOWN"
+            };
+            return serde_json::json!({
+                "error": error.to_string(),
+                "code": code,
+                "errno": error.raw_os_error(),
+                "path": command,
+            })
+            .to_string();
+        }
+    };
+    let pid = child.id();
+    if let Some(input) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(error) = stdin.write_all(&input) {
+                return serde_json::json!({
+                    "error": error.to_string(),
+                    "code": "EPIPE",
+                    "pid": pid,
+                })
+                .to_string();
+            }
+        }
+    }
+    match child.wait_with_output() {
+        Ok(output) => {
+            #[cfg(unix)]
+            let signal = output.status.signal();
+            #[cfg(not(unix))]
+            let signal: Option<i32> = None;
+            serde_json::json!({
+                "pid": pid,
+                "status": output.status.code(),
+                "signal": signal,
+                "stdout": hex_encode(&output.stdout),
+                "stderr": hex_encode(&output.stderr),
+            })
+            .to_string()
+        }
+        Err(error) => serde_json::json!({
+            "error": error.to_string(),
+            "code": "UNKNOWN",
+            "pid": pid,
+        })
+        .to_string(),
+    }
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -1774,6 +1858,13 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .expect("failed to create Worker event poller");
                 let worker_active = Function::new(ctx.clone(), host_workers_active)
                     .expect("failed to create Worker activity probe");
+                let child_process = Function::new(
+                    ctx.clone(),
+                    |command: String, arguments: String, options: String| {
+                        run_child_process(command, arguments, options)
+                    },
+                )
+                .expect("failed to create child process runner");
                 ctx.globals()
                     .set("__thaw_worker_spawn", worker_spawn)
                     .expect("failed to install Worker spawner");
@@ -1807,6 +1898,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_worker_active", worker_active)
                     .expect("failed to install Worker activity probe");
+                ctx.globals()
+                    .set("__thaw_child_process_sync", child_process)
+                    .expect("failed to install child process runner");
                 let random_hex = Function::new(ctx.clone(), |size: u32| {
                     let mut bytes = vec![0u8; size as usize];
                     getrandom::getrandom(&mut bytes).expect("OS random source failed");
