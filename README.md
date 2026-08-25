@@ -479,8 +479,8 @@ The workspace crates have narrow responsibilities:
 - `globSync`, callback `glob` and the `fs/promises.glob` async iterator
   support `*`, `?`, `**`, multiple patterns, exclusions, cwd and Dirent output
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
-  classes with ranged/chunked reads, append mode, byte counters and
-  open/ready/finish/end/close lifecycle events
+  classes with incremental host I/O, ranged/positioned reads and writes,
+  append mode, byte counters and open/ready/finish/end/close lifecycle events
 - `node:util/types` identifies standard collections, boxed primitives,
   promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:constants` and `fs.constants` share Linux-compatible access, open,
