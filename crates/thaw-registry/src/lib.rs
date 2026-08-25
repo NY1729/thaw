@@ -6103,6 +6103,64 @@ mod tests {
     }
 
     #[test]
+    fn web_pipe_to_propagates_completion_errors_and_abort() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_pipe_to_options");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var writes = [], closed = false, normalSource = new ReadableStream({ start: function(controller) { controller.enqueue('a'); controller.enqueue('b'); controller.close(); } }), normalDestination = new WritableStream({ write: function(value) { writes.push(value); }, close: function() { closed = true; } }); await normalSource.pipeTo(normalDestination, { preventClose: true }); var destinationFailure = new Error('destination'), cancelledWith, failingDestination = new WritableStream({ write: function() { throw destinationFailure; } }), cancellableSource = new ReadableStream({ pull: function(controller) { controller.enqueue('x'); }, cancel: function(error) { cancelledWith = error; } }), destinationResult; try { await cancellableSource.pipeTo(failingDestination); } catch (error) { destinationResult = error; } var sourceFailure = new Error('source'), abortedWith, failedSource = new ReadableStream({ start: function(controller) { controller.error(sourceFailure); } }), abortableDestination = new WritableStream({ abort: function(error) { abortedWith = error; } }), sourceResult; try { await failedSource.pipeTo(abortableDestination); } catch (error) { sourceResult = error; } var controller = new AbortController(), abortReason = new Error('stop'), signalCancelled, signalAborted, pendingSource = new ReadableStream({ pull: function() {}, cancel: function(error) { signalCancelled = error; } }), pendingDestination = new WritableStream({ abort: function(error) { signalAborted = error; } }), signalled = pendingSource.pipeTo(pendingDestination, { signal: controller.signal }).catch(function(error) { return error; }); controller.abort(abortReason); var signalResult = await signalled, preventedController = new AbortController(), preventedCancelled = false, preventedAborted = false, preventedSource = new ReadableStream({ pull: function() {}, cancel: function() { preventedCancelled = true; } }), preventedDestination = new WritableStream({ abort: function() { preventedAborted = true; } }), prevented = preventedSource.pipeTo(preventedDestination, { signal: preventedController.signal, preventCancel: true, preventAbort: true }).catch(function(error) { return error; }); preventedController.abort(abortReason); var preventedResult = await prevented; return [writes, closed, !normalSource.locked, !normalDestination.locked, destinationResult === destinationFailure, cancelledWith === destinationFailure, !cancellableSource.locked, !failingDestination.locked, sourceResult === sourceFailure, abortedWith === sourceFailure, signalResult === abortReason, signalCancelled === abortReason, signalAborted === abortReason, !pendingSource.locked, !pendingDestination.locked, preventedResult === abortReason, preventedCancelled, preventedAborted, !preventedSource.locked, !preventedDestination.locked]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_pipe_to_options_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebPipeTo = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebPipeTo").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["a","b"],false,true,true,true,true,true,true,true,true,true,true,true,true,true,true,false,false,true,true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn web_pipe_through_validates_locks_and_propagates_errors() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_pipe_through");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { function code(action) { try { action(); } catch (error) { return error.code; } } var lockedSource = new ReadableStream(), lockedReader = lockedSource.getReader(), sourceLockCode = code(function() { lockedSource.pipeThrough(new TransformStream()); }); lockedReader.releaseLock(); var lockedTransform = new TransformStream(), lockedWriter = lockedTransform.writable.getWriter(), destinationLockCode = code(function() { new ReadableStream().pipeThrough(lockedTransform); }); lockedWriter.releaseLock(); var source = new ReadableStream({ start: function(controller) { controller.enqueue('a'); controller.enqueue('b'); controller.close(); } }), upper = new TransformStream({ transform: function(value, controller) { controller.enqueue(value.toUpperCase()); } }), output = source.pipeThrough(upper), values = []; for await (var value of output) values.push(value); var failure = new Error('transform'), cancelledWith, failingSource = new ReadableStream({ start: function(controller) { controller.enqueue('x'); }, cancel: function(error) { cancelledWith = error; } }), failingTransform = new TransformStream({ transform: function() { throw failure; } }), failedOutput = failingSource.pipeThrough(failingTransform), failedReader = failedOutput.getReader(), received; try { await failedReader.read(); } catch (error) { received = error; } return [sourceLockCode, destinationLockCode, values, !source.locked, !upper.writable.locked, received === failure, cancelledWith === failure, !failingSource.locked]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_pipe_through_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebPipeThrough = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebPipeThrough").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["ERR_INVALID_STATE","ERR_INVALID_STATE",["A","B"],true,true,true,true,true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn stream_web_adapters_retain_locks_and_await_teardown() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_stream_web_adapter_locks");

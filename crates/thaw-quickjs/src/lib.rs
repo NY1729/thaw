@@ -3757,7 +3757,7 @@ const PLATFORM_GLOBALS: &str = r#"
       get desiredSize() { return this._stream._state === 'readable' ? 1 - this._stream._queue.length : null; }
     }
     class ReadableStreamDefaultReader {
-      constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._reader = this; this.closed = stream._closed; }
+      constructor(stream) { if (stream.locked) throw webInvalidState('ReadableStream is locked'); this._stream = stream; stream._reader = this; this.closed = stream._closed; }
       read() {
         const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
         if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
@@ -3781,15 +3781,49 @@ const PLATFORM_GLOBALS: &str = r#"
       getReader() { return new ReadableStreamDefaultReader(this); }
       _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
       cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); return this._cancel(reason); }
-      async pipeTo(destination, options = {}) { const reader = this.getReader(), writer = destination.getWriter(); try { while (true) { const result = await reader.read(); if (result.done) break; await writer.write(result.value); } if (!options.preventClose) await writer.close(); } catch (error) { if (!options.preventAbort) await writer.abort(error); throw error; } finally { reader.releaseLock(); writer.releaseLock(); } }
-      pipeThrough(transform, options) { this.pipeTo(transform.writable, options).catch(error => transform.readable._controller.error(error)); return transform.readable; }
+      async pipeTo(destination, options = {}) {
+        const signal = options.signal;
+        if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean' || typeof signal.addEventListener !== 'function')) throw new TypeError('signal must be an AbortSignal');
+        const reader = this.getReader(); let writer;
+        try { writer = destination.getWriter(); } catch (error) { reader.releaseLock(); throw error; }
+        let abort, abortPromise;
+        if (signal !== undefined) {
+          abortPromise = new Promise((resolve, reject) => { abort = () => reject(signal.reason); if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); });
+        }
+        const wait = operation => abortPromise ? Promise.race([operation, abortPromise]) : operation;
+        const isAbort = error => signal !== undefined && signal.aborted && error === signal.reason;
+        const abortBoth = async error => {
+          const actions = [];
+          if (!options.preventCancel) actions.push(reader.cancel(error));
+          if (!options.preventAbort) actions.push(writer.abort(error));
+          await Promise.all(actions);
+        };
+        try {
+          while (true) {
+            let result;
+            try { result = await wait(reader.read()); }
+            catch (error) { if (isAbort(error)) await abortBoth(error); else if (!options.preventAbort) await writer.abort(error); throw error; }
+            if (result.done) break;
+            try { await wait(writer.write(result.value)); }
+            catch (error) { if (isAbort(error)) await abortBoth(error); else if (!options.preventCancel) await reader.cancel(error); throw error; }
+          }
+          if (!options.preventClose) {
+            try { await wait(writer.close()); }
+            catch (error) { if (isAbort(error)) await abortBoth(error); else if (!options.preventCancel) await reader.cancel(error); throw error; }
+          }
+        } finally {
+          if (signal !== undefined && abort) signal.removeEventListener('abort', abort);
+          reader.releaseLock(); writer.releaseLock();
+        }
+      }
+      pipeThrough(transform, options) { if (this.locked) throw webInvalidState('ReadableStream is locked'); if (!transform || !transform.readable || !transform.writable) throw new TypeError('transform must contain readable and writable streams'); if (transform.writable.locked) throw webInvalidState('WritableStream is locked'); this.pipeTo(transform.writable, options).catch(error => transform.readable._controller.error(error)); return transform.readable; }
       values(options = {}) { const reader = this.getReader(); return { next: () => reader.read(), return: async () => { if (!options.preventCancel) await reader.cancel(); reader.releaseLock(); return { value: undefined, done: true }; }, [Symbol.asyncIterator]() { return this; } }; }
       [Symbol.asyncIterator]() { return this.values(); }
     };
     globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
     globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
     class WritableStreamDefaultWriter {
-      constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._writer = this; this.ready = Promise.resolve(); this.closed = stream._closed; }
+      constructor(stream) { if (stream.locked) throw webInvalidState('WritableStream is locked'); this._stream = stream; stream._writer = this; this.ready = Promise.resolve(); this.closed = stream._closed; }
       write(chunk) { return this._stream ? this._stream._write(chunk) : Promise.reject(webInvalidState('Writer is released')); }
       close() { return this._stream ? this._stream._close() : Promise.reject(webInvalidState('Writer is released')); }
       abort(reason) { return this._stream ? this._stream._abort(reason) : Promise.reject(webInvalidState('Writer is released')); }
