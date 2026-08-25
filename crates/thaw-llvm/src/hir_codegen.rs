@@ -13984,6 +13984,34 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_alias_defaults_and_constraints() {
+        let source = r#"
+            type Outcome<T, E = string> = { value: T; error: E };
+            type SamePair<T, U = T> = { first: T; second: U };
+            type Numeric<T extends number> = { value: T };
+            function outcome(value: number): Outcome<number> {
+                return { error: "none", value };
+            }
+            function pair(value: string): SamePair<string> {
+                return { second: value, first: value };
+            }
+            function numeric(value: number): Numeric<number> { return { value }; }
+            function main(): void {
+                const result: Outcome<number> = outcome(4);
+                console.log(result.value);
+                console.log(result.error);
+                const values: SamePair<string> = pair("same");
+                console.log(values.first + values.second);
+                console.log(numeric(7).value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_alias_defaults_constraints"),
+            "4\nnone\nsamesame\n7\n"
+        );
+    }
+
+    #[test]
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }
