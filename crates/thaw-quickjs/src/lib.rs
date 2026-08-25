@@ -1022,8 +1022,9 @@ fn os_info_json() -> String {
     }).to_string()
 }
 
-fn host_worker_bootstrap(worker_data_json: &str, thread_id: u32) -> String {
+fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u32) -> String {
     let worker_data = serde_json::to_string(worker_data_json).unwrap_or_else(|_| "\"null\"".into());
+    let config = serde_json::to_string(config_json).unwrap_or_else(|_| "\"{}\"".into());
     format!(
         r#"
         globalThis.__thaw_host_worker_events = [];
@@ -1052,9 +1053,13 @@ fn host_worker_bootstrap(worker_data_json: &str, thread_id: u32) -> String {
           start() {{}}, ref() {{ return this; }}, unref() {{ return this; }}, hasRef() {{ return true; }}
         }};
         const workerData = JSON.parse({worker_data});
+        const __thaw_host_worker_config = JSON.parse({config});
         globalThis.module = {{ exports: {{}} }};
         globalThis.exports = globalThis.module.exports;
-        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: '', workerData, parentPort, resourceLimits: {{}}, MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }} }};
+        process.env = Object.assign({{}}, __thaw_host_worker_config.env || {{}});
+        process.argv = Array.from(__thaw_host_worker_config.argv || []);
+        process.execArgv = Array.from(__thaw_host_worker_config.execArgv || []);
+        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }} }};
         globalThis.require = function(name) {{
           if (name === 'worker_threads' || name === 'node:worker_threads') return globalThis.__thaw_worker_module;
           if (typeof globalThis.__thaw_bundle_create_require === 'function') return globalThis.__thaw_bundle_create_require('')(name);
@@ -1090,6 +1095,7 @@ fn run_host_worker(
     bundle_source: String,
     source: String,
     worker_data_json: String,
+    config_json: String,
     thread_id: u32,
     commands: Receiver<HostWorkerCommand>,
     events: Sender<HostWorkerEvent>,
@@ -1100,7 +1106,7 @@ fn run_host_worker(
         }
         load_impl(
             ctx.clone(),
-            &host_worker_bootstrap(&worker_data_json, thread_id),
+            &host_worker_bootstrap(&worker_data_json, &config_json, thread_id),
         )?;
         let _ = events.send(HostWorkerEvent::Online);
         load_impl(ctx.clone(), &source)?;
@@ -1161,6 +1167,7 @@ fn spawn_host_worker(
     bundle_source: String,
     source: String,
     worker_data_json: String,
+    config_json: String,
     thread_id: u32,
 ) -> u32 {
     let (command_sender, command_receiver) = mpsc::channel();
@@ -1170,6 +1177,7 @@ fn spawn_host_worker(
             bundle_source,
             source,
             worker_data_json,
+            config_json,
             thread_id,
             command_receiver,
             event_sender,
@@ -1312,8 +1320,15 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     |bundle_source: String,
                      source: String,
                      worker_data_json: String,
+                     config_json: String,
                      thread_id: u32| {
-                        spawn_host_worker(bundle_source, source, worker_data_json, thread_id)
+                        spawn_host_worker(
+                            bundle_source,
+                            source,
+                            worker_data_json,
+                            config_json,
+                            thread_id,
+                        )
                     },
                 )
                 .expect("failed to create Worker spawner");
