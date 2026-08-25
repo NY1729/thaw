@@ -341,7 +341,10 @@ The workspace crates have narrow responsibilities:
   stream interfaces while preserving object-mode values and close/error flow.
   `Readable.from()` defaults to object mode, and readable collection helpers
   cover async `map`, `filter`, `flatMap`, `drop`, `take`, `toArray`, `forEach`,
-  `some`, `every`, `find` and `reduce` operations with AbortSignal checks;
+  `some`, `every`, `find` and `reduce` operations with AbortSignal checks.
+  Transforming helpers preserve input order with bounded `concurrency`, while
+  `iterator({ destroyOnReturn: false })` permits partial non-destructive
+  consumption and `Symbol.asyncDispose` destroys abandoned readables;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
