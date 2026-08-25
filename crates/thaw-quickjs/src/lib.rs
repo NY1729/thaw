@@ -251,6 +251,66 @@ const PLATFORM_GLOBALS: &str = r#"
       return clone(value);
     };
   }
+  if (typeof globalThis.Event !== 'function') {
+    globalThis.Event = class Event {
+      constructor(type, options = {}) {
+        this.type = String(type);
+        this.bubbles = Boolean(options.bubbles);
+        this.cancelable = Boolean(options.cancelable);
+        this.composed = Boolean(options.composed);
+        this.target = null;
+        this.currentTarget = null;
+        this.defaultPrevented = false;
+        this.__thawImmediateStopped = false;
+      }
+      preventDefault() {
+        if (this.cancelable) this.defaultPrevented = true;
+      }
+      stopPropagation() {}
+      stopImmediatePropagation() { this.__thawImmediateStopped = true; }
+    };
+  }
+  if (typeof globalThis.EventTarget !== 'function') {
+    globalThis.EventTarget = class EventTarget {
+      constructor() { this.__thawListeners = new Map(); }
+      addEventListener(type, callback, options = {}) {
+        if (callback == null) return;
+        if (typeof callback !== 'function'
+            && typeof callback.handleEvent !== 'function') {
+          throw new TypeError('event listener must be callable');
+        }
+        const name = String(type);
+        const listeners = this.__thawListeners.get(name) || [];
+        if (!listeners.some(entry => entry.callback === callback)) {
+          listeners.push({ callback, once: Boolean(options && options.once) });
+          this.__thawListeners.set(name, listeners);
+        }
+      }
+      removeEventListener(type, callback) {
+        const name = String(type);
+        const listeners = this.__thawListeners.get(name);
+        if (listeners) {
+          this.__thawListeners.set(name,
+            listeners.filter(entry => entry.callback !== callback));
+        }
+      }
+      dispatchEvent(event) {
+        if (!(event instanceof Event)) throw new TypeError('expected an Event');
+        event.target = this;
+        event.currentTarget = this;
+        event.__thawImmediateStopped = false;
+        const listeners = (this.__thawListeners.get(event.type) || []).slice();
+        for (const entry of listeners) {
+          if (entry.once) this.removeEventListener(event.type, entry.callback);
+          if (typeof entry.callback === 'function') entry.callback.call(this, event);
+          else entry.callback.handleEvent(event);
+          if (event.__thawImmediateStopped) break;
+        }
+        event.currentTarget = null;
+        return !event.defaultPrevented;
+      }
+    };
+  }
   if (typeof globalThis.AbortController !== 'function') {
     const abortError = message => {
       return new DOMException(message || 'This operation was aborted', 'AbortError');
@@ -258,25 +318,12 @@ const PLATFORM_GLOBALS: &str = r#"
     const timeoutError = () => {
       return new DOMException('The operation timed out', 'TimeoutError');
     };
-    class AbortSignal {
+    class AbortSignal extends EventTarget {
       constructor() {
+        super();
         this.aborted = false;
         this.reason = undefined;
         this.onabort = null;
-        this.listeners = [];
-      }
-      addEventListener(type, callback, options = {}) {
-        if (type !== 'abort' || callback == null) return;
-        if (typeof callback !== 'function'
-            && typeof callback.handleEvent !== 'function') {
-          throw new TypeError('abort listener must be callable');
-        }
-        this.listeners.push({ callback, once: Boolean(options && options.once) });
-      }
-      removeEventListener(type, callback) {
-        if (type === 'abort') {
-          this.listeners = this.listeners.filter(entry => entry.callback !== callback);
-        }
       }
       throwIfAborted() {
         if (this.aborted) throw this.reason;
@@ -285,14 +332,9 @@ const PLATFORM_GLOBALS: &str = r#"
         if (this.aborted) return;
         this.aborted = true;
         this.reason = reason === undefined ? abortError() : reason;
-        const event = { type: 'abort', target: this, currentTarget: this };
+        const event = new Event('abort');
         if (typeof this.onabort === 'function') this.onabort.call(this, event);
-        const listeners = this.listeners.slice();
-        this.listeners = this.listeners.filter(entry => !entry.once);
-        for (const entry of listeners) {
-          if (typeof entry.callback === 'function') entry.callback.call(this, event);
-          else entry.callback.handleEvent(event);
-        }
+        this.dispatchEvent(event);
       }
       static abort(reason) {
         const signal = new AbortSignal();
@@ -1338,13 +1380,39 @@ mod tests {
     }
 
     #[test]
+    fn event_target_dispatches_listeners_and_cancellation() {
+        assert_eq!(
+            load(
+                "function dispatchEvents() {\n\
+                   const target = new EventTarget();\n\
+                   const events = [];\n\
+                   const removed = () => events.push('removed');\n\
+                   target.addEventListener('work', removed);\n\
+                   target.removeEventListener('work', removed);\n\
+                   target.addEventListener('work', event => { events.push(event.target === target && event.currentTarget === target); event.preventDefault(); }, { once: true });\n\
+                   target.addEventListener('work', { handleEvent(event) { events.push('object'); event.stopImmediatePropagation(); } });\n\
+                   target.addEventListener('work', () => events.push('late'));\n\
+                   const first = target.dispatchEvent(new Event('work', { cancelable: true }));\n\
+                   const second = target.dispatchEvent(new Event('work', { cancelable: true }));\n\
+                   return [events.join(','), first, second];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("dispatchEvents", "[]"),
+            r#"["true,object,object",false,true]"#
+        );
+    }
+
+    #[test]
     fn abort_controller_dispatches_once_and_timeout_aborts() {
         assert_eq!(
             load(
                 "async function abortSignals() {\n\
                    const controller = new AbortController();\n\
                    const events = [];\n\
-                   controller.signal.onabort = () => events.push('property');\n\
+                   controller.signal.onabort = event => events.push(event instanceof Event ? 'property' : 'wrong');\n\
                    controller.signal.addEventListener('abort', () => events.push('once'), { once: true });\n\
                    controller.abort('reason'); controller.abort('ignored');\n\
                    let thrown = '';\n\
@@ -1359,14 +1427,14 @@ mod tests {
                    const defaultAbort = AbortSignal.abort();\n\
                    let invalidAny = false;\n\
                    try { AbortSignal.any([first.signal, {}]); } catch (error) { invalidAny = error instanceof TypeError; }\n\
-                   return [events.join(','), controller.signal.reason, thrown, timed.aborted, timed.reason.name, timed.reason.code, combined.aborted, combined.reason, preAborted.reason, defaultAbort.reason.name, defaultAbort.reason.code, invalidAny];\n\
+                   return [events.join(','), controller.signal instanceof EventTarget, controller.signal.reason, thrown, timed.aborted, timed.reason.name, timed.reason.code, combined.aborted, combined.reason, preAborted.reason, defaultAbort.reason.name, defaultAbort.reason.code, invalidAny];\n\
                  }"
             ),
             1
         );
         assert_eq!(
             call("abortSignals", "[]"),
-            r#"["property,once","reason","reason",true,"TimeoutError",23,true,"combined","pre","AbortError",20,true]"#
+            r#"["property,once",true,"reason","reason",true,"TimeoutError",23,true,"combined","pre","AbortError",20,true]"#
         );
     }
 
