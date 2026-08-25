@@ -684,6 +684,9 @@ The workspace crates have narrow responsibilities:
   Readable byte streams expose byte controllers, BYOB readers/requests,
   minimum-fill reads and default-reader auto-allocation; queued bytes split
   across supplied views, and byte-stream `tee()` retains BYOB-capable branches.
+  BYOB reads preserve `DataView` and multi-byte TypedArray result types, retain
+  partial elements across pulls, reject close during an unaligned partial read,
+  and invalidate consumed requests with Node-compatible error codes.
   Writable and Transform default controllers are exported; writable controllers
   expose abort signals and explicit errors, while transform controllers support
   enqueue, error, desired-size inspection and termination with matching

@@ -3757,15 +3757,15 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
     }
-    const byobResultView = (view, byteLength) => {
-      const elements = Math.floor(byteLength / view.BYTES_PER_ELEMENT);
-      return new view.constructor(view.buffer, view.byteOffset, elements);
-    };
+    const byobResultView = (view, byteLength) => view instanceof DataView
+      ? new DataView(view.buffer, view.byteOffset, byteLength)
+      : new view.constructor(view.buffer, view.byteOffset, Math.floor(byteLength / view.BYTES_PER_ELEMENT));
     class ReadableStreamBYOBRequest {
       constructor(stream, read) { this._stream = stream; this._read = read; this.view = read.view; }
       respond(bytesWritten) {
         const stream = this._stream, read = this._read, length = Number(bytesWritten);
-        if (!stream || stream._byobRequest !== this || !Number.isInteger(length) || length < 0 || length > this.view.byteLength) throw new RangeError('invalid BYOB response length');
+        if (!stream || stream._byobRequest !== this) throw webInvalidState('This BYOB request has been invalidated');
+        if (!Number.isInteger(length) || length < 0 || length > this.view.byteLength) { const error = new RangeError('invalid BYOB response length'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         if (length === 0 && stream._state === 'readable') throw new TypeError('BYOB response must write bytes');
         stream._byobRequest = null; this._stream = null; this._read = null; this.view = null;
         read.filled += length;
@@ -3777,7 +3777,8 @@ const PLATFORM_GLOBALS: &str = r#"
         }
       }
       respondWithNewView(view) {
-        if (!ArrayBuffer.isView(view) || view.buffer !== this.view.buffer || view.byteOffset !== this.view.byteOffset || view.byteLength > this.view.byteLength) throw new RangeError('invalid BYOB response view');
+        if (!this._stream || this._stream._byobRequest !== this) throw webInvalidState('This BYOB request has been invalidated');
+        if (!ArrayBuffer.isView(view) || view.buffer !== this.view.buffer || view.byteOffset !== this.view.byteOffset || view.byteLength > this.view.byteLength) { const error = new RangeError('invalid BYOB response view'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         this.respond(view.byteLength);
       }
     }
@@ -3793,6 +3794,7 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       close() {
         const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
+        if (stream._byobReads.length && stream._byobReads[0].filled % stream._byobReads[0].elementSize !== 0) throw webInvalidState('Partial read');
         stream._closeRequested = true; stream._drainByob(); stream._finishCloseIfReady();
       }
       error(error) {
@@ -3823,7 +3825,8 @@ const PLATFORM_GLOBALS: &str = r#"
         const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
         if (!ArrayBuffer.isView(view) || view.byteLength === 0) return Promise.reject(new TypeError('view must be a non-empty ArrayBuffer view'));
         const min = options.min === undefined ? 1 : Number(options.min);
-        if (!Number.isInteger(min) || min <= 0 || min > view.length) return Promise.reject(new RangeError('invalid minimum fill count'));
+        const capacity = view instanceof DataView ? view.byteLength : view.length;
+        if (!Number.isInteger(min) || min <= 0 || min > capacity) return Promise.reject(new RangeError('invalid minimum fill count'));
         return stream._readInto(view, this, min);
       }
       cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
@@ -3911,7 +3914,7 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       _readInto(view, reader, min) {
         if (this._state === 'errored') return Promise.reject(this._error);
-        const result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, minBytes: min * view.BYTES_PER_ELEMENT, filled: 0, resolve, reject })); this._notifyCapacity(); this._drainByob(); this._prepareByobRequest();
+        const elementSize = view instanceof DataView ? 1 : view.BYTES_PER_ELEMENT, result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, elementSize, minBytes: min * elementSize, filled: 0, resolve, reject })); this._notifyCapacity(); this._drainByob(); this._prepareByobRequest();
         return result;
       }
       _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
