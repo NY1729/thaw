@@ -380,6 +380,8 @@ The workspace crates have narrow responsibilities:
   file-type and copy flags for dependency feature detection
 - `node:readline` and `node:readline/promises` support streamed line splitting,
   callback/Promise questions, async iteration, history and ANSI cursor helpers
+- `node:dns` and `node:dns/promises` resolve localhost and IP literals without
+  network access, including family/all modes, reverse lookup and `ENOTFOUND`
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
