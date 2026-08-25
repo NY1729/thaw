@@ -1327,7 +1327,12 @@ fn runtime_export_specifiers(
     Ok(specifiers)
 }
 
-fn rewrite_static_worker_urls(source: &str, module_path: &Path) -> Result<String, String> {
+fn rewrite_static_worker_urls(
+    source: &str,
+    module_path: &Path,
+    package_name: &str,
+    package_dir: &Path,
+) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{Expr, Lit, NewExpr};
     use thaw_parser::common::Spanned;
@@ -1394,6 +1399,7 @@ fn rewrite_static_worker_urls(source: &str, module_path: &Path) -> Result<String
     workers.spans.sort_by_key(|(lo, _, _, _, _)| *lo);
     let directory = module_path.parent().unwrap_or(Path::new(""));
     let mut output = String::with_capacity(source.len());
+    let mut worker_requires = Vec::new();
     let mut cursor = 0usize;
     for (lo, hi, base_lo, base_hi, relative) in workers.spans {
         if !(relative.starts_with("./") || relative.starts_with("../")) {
@@ -1418,8 +1424,22 @@ fn rewrite_static_worker_urls(source: &str, module_path: &Path) -> Result<String
                 module_path.display()
             )
         })?;
-        let encoded = worker_source
-            .iter()
+        let worker_relative = worker_path.strip_prefix(package_dir).map_err(|_| {
+            format!(
+                "Worker source `{}` is outside package `{}`",
+                worker_path.display(),
+                package_dir.display()
+            )
+        })?;
+        let worker_relative = normalize_path_string(&worker_relative.to_string_lossy());
+        let worker_key = format!("{package_name}/{worker_relative}");
+        let worker_bootstrap = format!(
+            "var __thaw_worker_require = globalThis.__thaw_bundle_create_require({});\nvar require = function(name) {{ return name === 'worker_threads' || name === 'node:worker_threads' ? globalThis.__thaw_worker_module : __thaw_worker_require(name); }};\n",
+            js_string_literal(&worker_key)
+        );
+        let encoded = worker_bootstrap
+            .bytes()
+            .chain(worker_source)
             .map(|byte| format!("%{byte:02X}"))
             .collect::<String>();
         let replacement = serde_json::to_string(&format!("data:text/javascript,{encoded}"))
@@ -1438,8 +1458,17 @@ fn rewrite_static_worker_urls(source: &str, module_path: &Path) -> Result<String
         output.push_str(&source[cursor..lo]);
         output.push_str(&replacement);
         cursor = hi;
+        if !worker_requires.contains(&relative) {
+            worker_requires.push(relative);
+        }
     }
     output.push_str(&source[cursor..]);
+    for relative in worker_requires {
+        output.push_str(&format!(
+            "\nif (false) require({});",
+            js_string_literal(&relative)
+        ));
+    }
     Ok(output)
 }
 
@@ -1517,7 +1546,7 @@ fn bundle_commonjs_package(
         } else {
             source
         };
-        let source = rewrite_static_worker_urls(&source, &abs_path)?;
+        let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_name, &pkg_dir)?;
         let analysis = analyze_module(&source);
         if let Some(error) = &analysis.attribute_error {
             return Err(format!("invalid import attributes in `{key}`: {error}"));
@@ -3366,7 +3395,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isMainThread: true, threadId: 0, workerData: null, parentPort: null, resourceLimits: {}, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, receiveMessageOnPort: receiveMessageOnPort, setEnvironmentData: setEnvironmentData, getEnvironmentData: getEnvironmentData, moveMessagePortToContext: moveMessagePortToContext, markAsUntransferable: markAsUntransferable, markAsUncloneable: markAsUncloneable, isMarkedAsUntransferable: isMarkedAsUntransferable, SHARE_ENV: SHARE_ENV }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
             r#"
              var nextWorkerId = globalThis.__thaw_next_worker_id || 1; function runWorkerSource(source, context) { context.globalThis = context; context.global = context; var scope = new Proxy(context, { has: function(target, key) { return key !== 'scope' && key !== 'source'; }, get: function(target, key) { if (key === Symbol.unscopables) return undefined; return key in target ? target[key] : undefined; }, set: function(target, key, value) { target[key] = value; return true; } }); return Function('scope', 'source', 'with (scope) { return eval(source); }')(scope, String(source)); }
-             function Worker(filename, options) { if (!(this instanceof Worker)) return new Worker(filename, options); options = options || {}; if (!options.eval) throw new Error('Thaw Worker currently requires { eval: true }'); this._events = Object.create(null); this.threadId = nextWorkerId++; globalThis.__thaw_next_worker_id = nextWorkerId; this.resourceLimits = {}; this.performance = { eventLoopUtilization: function() { return { idle: 0, active: 0, utilization: 0 }; } }; this.stdin = null; this.stdout = null; this.stderr = null; this._terminated = false; this._exited = false; var worker = this, channel = new MessageChannel(); this._port = channel.port1; this._workerPort = channel.port2; this._port.on('message', function(value) { worker.emit('message', value); }); this._port.on('messageerror', function(error) { worker.emit('messageerror', error); }); this._workerPort.on('close', function() { worker._finish(0); }); var data = options.workerData === undefined ? undefined : structuredClone(options.workerData); queueMicrotask(function() { if (worker._terminated) return; worker.emit('online'); var childModule = { isMainThread: false, threadId: worker.threadId, workerData: data, parentPort: worker._workerPort, resourceLimits: worker.resourceLimits, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, receiveMessageOnPort: receiveMessageOnPort, setEnvironmentData: setEnvironmentData, getEnvironmentData: getEnvironmentData, SHARE_ENV: SHARE_ENV }; var context = { eval: eval, console: console, Buffer: Buffer, structuredClone: structuredClone, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval, clearInterval: clearInterval, queueMicrotask: queueMicrotask, require: function(name) { if (name === 'worker_threads' || name === 'node:worker_threads') return childModule; return require(name); } }; try { runWorkerSource(String(filename), context); if (!(worker._workerPort.__thawNodeListeners.get('message') || []).length) worker._workerPort.close(); } catch (error) { worker.emit('error', error); worker._finish(1); } }); }
+             function Worker(filename, options) { if (!(this instanceof Worker)) return new Worker(filename, options); options = options || {}; if (!options.eval) throw new Error('Thaw Worker currently requires { eval: true }'); this._events = Object.create(null); this.threadId = nextWorkerId++; globalThis.__thaw_next_worker_id = nextWorkerId; this.resourceLimits = {}; this.performance = { eventLoopUtilization: function() { return { idle: 0, active: 0, utilization: 0 }; } }; this.stdin = null; this.stdout = null; this.stderr = null; this._terminated = false; this._exited = false; var worker = this, channel = new MessageChannel(); this._port = channel.port1; this._workerPort = channel.port2; this._port.on('message', function(value) { worker.emit('message', value); }); this._port.on('messageerror', function(error) { worker.emit('messageerror', error); }); this._workerPort.on('close', function() { worker._finish(0); }); var data = options.workerData === undefined ? undefined : structuredClone(options.workerData); queueMicrotask(function() { if (worker._terminated) return; worker.emit('online'); var childModule = { isMainThread: false, threadId: worker.threadId, workerData: data, parentPort: worker._workerPort, resourceLimits: worker.resourceLimits, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, receiveMessageOnPort: receiveMessageOnPort, setEnvironmentData: setEnvironmentData, getEnvironmentData: getEnvironmentData, SHARE_ENV: SHARE_ENV }; var context = { eval: eval, console: console, Buffer: Buffer, structuredClone: structuredClone, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval, clearInterval: clearInterval, queueMicrotask: queueMicrotask, __thaw_bundle_create_require: globalThis.__thaw_bundle_create_require, __thaw_worker_module: childModule, require: function(name) { if (name === 'worker_threads' || name === 'node:worker_threads') return childModule; return require(name); } }; try { runWorkerSource(String(filename), context); if (!(worker._workerPort.__thawNodeListeners.get('message') || []).length) worker._workerPort.close(); } catch (error) { worker.emit('error', error); worker._finish(1); } }); }
              Worker.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; }; Worker.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; }; Worker.prototype.off = Worker.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; }; Worker.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; }; Worker.prototype.postMessage = function(value, transfer) { if (!this._terminated) this._port.postMessage(value, transfer); }; Worker.prototype._finish = function(code) { if (this._exited) return; this._exited = true; var worker = this; queueMicrotask(function() { worker.emit('exit', Number(code)); }); }; Worker.prototype.terminate = function() { if (!this._terminated) { this._terminated = true; this._workerPort.close(); this._port.close(); this._finish(1); } return Promise.resolve(1); }; Worker.prototype.ref = function() { this._port.ref(); return this; }; Worker.prototype.unref = function() { this._port.unref(); return this; }; Worker.prototype.getHeapSnapshot = function() { return Promise.resolve({}); };
              var EvalWorker = Worker; function decodeWorkerDataUrl(value) { var text = String(value); if (!text.startsWith('data:')) return null; var comma = text.indexOf(','); if (comma < 0) throw new TypeError('Invalid Worker data URL'); var metadata = text.slice(5, comma).toLowerCase(), payload = text.slice(comma + 1), parts = metadata.split(';'), mediaType = parts[0] || 'text/plain'; if (mediaType !== 'text/javascript' && mediaType !== 'application/javascript') throw new TypeError('Worker data URL must contain JavaScript'); try { return parts.indexOf('base64') >= 0 ? Buffer.from(payload, 'base64').toString('utf8') : decodeURIComponent(payload); } catch (error) { throw new TypeError('Invalid Worker data URL payload'); } } Worker = function Worker(filename, options) { options = options || {}; if (options.eval) return new EvalWorker(filename, options); var source = decodeWorkerDataUrl(filename); if (source === null) throw new Error('Thaw Worker supports eval code or JavaScript data URLs'); var workerOptions = Object.assign({}, options, { eval: true }); return new EvalWorker(source, workerOptions); }; Worker.prototype = EvalWorker.prototype;
              module.exports.Worker = Worker;
@@ -5663,8 +5692,13 @@ mod tests {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_worker_file_url");
         fs::write(
+            dir.join("double.js"),
+            "module.exports = function(value) { return value * 2; };",
+        )
+        .unwrap();
+        fs::write(
             dir.join("worker.js"),
-            "var wt = require('node:worker_threads'); wt.parentPort.postMessage(wt.workerData * 2); wt.parentPort.close();",
+            "var wt = require('node:worker_threads'); var double = require('./double'); wt.parentPort.postMessage(double(wt.workerData)); wt.parentPort.close();",
         )
         .unwrap();
         fs::write(
@@ -5675,7 +5709,7 @@ mod tests {
         let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-        assert_eq!(file_count, 2);
+        assert_eq!(file_count, 4);
         fs::remove_dir_all(&dir).unwrap();
         let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileWorker = module.exports;");
         let source = CString::new(script).unwrap();
