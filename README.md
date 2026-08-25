@@ -377,6 +377,9 @@ The workspace crates have narrow responsibilities:
   state, while `readable.compose()` builds an abortable composed Duplex;
   legacy base `Stream.pipe()` forwards manually emitted data, honors
   `{ end: false }`, propagates backpressure and removes lifecycle listeners;
+  subclass prototype `_read`, `_write`, `_writev`, `_final`, `_transform`,
+  `_flush` and `_destroy` hooks remain visible instead of being shadowed by
+  constructor defaults, with missing write/transform hooks diagnosed;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
