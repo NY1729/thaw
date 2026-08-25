@@ -4035,6 +4035,7 @@ const PLATFORM_GLOBALS: &str = r#"
       constructor(stream) { if (stream.locked) throw webInvalidState('ReadableStream is locked'); this._stream = stream; stream._reader = this; this.closed = stream._closed; }
       read() {
         const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
+        stream._disturbed = true;
         if (stream._byteStream && stream._autoAllocateChunkSize) return stream._readInto(new Uint8Array(stream._autoAllocateChunkSize), this, 1);
         if (stream._queue.length) { const value = stream._dequeue(); stream._finishCloseIfReady(); stream._callPullIfNeeded(); return Promise.resolve({ value, done: false }); }
         if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
@@ -4043,20 +4044,21 @@ const PLATFORM_GLOBALS: &str = r#"
         stream._notifyCapacity(); stream._callPullIfNeeded();
         return result;
       }
-      cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
+      cancel(reason) { if (this._stream) this._stream._disturbed = true; return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
       releaseLock() { if (!this._stream) return; const stream = this._stream, error = webInvalidState('Reader was released'); stream._reads = stream._reads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); stream._byobReads = stream._byobReads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); if (stream._byobRequest && stream._byobRequest._read.reader === this) stream._byobRequest = null; stream._reader = null; this._stream = null; this.closed = Promise.reject(error); this.closed.catch(() => {}); }
     }
     class ReadableStreamBYOBReader {
       constructor(stream) { if (stream.locked) throw webInvalidState('ReadableStream is locked'); if (!stream._byteStream) { const error = new TypeError('stream must be a byte stream'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } this._stream = stream; stream._reader = this; this.closed = stream._closed; }
       read(view, options = {}) {
         const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
+        stream._disturbed = true;
         if (!ArrayBuffer.isView(view) || view.byteLength === 0) return Promise.reject(new TypeError('view must be a non-empty ArrayBuffer view'));
         const min = options.min === undefined ? 1 : Number(options.min);
         const capacity = view instanceof DataView ? view.byteLength : view.length;
         if (!Number.isInteger(min) || min <= 0 || min > capacity) return Promise.reject(new RangeError('invalid minimum fill count'));
         return stream._readInto(view, this, min);
       }
-      cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
+      cancel(reason) { if (this._stream) this._stream._disturbed = true; return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
       releaseLock() { if (!this._stream) return; const stream = this._stream, error = webInvalidState('Reader was released'); stream._byobReads = stream._byobReads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); if (stream._byobRequest && stream._byobRequest._read.reader === this) stream._byobRequest = null; stream._reader = null; this._stream = null; this.closed = Promise.reject(error); this.closed.catch(() => {}); }
     }
     globalThis.ReadableStream = class ReadableStream {
@@ -4094,7 +4096,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (source.type === 'bytes' && strategy.size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         const defaultHighWaterMark = source.type === 'bytes' ? 0 : 1, highWaterMark = strategy.highWaterMark === undefined ? defaultHighWaterMark : Number(strategy.highWaterMark);
         if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        this._source = source; this._byteStream = source.type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = typeof strategy.size === 'function' ? strategy.size : () => 1; this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
+        this._source = source; this._byteStream = source.type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = typeof strategy.size === 'function' ? strategy.size : () => 1; this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._disturbed = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
         this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; });
         this._closed.catch(() => {}); this._controller = this._byteStream ? new ReadableByteStreamController(this) : new ReadableStreamDefaultController(this);
         try { Promise.resolve(typeof source.start === 'function' ? source.start(this._controller) : undefined).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error)); } catch (error) { this._controller.error(error); }
@@ -4145,7 +4147,7 @@ const PLATFORM_GLOBALS: &str = r#"
         return result;
       }
       _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
-      cancel(reason) { if (this.locked) return Promise.reject(webInvalidState('ReadableStream is locked')); return this._cancel(reason); }
+      cancel(reason) { if (this.locked) return Promise.reject(webInvalidState('ReadableStream is locked')); this._disturbed = true; return this._cancel(reason); }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');
         const byteStream = this._byteStream, reader = this.getReader(), controllers = [null, null], cancelled = [false, false], reasons = [undefined, undefined], demand = [false, false];
@@ -4327,6 +4329,79 @@ const PLATFORM_GLOBALS: &str = r#"
     globalThis.CountQueuingStrategy = CountQueuingStrategy;
     globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); let pendingHigh = ''; const transform = new TransformStream({ transform(chunk, controller) { let text = pendingHigh + String(chunk); pendingHigh = ''; const last = text.charCodeAt(text.length - 1); if (last >= 0xd800 && last <= 0xdbff) { pendingHigh = text.slice(-1); text = text.slice(0, -1); } if (text) controller.enqueue(encoder.encode(text)); }, flush(controller) { if (pendingHigh) controller.enqueue(encoder.encode(pendingHigh)); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
     globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const text = decoder.decode(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
+  }
+  if (typeof globalThis.FormData !== 'function') {
+    const formDataEntries = new WeakMap();
+    class FormData {
+      constructor() { formDataEntries.set(this, []); }
+      append(name, value, filename = undefined) { const entry = [String(name), value instanceof Blob ? value : String(value)]; if (filename !== undefined) entry.push(String(filename)); formDataEntries.get(this).push(entry); }
+      delete(name) { const key = String(name); formDataEntries.set(this, formDataEntries.get(this).filter(entry => entry[0] !== key)); }
+      get(name) { const key = String(name), entry = formDataEntries.get(this).find(item => item[0] === key); return entry ? entry[1] : null; }
+      getAll(name) { const key = String(name); return formDataEntries.get(this).filter(entry => entry[0] === key).map(entry => entry[1]); }
+      has(name) { const key = String(name); return formDataEntries.get(this).some(entry => entry[0] === key); }
+      set(name, value, filename = undefined) { const key = String(name), entries = formDataEntries.get(this), index = entries.findIndex(entry => entry[0] === key), replacement = [key, value instanceof Blob ? value : String(value)]; if (filename !== undefined) replacement.push(String(filename)); if (index < 0) entries.push(replacement); else { entries[index] = replacement; formDataEntries.set(this, entries.filter((entry, current) => entry[0] !== key || current === index)); } }
+      *entries() { for (const entry of formDataEntries.get(this)) yield [entry[0], entry[1]]; }
+      *keys() { for (const entry of formDataEntries.get(this)) yield entry[0]; }
+      *values() { for (const entry of formDataEntries.get(this)) yield entry[1]; }
+      forEach(callback, thisArg = undefined) { for (const [name, value] of this.entries()) callback.call(thisArg, value, name, this); }
+      [Symbol.iterator]() { return this.entries(); }
+      get [Symbol.toStringTag]() { return 'FormData'; }
+    }
+    globalThis.FormData = FormData;
+  }
+  if (typeof globalThis.Response !== 'function') {
+    const responseData = new WeakMap();
+    const bytesBodyStream = bytes => new ReadableStream({ start(controller) { if (bytes.byteLength) controller.enqueue(bytes); controller.close(); } });
+    const responseBody = value => {
+      if (value === null || value === undefined) return { stream: null, type: null };
+      if (value instanceof ReadableStream) { if (value.locked || value._disturbed) throw new TypeError('Body is unusable'); return { stream: value, type: null }; }
+      if (value instanceof Blob) return { stream: new ReadableStream({ async start(controller) { const bytes = await value.bytes(); if (bytes.byteLength) controller.enqueue(bytes); controller.close(); } }), type: value.type || null };
+      if (value instanceof URLSearchParams) { const bytes = Uint8Array.from(encodeUtf8(value.toString())); return { stream: bytesBodyStream(bytes), type: 'application/x-www-form-urlencoded;charset=UTF-8' }; }
+      if (value instanceof ArrayBuffer) return { stream: bytesBodyStream(new Uint8Array(value.slice(0))), type: null };
+      if (ArrayBuffer.isView(value)) return { stream: bytesBodyStream(new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))), type: null };
+      return { stream: bytesBodyStream(Uint8Array.from(encodeUtf8(String(value)))), type: 'text/plain;charset=UTF-8' };
+    };
+    const consumeResponseBody = async response => {
+      const record = responseData.get(response); if (!record) throw new TypeError('invalid Response receiver');
+      if (!record.body) return new Uint8Array();
+      if (record.body._disturbed || record.body.locked) throw new TypeError('Body is unusable');
+      const reader = record.body.getReader(), chunks = []; let length = 0;
+      while (true) { const result = await reader.read(); if (result.done) break; const chunk = result.value instanceof ArrayBuffer ? new Uint8Array(result.value) : ArrayBuffer.isView(result.value) ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength) : Uint8Array.from(encodeUtf8(String(result.value))); chunks.push(chunk); length += chunk.byteLength; }
+      const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; } return output;
+    };
+    class Response {
+      constructor(body = null, init = {}) {
+        const status = init.status === undefined ? 200 : Number(init.status);
+        if (!Number.isInteger(status) || status < 200 || status > 599) throw new RangeError('status must be between 200 and 599');
+        if (body !== null && body !== undefined && (status === 204 || status === 205 || status === 304)) throw new TypeError(`Invalid response status code ${status}`);
+        const statusText = init.statusText === undefined ? '' : String(init.statusText);
+        if (/[\0\r\n]/.test(statusText)) throw new TypeError('invalid statusText');
+        const headers = new Headers(init.headers), normalized = responseBody(body);
+        if (normalized.type && !headers.has('content-type')) headers.set('content-type', normalized.type);
+        responseData.set(this, { body: normalized.stream, headers, status, statusText, type: 'default', url: '', redirected: false });
+      }
+      get body() { return responseData.get(this).body; }
+      get bodyUsed() { const body = responseData.get(this).body; return Boolean(body && body._disturbed); }
+      get headers() { return responseData.get(this).headers; }
+      get ok() { const status = responseData.get(this).status; return status >= 200 && status <= 299; }
+      get redirected() { return responseData.get(this).redirected; }
+      get status() { return responseData.get(this).status; }
+      get statusText() { return responseData.get(this).statusText; }
+      get type() { return responseData.get(this).type; }
+      get url() { return responseData.get(this).url; }
+      async arrayBuffer() { const bytes = await consumeResponseBody(this); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); }
+      async blob() { const record = responseData.get(this), bytes = await consumeResponseBody(this); return new Blob([bytes], { type: record.headers.get('content-type') || '' }); }
+      async bytes() { return consumeResponseBody(this); }
+      async json() { return JSON.parse(await this.text()); }
+      async text() { return new TextDecoder().decode(await consumeResponseBody(this)); }
+      async formData() { const type = this.headers.get('content-type') || ''; if (!type.toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new TypeError('unsupported form data content type'); const params = new URLSearchParams(await this.text()), data = new FormData(); for (const [name, value] of params) data.append(name, value); return data; }
+      clone() { const record = responseData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Response(body, { status: record.status, statusText: record.statusText, headers: record.headers }); const cloneRecord = responseData.get(clone); cloneRecord.type = record.type; cloneRecord.url = record.url; cloneRecord.redirected = record.redirected; return clone; }
+      static error() { const response = new Response(); const record = responseData.get(response); record.status = 0; record.type = 'error'; return response; }
+      static json(value, init = {}) { const body = JSON.stringify(value); if (body === undefined) throw new TypeError('value is not JSON serializable'); const headers = new Headers(init.headers); if (!headers.has('content-type')) headers.set('content-type', 'application/json'); return new Response(body, { ...init, headers }); }
+      static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); return new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); }
+      get [Symbol.toStringTag]() { return 'Response'; }
+    }
+    globalThis.Response = Response;
   }
   if (typeof globalThis.MessageChannel !== 'function') {
     class MessagePort extends EventTarget {

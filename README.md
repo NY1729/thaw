@@ -307,6 +307,11 @@ The workspace crates have narrow responsibilities:
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
   `getSetCookie()` with Web-compatible prototype shape
+- Global `Response` normalizes string, binary, Blob, URLSearchParams and
+  ReadableStream bodies, exposes byte/array-buffer/blob/text/JSON/form-data
+  consumers with disturbance tracking, clones bodies through `tee()`, and
+  provides `json()`, `redirect()` and `error()` factories. The supporting
+  `FormData` collection covers repeated string/Blob fields and ordered mutation
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
