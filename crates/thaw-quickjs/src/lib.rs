@@ -3742,13 +3742,13 @@ const PLATFORM_GLOBALS: &str = r#"
       constructor(stream) { this._stream = stream; }
       enqueue(chunk) {
         const stream = this._stream;
-        if (stream._state !== 'readable' || stream._closeRequested) throw new TypeError('stream is not readable');
+        if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
         if (stream._reads.length) stream._reads.shift().resolve({ value: chunk, done: false });
         else { let size; try { size = stream._chunkSize(chunk); } catch (error) { this.error(error); throw error; } stream._queue.push(chunk); stream._queueSizes.push(size); stream._queueTotalSize += size; }
         stream._notifyCapacity(); stream._callPullIfNeeded();
       }
       close() {
-        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) return;
+        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
         stream._closeRequested = true; stream._finishCloseIfReady();
       }
       error(error) {
@@ -3785,14 +3785,14 @@ const PLATFORM_GLOBALS: &str = r#"
       constructor(stream) { this._stream = stream; }
       enqueue(chunk) {
         const stream = this._stream;
-        if (stream._state !== 'readable' || stream._closeRequested) throw new TypeError('stream is not readable');
+        if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
         if (!ArrayBuffer.isView(chunk) || chunk.byteLength === 0) throw new TypeError('byte stream chunks must be non-empty ArrayBuffer views');
         stream._queue.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); stream._queueSizes.push(chunk.byteLength); stream._queueTotalSize += chunk.byteLength; stream._drainByob();
         if (stream._reads.length && stream._queue.length) stream._reads.shift().resolve({ value: stream._dequeue(), done: false });
         stream._notifyCapacity(); stream._callPullIfNeeded();
       }
       close() {
-        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) return;
+        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
         stream._closeRequested = true; stream._drainByob(); stream._finishCloseIfReady();
       }
       error(error) {
@@ -3915,7 +3915,7 @@ const PLATFORM_GLOBALS: &str = r#"
         return result;
       }
       _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
-      cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); return this._cancel(reason); }
+      cancel(reason) { if (this.locked) return Promise.reject(webInvalidState('ReadableStream is locked')); return this._cancel(reason); }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');
         const byteStream = this._byteStream, reader = this.getReader(), controllers = [null, null], cancelled = [false, false], reasons = [undefined, undefined], demand = [false, false];
@@ -4031,8 +4031,8 @@ const PLATFORM_GLOBALS: &str = r#"
       _setBackpressure(value) { if (this._backpressured === value) return; this._backpressured = value; if (value) { this._ready = new Promise((resolve, reject) => { this._resolveReady = resolve; this._rejectReady = reject; }); this._ready.catch(() => {}); } else { if (this._resolveReady) this._resolveReady(); this._resolveReady = null; this._rejectReady = null; this._ready = Promise.resolve(); } }
       _errorReady(error) { if (this._rejectReady) this._rejectReady(error); this._resolveReady = null; this._rejectReady = null; this._backpressured = false; this._ready = Promise.reject(error); this._ready.catch(() => {}); }
       _errorStream(error) { if (this._state !== 'writable') return; this._state = 'errored'; this._error = error; this._errorReady(error); this._rejectClosed(error); }
-      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); let size; try { size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } } catch (error) { this._errorStream(error); return Promise.reject(error); } this._queueTotalSize += size; this._setBackpressure(this._desiredSize() <= 0); const operation = this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this._controller) : undefined); return operation.then(value => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); if (this._state === 'writable') this._setBackpressure(this._desiredSize() <= 0); return Promise.resolve().then(() => value); }, error => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._errorStream(error); return Promise.resolve().then(() => { throw error; }); }); }
-      _close() { if (this._state !== 'writable') return this._closed; this._state = 'closed'; this._setBackpressure(false); this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._errorReady(error); this._rejectClosed(error); throw error; }); return this._chain; }
+      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); let size; try { size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } } catch (error) { this._errorStream(error); return Promise.reject(error); } this._queueTotalSize += size; this._setBackpressure(this._desiredSize() <= 0); const operation = this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this._controller) : undefined); return operation.then(value => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); if (this._state === 'writable') this._setBackpressure(this._desiredSize() <= 0); return Promise.resolve().then(() => value); }, error => { this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._errorStream(error); return Promise.resolve().then(() => { throw error; }); }); }
+      _close() { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(webInvalidState('WritableStream is closed')); this._state = 'closed'; this._setBackpressure(false); this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._errorReady(error); this._rejectClosed(error); throw error; }); return this._chain; }
       close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
       _abort(reason) { if (this._state !== 'writable') return Promise.resolve(); this._state = 'errored'; this._error = reason; this._errorReady(reason); this._controller._abortController.abort(reason); const operation = this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
       abort(reason) { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._abort(reason); }
