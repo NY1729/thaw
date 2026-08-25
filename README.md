@@ -374,6 +374,8 @@ The workspace crates have narrow responsibilities:
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
 - Sandboxed QuickJS bundles resolve both `node:fs/promises` and `fs.promises`,
   returning Node-shaped `ENOENT`/`EROFS` rejections instead of leaking host files
+- `node:util/types` identifies standard collections, boxed primitives,
+  promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
