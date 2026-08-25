@@ -354,8 +354,8 @@ The workspace crates have narrow responsibilities:
   ESM worker entry syntax, cloned `workerData`, `parentPort` message exchange,
   per-worker `argv`, copied or `SHARE_ENV` process environments, reported
   resource limits, protected transfer/clone markers, lifecycle events and
-  termination (runtime-computed worker paths, stdio redirection and parallel
-  OS threads remain later)
+  EventEmitter-style listener management and termination (runtime-computed
+  worker paths, stdio redirection and parallel OS threads remain later)
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
