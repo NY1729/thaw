@@ -386,6 +386,9 @@ The workspace crates have narrow responsibilities:
   generic pattern for arrow and function expressions. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
+- Callable assignment compares the effective Promise-wrapped return of named
+  async generic functions, rejecting synchronous aliases while accepting an
+  explicit `Promise<T>` callable contract without adding a second Promise layer
 - Pure callable interfaces with one generic call signature, such as
   `interface Identity { <T>(value: T): T }`, use the same polymorphic template,
   assignment checks and direct/callback specialization paths; annotated local

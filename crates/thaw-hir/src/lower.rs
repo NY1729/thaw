@@ -13567,7 +13567,7 @@ impl<'a> FnLowerer<'a> {
             self.generic_interfaces,
             &mut Vec::new(),
         )?;
-        let actual_return = resolve_ts_type_with_substitution(
+        let mut actual_return = resolve_ts_type_with_substitution(
             actual
                 .generic_return_type
                 .as_ref()
@@ -13577,6 +13577,9 @@ impl<'a> FnLowerer<'a> {
             self.generic_interfaces,
             &mut Vec::new(),
         )?;
+        if actual.is_async && !matches!(actual_return, HirType::Promise(_)) {
+            actual_return = HirType::Promise(Box::new(actual_return));
+        }
         if expected_params != actual_params || expected_return != actual_return {
             return Err(format!(
                 "generic arrow has signature {actual_params:?} -> {actual_return:?}, incompatible with function type alias `{alias_name}` {expected_params:?} -> {expected_return:?}"
@@ -14300,6 +14303,10 @@ mod tests {
             (
                 "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"not inferred\"; }",
                 "needs an explicit return type",
+            ),
+            (
+                "type Identity = <T>(value: T) => T; async function asynchronous<T>(value: T): Promise<T> { return value; } function main(): void { const invalid: Identity = asynchronous; }",
+                "incompatible with function type alias `Identity`",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
