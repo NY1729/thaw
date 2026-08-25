@@ -1381,6 +1381,29 @@ fn resolve_interface(
                 None,
                 in_progress,
             )?
+        } else if let Some(base_decl) = generic.aliases.get(&base_name) {
+            resolve_type_dependencies(
+                &base_decl.type_ann,
+                raw,
+                aliases,
+                generic,
+                resolved,
+                in_progress,
+            )?;
+            let reference = swc_ecma_ast::TsTypeRef {
+                span: base.span,
+                type_name: swc_ecma_ast::TsEntityName::Ident(base_ident.clone()),
+                type_params: base.type_args.clone(),
+            };
+            resolve_generic_alias(
+                &base_name,
+                base_decl,
+                &reference,
+                resolved,
+                generic,
+                None,
+                in_progress,
+            )?
         } else {
             if base.type_args.is_some() {
                 return Err(format!(
@@ -1526,6 +1549,19 @@ fn resolve_type_dependencies(
                         in_progress,
                         &mut Vec::new(),
                     )?;
+                } else if let Some(decl) = generic.aliases.get(name) {
+                    if !in_progress.iter().any(|active| active == name) {
+                        in_progress.push(name.to_string());
+                        resolve_type_dependencies(
+                            &decl.type_ann,
+                            interfaces,
+                            aliases,
+                            generic,
+                            resolved,
+                            in_progress,
+                        )?;
+                        in_progress.pop();
+                    }
                 }
             }
             if let Some(arguments) = &reference.type_params {
@@ -13268,6 +13304,17 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("does not satisfy constraint F64"));
+    }
+
+    #[test]
+    fn rejects_non_object_generic_alias_base() {
+        let module = thaw_parser::parse_typescript(
+            "type Value<T> = T; interface Bad extends Value<number> {} function bad(value: Bad): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("can only extend object-shaped"));
     }
 
     #[test]

@@ -130,7 +130,8 @@ The workspace crates have narrow responsibilities:
   `NumberBox extends Box<number>`) and generic interface instantiation;
   generic interfaces accept trailing type-parameter defaults (including
   defaults that reference earlier parameters) and validate concrete
-  primitive/union or structural-object constraints
+  primitive/union or structural-object constraints. Object-shaped generic
+  type aliases may also be used as concrete interface bases
 - Numeric and string `enum` declarations lower to typed native constants,
   including implicit numeric numbering, preceding-member constant expressions,
   bracketed string member reads, runtime numeric reverse lookup (unknown values
