@@ -464,17 +464,28 @@ fn tls_server_listen(
     })
 }
 
-fn tls_server_accept(handle: u32) -> String {
+fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
     let accepted = TLS_LISTENERS.with(|listeners| {
         let listeners = listeners.borrow();
         let Some(listener) = listeners.1.get(&handle) else {
             return Err("listener is closed".to_string());
         };
-        listener
-            .socket
-            .accept()
+        if let Err(error) = listener.socket.set_nonblocking(nonblocking) {
+            return Err(error.to_string());
+        }
+        let accepted = listener.socket.accept();
+        if nonblocking {
+            let _ = listener.socket.set_nonblocking(false);
+        }
+        accepted
             .map(|(socket, peer)| (socket, peer, Arc::clone(&listener.config)))
-            .map_err(|error| error.to_string())
+            .map_err(|error| {
+                if nonblocking && error.kind() == io::ErrorKind::WouldBlock {
+                    "pending".to_string()
+                } else {
+                    error.to_string()
+                }
+            })
     });
     let (mut socket, peer, config) = match accepted {
         Ok(accepted) => accepted,
@@ -499,6 +510,14 @@ fn tls_server_accept(handle: u32) -> String {
             .insert(stream_handle, StreamOwned::new(connection, socket));
         format!("ok:{stream_handle}:{}:{}", peer.ip(), peer.port())
     })
+}
+
+fn tls_server_accept(handle: u32) -> String {
+    tls_server_accept_impl(handle, false)
+}
+
+fn tls_server_poll_accept(handle: u32) -> String {
+    tls_server_accept_impl(handle, true)
 }
 
 fn tls_server_read(handle: u32) -> String {
@@ -880,6 +899,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_server_accept_function =
                     Function::new(ctx.clone(), |handle: u32| tls_server_accept(handle))
                         .expect("failed to create JavaScript TLS acceptor");
+                let tls_server_poll_accept_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_server_poll_accept(handle))
+                        .expect("failed to create JavaScript TLS polling acceptor");
                 let tls_server_read_function =
                     Function::new(ctx.clone(), |handle: u32| tls_server_read(handle))
                         .expect("failed to create JavaScript TLS reader");
@@ -966,6 +988,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_tls_server_accept", tls_server_accept_function)
                     .expect("failed to install JavaScript TLS acceptor");
+                ctx.globals()
+                    .set(
+                        "__thaw_tls_server_poll_accept",
+                        tls_server_poll_accept_function,
+                    )
+                    .expect("failed to install JavaScript TLS polling acceptor");
                 ctx.globals()
                     .set("__thaw_tls_server_read", tls_server_read_function)
                     .expect("failed to install JavaScript TLS reader");
