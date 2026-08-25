@@ -4172,7 +4172,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
         function cleanup() { if (request.signal) request.signal.removeEventListener('abort', onAbort); }
         function onAbort() { if (active && typeof active.destroy === 'function') active.destroy(); finishReject(aborted()); }
         if (request.signal) request.signal.addEventListener('abort', onAbort, { once: true });
-        var initialHeaders = {}; request.headers.forEach(function(value, name) { initialHeaders[name] = value; });
+        var initialHeaders = {}; request.headers.forEach(function(value, name) { initialHeaders[name] = value; }); if (initialHeaders['accept-encoding'] === undefined) initialHeaders['accept-encoding'] = 'gzip, deflate';
         function dispatch(url, method, bytes, redirected, headers) {
           var parsed;
           try { parsed = new URL(url); } catch (error) { finishReject(error); return; }
@@ -4208,6 +4208,8 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
                 incoming.on('aborted', function() { cleanupBody(); if (controller) controller.error(new TypeError('terminated')); });
                 bodyAbort = function() { cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
                 if (request.signal) request.signal.addEventListener('abort', bodyAbort, { once: true });
+                var contentEncoding = String(responseHeaders.get('content-encoding') || '').trim().toLowerCase();
+                if (contentEncoding === 'gzip' || contentEncoding === 'deflate') stream = stream.pipeThrough(new DecompressionStream(contentEncoding));
               }
               var response;
               try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }
@@ -10246,6 +10248,8 @@ mod tests {
                 "POST /multipart ",
                 "POST /post-redirect ",
                 "GET /post-final ",
+                "GET /gzip ",
+                "GET /deflate ",
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
@@ -10282,6 +10286,35 @@ mod tests {
                     stream
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/form-data; boundary=reply-boundary\r\nConnection: close\r\n\r\n--reply-boundary\r\nContent-Disposition: form-data; name=\"answer\"\r\n\r\n42\r\n--reply-boundary\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"reply.txt\"\r\nContent-Type: text/plain\r\n\r\nreply-body\r\n--reply-boundary--\r\n")
                         .unwrap();
+                } else if expected.contains("gzip") || expected.contains("deflate") {
+                    assert!(request
+                        .to_ascii_lowercase()
+                        .contains("accept-encoding: gzip, deflate\r\n"));
+                    let (encoding, compressed): (&str, &[u8]) = if expected.contains("gzip") {
+                        (
+                            "gzip",
+                            &[
+                                0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x4b,
+                                0xce, 0xcf, 0x2d, 0x28, 0x4a, 0x2d, 0x2e, 0x4e, 0x4d, 0x01, 0x00,
+                                0x1e, 0x4b, 0x56, 0x97, 0x0a, 0x00, 0x00, 0x00,
+                            ],
+                        )
+                    } else {
+                        (
+                            "deflate",
+                            &[
+                                0x78, 0x9c, 0x4b, 0xce, 0xcf, 0x2d, 0x28, 0x4a, 0x2d, 0x2e, 0x4e,
+                                0x4d, 0x01, 0x00, 0x17, 0x3f, 0x04, 0x36,
+                            ],
+                        )
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Encoding: {encoding}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        compressed.len()
+                    )
+                    .unwrap();
+                    stream.write_all(compressed).unwrap();
                 } else {
                     assert!(!request.to_ascii_lowercase().contains("content-type:"));
                     assert!(!request.to_ascii_lowercase().contains("content-length:"));
@@ -10295,7 +10328,7 @@ mod tests {
         let dir = temp_registry("global_fetch");
         fs::write(
             dir.join("index.js"),
-            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var rewritten = await fetch(base + '/post-redirect#source', { method: 'POST', body: 'again' }), rewrittenText = await rewritten.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text(), rewritten.redirected, rewritten.url, rewrittenText]; };",
+            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var rewritten = await fetch(base + '/post-redirect#source', { method: 'POST', body: 'again' }), rewrittenText = await rewritten.text(), gzip = await fetch(base + '/gzip'), gzipText = await gzip.text(), deflate = await fetch(base + '/deflate'), deflateText = await deflate.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text(), rewritten.redirected, rewritten.url, rewrittenText, gzipText, gzip.headers.get('content-encoding'), deflateText, deflate.headers.get('content-encoding')]; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("global_fetch_node_modules");
@@ -10312,7 +10345,7 @@ mod tests {
         assert_eq!(
             result,
             format!(
-                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body",true,"http://127.0.0.1:{port}/post-final","rewritten"]"#
+                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body",true,"http://127.0.0.1:{port}/post-final","rewritten","compressed","gzip","compressed","deflate"]"#
             )
         );
         server.join().unwrap();
