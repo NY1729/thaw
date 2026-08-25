@@ -161,6 +161,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "process" => {
             "export declare function cwd(argsArray: any): any;\nexport declare function chdir(argsArray: any): void;\nexport declare function uptime(argsArray: any): any;\nexport declare function hrtime(argsArray: any): any;\nexport declare function memoryUsage(argsArray: any): any;\nexport declare function cpuUsage(argsArray: any): any;\nexport declare function emitWarning(argsArray: any): void;\n"
         }
+        "punycode" => {
+            "export declare function encode(argsArray: any): string;\nexport declare function decode(argsArray: any): string;\nexport declare function toASCII(argsArray: any): string;\nexport declare function toUnicode(argsArray: any): string;\n"
+        }
         "buffer" => {
             "export declare const Buffer: any;\nexport declare const SlowBuffer: any;\nexport declare function byteLength(argsArray: any): any;\nexport declare function isUtf8(argsArray: any): any;\nexport declare function isAscii(argsArray: any): any;\nexport declare function transcode(argsArray: any): any;\n"
         }
@@ -2684,6 +2687,12 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = __thaw_process;\n\
              module.exports.__esModule = true;\n",
         ),
+        "punycode" => Some(
+            "var base = 36, tMin = 1, tMax = 26, skew = 38, damp = 700, initialBias = 72, initialN = 128, delimiter = '-'; function adapt(delta, points, first) { delta = first ? Math.floor(delta / damp) : delta >> 1; delta += Math.floor(delta / points); var k = 0; while (delta > Math.floor(((base - tMin) * tMax) / 2)) { delta = Math.floor(delta / (base - tMin)); k += base; } return k + Math.floor(((base - tMin + 1) * delta) / (delta + skew)); } function encodeDigit(value) { return String.fromCharCode(value + 22 + 75 * (value < 26)); } function decodeDigit(code) { if (code >= 48 && code <= 57) return code - 22; if (code >= 65 && code <= 90) return code - 65; if (code >= 97 && code <= 122) return code - 97; return base; } function codePoints(value) { return Array.from(String(value)).map(function(character) { return character.codePointAt(0); }); }\n\
+             function encode(value) { var input = codePoints(value), output = [], n = initialN, delta = 0, bias = initialBias; input.forEach(function(point) { if (point < 128) output.push(String.fromCharCode(point)); }); var basic = output.length, handled = basic; if (basic) output.push(delimiter); while (handled < input.length) { var next = Infinity; input.forEach(function(point) { if (point >= n && point < next) next = point; }); delta += (next - n) * (handled + 1); n = next; input.forEach(function(point) { if (point < n) delta++; if (point === n) { var q = delta; for (var k = base;; k += base) { var threshold = k <= bias ? tMin : k >= bias + tMax ? tMax : k - bias; if (q < threshold) break; output.push(encodeDigit(threshold + ((q - threshold) % (base - threshold)))); q = Math.floor((q - threshold) / (base - threshold)); } output.push(encodeDigit(q)); bias = adapt(delta, handled + 1, handled === basic); delta = 0; handled++; } }); delta++; n++; } return output.join(''); }\n\
+             function decode(value) { var input = String(value), output = [], n = initialN, index = 0, bias = initialBias, i = 0, delimiterIndex = input.lastIndexOf(delimiter); if (delimiterIndex >= 0) { for (var basicIndex = 0; basicIndex < delimiterIndex; basicIndex++) { var basicCode = input.charCodeAt(basicIndex); if (basicCode >= 128) throw new RangeError('Illegal input'); output.push(basicCode); } index = delimiterIndex + 1; } while (index < input.length) { var oldI = i, weight = 1; for (var k = base;; k += base) { if (index >= input.length) throw new RangeError('Invalid input'); var digit = decodeDigit(input.charCodeAt(index++)); if (digit >= base) throw new RangeError('Invalid input'); i += digit * weight; var threshold = k <= bias ? tMin : k >= bias + tMax ? tMax : k - bias; if (digit < threshold) break; weight *= base - threshold; } var length = output.length + 1; bias = adapt(i - oldI, length, oldI === 0); n += Math.floor(i / length); i %= length; output.splice(i, 0, n); i++; } return String.fromCodePoint.apply(String, output); }\n\
+             function mapDomain(value, callback) { var input = String(value), parts = input.split('@'), local = ''; if (parts.length > 1) local = parts.shift() + '@'; return local + parts.join('@').replace(/[\\u3002\\uFF0E\\uFF61]/g, '.').split('.').map(callback).join('.'); } function toASCII(value) { return mapDomain(value, function(label) { return /[^\\x00-\\x7F]/.test(label) ? 'xn--' + encode(label) : label; }); } function toUnicode(value) { return mapDomain(value, function(label) { return /^xn--/i.test(label) ? decode(label.slice(4).toLowerCase()) : label; }); } var ucs2 = { decode: codePoints, encode: function(points) { return String.fromCodePoint.apply(String, points); } }; module.exports = { version: '2.1.0', ucs2: ucs2, decode: decode, encode: encode, toASCII: toASCII, toUnicode: toUnicode }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         // Found necessary chasing a real native addon's load path
         // (`bcrypt`, `utf-8-validate`): both depend on `node-gyp-build`,
         // which unconditionally does `require('path')`/`require('os')`/
@@ -3130,7 +3139,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','querystring','readline','readline/promises','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -5720,6 +5729,30 @@ mod tests {
         assert_eq!(
             result,
             r#"[12,12,13,7,42,17,true,false,true,false,0,true,"symbol"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn punycode_builtin_converts_unicode_labels_and_code_points() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_punycode");
+        fs::write(dir.join("index.js"), "var punycode = require('node:punycode'); module.exports = function () { var encoded = punycode.encode('mañana'); var snowman = punycode.encode('☃-⌘'); var points = punycode.ucs2.decode('A😀Z'); return [encoded, punycode.decode(encoded), snowman, punycode.decode(snowman), punycode.toASCII('mañana.com'), punycode.toUnicode('xn--bcher-kva.example'), points, punycode.ucs2.encode(points), punycode.toASCII('user@bücher.example'), punycode.version]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_punycode_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePunycode = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exercisePunycode").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["maana-pta","mañana","--dqo34k","☃-⌘","xn--maana-pta.com","bücher.example",[65,128512,90],"A😀Z","user@xn--bcher-kva.example","2.1.0"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
