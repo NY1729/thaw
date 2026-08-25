@@ -14264,6 +14264,7 @@ mod tests {
                 const stringifyValue: Stringify = <T>(value: T) => String(value);
                 const numericValue: NumericValue = <T>(value: T) => Number(value);
                 const decrement: NumericOperation = <T extends number>(value: T) => value - 1;
+                const prefixed: Stringify = <T>(value: T) => "value=" + String(value);
                 const asyncIdentity: AsyncIdentity = namedAsyncIdentity;
                 console.log(identity(24));
                 console.log(identity("alias"));
@@ -14297,11 +14298,12 @@ mod tests {
                 console.log(stringifyValue(38));
                 console.log(numericValue("39"));
                 console.log(decrement(41));
+                console.log(prefixed(true));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\nnull\nundefined\ntrue\n38\n39\n40\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\nnull\nundefined\ntrue\n38\n39\n40\nvalue=true\n"
         );
     }
 
