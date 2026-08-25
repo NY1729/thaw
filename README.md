@@ -300,7 +300,12 @@ The workspace crates have narrow responsibilities:
   provides file-URL conversion plus HTTP-option projection
 - `node:path` covers POSIX resolve/join/normalize, relative paths, component
   parsing/formatting, extensions and suffix removal, with a matching minimal
-  `win32` namespace for cross-platform package logic
+  `win32` namespace for cross-platform package logic. `path/posix` and
+  `path/win32` resolve to those exact namespace objects, while legacy `sys`
+  resolves to the shared `node:util` module
+- `node:domain` provides active/process domain tracking, nested enter/exit,
+  synchronous `run`, receiver-preserving `bind`/`intercept`, error annotation,
+  member transfer/removal and disposal over the shared EventEmitter layer
 - `node:string_decoder` preserves incomplete UTF-8, UTF-16LE and Base64 input
   across chunk boundaries and flushes incomplete terminal input from `end()`
 - Global `Headers` accepts records, header-pair iterables and clones; it
