@@ -775,49 +775,89 @@ fn generic_type_pattern(
                 if in_progress.iter().any(|active| active == name) {
                     return Err(format!("generic interface `{name}` is self-referential"));
                 }
-                if !interface.extends.is_empty() {
-                    return Err(format!(
-                        "generic interface `{name}` cannot use `extends` yet"
-                    ));
-                }
-                let parameter_names = interface
+                let parameters = &interface
                     .type_params
                     .as_ref()
                     .expect("generic interface type parameters")
-                    .params
-                    .iter()
-                    .map(|param| param.name.sym.to_string())
-                    .collect::<Vec<_>>();
+                    .params;
                 let arguments = reference
                     .type_params
                     .as_ref()
                     .map(|params| params.params.as_slice())
                     .unwrap_or_default();
-                if arguments.len() != parameter_names.len() {
+                let required = parameters
+                    .iter()
+                    .take_while(|parameter| parameter.default.is_none())
+                    .count();
+                if arguments.len() < required || arguments.len() > parameters.len() {
                     return Err(format!(
-                        "generic interface `{name}` expects {} type argument(s), got {}",
-                        parameter_names.len(),
+                        "generic interface `{name}` expects {required}..={} type argument(s), got {}",
+                        parameters.len(),
                         arguments.len()
                     ));
                 }
-                let argument_patterns = arguments
-                    .iter()
-                    .map(|argument| {
-                        generic_type_pattern(
-                            argument,
-                            substitutions,
-                            interfaces,
-                            generic_interfaces,
-                            in_progress,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let nested_substitutions = parameter_names
-                    .into_iter()
-                    .zip(argument_patterns)
-                    .collect::<HashMap<_, _>>();
+                let mut nested_substitutions = HashMap::new();
+                for (index, parameter) in parameters.iter().enumerate() {
+                    let argument = arguments
+                        .get(index)
+                        .map(|argument| argument.as_ref())
+                        .or_else(|| parameter.default.as_ref().map(|default| default.as_ref()))
+                        .expect("validated generic interface arity requires a default");
+                    let pattern = generic_type_pattern(
+                        argument,
+                        if index < arguments.len() {
+                            substitutions
+                        } else {
+                            &nested_substitutions
+                        },
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
+                    nested_substitutions.insert(parameter.name.sym.to_string(), pattern);
+                }
                 in_progress.push(name.to_string());
-                let fields = interface
+                let mut fields = Vec::new();
+                for base in &interface.extends {
+                    let Expr::Ident(base_ident) = base.expr.as_ref() else {
+                        return Err(format!(
+                            "generic interface `{name}` has an unsupported `extends` target"
+                        ));
+                    };
+                    let base_reference = TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                        span: base.span,
+                        type_name: swc_ecma_ast::TsEntityName::Ident(base_ident.clone()),
+                        type_params: base.type_args.clone(),
+                    });
+                    let base_pattern = generic_type_pattern(
+                        &base_reference,
+                        &nested_substitutions,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
+                    let base_fields = match base_pattern {
+                        GenericTypePattern::Object(fields) => fields,
+                        GenericTypePattern::Concrete(HirType::Object(fields)) => fields
+                            .into_iter()
+                            .map(|(field, ty)| (field, GenericTypePattern::Concrete(ty)))
+                            .collect(),
+                        _ => {
+                            return Err(format!(
+                            "generic interface `{name}` can only extend an object-shaped interface"
+                        ))
+                        }
+                    };
+                    for (field_name, field_ty) in base_fields {
+                        if fields.iter().any(|(existing, _)| existing == &field_name) {
+                            return Err(format!(
+                                "generic interface `{name}` inherits duplicate field `{field_name}`"
+                            ));
+                        }
+                        fields.push((field_name, field_ty));
+                    }
+                }
+                let own_fields = interface
                     .body
                     .body
                     .iter()
@@ -846,9 +886,17 @@ fn generic_type_pattern(
                             )?,
                         ))
                     })
-                    .collect::<Result<Vec<_>, String>>();
+                    .collect::<Result<Vec<_>, String>>()?;
+                for (field_name, field_ty) in own_fields {
+                    if fields.iter().any(|(existing, _)| existing == &field_name) {
+                        return Err(format!(
+                            "generic interface `{name}` declares inherited field `{field_name}` again"
+                        ));
+                    }
+                    fields.push((field_name, field_ty));
+                }
                 in_progress.pop();
-                return Ok(GenericTypePattern::Object(fields?));
+                return Ok(GenericTypePattern::Object(fields));
             }
             if let Some(alias) = generic_interfaces.aliases.get(name) {
                 if in_progress.iter().any(|active| active == name) {
@@ -1904,8 +1952,9 @@ fn lower_ts_type(
 /// generic interface) -- freshly created at each top-level `lower_ts_type`
 /// call, so it only needs to catch a cycle within one such call tree.
 ///
-/// The generic interface itself cannot use `extends` yet. Type arguments are
-/// resolved through an optional outer substitution, so function type variables
+/// Base interfaces are expanded before the interface's own fields, using the
+/// same substitution for generic base arguments. Type arguments are resolved
+/// through an optional outer substitution, so function type variables
 /// in `Box<T>` and nested forms such as `Wrapper<Box<T>>` are concrete before
 /// the interface's own fields are expanded.
 fn resolve_generic_interface(
@@ -1922,12 +1971,6 @@ fn resolve_generic_interface(
             "generic interface `{name}` is (indirectly) self-referential, which Thaw's fixed-size object layout can't represent"
         ));
     }
-    if !decl.extends.is_empty() {
-        return Err(format!(
-            "generic interface `{name}` cannot use `extends` yet"
-        ));
-    }
-
     let parameters = &decl
         .type_params
         .as_ref()
@@ -2000,6 +2043,53 @@ fn resolve_generic_interface(
     in_progress.push(name.to_string());
 
     let mut fields = Vec::with_capacity(decl.body.body.len());
+    for base in &decl.extends {
+        let Expr::Ident(base_ident) = base.expr.as_ref() else {
+            return Err(format!(
+                "generic interface `{name}` has an unsupported `extends` target (only a plain interface name is supported)"
+            ));
+        };
+        let base_name = base_ident.sym.as_str();
+        let base_ty = if let Some(base_decl) = generic_interfaces.interfaces.get(base_name) {
+            let reference = swc_ecma_ast::TsTypeRef {
+                span: base.span,
+                type_name: swc_ecma_ast::TsEntityName::Ident(base_ident.clone()),
+                type_params: base.type_args.clone(),
+            };
+            resolve_generic_interface(
+                base_name,
+                base_decl,
+                &reference,
+                interfaces,
+                generic_interfaces,
+                Some(&substitution),
+                in_progress,
+            )?
+        } else {
+            if base.type_args.is_some() {
+                return Err(format!(
+                    "interface `{name}` supplies type arguments to non-generic base `{base_name}`"
+                ));
+            }
+            interfaces
+                .get(base_name)
+                .cloned()
+                .ok_or_else(|| format!("unknown base interface `{base_name}` for `{name}`"))?
+        };
+        let HirType::Object(base_fields) = base_ty else {
+            return Err(format!(
+                "interface `{name}` can only extend object-shaped interface `{base_name}`"
+            ));
+        };
+        for (field_name, field_ty) in base_fields {
+            if fields.iter().any(|(existing, _)| existing == &field_name) {
+                return Err(format!(
+                    "interface `{name}` inherits field `{field_name}` from `{base_name}`, which collides with an earlier field of the same name"
+                ));
+            }
+            fields.push((field_name, field_ty));
+        }
+    }
     for member in &decl.body.body {
         let TsTypeElement::TsPropertySignature(prop) = member else {
             return Err(format!(
@@ -2024,6 +2114,11 @@ fn resolve_generic_interface(
             generic_interfaces,
             in_progress,
         )?;
+        if fields.iter().any(|(existing, _)| existing == &field_name) {
+            return Err(format!(
+                "interface `{name}` declares field `{field_name}`, which collides with an inherited field"
+            ));
+        }
         fields.push((field_name, field_ty));
     }
 
@@ -13028,6 +13123,17 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("does not satisfy constraint F64"));
+    }
+
+    #[test]
+    fn validates_generic_interface_inherited_field_collisions() {
+        let module = thaw_parser::parse_typescript(
+            "interface Base<T> { value: T } interface Child<T> extends Base<T> { value: T } function bad(value: Child<number>): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("collides with an inherited field"));
     }
 
     #[test]
