@@ -31,6 +31,8 @@ use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -148,6 +150,30 @@ thread_local! {
     static TLS_LISTENERS: RefCell<(u32, HashMap<u32, TlsListener>)> = RefCell::new((1, HashMap::new()));
     static TLS_CLIENT_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
     static TLS_SERVER_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
+    static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new() });
+}
+
+enum HostWorkerCommand {
+    Message(String),
+    Terminate,
+}
+
+enum HostWorkerEvent {
+    Online,
+    Message(String),
+    Error(String),
+    Exit(i32),
+}
+
+struct HostWorker {
+    commands: Sender<HostWorkerCommand>,
+    events: Receiver<HostWorkerEvent>,
+    thread: Option<JoinHandle<()>>,
+}
+
+struct HostWorkerTable {
+    next_handle: u32,
+    workers: HashMap<u32, HostWorker>,
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -996,6 +1022,254 @@ fn os_info_json() -> String {
     }).to_string()
 }
 
+fn host_worker_bootstrap(worker_data_json: &str, thread_id: u32) -> String {
+    let worker_data = serde_json::to_string(worker_data_json).unwrap_or_else(|_| "\"null\"".into());
+    format!(
+        r#"
+        globalThis.__thaw_host_worker_events = [];
+        globalThis.__thaw_host_worker_closed = false;
+        const __thaw_host_worker_listeners = new Map();
+        function __thaw_host_worker_on(name, listener) {{
+          const key = String(name), list = __thaw_host_worker_listeners.get(key) || [];
+          list.push(listener); __thaw_host_worker_listeners.set(key, list); return parentPort;
+        }}
+        function __thaw_host_worker_off(name, listener) {{
+          const key = String(name), list = __thaw_host_worker_listeners.get(key) || [];
+          __thaw_host_worker_listeners.set(key, list.filter(item => item !== listener && item.listener !== listener)); return parentPort;
+        }}
+        const parentPort = {{
+          postMessage(value) {{
+            const payload = JSON.stringify(value);
+            if (payload === undefined) throw new DOMException('value cannot be cloned', 'DataCloneError');
+            __thaw_host_worker_events.push(payload);
+          }},
+          on: __thaw_host_worker_on,
+          addListener: __thaw_host_worker_on,
+          once(name, listener) {{ const wrapped = (...args) => {{ __thaw_host_worker_off(name, wrapped); listener(...args); }}; wrapped.listener = listener; return __thaw_host_worker_on(name, wrapped); }},
+          off: __thaw_host_worker_off,
+          removeListener: __thaw_host_worker_off,
+          close() {{ globalThis.__thaw_host_worker_closed = true; }},
+          start() {{}}, ref() {{ return this; }}, unref() {{ return this; }}, hasRef() {{ return true; }}
+        }};
+        const workerData = JSON.parse({worker_data});
+        globalThis.module = {{ exports: {{}} }};
+        globalThis.exports = globalThis.module.exports;
+        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: '', workerData, parentPort, resourceLimits: {{}}, MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }} }};
+        globalThis.require = function(name) {{
+          if (name === 'worker_threads' || name === 'node:worker_threads') return globalThis.__thaw_worker_module;
+          if (typeof globalThis.__thaw_bundle_create_require === 'function') return globalThis.__thaw_bundle_create_require('')(name);
+          throw new Error("require('" + name + "') is not available in this Worker");
+        }};
+        globalThis.__thaw_host_worker_deliver = function(payload) {{
+          const value = JSON.parse(payload);
+          for (const listener of (__thaw_host_worker_listeners.get('message') || []).slice()) listener(value);
+        }};
+        globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
+        globalThis.__thaw_host_worker_should_exit = function() {{
+          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && __thaw_next_timer_delay() < 0);
+        }};
+        "#
+    )
+}
+
+fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> Result<(), String> {
+    let drain: Function = ctx
+        .globals()
+        .get("__thaw_host_worker_drain")
+        .map_err(|error| error.to_string())?;
+    let payloads: String = drain.call(()).map_err(|error| error.to_string())?;
+    let payloads: Vec<String> =
+        serde_json::from_str(&payloads).map_err(|error| error.to_string())?;
+    for payload in payloads {
+        let _ = events.send(HostWorkerEvent::Message(payload));
+    }
+    Ok(())
+}
+
+fn run_host_worker(
+    bundle_source: String,
+    source: String,
+    worker_data_json: String,
+    thread_id: u32,
+    commands: Receiver<HostWorkerCommand>,
+    events: Sender<HostWorkerEvent>,
+) {
+    let result = with_context(|ctx| -> Result<i32, String> {
+        if !bundle_source.is_empty() {
+            load_impl(ctx.clone(), &bundle_source)?;
+        }
+        load_impl(
+            ctx.clone(),
+            &host_worker_bootstrap(&worker_data_json, thread_id),
+        )?;
+        let _ = events.send(HostWorkerEvent::Online);
+        load_impl(ctx.clone(), &source)?;
+        loop {
+            while ctx.execute_pending_job() {}
+            let run_due: Function = ctx
+                .globals()
+                .get("__thaw_run_due_timers")
+                .map_err(|error| error.to_string())?;
+            run_due
+                .call::<_, usize>(())
+                .map_err(|error| error.to_string())?;
+            while ctx.execute_pending_job() {}
+            drain_host_worker_events(&ctx, &events)?;
+
+            let should_exit: Function = ctx
+                .globals()
+                .get("__thaw_host_worker_should_exit")
+                .map_err(|error| error.to_string())?;
+            if should_exit
+                .call::<_, bool>(())
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(0);
+            }
+
+            match commands.recv_timeout(Duration::from_millis(1)) {
+                Ok(HostWorkerCommand::Message(payload)) => {
+                    let deliver: Function = ctx
+                        .globals()
+                        .get("__thaw_host_worker_deliver")
+                        .map_err(|error| error.to_string())?;
+                    deliver
+                        .call::<_, ()>((payload,))
+                        .map_err(|error| match error {
+                            rquickjs::Error::Exception => describe_exception(&ctx),
+                            error => error.to_string(),
+                        })?;
+                }
+                Ok(HostWorkerCommand::Terminate) => return Ok(1),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(1),
+            }
+        }
+    });
+    match result {
+        Ok(code) => {
+            let _ = events.send(HostWorkerEvent::Exit(code));
+        }
+        Err(error) => {
+            let _ = events.send(HostWorkerEvent::Error(error));
+            let _ = events.send(HostWorkerEvent::Exit(1));
+        }
+    }
+}
+
+fn spawn_host_worker(
+    bundle_source: String,
+    source: String,
+    worker_data_json: String,
+    thread_id: u32,
+) -> u32 {
+    let (command_sender, command_receiver) = mpsc::channel();
+    let (event_sender, event_receiver) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        run_host_worker(
+            bundle_source,
+            source,
+            worker_data_json,
+            thread_id,
+            command_receiver,
+            event_sender,
+        );
+    });
+    HOST_WORKERS.with(|table| {
+        let mut table = table.borrow_mut();
+        let handle = table.next_handle;
+        table.next_handle = table.next_handle.wrapping_add(1).max(1);
+        table.workers.insert(
+            handle,
+            HostWorker {
+                commands: command_sender,
+                events: event_receiver,
+                thread: Some(thread),
+            },
+        );
+        handle
+    })
+}
+
+fn send_host_worker(handle: u32, payload: String) -> bool {
+    HOST_WORKERS.with(|table| {
+        table.borrow().workers.get(&handle).is_some_and(|worker| {
+            worker
+                .commands
+                .send(HostWorkerCommand::Message(payload))
+                .is_ok()
+        })
+    })
+}
+
+fn terminate_host_worker(handle: u32) -> bool {
+    HOST_WORKERS.with(|table| {
+        table
+            .borrow()
+            .workers
+            .get(&handle)
+            .is_some_and(|worker| worker.commands.send(HostWorkerCommand::Terminate).is_ok())
+    })
+}
+
+fn host_workers_active() -> bool {
+    HOST_WORKERS.with(|table| !table.borrow().workers.is_empty())
+}
+
+fn poll_host_workers() -> String {
+    HOST_WORKERS.with(|table| {
+        let mut table = table.borrow_mut();
+        let handles = table.workers.keys().copied().collect::<Vec<_>>();
+        let mut output = Vec::new();
+        let mut finished = Vec::new();
+        for handle in handles {
+            let Some(worker) = table.workers.get(&handle) else {
+                continue;
+            };
+            loop {
+                match worker.events.try_recv() {
+                    Ok(HostWorkerEvent::Online) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "online" }));
+                    }
+                    Ok(HostWorkerEvent::Message(payload)) => {
+                        let value = serde_json::from_str::<serde_json::Value>(&payload)
+                            .unwrap_or(serde_json::Value::Null);
+                        output.push(
+                        serde_json::json!({ "handle": handle, "type": "message", "value": value }),
+                    );
+                    }
+                    Ok(HostWorkerEvent::Error(error)) => {
+                        output.push(
+                        serde_json::json!({ "handle": handle, "type": "error", "error": error }),
+                    );
+                    }
+                    Ok(HostWorkerEvent::Exit(code)) => {
+                        output.push(
+                            serde_json::json!({ "handle": handle, "type": "exit", "code": code }),
+                        );
+                        finished.push(handle);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        finished.push(handle);
+                        break;
+                    }
+                }
+            }
+        }
+        finished.sort_unstable();
+        finished.dedup();
+        for handle in finished {
+            if let Some(mut worker) = table.workers.remove(&handle) {
+                if let Some(thread) = worker.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        serde_json::to_string(&output).unwrap_or_else(|_| "[]".into())
+    })
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -1003,6 +1277,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
+                ctx.globals()
+                    .set(
+                        "__thaw_os_thread_token",
+                        format!("{:?}", std::thread::current().id()),
+                    )
+                    .expect("failed to install OS thread identity");
                 let stdout = Function::new(ctx.clone(), |text: String| {
                     print!("{text}");
                     let _ = io::stdout().flush();
@@ -1027,6 +1307,42 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_detach_array_buffer", detach_array_buffer)
                     .expect("failed to install ArrayBuffer detacher");
+                let worker_spawn = Function::new(
+                    ctx.clone(),
+                    |bundle_source: String,
+                     source: String,
+                     worker_data_json: String,
+                     thread_id: u32| {
+                        spawn_host_worker(bundle_source, source, worker_data_json, thread_id)
+                    },
+                )
+                .expect("failed to create Worker spawner");
+                let worker_send = Function::new(ctx.clone(), |handle: u32, payload: String| {
+                    send_host_worker(handle, payload)
+                })
+                .expect("failed to create Worker sender");
+                let worker_terminate =
+                    Function::new(ctx.clone(), |handle: u32| terminate_host_worker(handle))
+                        .expect("failed to create Worker terminator");
+                let worker_poll = Function::new(ctx.clone(), poll_host_workers)
+                    .expect("failed to create Worker event poller");
+                let worker_active = Function::new(ctx.clone(), host_workers_active)
+                    .expect("failed to create Worker activity probe");
+                ctx.globals()
+                    .set("__thaw_worker_spawn", worker_spawn)
+                    .expect("failed to install Worker spawner");
+                ctx.globals()
+                    .set("__thaw_worker_send", worker_send)
+                    .expect("failed to install Worker sender");
+                ctx.globals()
+                    .set("__thaw_worker_terminate", worker_terminate)
+                    .expect("failed to install Worker terminator");
+                ctx.globals()
+                    .set("__thaw_worker_poll", worker_poll)
+                    .expect("failed to install Worker event poller");
+                ctx.globals()
+                    .set("__thaw_worker_active", worker_active)
+                    .expect("failed to install Worker activity probe");
                 let random_hex = Function::new(ctx.clone(), |size: u32| {
                     let mut bytes = vec![0u8; size as usize];
                     getrandom::getrandom(&mut bytes).expect("OS random source failed");
@@ -2982,6 +3298,12 @@ fn finish_with_platform_events<'js>(
     promise: &rquickjs::Promise<'js>,
 ) -> rquickjs::Result<Value<'js>> {
     loop {
+        if let Ok(poll_platform_events) = ctx
+            .globals()
+            .get::<_, Function>("__thaw_poll_platform_events")
+        {
+            poll_platform_events.call::<_, ()>(())?;
+        }
         if let Some(result) = promise.result() {
             return result;
         }
@@ -2992,6 +3314,16 @@ fn finish_with_platform_events<'js>(
         let next_delay: Function = ctx.globals().get("__thaw_next_timer_delay")?;
         let delay: i64 = next_delay.call(())?;
         if delay < 0 {
+            let active = ctx
+                .globals()
+                .get::<_, Function>("__thaw_worker_active")
+                .ok()
+                .and_then(|probe| probe.call::<_, bool>(()).ok())
+                .unwrap_or(false);
+            if active {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             return Err(rquickjs::Error::WouldBlock);
         }
         if delay > 0 {
