@@ -294,6 +294,8 @@ The workspace crates have narrow responsibilities:
   and introspection; native `new EventEmitter()` class bridging remains outside
   this import surface. The URL module shares the global constructors and
   provides file-URL conversion plus HTTP-option projection
+- `node:string_decoder` preserves incomplete UTF-8, UTF-16LE and Base64 input
+  across chunk boundaries and flushes incomplete terminal input from `end()`
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
