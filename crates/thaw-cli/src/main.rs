@@ -3822,12 +3822,14 @@ mod tests {
                 import { inspect } from "node:util";
                 import { cwd } from "node:process";
                 import { byteLength } from "node:buffer";
+                import * as os from "node:os";
                 import { pathToFileURL, fileURLToPath, urlToHttpOptions } from "node:url";
                 function main(): void {
                     console.log(String(path.join(JSON.parse("[\"a\",\"b\"]"))));
                     console.log(String(inspect(JSON.parse("[42]"))));
                     console.log(String(cwd(JSON.parse("[]"))));
                     console.log(Number(byteLength(JSON.parse("[\"thaw\"]"))));
+                    console.log(String(os.arch(JSON.parse("[]"))) + ":" + String(os.platform(JSON.parse("[]"))) + ":" + String(os.type(JSON.parse("[]"))) + ":" + String(os.tmpdir(JSON.parse("[]"))));
                     console.log(String(pathToFileURL(JSON.parse("[\"/tmp/a b\"]"))));
                     console.log(String(fileURLToPath(JSON.parse("[\"file:///tmp/a%20b\"]"))));
                     console.log(String(urlToHttpOptions(JSON.parse("[\"https://user:pass@example.test:8443/a?b=1#c\"]"))));
@@ -3845,7 +3847,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "a/b\n42\n/\n4\nfile:///tmp/a%20b\n/tmp/a b\n{\"auth\":\"user:pass\",\"hash\":\"#c\",\"hostname\":\"example.test\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"path\":\"/a?b=1\",\"pathname\":\"/a\",\"port\":8443,\"protocol\":\"https:\",\"search\":\"?b=1\"}\n"
+            "a/b\n42\n/\n4\nx64:linux:Linux:/tmp\nfile:///tmp/a%20b\n/tmp/a b\n{\"auth\":\"user:pass\",\"hash\":\"#c\",\"hostname\":\"example.test\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"path\":\"/a?b=1\",\"pathname\":\"/a\",\"port\":8443,\"protocol\":\"https:\",\"search\":\"?b=1\"}\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

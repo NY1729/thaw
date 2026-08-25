@@ -155,6 +155,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         }
         "process" => "export declare function cwd(argsArray: any): any;\n",
         "buffer" => "export declare function byteLength(argsArray: any): any;\n",
+        "os" => {
+            "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
+        }
         "url" => {
             "export declare const URL: any;\nexport declare const URLSearchParams: any;\nexport declare function pathToFileURL(argsArray: any): any;\nexport declare function fileURLToPath(argsArray: any): any;\nexport declare function urlToHttpOptions(argsArray: any): any;\n"
         }
