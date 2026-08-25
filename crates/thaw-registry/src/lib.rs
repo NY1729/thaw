@@ -10740,6 +10740,37 @@ mod tests {
     }
 
     #[test]
+    fn text_encoder_stream_preserves_split_surrogate_pairs() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_text_encoder_surrogates");
+        fs::write(
+            dir.join("index.js"),
+            "var web = require('node:stream/web'); async function encodeParts(parts) { var stream = new web.TextEncoderStream(), writer = stream.writable.getWriter(), reader = stream.readable.getReader(), output = [], consume = (async function() { while (true) { var result = await reader.read(); if (result.done) break; output.push(Array.from(result.value)); } })(); for (var part of parts) await writer.write(part); await writer.close(); await consume; return output; } module.exports = async function () { var encoder = new TextEncoder(), destination = new Uint8Array(4), into = encoder.encodeInto('\\ud83dA', destination); return [Array.from(encoder.encode('\\ud83d')), Array.from(encoder.encode('\\ude00')), into, Array.from(destination), await encodeParts(['\\ud83d', '\\ude00A']), await encodeParts(['X\\ud83d']), await encodeParts(['\\ud83d', 'B'])]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_text_encoder_surrogates_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTextEncoderSurrogates = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseTextEncoderSurrogates")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[239,191,189],[239,191,189],{"read":2,"written":4},[239,191,189,65],[[240,159,152,128,65]],[[88],[239,191,189]],[[239,191,189,66]]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_compression_streams_round_trip_supported_formats() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_compression");
