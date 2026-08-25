@@ -391,7 +391,9 @@ The workspace crates have narrow responsibilities:
   calls also contribute their statically fixed result type. Numeric binary
   operators except the string-sensitive `+` infer `number`. `+` infers
   `string` only when a string literal, template or `String()` operand
-  makes concatenation statically certain. The equivalent
+  makes concatenation statically certain. Conditional, `&&`, `||` and `??`
+  results are inferred when every possible result has the same generic or
+  concrete type pattern. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Callable assignment compares the effective Promise-wrapped return of named
