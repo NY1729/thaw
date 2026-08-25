@@ -360,7 +360,9 @@ The workspace crates have narrow responsibilities:
   `destroy(error, callback)` hooks may clean up asynchronously; final errors
   and `close` are emitted once after the hook completes. Asynchronous
   `construct(callback)` hooks gate readable pulls, queued writes and finalization;
-  construction failures run normal destruction and reject queued callbacks;
+  construction failures run normal destruction and reject queued callbacks.
+  Streams expose EventEmitter-compatible add/prepend/remove/list/enumerate APIs,
+  including Symbol event names, once-listener ordering and max-listener state;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
