@@ -429,6 +429,8 @@ The workspace crates have narrow responsibilities:
   Node-shaped host errors
 - Copying, canonical path resolution and unique temporary-directory creation
   are available through synchronous, callback and Promise APIs
+- `COPYFILE_EXCL` rejects existing destinations with `EEXIST`, while forced
+  removal treats missing paths as success across all three API styles
 - Recursive directory copying is available through `cpSync`, callback `cp`
   and `fs/promises.cp`, including force and existing-destination controls
 - Directory handles expose synchronous and asynchronous reads, callback
