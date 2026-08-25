@@ -323,6 +323,9 @@ The workspace crates have narrow responsibilities:
 - `node:module` exposes builtin discovery, Module/SourceMap compatibility
   shapes and hook registration; parser-tracked `createRequire` aliases load
   bundled relative files and Node builtins with working resolve/cache views
+- QuickJS packages receive a stdout/stderr-backed global `console`, shared by
+  `node:console`, with Node-style formatting, grouping, counts, timers,
+  assertions, traces and custom Console stream targets
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by

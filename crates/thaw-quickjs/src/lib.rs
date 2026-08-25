@@ -27,6 +27,7 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
+use std::io::{self, Write};
 use std::os::raw::c_char;
 use std::time::Duration;
 
@@ -50,6 +51,22 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
+                let stdout = Function::new(ctx.clone(), |text: String| {
+                    print!("{text}");
+                    let _ = io::stdout().flush();
+                })
+                .expect("failed to create JavaScript stdout writer");
+                let stderr = Function::new(ctx.clone(), |text: String| {
+                    eprint!("{text}");
+                    let _ = io::stderr().flush();
+                })
+                .expect("failed to create JavaScript stderr writer");
+                ctx.globals()
+                    .set("__thaw_console_stdout", stdout)
+                    .expect("failed to install JavaScript stdout writer");
+                ctx.globals()
+                    .set("__thaw_console_stderr", stderr)
+                    .expect("failed to install JavaScript stderr writer");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
@@ -93,6 +110,81 @@ const PLATFORM_GLOBALS: &str = r#"
     }
     Promise.resolve().then(callback);
   };
+  const consoleInspect = value => {
+    if (typeof value === 'string') return value;
+    if (typeof value === 'symbol' || typeof value === 'bigint') return String(value);
+    try { const encoded = JSON.stringify(value); return encoded === undefined ? String(value) : encoded; }
+    catch (_) { return '[Circular]'; }
+  };
+  const consoleFormat = (...args) => {
+    if (args.length === 0) return '';
+    if (typeof args[0] !== 'string') return args.map(consoleInspect).join(' ');
+    let index = 1;
+    let output = args[0].replace(/%[sdifjoOc%]/g, token => {
+      if (token === '%%') return '%';
+      if (index >= args.length) return token;
+      const value = args[index++];
+      if (token === '%s') return String(value);
+      if (token === '%d' || token === '%f') return String(Number(value));
+      if (token === '%i') return String(parseInt(value, 10));
+      if (token === '%c') return '';
+      return consoleInspect(value);
+    });
+    while (index < args.length) output += ' ' + consoleInspect(args[index++]);
+    return output;
+  };
+  globalThis.Console = class Console {
+    constructor(stdout, stderr) {
+      const options = stdout && stdout.stdout ? stdout : { stdout, stderr };
+      this._stdout = options.stdout;
+      this._stderr = options.stderr || options.stdout;
+      this._counts = new Map();
+      this._timers = new Map();
+      this._indent = '';
+    }
+    _write(stream, args) {
+      const text = this._indent + consoleFormat(...args) + '\n';
+      if (typeof stream === 'function') stream(text);
+      else if (stream && typeof stream.write === 'function') stream.write(text);
+    }
+    log(...args) { this._write(this._stdout, args); }
+    info(...args) { this.log(...args); }
+    debug(...args) { this.log(...args); }
+    warn(...args) { this._write(this._stderr, args); }
+    error(...args) { this.warn(...args); }
+    dir(value, options) { this.log(consoleInspect(value)); }
+    dirxml(...args) { this.log(...args); }
+    table(value) { this.log(consoleInspect(value)); }
+    assert(condition, ...args) {
+      if (!condition) this.error('Assertion failed' + (args.length ? ': ' + consoleFormat(...args) : ''));
+    }
+    count(label = 'default') {
+      const name = String(label); const value = (this._counts.get(name) || 0) + 1;
+      this._counts.set(name, value); this.log(`${name}: ${value}`);
+    }
+    countReset(label = 'default') { this._counts.delete(String(label)); }
+    time(label = 'default') { this._timers.set(String(label), Date.now()); }
+    timeLog(label = 'default', ...args) {
+      const name = String(label); const started = this._timers.get(name);
+      if (started !== undefined) this.log(`${name}: ${Date.now() - started}ms`, ...args);
+    }
+    timeEnd(label = 'default') { const name = String(label); this.timeLog(name); this._timers.delete(name); }
+    group(...args) { if (args.length) this.log(...args); this._indent += '  '; }
+    groupCollapsed(...args) { this.group(...args); }
+    groupEnd() { this._indent = this._indent.substring(0, Math.max(0, this._indent.length - 2)); }
+    trace(...args) {
+      const error = new Error(consoleFormat(...args));
+      this.error(`Trace: ${error.message}` + (error.stack ? `\n${error.stack}` : ''));
+    }
+    clear() {}
+    profile() {}
+    profileEnd() {}
+    timeStamp() {}
+  };
+  if (typeof globalThis.console === 'undefined') {
+    globalThis.console = new Console(globalThis.__thaw_console_stdout,
+                                     globalThis.__thaw_console_stderr);
+  }
   const nextTick = (callback, ...args) => {
     if (typeof callback !== 'function') {
       throw new TypeError('process.nextTick callback must be a function');
@@ -1735,6 +1827,25 @@ mod tests {
         assert_eq!(
             call("processHelpers", "[]"),
             r#"["/tmp/app",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw"]"#
+        );
+    }
+
+    #[test]
+    fn console_formats_groups_counts_and_writes_to_streams() {
+        assert_eq!(
+            load(
+                "function consoleHelpers() {\n\
+                   const stdout = []; const stderr = []; const instance = new Console({ write(value) { stdout.push(value); } }, { write(value) { stderr.push(value); } });\n\
+                   instance.log('%s:%d:%j:%%', 'value', 4, { ok: true }); instance.group('group'); instance.log('child'); instance.groupEnd();\n\
+                   instance.count('item'); instance.count('item'); instance.countReset('item'); instance.count('item'); instance.assert(false, 'bad %s', 'value'); instance.trace('trace-value');\n\
+                   return [stdout.join(''), stderr[0], stderr[1].startsWith('Trace: trace-value\\n'), typeof console.log, console instanceof Console];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("consoleHelpers", "[]"),
+            r#"["value:4:{\"ok\":true}:%\ngroup\n  child\nitem: 1\nitem: 2\nitem: 1\n","Assertion failed: bad value\n",true,"function",true]"#
         );
     }
 
