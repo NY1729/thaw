@@ -14245,6 +14245,8 @@ mod tests {
                 const inferredExpression = function<T>(value: T): T { return value; };
                 const namedExpression: Identity = function localIdentity<T>(value: T): T { return value; };
                 const factory: DefaultFactory = <Value = string>(): Value => "default";
+                const inferredReturn: Identity = <T>(value: T) => value;
+                const inferredFunctionReturn: Identity = function<T>(value: T) { return value; };
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14265,11 +14267,13 @@ mod tests {
                 console.log([33, 34].map(function<T>(value: T): T { return value; })[1]);
                 console.log(namedExpression<string>("named-expression"));
                 console.log(factory());
+                console.log(inferredReturn<string>("inferred-return"));
+                console.log(inferredFunctionReturn(35));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\n"
         );
     }
 
