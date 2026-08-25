@@ -142,6 +142,10 @@ The workspace crates have narrow responsibilities:
   union, intersection, function, and promise layouts. Nested alias references
   inside object/array/tuple/function types are pre-resolved, and mixed
   alias/interface cycles are explicit errors
+- Generic `type` aliases substitute concrete arguments through nested object,
+  alias, array, optional/nullable union, function, and promise layouts. They
+  participate in generic-function call-site inference, validate arity and
+  reject direct or indirect generic-alias cycles
 - Heterogeneous native unions use an explicit tag and word payload across
   locals, function parameters/returns, fixed-shape object fields, nested calls,
   async frames, and homogeneous arrays (including index updates and spread
