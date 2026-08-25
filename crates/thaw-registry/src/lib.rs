@@ -194,6 +194,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "console" => {
             "export declare function Console(argsArray: any): any;\nexport declare function log(argsArray: any): void;\nexport declare function info(argsArray: any): void;\nexport declare function warn(argsArray: any): void;\nexport declare function error(argsArray: any): void;\n"
         }
+        "constants" => "export declare const F_OK: number;\nexport declare const R_OK: number;\nexport declare const W_OK: number;\nexport declare const X_OK: number;\nexport declare const O_RDONLY: number;\nexport declare const O_WRONLY: number;\nexport declare const O_RDWR: number;\n",
         "crypto" => {
             "export declare function createHash(argsArray: any): any;\nexport declare function createHmac(argsArray: any): any;\nexport declare function randomBytes(argsArray: any): any;\nexport declare function randomFill(argsArray: any): any;\nexport declare function randomFillSync(argsArray: any): any;\nexport declare function randomInt(argsArray: any): any;\nexport declare function randomUUID(argsArray: any): any;\nexport declare function timingSafeEqual(argsArray: any): any;\nexport declare function getHashes(argsArray: any): any;\n"
         }
@@ -2918,6 +2919,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20writeFileSync: function(p) { __thaw_fs_erofs('open', p); },\n\
              \x20\x20mkdirSync: function(p) { __thaw_fs_erofs('mkdir', p); },\n\
              };\n\
+             __thaw_fs.constants = globalThis.__thaw_fs_constants || (globalThis.__thaw_fs_constants = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4, O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_SYNC: 1052672, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192, S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 });\n\
              function __thaw_fs_reject(op, p) { try { __thaw_fs_enoent(op, p); } catch (error) { return Promise.reject(error); } }\n\
              function __thaw_fs_readonly(op, p) { try { __thaw_fs_erofs(op, p); } catch (error) { return Promise.reject(error); } }\n\
              __thaw_fs.promises = { access: function(p) { return __thaw_fs_reject('access', p); }, readFile: function(p) { return __thaw_fs_reject('open', p); }, readdir: function(p) { return __thaw_fs_reject('scandir', p); }, stat: function(p) { return __thaw_fs_reject('stat', p); }, writeFile: function(p) { return __thaw_fs_readonly('open', p); }, mkdir: function(p) { return __thaw_fs_readonly('mkdir', p); } };\n\
@@ -3093,7 +3095,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','fs/promises','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','events','fs','fs/promises','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3106,6 +3108,9 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         ),
         "console" => Some(
             "module.exports = globalThis.console; module.exports.Console = globalThis.Console; module.exports.console = globalThis.console; module.exports.default = globalThis.console; module.exports.__esModule = true;\n",
+        ),
+        "constants" => Some(
+            "var constants = globalThis.__thaw_fs_constants || (globalThis.__thaw_fs_constants = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4, O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_SYNC: 1052672, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192, S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 }); module.exports = constants; module.exports.default = constants; module.exports.__esModule = true;\n",
         ),
         "crypto" => Some(
             "module.exports = globalThis.__thaw_crypto_module; module.exports.default = module.exports; module.exports.__esModule = true;\n",
@@ -5445,6 +5450,27 @@ mod tests {
             result,
             r#"[true,true,true,true,true,true,true,true,true,true,true,true,true,true,false]"#
         );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn node_constants_are_shared_with_filesystem_constants() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_constants");
+        fs::write(dir.join("index.js"), "var constants = require('node:constants'); var fs = require('node:fs'); module.exports = function () { return [constants === fs.constants, constants.F_OK, constants.R_OK, constants.W_OK, constants.X_OK, constants.O_CREAT, constants.O_APPEND, constants.S_IFREG, constants.S_IFDIR, constants.COPYFILE_FICLONE_FORCE]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_constants_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseConstants = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseConstants").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[true,0,4,2,1,64,1024,32768,16384,4]"#);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
