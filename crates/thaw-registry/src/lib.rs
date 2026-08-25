@@ -197,6 +197,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "perf_hooks" => {
             "export declare const performance: any;\nexport declare function monitorEventLoopDelay(argsArray: any): any;\nexport declare function createHistogram(argsArray: any): any;\n"
         }
+        "v8" => {
+            "export declare function serialize(argsArray: any): any;\nexport declare function deserialize(argsArray: any): any;\nexport declare function getHeapStatistics(argsArray: any): any;\nexport declare function getHeapSpaceStatistics(argsArray: any): any;\nexport declare function getHeapCodeStatistics(argsArray: any): any;\nexport declare function cachedDataVersionTag(argsArray: any): number;\nexport declare function setFlagsFromString(argsArray: any): void;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -3064,7 +3067,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3089,6 +3092,14 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              globalThis.performance.eventLoopUtilization = globalThis.performance.eventLoopUtilization || function(previous) { var active = globalThis.performance.now(); if (previous) active = Math.max(0, active - Number(previous.active || 0)); return { idle: 0, active: active, utilization: active === 0 ? 0 : 1 }; };\n\
              module.exports = { performance: globalThis.performance, PerformanceEntry: globalThis.PerformanceEntry, PerformanceMark: globalThis.PerformanceMark, PerformanceMeasure: globalThis.PerformanceMeasure, PerformanceObserver: globalThis.PerformanceObserver, PerformanceObserverEntryList: globalThis.PerformanceObserverEntryList, monitorEventLoopDelay: monitorEventLoopDelay, createHistogram: createHistogram, constants: { NODE_PERFORMANCE_GC_MAJOR: 4, NODE_PERFORMANCE_GC_MINOR: 1, NODE_PERFORMANCE_GC_INCREMENTAL: 8, NODE_PERFORMANCE_GC_WEAKCB: 16 }, timerify: globalThis.performance.timerify };\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "v8" => Some(
+            "function encode(root) { var seen = new Map(); var nodes = []; function visit(value) { if (value === undefined) return { t: 'u' }; if (typeof value === 'bigint') return { t: 'i', v: String(value) }; if (typeof value === 'number' && !Number.isFinite(value)) return { t: 'n', v: String(value) }; if (value === null || typeof value !== 'object') return { t: 'p', v: value }; if (seen.has(value)) return { t: 'r', v: seen.get(value) }; var id = nodes.length; seen.set(value, id); nodes.push(null); var node; if (Buffer.isBuffer(value)) node = { k: 'b', v: value.toString('base64') }; else if (value instanceof Date) node = { k: 'd', v: value.toISOString() }; else if (value instanceof RegExp) node = { k: 'x', v: value.source, f: value.flags, l: value.lastIndex }; else if (value instanceof Map) node = { k: 'm', v: Array.from(value, function(entry) { return [visit(entry[0]), visit(entry[1])]; }) }; else if (value instanceof Set) node = { k: 's', v: Array.from(value, visit) }; else if (Array.isArray(value)) node = { k: 'a', v: value.map(visit) }; else node = { k: 'o', v: Object.keys(value).map(function(key) { return [key, visit(value[key])]; }) }; nodes[id] = node; return { t: 'r', v: id }; } return JSON.stringify({ root: visit(root), nodes: nodes }); }\n\
+             function decode(text) { var graph = JSON.parse(text); var values = new Array(graph.nodes.length); graph.nodes.forEach(function(node, index) { if (node.k === 'b') values[index] = Buffer.from(node.v, 'base64'); else if (node.k === 'd') values[index] = new Date(node.v); else if (node.k === 'x') values[index] = new RegExp(node.v, node.f); else if (node.k === 'm') values[index] = new Map(); else if (node.k === 's') values[index] = new Set(); else if (node.k === 'a') values[index] = []; else values[index] = {}; }); function read(value) { if (value.t === 'u') return undefined; if (value.t === 'i') return BigInt(value.v); if (value.t === 'n') return Number(value.v); if (value.t === 'p') return value.v; return values[value.v]; } graph.nodes.forEach(function(node, index) { var target = values[index]; if (node.k === 'm') node.v.forEach(function(entry) { target.set(read(entry[0]), read(entry[1])); }); else if (node.k === 's') node.v.forEach(function(entry) { target.add(read(entry)); }); else if (node.k === 'a') node.v.forEach(function(entry) { target.push(read(entry)); }); else if (node.k === 'o') node.v.forEach(function(entry) { target[entry[0]] = read(entry[1]); }); else if (node.k === 'x') target.lastIndex = node.l; }); return read(graph.root); }\n\
+             function serialize(value) { return Buffer.from(encode(value), 'utf8'); } function deserialize(value) { return decode(Buffer.from(value).toString('utf8')); }\n\
+             function getHeapStatistics() { return { total_heap_size: 0, total_heap_size_executable: 0, total_physical_size: 0, total_available_size: 0, used_heap_size: 0, heap_size_limit: Number.MAX_SAFE_INTEGER, malloced_memory: 0, peak_malloced_memory: 0, does_zap_garbage: 0, number_of_native_contexts: 1, number_of_detached_contexts: 0, total_global_handles_size: 0, used_global_handles_size: 0, external_memory: 0 }; }\n\
+             function getHeapSpaceStatistics() { return []; } function getHeapCodeStatistics() { return { code_and_metadata_size: 0, bytecode_and_metadata_size: 0, external_script_source_size: 0, cpu_profiler_metadata_size: 0 }; } function cachedDataVersionTag() { return 0; } function setFlagsFromString() {}\n\
+             module.exports = { serialize: serialize, deserialize: deserialize, getHeapStatistics: getHeapStatistics, getHeapSpaceStatistics: getHeapSpaceStatistics, getHeapCodeStatistics: getHeapCodeStatistics, cachedDataVersionTag: cachedDataVersionTag, setFlagsFromString: setFlagsFromString }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         _ => None,
     }
@@ -5235,6 +5246,42 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,5,true,true,true,0,"bigint",0,true,true,"node",4]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn v8_builtin_serializes_graphs_and_exposes_runtime_statistics() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_v8");
+        fs::write(
+            dir.join("index.js"),
+            "var v8 = require('node:v8');\n\
+             module.exports = function () { var source = { bigint: 42n, bytes: Buffer.from('thaw'), map: new Map([['answer', 42]]), set: new Set(['x']), missing: undefined }; source.self = source; var encoded = v8.serialize(source); var copy = v8.deserialize(encoded); var heap = v8.getHeapStatistics(); var code = v8.getHeapCodeStatistics(); return [Buffer.isBuffer(encoded), copy !== source, copy.self === copy, copy.bigint === 42n, copy.bytes.toString(), copy.map.get('answer'), copy.set.has('x'), Object.prototype.hasOwnProperty.call(copy, 'missing'), copy.missing === undefined, heap.number_of_native_contexts, heap.heap_size_limit > 0, v8.getHeapSpaceStatistics().length, code.code_and_metadata_size, v8.cachedDataVersionTag()]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_v8_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseV8 = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseV8").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,true,true,true,"thaw",42,true,true,true,1,true,0,0,0]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
