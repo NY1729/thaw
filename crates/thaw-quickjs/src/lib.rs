@@ -156,6 +156,8 @@ enum WebZlibWriter {
     GzipDecoder(flate2::write::GzDecoder<Vec<u8>>),
     ZlibDecoder(flate2::write::ZlibDecoder<Vec<u8>>),
     DeflateDecoder(flate2::write::DeflateDecoder<Vec<u8>>),
+    BrotliEncoder(Box<brotli::CompressorWriter<Vec<u8>>>),
+    BrotliDecoder(Box<brotli::DecompressorWriter<Vec<u8>>>),
 }
 
 struct WebZlibStream {
@@ -187,6 +189,12 @@ impl WebZlibStream {
             ("decompress", "deflate") => {
                 WebZlibWriter::ZlibDecoder(flate2::write::ZlibDecoder::new(Vec::new()))
             }
+            ("compress", "brotli") => WebZlibWriter::BrotliEncoder(Box::new(
+                brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22),
+            )),
+            ("decompress", "brotli") => WebZlibWriter::BrotliDecoder(Box::new(
+                brotli::DecompressorWriter::new(Vec::new(), 4096),
+            )),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -212,6 +220,8 @@ impl WebZlibStream {
             WebZlibWriter::GzipDecoder(writer) => write!(writer),
             WebZlibWriter::ZlibDecoder(writer) => write!(writer),
             WebZlibWriter::DeflateDecoder(writer) => write!(writer),
+            WebZlibWriter::BrotliEncoder(writer) => write!(writer),
+            WebZlibWriter::BrotliDecoder(writer) => write!(writer),
         };
         let chunk = output[self.emitted..].to_vec();
         self.emitted = output.len();
@@ -233,6 +243,18 @@ impl WebZlibStream {
             WebZlibWriter::GzipDecoder(writer) => finish!(writer),
             WebZlibWriter::ZlibDecoder(writer) => finish!(writer),
             WebZlibWriter::DeflateDecoder(writer) => finish!(writer),
+            WebZlibWriter::BrotliEncoder(mut writer) => {
+                writer.write_all(input)?;
+                writer.flush()?;
+                (*writer).into_inner()
+            }
+            WebZlibWriter::BrotliDecoder(mut writer) => {
+                writer.write_all(input)?;
+                writer.flush()?;
+                (*writer).into_inner().map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid Brotli stream")
+                })?
+            }
         };
         Ok(output[self.emitted..].to_vec())
     }
@@ -4429,8 +4451,8 @@ const PLATFORM_GLOBALS: &str = r#"
     const bytesFromHex = value => new Uint8Array(String(value).match(/../g)?.map(pair => parseInt(pair, 16)) || []);
     const compressionTransform = (operation, format) => {
       const normalized = String(format);
-      if (normalized !== 'gzip' && normalized !== 'deflate' && normalized !== 'deflate-raw') throw new TypeError('Unsupported compression format');
-      const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized, handle = __thaw_zlib_stream_create(operation, nativeFormat);
+      if (normalized !== 'gzip' && normalized !== 'deflate' && normalized !== 'deflate-raw' && normalized !== 'br') throw new TypeError('Unsupported compression format');
+      const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized === 'br' ? 'brotli' : normalized, handle = __thaw_zlib_stream_create(operation, nativeFormat);
       let active = true;
       const release = () => { if (active) { active = false; __thaw_zlib_stream_drop(handle); } };
       return new TransformStream({

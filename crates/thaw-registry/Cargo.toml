@@ -14,5 +14,6 @@ swc_ecma_visit = "29.0.0"
 ureq = "3.4.0"
 
 [dev-dependencies]
+brotli = "8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 thaw-quickjs = { path = "../thaw-quickjs" }
