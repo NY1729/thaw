@@ -315,7 +315,9 @@ The workspace crates have narrow responsibilities:
   scheduler wait/yield helpers and an async interval iterator
 - `node:stream` provides EventEmitter-style Readable, Writable, Duplex,
   Transform and PassThrough streams with buffering, piping, pipeline/finished
-  completion, iterable sources and AbortSignal destruction;
+  completion, iterable sources and AbortSignal destruction. Writable and
+  Transform work is serialized across asynchronous callbacks, with
+  high-water-mark return values, queued length and `drain` notification;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
