@@ -157,6 +157,16 @@ enum HostWorkerCommand {
     Message(String),
     Stdin(String),
     StdinEnd,
+    DirectMessage {
+        payload: String,
+        source: u32,
+        request: u64,
+        reply: Option<Sender<HostWorkerCommand>>,
+    },
+    DirectResult {
+        request: u64,
+        error: Option<String>,
+    },
     Terminate,
 }
 
@@ -165,6 +175,16 @@ enum HostWorkerEvent {
     Message(String),
     Stdout(String),
     Stderr(String),
+    DirectRequest {
+        target: u32,
+        source: u32,
+        request: u64,
+        payload: String,
+    },
+    ParentDirectResult {
+        request: u64,
+        error: Option<String>,
+    },
     Error(String),
     Exit(i32),
 }
@@ -1057,6 +1077,8 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         }};
         const workerData = __thaw_worker_decode({worker_data});
         const __thaw_host_worker_config = JSON.parse({config});
+        let __thaw_direct_request = 1;
+        const __thaw_direct_pending = new Map();
         globalThis.module = {{ exports: {{}} }};
         globalThis.exports = globalThis.module.exports;
         process.env = Object.assign({{}}, __thaw_host_worker_config.env || {{}});
@@ -1074,7 +1096,18 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         process.stderr = {{ write(value) {{ __thaw_host_worker_events.push({{ type: 'stderr', payload: String(value) }}); return true; }} }};
         if (__thaw_host_worker_config.stdout) console.log = console.info = (...values) => process.stdout.write(values.map(String).join(' ') + '\n');
         if (__thaw_host_worker_config.stderr) console.warn = console.error = (...values) => process.stderr.write(values.map(String).join(' ') + '\n');
-        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }} }};
+        function __thaw_host_post_message_to_thread(target, value, transferList, timeout) {{
+          target = Number(target);
+          if (target === {thread_id}) {{ const error = new Error('Cannot send a message to the same thread'); error.code = 'ERR_WORKER_MESSAGING_SAME_THREAD'; return Promise.reject(error); }}
+          const cloned = structuredClone(value, {{ transfer: transferList || [] }}), payload = __thaw_worker_encode(cloned), request = __thaw_direct_request++;
+          return new Promise((resolve, reject) => {{
+            let timer;
+            if (timeout !== undefined && Number(timeout) >= 0) timer = setTimeout(() => {{ if (__thaw_direct_pending.delete(request)) {{ const error = new Error('The destination thread did not process the message'); error.code = 'ERR_WORKER_MESSAGING_TIMEOUT'; reject(error); }} }}, Number(timeout));
+            __thaw_direct_pending.set(request, {{ resolve, reject, timer }});
+            __thaw_host_worker_events.push({{ type: 'direct', target, source: {thread_id}, request, payload }});
+          }});
+        }}
+        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }}, postMessageToThread: __thaw_host_post_message_to_thread }};
         globalThis.require = function(name) {{
           if (name === 'worker_threads' || name === 'node:worker_threads') return globalThis.__thaw_worker_module;
           if (typeof globalThis.__thaw_bundle_create_require === 'function') return globalThis.__thaw_bundle_create_require('')(name);
@@ -1088,9 +1121,19 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           const name = ended ? 'end' : 'data';
           for (const listener of (__thaw_stdin_listeners.get(name) || []).slice()) listener(ended ? undefined : payload);
         }};
+        globalThis.__thaw_host_worker_direct_deliver = function(payload, source) {{
+          if (!process.listenerCount || process.listenerCount('workerMessage') === 0) return 'ERR_WORKER_MESSAGING_FAILED:The destination thread has no workerMessage listener';
+          try {{ process.emit('workerMessage', __thaw_worker_decode(payload), Number(source)); return ''; }}
+          catch (error) {{ return 'ERR_WORKER_MESSAGING_ERRORED:' + String(error && error.message || error); }}
+        }};
+        globalThis.__thaw_host_worker_direct_result = function(request, errorText) {{
+          const pending = __thaw_direct_pending.get(Number(request)); if (!pending) return;
+          __thaw_direct_pending.delete(Number(request)); if (pending.timer) clearTimeout(pending.timer);
+          if (!errorText) pending.resolve(); else {{ const separator = errorText.indexOf(':'), code = separator < 0 ? errorText : errorText.slice(0, separator), message = separator < 0 ? errorText : errorText.slice(separator + 1), error = new Error(message); error.code = code; if (code === 'ERR_WORKER_MESSAGING_ERRORED') error.cause = new Error(message); pending.reject(error); }}
+        }};
         globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
         globalThis.__thaw_host_worker_should_exit = function() {{
-          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && __thaw_next_timer_delay() < 0);
+          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((!process.listenerCount || process.listenerCount('workerMessage') === 0)) && __thaw_direct_pending.size === 0 && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && __thaw_next_timer_delay() < 0);
         }};
         "#
     )
@@ -1114,6 +1157,21 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
         let event = match kind {
             Some("stdout") => HostWorkerEvent::Stdout(payload),
             Some("stderr") => HostWorkerEvent::Stderr(payload),
+            Some("direct") => HostWorkerEvent::DirectRequest {
+                target: event
+                    .get("target")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or_default() as u32,
+                source: event
+                    .get("source")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or_default() as u32,
+                request: event
+                    .get("request")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or_default(),
+                payload,
+            },
             _ => HostWorkerEvent::Message(payload),
         };
         let _ = events.send(event);
@@ -1194,6 +1252,35 @@ fn run_host_worker(
                         .call::<_, ()>((String::new(), true))
                         .map_err(|error| error.to_string())?;
                 }
+                Ok(HostWorkerCommand::DirectMessage {
+                    payload,
+                    source,
+                    request,
+                    reply,
+                }) => {
+                    let deliver: Function = ctx
+                        .globals()
+                        .get("__thaw_host_worker_direct_deliver")
+                        .map_err(|error| error.to_string())?;
+                    let error: String = deliver
+                        .call((payload, source))
+                        .map_err(|error| error.to_string())?;
+                    let error = (!error.is_empty()).then_some(error);
+                    if let Some(reply) = reply {
+                        let _ = reply.send(HostWorkerCommand::DirectResult { request, error });
+                    } else {
+                        let _ = events.send(HostWorkerEvent::ParentDirectResult { request, error });
+                    }
+                }
+                Ok(HostWorkerCommand::DirectResult { request, error }) => {
+                    let resolve: Function = ctx
+                        .globals()
+                        .get("__thaw_host_worker_direct_result")
+                        .map_err(|error| error.to_string())?;
+                    resolve
+                        .call::<_, ()>((request, error.unwrap_or_default()))
+                        .map_err(|error| error.to_string())?;
+                }
                 Ok(HostWorkerCommand::Terminate) => return Ok(1),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(1),
@@ -1271,6 +1358,66 @@ fn send_host_worker_stdin(handle: u32, payload: String, ended: bool) -> bool {
     })
 }
 
+fn route_host_worker_direct(
+    origin: u32,
+    target: u32,
+    payload: String,
+    source: u32,
+    request: u64,
+) -> bool {
+    HOST_WORKERS.with(|table| {
+        let table = table.borrow();
+        let Some(reply) = table
+            .workers
+            .get(&origin)
+            .map(|worker| worker.commands.clone())
+        else {
+            return false;
+        };
+        table.workers.get(&target).is_some_and(|worker| {
+            worker
+                .commands
+                .send(HostWorkerCommand::DirectMessage {
+                    payload,
+                    source,
+                    request,
+                    reply: Some(reply),
+                })
+                .is_ok()
+        })
+    })
+}
+
+fn route_parent_direct(target: u32, payload: String, request: u64) -> bool {
+    HOST_WORKERS.with(|table| {
+        table.borrow().workers.get(&target).is_some_and(|worker| {
+            worker
+                .commands
+                .send(HostWorkerCommand::DirectMessage {
+                    payload,
+                    source: 0,
+                    request,
+                    reply: None,
+                })
+                .is_ok()
+        })
+    })
+}
+
+fn resolve_host_worker_direct(handle: u32, request: u64, error: String) -> bool {
+    HOST_WORKERS.with(|table| {
+        table.borrow().workers.get(&handle).is_some_and(|worker| {
+            worker
+                .commands
+                .send(HostWorkerCommand::DirectResult {
+                    request,
+                    error: (!error.is_empty()).then_some(error),
+                })
+                .is_ok()
+        })
+    })
+}
+
 fn terminate_host_worker(handle: u32) -> bool {
     HOST_WORKERS.with(|table| {
         table
@@ -1314,6 +1461,17 @@ fn poll_host_workers() -> String {
                         output.push(
                             serde_json::json!({ "handle": handle, "type": "stderr", "payload": payload }),
                         );
+                    }
+                    Ok(HostWorkerEvent::DirectRequest {
+                        target,
+                        source,
+                        request,
+                        payload,
+                    }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "direct", "target": target, "source": source, "request": request, "payload": payload }));
+                    }
+                    Ok(HostWorkerEvent::ParentDirectResult { request, error }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "directResult", "request": request, "error": error }));
                     }
                     Ok(HostWorkerEvent::Error(error)) => {
                         output.push(
@@ -1413,6 +1571,23 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         send_host_worker_stdin(handle, payload, ended)
                     })
                     .expect("failed to create Worker stdin sender");
+                let worker_route_direct = Function::new(
+                    ctx.clone(),
+                    |origin: u32, target: u32, payload: String, source: u32, request: u64| {
+                        route_host_worker_direct(origin, target, payload, source, request)
+                    },
+                )
+                .expect("failed to create Worker direct router");
+                let worker_parent_direct =
+                    Function::new(ctx.clone(), |target: u32, payload: String, request: u64| {
+                        route_parent_direct(target, payload, request)
+                    })
+                    .expect("failed to create parent direct router");
+                let worker_direct_result =
+                    Function::new(ctx.clone(), |handle: u32, request: u64, error: String| {
+                        resolve_host_worker_direct(handle, request, error)
+                    })
+                    .expect("failed to create Worker direct resolver");
                 let worker_poll = Function::new(ctx.clone(), poll_host_workers)
                     .expect("failed to create Worker event poller");
                 let worker_active = Function::new(ctx.clone(), host_workers_active)
@@ -1429,6 +1604,15 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_worker_stdin", worker_stdin)
                     .expect("failed to install Worker stdin sender");
+                ctx.globals()
+                    .set("__thaw_worker_route_direct", worker_route_direct)
+                    .expect("failed to install Worker direct router");
+                ctx.globals()
+                    .set("__thaw_worker_parent_direct", worker_parent_direct)
+                    .expect("failed to install parent direct router");
+                ctx.globals()
+                    .set("__thaw_worker_direct_result", worker_direct_result)
+                    .expect("failed to install Worker direct resolver");
                 ctx.globals()
                     .set("__thaw_worker_poll", worker_poll)
                     .expect("failed to install Worker event poller");
