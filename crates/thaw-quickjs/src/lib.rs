@@ -972,6 +972,60 @@ const PLATFORM_GLOBALS: &str = r#"
       }
     };
   }
+  if (typeof globalThis.BroadcastChannel !== 'function') {
+    const broadcastChannels = new Map();
+    globalThis.BroadcastChannel = class BroadcastChannel extends EventTarget {
+      constructor(name) {
+        super();
+        this.name = String(name);
+        this.__thawClosed = false;
+        this.__thawOnMessage = null;
+        this.__thawOnMessageError = null;
+        const channels = broadcastChannels.get(this.name) || new Set();
+        channels.add(this);
+        broadcastChannels.set(this.name, channels);
+      }
+      postMessage(value) {
+        if (this.__thawClosed) throw new DOMException('BroadcastChannel is closed', 'InvalidStateError');
+        const channels = broadcastChannels.get(this.name) || [];
+        for (const channel of channels) {
+          if (channel === this || channel.__thawClosed) continue;
+          let copy;
+          try { copy = structuredClone(value); }
+          catch (error) {
+            queueMicrotask(() => channel.__thawDispatchError(error));
+            continue;
+          }
+          queueMicrotask(() => {
+            if (channel.__thawClosed) return;
+            const event = new MessageEvent('message', { data: copy });
+            channel.dispatchEvent(event);
+            if (typeof channel.__thawOnMessage === 'function') channel.__thawOnMessage.call(channel, event);
+          });
+        }
+      }
+      __thawDispatchError(error) {
+        const event = new MessageEvent('messageerror', { data: error });
+        this.dispatchEvent(event);
+        if (typeof this.__thawOnMessageError === 'function') this.__thawOnMessageError.call(this, event);
+      }
+      close() {
+        if (this.__thawClosed) return;
+        this.__thawClosed = true;
+        const channels = broadcastChannels.get(this.name);
+        if (channels) {
+          channels.delete(this);
+          if (channels.size === 0) broadcastChannels.delete(this.name);
+        }
+      }
+      ref() { return this; }
+      unref() { return this; }
+      set onmessage(listener) { this.__thawOnMessage = listener; }
+      get onmessage() { return this.__thawOnMessage; }
+      set onmessageerror(listener) { this.__thawOnMessageError = listener; }
+      get onmessageerror() { return this.__thawOnMessageError; }
+    };
+  }
   if (typeof globalThis.AbortController !== 'function') {
     const abortError = message => {
       return new DOMException(message || 'This operation was aborted', 'AbortError');

@@ -344,8 +344,9 @@ The workspace crates have narrow responsibilities:
 - `node:zlib` provides gzip, zlib and raw-deflate compression/decompression
   through synchronous and callback APIs
 - `MessageChannel`/`MessagePort` provide structured-cloned asynchronous and
-  synchronous delivery; `node:worker_threads` exposes the main-thread identity,
-  environment data and port lifecycle APIs (isolated `Worker` execution is not yet available)
+  synchronous delivery, while `BroadcastChannel` distributes isolated copies
+  by channel name; `node:worker_threads` exposes the main-thread identity,
+  environment data and lifecycle APIs (isolated `Worker` execution is not yet available)
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
