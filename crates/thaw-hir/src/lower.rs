@@ -902,42 +902,47 @@ fn generic_type_pattern(
                 if in_progress.iter().any(|active| active == name) {
                     return Err(format!("generic type alias `{name}` is self-referential"));
                 }
-                let parameter_names = alias
+                let parameters = &alias
                     .type_params
                     .as_ref()
                     .expect("generic alias type parameters")
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.name.sym.to_string())
-                    .collect::<Vec<_>>();
+                    .params;
                 let arguments = reference
                     .type_params
                     .as_ref()
                     .map(|parameters| parameters.params.as_slice())
                     .unwrap_or_default();
-                if arguments.len() != parameter_names.len() {
+                let required = parameters
+                    .iter()
+                    .take_while(|parameter| parameter.default.is_none())
+                    .count();
+                if arguments.len() < required || arguments.len() > parameters.len() {
                     return Err(format!(
-                        "generic type alias `{name}` expects {} type argument(s), got {}",
-                        parameter_names.len(),
+                        "generic type alias `{name}` expects {required}..={} type argument(s), got {}",
+                        parameters.len(),
                         arguments.len()
                     ));
                 }
-                let arguments = arguments
-                    .iter()
-                    .map(|argument| {
-                        generic_type_pattern(
-                            argument,
-                            substitutions,
-                            interfaces,
-                            generic_interfaces,
-                            in_progress,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let nested = parameter_names
-                    .into_iter()
-                    .zip(arguments)
-                    .collect::<HashMap<_, _>>();
+                let mut nested = HashMap::new();
+                for (index, parameter) in parameters.iter().enumerate() {
+                    let argument = arguments
+                        .get(index)
+                        .map(|argument| argument.as_ref())
+                        .or_else(|| parameter.default.as_ref().map(|default| default.as_ref()))
+                        .expect("validated generic alias arity requires a default");
+                    let pattern = generic_type_pattern(
+                        argument,
+                        if index < arguments.len() {
+                            substitutions
+                        } else {
+                            &nested
+                        },
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
+                    nested.insert(parameter.name.sym.to_string(), pattern);
+                }
                 in_progress.push(name.to_string());
                 let result = generic_type_pattern(
                     &alias.type_ann,
