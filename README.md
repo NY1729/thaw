@@ -311,7 +311,10 @@ The workspace crates have narrow responsibilities:
   ReadableStream bodies, exposes byte/array-buffer/blob/text/JSON/form-data
   consumers with disturbance tracking, clones bodies through `tee()`, and
   provides `json()`, `redirect()` and `error()` factories. The supporting
-  `FormData` collection covers repeated string/Blob fields and ordered mutation
+  `FormData` collection covers repeated string/Blob fields and ordered mutation.
+  Request bodies encode multipart fields and files with generated boundaries;
+  Request and Response consumers parse URL-encoded and multipart forms back
+  into strings and typed `File` values
 - Global `Request` normalizes absolute credential-free URLs and standard HTTP
   methods, validates fetch mode/cache/credentials/redirect/referrer policies,
   follows AbortSignals, inherits or overrides other Requests, moves inherited
