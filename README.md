@@ -376,6 +376,8 @@ The workspace crates have narrow responsibilities:
   returning Node-shaped `ENOENT`/`EROFS` rejections instead of leaking host files
 - `node:util/types` identifies standard collections, boxed primitives,
   promises, errors, ArrayBuffer views and individual typed-array classes
+- `node:constants` and `fs.constants` share Linux-compatible access, open,
+  file-type and copy flags for dependency feature detection
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
