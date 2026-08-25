@@ -303,6 +303,10 @@ The workspace crates have narrow responsibilities:
   `win32` namespace for cross-platform package logic
 - `node:string_decoder` preserves incomplete UTF-8, UTF-16LE and Base64 input
   across chunk boundaries and flushes incomplete terminal input from `end()`
+- Global `Headers` accepts records, header-pair iterables and clones; it
+  validates and normalizes names/values, combines ordinary duplicates, retains
+  individual `set-cookie` fields, and exposes sorted iteration, mutation and
+  `getSetCookie()` with Web-compatible prototype shape
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the

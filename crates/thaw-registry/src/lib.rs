@@ -10709,6 +10709,35 @@ mod tests {
     }
 
     #[test]
+    fn global_headers_normalize_duplicate_and_cookie_values() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_global_headers");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = function () { function capture(action) { try { action(); } catch (error) { return [error.name, error.code]; } } var headers = new Headers([['X-B', '  one  '], ['x-a', 'a'], ['X-B', 'two'], ['set-cookie', 'a=1'], ['Set-Cookie', 'b=2']]), calls = []; headers.forEach(function(value, name, owner) { calls.push([name, value, owner === headers]); }); var clone = new Headers(headers), record = new Headers({ Z: 1, A: ['x', 'y'] }); headers.set('replace', 'first'); headers.set('replace', 'second'); headers.delete('replace'); return [[...headers], headers.get('X-B'), headers.getSetCookie(), [...headers.keys()], [...headers.values()], headers.has('X-A'), headers.get('missing'), calls, [...clone], [...record], Object.keys(headers), Object.keys(Headers.prototype), Object.prototype.toString.call(headers), capture(function() { headers.set('bad name', 'x'); }), capture(function() { headers.set('x', 'a\\nb'); }), capture(function() { new Headers([['a']]); })]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_global_headers_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHeaders = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseHeaders").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[["set-cookie","a=1"],["set-cookie","b=2"],["x-a","a"],["x-b","one, two"]],"one, two",["a=1","b=2"],["set-cookie","set-cookie","x-a","x-b"],["a=1","b=2","a","one, two"],true,null,[["set-cookie","a=1",true],["set-cookie","b=2",true],["x-a","a",true],["x-b","one, two",true]],[["set-cookie","a=1"],["set-cookie","b=2"],["x-a","a"],["x-b","one, two"]],[["a","x,y"],["z","1"]],[],["append","delete","get","has","set","getSetCookie","keys","values","entries","forEach"],"[object Headers]",["TypeError",null],["TypeError",null],["TypeError",null]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_text_decoder_streaming");
