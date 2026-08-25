@@ -363,7 +363,8 @@ The workspace crates have narrow responsibilities:
   compose as object-mode transforms; Promise-returning body functions expose a
   writable-only sink and reject non-null return values with
   `ERR_INVALID_RETURN_VALUE`. Destroying a `Duplex.from()` iterable adapter
-  closes its source iterator so generator `finally` cleanup runs. Stream
+  closes its source iterator exactly once so generator `finally` cleanup runs.
+  Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
   errored state, with the original destruction error retained on the stream.
   Default byte/object high-water marks are queryable and configurable for new
