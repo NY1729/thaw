@@ -203,6 +203,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "module" => {
             "export declare function createRequire(argsArray: any): any;\nexport declare function isBuiltin(argsArray: any): any;\nexport declare function syncBuiltinESMExports(argsArray: any): void;\nexport declare function findSourceMap(argsArray: any): any;\nexport declare function SourceMap(argsArray: any): any;\nexport declare function register(argsArray: any): any;\nexport declare function registerHooks(argsArray: any): any;\n"
         }
+        "net" => {
+            "export declare function isIP(argsArray: any): number;\nexport declare function isIPv4(argsArray: any): boolean;\nexport declare function isIPv6(argsArray: any): boolean;\nexport declare function BlockList(argsArray: any): any;\nexport declare function SocketAddress(argsArray: any): any;\n"
+        }
         "console" => {
             "export declare function Console(argsArray: any): any;\nexport declare function log(argsArray: any): void;\nexport declare function info(argsArray: any): void;\nexport declare function warn(argsArray: any): void;\nexport declare function error(argsArray: any): void;\n"
         }
@@ -3124,7 +3127,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','os','path','perf_hooks','process','querystring','readline','readline/promises','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','querystring','readline','readline/promises','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3134,6 +3137,12 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function register() { return undefined; } function registerHooks(hooks) { var active = true; return { deregister: function() { active = false; }, get active() { return active; }, hooks: hooks }; }\n\
              Object.assign(Module, { Module: Module, createRequire: createRequire, builtinModules: builtinModules, isBuiltin: isBuiltin, syncBuiltinESMExports: syncBuiltinESMExports, findSourceMap: findSourceMap, SourceMap: SourceMap, register: register, registerHooks: registerHooks });\n\
              module.exports = Module; module.exports.default = Module; module.exports.__esModule = true;\n",
+        ),
+        "net" => Some(
+            "function isIPv4(value) { if (typeof value !== 'string' || !/^(?:\\d{1,3}\\.){3}\\d{1,3}$/.test(value)) return false; return value.split('.').every(function(part) { return String(Number(part)) === part && Number(part) <= 255; }); } function isIPv6(value) { if (typeof value !== 'string') return false; var address = value.split('%')[0]; if (address.indexOf(':') < 0 || address.indexOf(':::') >= 0) return false; var halves = address.split('::'); if (halves.length > 2) return false; function count(part) { if (!part) return 0; var groups = part.split(':'); for (var index = 0; index < groups.length; index++) { if (isIPv4(groups[index])) { if (index !== groups.length - 1) return -1; } else if (!/^[0-9a-fA-F]{1,4}$/.test(groups[index])) return -1; } return groups.reduce(function(total, group) { return total + (isIPv4(group) ? 2 : 1); }, 0); } var total = count(halves[0]) + count(halves[1] || ''); return total >= 0 && (halves.length === 2 ? total < 8 : total === 8); } function isIP(value) { return isIPv4(value) ? 4 : isIPv6(value) ? 6 : 0; } function ipv4Number(value) { return value.split('.').reduce(function(result, part) { return (result * 256 + Number(part)) >>> 0; }, 0); }\n\
+             function SocketAddress(options) { if (!(this instanceof SocketAddress)) return new SocketAddress(options); options = options || {}; this.address = options.address === undefined ? '127.0.0.1' : String(options.address); var detected = isIP(this.address); var requested = options.family === undefined ? detected : (String(options.family).toLowerCase() === 'ipv6' || Number(options.family) === 6 ? 6 : 4); if (!detected || detected !== requested) throw new TypeError('Invalid socket address'); this.family = requested === 6 ? 'ipv6' : 'ipv4'; this.port = options.port === undefined ? 0 : Number(options.port); if (!Number.isInteger(this.port) || this.port < 0 || this.port > 65535) throw new RangeError('port must be between 0 and 65535'); this.flowlabel = options.flowlabel === undefined ? 0 : Number(options.flowlabel); } SocketAddress.prototype.toJSON = function() { return { address: this.address, port: this.port, family: this.family, flowlabel: this.flowlabel }; };\n\
+             function BlockList() { if (!(this instanceof BlockList)) return new BlockList(); this.rules = []; } BlockList.prototype.addAddress = function(address, type) { var family = type === 'ipv6' ? 6 : type === 'ipv4' ? 4 : isIP(address); if (!family) throw new TypeError('Invalid IP address'); this.rules.push({ kind: 'address', address: String(address), family: family }); }; BlockList.prototype.addRange = function(start, end, type) { var family = type === 'ipv6' ? 6 : type === 'ipv4' ? 4 : isIP(start); if (!family || family !== isIP(end)) throw new TypeError('Invalid IP range'); this.rules.push({ kind: 'range', start: String(start), end: String(end), family: family }); }; BlockList.prototype.addSubnet = function(network, prefix, type) { var family = type === 'ipv6' ? 6 : type === 'ipv4' ? 4 : isIP(network); prefix = Number(prefix); if (!family || !Number.isInteger(prefix) || prefix < 0 || prefix > (family === 4 ? 32 : 128)) throw new TypeError('Invalid subnet'); this.rules.push({ kind: 'subnet', network: String(network), prefix: prefix, family: family }); }; BlockList.prototype.check = function(address, type) { var family = type === 'ipv6' ? 6 : type === 'ipv4' ? 4 : isIP(address); if (!family) return false; return this.rules.some(function(rule) { if (rule.family !== family) return false; if (rule.kind === 'address') return rule.address === address; if (family === 4) { var value = ipv4Number(address); if (rule.kind === 'range') return value >= ipv4Number(rule.start) && value <= ipv4Number(rule.end); var mask = rule.prefix === 0 ? 0 : (0xffffffff << (32 - rule.prefix)) >>> 0; return (value & mask) === (ipv4Number(rule.network) & mask); } if (rule.kind === 'range') return address >= rule.start && address <= rule.end; return rule.prefix === 128 ? address === rule.network : address.toLowerCase().startsWith(rule.network.toLowerCase().split('::')[0]); }); };\n\
+             module.exports = { isIP: isIP, isIPv4: isIPv4, isIPv6: isIPv6, BlockList: BlockList, SocketAddress: SocketAddress }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "console" => Some(
             "module.exports = globalThis.console; module.exports.Console = globalThis.Console; module.exports.console = globalThis.console; module.exports.default = globalThis.console; module.exports.__esModule = true;\n",
@@ -5567,6 +5576,30 @@ mod tests {
         assert_eq!(
             result,
             r#"[["127.0.0.1",4],[{"address":"127.0.0.1","family":4},{"address":"::1","family":6}],["::1"],["localhost"],["ENOTFOUND","getaddrinfo","does-not-exist.invalid"],"ipv4first",["127.0.0.1"]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn net_builtin_validates_addresses_and_block_lists() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_net");
+        fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = function () { var block = new net.BlockList(); block.addAddress('127.0.0.1'); block.addRange('10.0.0.2', '10.0.0.5'); block.addSubnet('192.168.1.0', 24); block.addAddress('::1', 'ipv6'); var ipv4 = new net.SocketAddress({ address: '127.0.0.1', port: 8080 }); var ipv6 = new net.SocketAddress({ address: '::1', family: 'ipv6' }); var invalidPort = false; try { new net.SocketAddress({ address: '127.0.0.1', port: 70000 }); } catch (error) { invalidPort = error instanceof RangeError; } return [net.isIP('127.0.0.1'), net.isIP('2001:db8::1'), net.isIP('999.0.0.1'), net.isIPv4('01.2.3.4'), net.isIPv6('::ffff:192.0.2.1'), block.check('127.0.0.1'), block.check('10.0.0.4'), block.check('10.0.0.9'), block.check('192.168.1.88'), block.check('::1'), ipv4.toJSON(), ipv6.family, invalidPort]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_net_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNet = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseNet").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[4,6,0,false,true,true,true,false,true,true,{"address":"127.0.0.1","port":8080,"family":"ipv4","flowlabel":0},"ipv6",true]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

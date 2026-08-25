@@ -382,6 +382,8 @@ The workspace crates have narrow responsibilities:
   callback/Promise questions, async iteration, history and ANSI cursor helpers
 - `node:dns` and `node:dns/promises` resolve localhost and IP literals without
   network access, including family/all modes, reverse lookup and `ENOTFOUND`
+- `node:net` provides IPv4/IPv6 detection, validated `SocketAddress` values and
+  address/range/subnet `BlockList` checks; socket transports remain a later step
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
