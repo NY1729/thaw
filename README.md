@@ -313,6 +313,8 @@ The workspace crates have narrow responsibilities:
   Transform and PassThrough streams with buffering, piping, pipeline/finished
   completion, iterable sources and AbortSignal destruction;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
+- `node:diagnostics_channel` provides named shared channels, duplicate-safe
+  subscriptions, store binding and sync/Promise/callback tracing lifecycles
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
