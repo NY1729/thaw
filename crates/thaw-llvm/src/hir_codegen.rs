@@ -14223,6 +14223,8 @@ mod tests {
             type ForwardIdentity = IdentityChain;
             type IdentityChain = Identity;
             type LiteralIdentity = { <T>(value: T): T };
+            type ParenthesizedIdentity = (<T>(value: T) => T);
+            type ParenthesizedForward = (ParenthesizedIdentity);
             type Choose = <T, U>(left: T, right: U) => T;
             type Numeric = <T extends number>(value: T) => T;
             function namedIdentity<T>(value: T): T { return value; }
@@ -14237,6 +14239,7 @@ mod tests {
                 const inferredArrowChain = aliasChain;
                 const inferredNamedChain = namedChain;
                 const literal: LiteralIdentity = <T>(value: T): T => value;
+                const parenthesized: (ParenthesizedForward) = literal;
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14251,11 +14254,12 @@ mod tests {
                 console.log(inferredArrowChain(30));
                 console.log(inferredNamedChain<string>("inferred-chain"));
                 console.log(literal<string>("call-literal-alias"));
+                console.log(parenthesized(31));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\n"
         );
     }
 
