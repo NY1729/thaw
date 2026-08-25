@@ -29,7 +29,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::raw::c_char;
 use std::time::Duration;
 
@@ -74,6 +74,7 @@ fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
 thread_local! {
     static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
     static NET_STREAMS: RefCell<(u32, HashMap<u32, TcpStream>)> = RefCell::new((1, HashMap::new()));
+    static NET_LISTENERS: RefCell<(u32, HashMap<u32, TcpListener>)> = RefCell::new((1, HashMap::new()));
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -126,6 +127,65 @@ fn net_destroy(handle: u32) {
         if let Some(stream) = streams.borrow_mut().1.remove(&handle) {
             let _ = stream.shutdown(Shutdown::Both);
         }
+    });
+}
+
+fn net_listen(host: &str, port: u16) -> String {
+    match TcpListener::bind((host, port)) {
+        Ok(listener) => {
+            let actual_port = listener
+                .local_addr()
+                .map(|value| value.port())
+                .unwrap_or(port);
+            NET_LISTENERS.with(|listeners| {
+                let mut listeners = listeners.borrow_mut();
+                let handle = listeners.0;
+                listeners.0 = listeners.0.wrapping_add(1).max(1);
+                listeners.1.insert(handle, listener);
+                format!("ok:{handle}:{actual_port}")
+            })
+        }
+        Err(error) => format!("err:{error}"),
+    }
+}
+
+fn net_accept(handle: u32) -> String {
+    NET_LISTENERS.with(|listeners| {
+        let listeners = listeners.borrow();
+        let Some(listener) = listeners.1.get(&handle) else {
+            return "err:server is closed".to_string();
+        };
+        match listener.accept() {
+            Ok((stream, peer)) => NET_STREAMS.with(|streams| {
+                let mut streams = streams.borrow_mut();
+                let stream_handle = streams.0;
+                streams.0 = streams.0.wrapping_add(1).max(1);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                streams.1.insert(stream_handle, stream);
+                format!("ok:{stream_handle}:{}:{}", peer.ip(), peer.port())
+            }),
+            Err(error) => format!("err:{error}"),
+        }
+    })
+}
+
+fn net_read_all(handle: u32) -> String {
+    NET_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let Some(stream) = streams.1.get_mut(&handle) else {
+            return "err:socket is closed".to_string();
+        };
+        let mut value = Vec::new();
+        match stream.read_to_end(&mut value) {
+            Ok(_) => format!("ok:{}", hex_encode(&value)),
+            Err(error) => format!("err:{error}"),
+        }
+    })
+}
+
+fn net_close_listener(handle: u32) {
+    NET_LISTENERS.with(|listeners| {
+        listeners.borrow_mut().1.remove(&handle);
     });
 }
 
@@ -264,6 +324,17 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .expect("failed to create JavaScript TCP finisher");
                 let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
                     .expect("failed to create JavaScript TCP closer");
+                let tcp_listen = Function::new(ctx.clone(), |host: String, port: u32| {
+                    net_listen(&host, port as u16)
+                })
+                .expect("failed to create JavaScript TCP listener");
+                let tcp_accept = Function::new(ctx.clone(), |handle: u32| net_accept(handle))
+                    .expect("failed to create JavaScript TCP acceptor");
+                let tcp_read = Function::new(ctx.clone(), |handle: u32| net_read_all(handle))
+                    .expect("failed to create JavaScript TCP reader");
+                let tcp_close_listener =
+                    Function::new(ctx.clone(), |handle: u32| net_close_listener(handle))
+                        .expect("failed to create JavaScript TCP listener closer");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -288,6 +359,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_net_destroy", tcp_destroy)
                     .expect("failed to install JavaScript TCP closer");
+                ctx.globals()
+                    .set("__thaw_net_listen", tcp_listen)
+                    .expect("failed to install JavaScript TCP listener");
+                ctx.globals()
+                    .set("__thaw_net_accept", tcp_accept)
+                    .expect("failed to install JavaScript TCP acceptor");
+                ctx.globals()
+                    .set("__thaw_net_read", tcp_read)
+                    .expect("failed to install JavaScript TCP reader");
+                ctx.globals()
+                    .set("__thaw_net_close_listener", tcp_close_listener)
+                    .expect("failed to install JavaScript TCP listener closer");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });

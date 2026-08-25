@@ -385,7 +385,8 @@ The workspace crates have narrow responsibilities:
 - `node:net` provides IPv4/IPv6 detection, validated `SocketAddress` values and
   address/range/subnet `BlockList` checks. `Socket`/`createConnection` perform
   real TCP writes and return peer data after `end()` half-closes the connection;
-  fully streaming reads and listening servers remain later transport steps
+  `Server`/`createServer` accept and reply to a real TCP connection with Node-like
+  listening/connection/data/close events. Multi-client streaming remains later
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
