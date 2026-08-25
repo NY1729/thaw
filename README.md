@@ -359,7 +359,10 @@ The workspace crates have narrow responsibilities:
   output, preserves strings and Buffers as single chunks, and rejects null
   iterable values with `ERR_STREAM_NULL_VALUES`. Premature closure of any
   composed stage destroys the remaining stages and the outer Duplex with
-  `ERR_STREAM_PREMATURE_CLOSE`. Stream
+  `ERR_STREAM_PREMATURE_CLOSE`. Function stages receive an AbortSignal and
+  compose as object-mode transforms; Promise-returning body functions expose a
+  writable-only sink and reject non-null return values with
+  `ERR_INVALID_RETURN_VALUE`. Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
   errored state, with the original destruction error retained on the stream.
   Default byte/object high-water marks are queryable and configurable for new
