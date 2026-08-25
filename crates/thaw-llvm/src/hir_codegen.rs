@@ -13989,6 +13989,7 @@ mod tests {
             type Outcome<T, E = string> = { value: T; error: E };
             type SamePair<T, U = T> = { first: T; second: U };
             type Numeric<T extends number> = { value: T };
+            function outcomeValue<T>(result: Outcome<T>): T { return result.value; }
             function outcome(value: number): Outcome<number> {
                 return { error: "none", value };
             }
@@ -13998,7 +13999,7 @@ mod tests {
             function numeric(value: number): Numeric<number> { return { value }; }
             function main(): void {
                 const result: Outcome<number> = outcome(4);
-                console.log(result.value);
+                console.log(outcomeValue(result));
                 console.log(result.error);
                 const values: SamePair<string> = pair("same");
                 console.log(values.first + values.second);
