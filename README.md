@@ -398,7 +398,11 @@ The workspace crates have narrow responsibilities:
   Releasing a Web reader rejects and removes its pending reads; releasing a
   writer leaves already-queued writes alive while rejecting subsequent calls,
   `ready`, and `closed` with `ERR_INVALID_STATE`. Both streams can then be
-  locked by a replacement reader or writer.
+  locked by a replacement reader or writer. Locked cancellation/closure,
+  enqueue or close through an already-closed readable controller, repeated
+  writable close, and writes after close report Node-compatible
+  `ERR_INVALID_STATE`; cancellation/abort of an already-closed side remains an
+  idempotent resolved operation.
   Web `pipeTo()` propagates source errors to destination abort, destination
   errors to source cancel, and AbortSignal reasons to both sides while honoring
   all three `prevent*` options and releasing both locks. `pipeThrough()`

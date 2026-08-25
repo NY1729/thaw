@@ -6223,6 +6223,37 @@ mod tests {
     }
 
     #[test]
+    fn web_stream_state_errors_match_node_codes() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_stream_state_errors");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { function capture(action) { try { action(); } catch (error) { return [error.name, error.code]; } } async function captureAsync(action) { try { await action(); return ['resolved']; } catch (error) { return [error.name, error.code]; } } var readableController, readable = new ReadableStream({ start: function(controller) { readableController = controller; controller.close(); } }), closeAgain = capture(function() { readableController.close(); }), enqueueClosed = capture(function() { readableController.enqueue(1); }), reader = readable.getReader(), cancelLocked = await captureAsync(function() { return readable.cancel(); }), cancelClosed = await captureAsync(function() { return reader.cancel(); }), writableController, writable = new WritableStream({ start: function(controller) { writableController = controller; } }), writer = writable.getWriter(), firstClose = await captureAsync(function() { return writer.close(); }), secondClose = await captureAsync(function() { return writer.close(); }), writeClosed = await captureAsync(function() { return writer.write(1); }), abortClosed = await captureAsync(function() { return writer.abort('ignored'); }), directLocked = await captureAsync(function() { return writable.close(); }), controllerErrorClosed = capture(function() { writableController.error(new Error('ignored')); }), errorReason = new Error('failure'), erroredController, errored = new WritableStream({ start: function(controller) { erroredController = controller; } }), erroredWriter = errored.getWriter(); erroredController.error(errorReason); var closeError = await erroredWriter.close().catch(function(error) { return error; }), abortErrored = await captureAsync(function() { return erroredWriter.abort(); }); return [closeAgain, enqueueClosed, cancelLocked, cancelClosed, firstClose, secondClose, writeClosed, abortClosed, directLocked, controllerErrorClosed, closeError === errorReason, abortErrored]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_stream_state_errors_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebStreamStateErrors = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebStreamStateErrors")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["TypeError","ERR_INVALID_STATE"],["TypeError","ERR_INVALID_STATE"],["TypeError","ERR_INVALID_STATE"],["resolved"],["resolved"],["TypeError","ERR_INVALID_STATE"],["TypeError","ERR_INVALID_STATE"],["resolved"],["TypeError","ERR_INVALID_STATE"],null,true,["resolved"]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn transform_stream_applies_readable_backpressure_and_strategies() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_transform_stream_backpressure");
