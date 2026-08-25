@@ -1481,7 +1481,13 @@ fn function_expression_as_arrow(
     })
 }
 
-fn returned_generic_parameter_index(expr: &Expr, params: &[Pat]) -> Option<usize> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InferredGenericReturn {
+    Parameter(usize),
+    Keyword(TsKeywordTypeKind),
+}
+
+fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGenericReturn> {
     let returned = match expr {
         Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
         Expr::TsAs(assertion) => assertion.expr.as_ref(),
@@ -1489,31 +1495,43 @@ fn returned_generic_parameter_index(expr: &Expr, params: &[Pat]) -> Option<usize
         expression => expression,
     };
     if let Expr::Cond(conditional) = returned {
-        let consequent = returned_generic_parameter_index(&conditional.cons, params)?;
-        let alternate = returned_generic_parameter_index(&conditional.alt, params)?;
+        let consequent = inferred_generic_return(&conditional.cons, params)?;
+        let alternate = inferred_generic_return(&conditional.alt, params)?;
         return (consequent == alternate).then_some(consequent);
+    }
+    let keyword = match returned {
+        Expr::Lit(Lit::Num(_)) => Some(TsKeywordTypeKind::TsNumberKeyword),
+        Expr::Lit(Lit::Str(_)) => Some(TsKeywordTypeKind::TsStringKeyword),
+        Expr::Lit(Lit::Bool(_)) => Some(TsKeywordTypeKind::TsBooleanKeyword),
+        _ => None,
+    };
+    if let Some(keyword) = keyword {
+        return Some(InferredGenericReturn::Keyword(keyword));
     }
     let Expr::Ident(returned) = returned else {
         return None;
     };
-    params.iter().position(|parameter| {
-        let Pat::Ident(binding) = parameter else {
-            return false;
-        };
-        binding.id.sym == returned.sym
-    })
+    params
+        .iter()
+        .position(|parameter| {
+            let Pat::Ident(binding) = parameter else {
+                return false;
+            };
+            binding.id.sym == returned.sym
+        })
+        .map(InferredGenericReturn::Parameter)
 }
 
 fn collect_generic_return_parameters(
     statement: &Stmt,
     params: &[Pat],
-    returned: &mut Vec<usize>,
+    returned: &mut Vec<InferredGenericReturn>,
 ) -> bool {
     match statement {
         Stmt::Return(return_statement) => return_statement
             .arg
             .as_deref()
-            .and_then(|expr| returned_generic_parameter_index(expr, params))
+            .and_then(|expr| inferred_generic_return(expr, params))
             .map(|index| returned.push(index))
             .is_some(),
         Stmt::If(if_statement) => {
@@ -1532,10 +1550,8 @@ fn collect_generic_return_parameters(
 }
 
 fn inferred_generic_arrow_return_type(arrow: &swc_ecma_ast::ArrowExpr) -> Option<Box<TsType>> {
-    let index = match arrow.body.as_ref() {
-        ArrowFunctionBody::Expr(expression) => {
-            returned_generic_parameter_index(expression, &arrow.params)?
-        }
+    let inferred = match arrow.body.as_ref() {
+        ArrowFunctionBody::Expr(expression) => inferred_generic_return(expression, &arrow.params)?,
         ArrowFunctionBody::FunctionBody(body) => {
             let mut returned = Vec::new();
             if !body.stmts.iter().all(|statement| {
@@ -1550,13 +1566,23 @@ fn inferred_generic_arrow_return_type(arrow: &swc_ecma_ast::ArrowExpr) -> Option
                 .then_some(first)?
         }
     };
-    let Pat::Ident(binding) = &arrow.params[index] else {
-        return None;
-    };
-    binding
-        .type_ann
-        .as_ref()
-        .map(|annotation| annotation.type_ann.clone())
+    match inferred {
+        InferredGenericReturn::Parameter(index) => {
+            let Pat::Ident(binding) = &arrow.params[index] else {
+                return None;
+            };
+            binding
+                .type_ann
+                .as_ref()
+                .map(|annotation| annotation.type_ann.clone())
+        }
+        InferredGenericReturn::Keyword(kind) => Some(Box::new(TsType::TsKeywordType(
+            swc_ecma_ast::TsKeywordType {
+                span: swc_common::DUMMY_SP,
+                kind,
+            },
+        ))),
+    }
 }
 
 /// Resolves every top-level `interface` declaration, so `lower_ts_type` can
@@ -14345,8 +14371,12 @@ mod tests {
                 "defaults do not match function type alias `Factory`",
             ),
             (
-                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"not inferred\"; }",
+                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => String(value); }",
                 "needs an explicit return type",
+            ),
+            (
+                "type Stringify = <T>(value: T) => string; function main(): void { const invalid: Stringify = <T>(value: T) => 1; }",
+                "incompatible with function type alias `Stringify`",
             ),
             (
                 "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",
