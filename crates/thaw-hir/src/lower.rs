@@ -1476,6 +1476,12 @@ fn resolve_interfaces(
                     alias.type_ann.as_ref(),
                     TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function))
                         if function.type_params.is_some()
+                ) || matches!(
+                    alias.type_ann.as_ref(),
+                    TsType::TsTypeLit(literal)
+                        if matches!(literal.members.as_slice(),
+                            [TsTypeElement::TsCallSignatureDecl(call)]
+                                if call.type_params.is_some())
                 ) {
                     generic.function_aliases.insert(name, alias.as_ref());
                 } else if let Some(parameters) = &alias.type_params {
@@ -13227,18 +13233,37 @@ impl<'a> FnLowerer<'a> {
         &self,
         alias: &swc_ecma_ast::TsTypeAliasDecl,
     ) -> Result<FnSignature, String> {
-        let TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) =
-            alias.type_ann.as_ref()
-        else {
-            return Err(format!(
-                "type alias `{}` is not a generic function type",
-                alias.id.sym
-            ));
+        let (type_params, params, return_type) = match alias.type_ann.as_ref() {
+            TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => (
+                function.type_params.as_ref(),
+                function.params.as_slice(),
+                Some(function.type_ann.type_ann.as_ref()),
+            ),
+            TsType::TsTypeLit(literal) => {
+                let [TsTypeElement::TsCallSignatureDecl(call)] = literal.members.as_slice() else {
+                    return Err(format!(
+                        "type alias `{}` is not a generic callable type",
+                        alias.id.sym
+                    ));
+                };
+                (
+                    call.type_params.as_ref(),
+                    call.params.as_slice(),
+                    call.type_ann
+                        .as_ref()
+                        .map(|annotation| annotation.type_ann.as_ref()),
+                )
+            }
+            _ => {
+                return Err(format!(
+                    "type alias `{}` is not a generic callable type",
+                    alias.id.sym
+                ))
+            }
         };
-        let type_params = function
-            .type_params
+        let type_params = type_params
             .as_ref()
-            .ok_or_else(|| format!("function type alias `{}` is not generic", alias.id.sym))?;
+            .ok_or_else(|| format!("callable type alias `{}` is not generic", alias.id.sym))?;
         validate_trailing_type_parameter_defaults(
             "generic function type alias",
             alias.id.sym.as_ref(),
@@ -13253,8 +13278,7 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
             .collect::<HashMap<_, _>>();
-        let generic_param_patterns = function
-            .params
+        let generic_param_patterns = params
             .iter()
             .map(|parameter| {
                 let TsFnParam::Ident(parameter) = parameter else {
@@ -13297,7 +13321,16 @@ impl<'a> FnLowerer<'a> {
                 .map(|parameter| parameter.default.clone())
                 .collect(),
             generic_param_patterns,
-            generic_return_type: Some(function.type_ann.type_ann.clone()),
+            generic_return_type: Some(Box::new(
+                return_type
+                    .ok_or_else(|| {
+                        format!(
+                            "generic callable type alias `{}` needs a return type",
+                            alias.id.sym
+                        )
+                    })?
+                    .clone(),
+            )),
         })
     }
 
@@ -14033,6 +14066,10 @@ mod tests {
             (
                 "type Forward = Stringify; type Stringify = <T>(value: T) => string; function main(): void { const invalid: Forward = <T>(value: T): T => value; }",
                 "incompatible with function type alias `Forward`",
+            ),
+            (
+                "type Stringify = { <T>(value: T): string }; function main(): void { const invalid: Stringify = <T>(value: T): T => value; }",
+                "incompatible with function type alias `Stringify`",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();

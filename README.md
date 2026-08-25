@@ -374,7 +374,9 @@ The workspace crates have narrow responsibilities:
 - Generic function type aliases such as `type Identity = <T>(value: T) => T`
   retain a polymorphic template when assigned a compatible generic arrow or
   named generic function; parameter/return shapes and constraints are checked
-  modulo type-parameter names before call-site specialization
+  modulo type-parameter names before call-site specialization. The equivalent
+  call-signature literal form `type Identity = { <T>(value: T): T }` shares
+  the same path
 - Pure callable interfaces with one generic call signature, such as
   `interface Identity { <T>(value: T): T }`, use the same polymorphic template,
   assignment checks and direct/callback specialization paths; annotated local
