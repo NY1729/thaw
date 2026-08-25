@@ -267,6 +267,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "http" => {
             "export interface IncomingMessage { method: string; url: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => boolean): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => boolean): Server;\n"
         }
+        "https" => {
+            "export declare function request(argsArray: any): any;\nexport declare function get(argsArray: any): any;\nexport declare function createServer(argsArray: any): any;\nexport declare const ClientRequest: any;\nexport declare const IncomingMessage: any;\nexport declare const ServerResponse: any;\nexport declare const Server: any;\nexport declare const globalAgent: any;\n"
+        }
         _ => return Err(format!("unsupported Node built-in module `{specifier}`")),
     };
     let source = builtin_module_source(name)
@@ -3438,21 +3441,25 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
             r#"var net = require('node:net'), EventEmitter = require('node:events');
              function IncomingMessage(socket) { EventEmitter.call(this); this.socket = this.connection = socket; this.statusCode = null; this.statusMessage = null; this.headers = {}; this.headersDistinct = {}; this.rawHeaders = []; this.trailers = {}; this.rawTrailers = []; this.complete = false; this.aborted = false; this.readable = true; this.method = null; this.url = ''; this.httpVersion = '1.1'; }
              IncomingMessage.prototype = Object.create(EventEmitter.prototype); IncomingMessage.prototype.constructor = IncomingMessage; IncomingMessage.prototype.setEncoding = function(encoding) { this._encoding = encoding; return this; }; IncomingMessage.prototype.destroy = function(error) { this.aborted = true; this.readable = false; if (this.socket) this.socket.destroy(error); return this; }; IncomingMessage.prototype.resume = function() { return this; };
-             function normalizeOptions(input, options) { var result = {}; if (typeof input === 'string' || input instanceof URL) { var url = input instanceof URL ? input : new URL(String(input)); result.protocol = url.protocol; result.hostname = url.hostname; result.port = url.port ? Number(url.port) : 80; result.path = url.pathname + url.search; result.auth = url.username ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : undefined; } else if (input) Object.assign(result, input); if (options) Object.assign(result, options); result.protocol = result.protocol || 'http:'; if (result.protocol !== 'http:') throw new Error('Protocol "' + result.protocol + '" not supported. Expected "http:"'); result.hostname = result.hostname || result.host || 'localhost'; result.port = result.port === undefined ? 80 : Number(result.port); result.path = result.path || '/'; result.method = String(result.method || 'GET').toUpperCase(); return result; }
-             function ClientRequest(input, options, callback) { if (!(this instanceof ClientRequest)) return new ClientRequest(input, options, callback); EventEmitter.call(this); if (typeof options === 'function') { callback = options; options = undefined; } this._options = normalizeOptions(input, options); this.method = this._options.method; this.path = this._options.path; this.host = this._options.hostname; this.protocol = 'http:'; this.socket = this.connection = null; this.aborted = false; this.destroyed = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; if (this._options.headers) for (var name of Object.keys(this._options.headers)) this.setHeader(name, this._options.headers[name]); if (!this.hasHeader('host')) this.setHeader('Host', this.host + (this._options.port === 80 ? '' : ':' + this._options.port)); if (this._options.auth && !this.hasHeader('authorization')) this.setHeader('Authorization', 'Basic ' + Buffer.from(this._options.auth).toString('base64')); if (typeof callback === 'function') this.once('response', callback); }
+             function normalizeOptions(input, options) { var result = {}; if (typeof input === 'string' || input instanceof URL) { var url = input instanceof URL ? input : new URL(String(input)); result.protocol = url.protocol; result.hostname = url.hostname; if (url.port) result.port = Number(url.port); result.path = url.pathname + url.search; result.auth = url.username ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : undefined; } else if (input) Object.assign(result, input); if (options) Object.assign(result, options); var expectedProtocol = result._defaultProtocol || 'http:'; result.protocol = result.protocol || expectedProtocol; if (result.protocol !== expectedProtocol) throw new Error('Protocol "' + result.protocol + '" not supported. Expected "' + expectedProtocol + '"'); result.hostname = result.hostname || result.host || 'localhost'; result.port = result.port === undefined ? (expectedProtocol === 'https:' ? 443 : 80) : Number(result.port); result.path = result.path || '/'; result.method = String(result.method || 'GET').toUpperCase(); return result; }
+             function ClientRequest(input, options, callback) { if (!(this instanceof ClientRequest)) return new ClientRequest(input, options, callback); EventEmitter.call(this); if (typeof options === 'function') { callback = options; options = undefined; } this._options = normalizeOptions(input, options); this.method = this._options.method; this.path = this._options.path; this.host = this._options.hostname; this.protocol = this._options.protocol; this.socket = this.connection = null; this.aborted = false; this.destroyed = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; if (this._options.headers) for (var name of Object.keys(this._options.headers)) this.setHeader(name, this._options.headers[name]); var defaultPort = this.protocol === 'https:' ? 443 : 80; if (!this.hasHeader('host')) this.setHeader('Host', this.host + (this._options.port === defaultPort ? '' : ':' + this._options.port)); if (this._options.auth && !this.hasHeader('authorization')) this.setHeader('Authorization', 'Basic ' + Buffer.from(this._options.auth).toString('base64')); if (typeof callback === 'function') this.once('response', callback); }
              ClientRequest.prototype = Object.create(EventEmitter.prototype); ClientRequest.prototype.constructor = ClientRequest; ClientRequest.prototype.setHeader = function(name, value) { var key = String(name).toLowerCase(); this._headers[key] = value; this._headerNames[key] = String(name); return this; }; ClientRequest.prototype.getHeader = function(name) { return this._headers[String(name).toLowerCase()]; }; ClientRequest.prototype.getHeaders = function() { return Object.assign({}, this._headers); }; ClientRequest.prototype.getHeaderNames = function() { return Object.keys(this._headers); }; ClientRequest.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, String(name).toLowerCase()); }; ClientRequest.prototype.removeHeader = function(name) { var key = String(name).toLowerCase(); delete this._headers[key]; delete this._headerNames[key]; }; ClientRequest.prototype.flushHeaders = function() { return this; }; ClientRequest.prototype.write = function(chunk, encoding, callback) { if (this.writableEnded) throw new Error('write after end'); var value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding); this._chunks.push(value); if (typeof callback === 'function') queueMicrotask(callback); return true; };
              function decodeChunked(body) { var offset = 0, output = []; while (offset < body.length) { var line = body.indexOf('\r\n', offset); if (line < 0) throw new Error('Parse Error: Invalid chunk size'); var size = parseInt(body.slice(offset, line).toString(), 16); if (!Number.isFinite(size)) throw new Error('Parse Error: Invalid chunk size'); offset = line + 2; if (size === 0) break; output.push(body.slice(offset, offset + size)); offset += size + 2; } return Buffer.concat(output); }
              function parseResponse(buffer, socket) { var marker = buffer.indexOf(Buffer.from('\r\n\r\n')), head = marker < 0 ? '' : buffer.slice(0, marker).toString(), body = marker < 0 ? buffer : buffer.slice(marker + 4), lines = head.split('\r\n'), status = (lines.shift() || '').match(/^HTTP\/(\d+\.\d+)\s+(\d+)(?:\s+(.*))?$/); if (!status) throw new Error('Parse Error: Invalid HTTP response'); var response = new IncomingMessage(socket); response.httpVersion = status[1]; response.statusCode = Number(status[2]); response.statusMessage = status[3] || ''; lines.forEach(function(line) { var colon = line.indexOf(':'); if (colon < 0) return; var name = line.slice(0, colon), key = name.toLowerCase(), value = line.slice(colon + 1).trim(); response.rawHeaders.push(name, value); (response.headersDistinct[key] || (response.headersDistinct[key] = [])).push(value); if (key === 'set-cookie') response.headers[key] = response.headersDistinct[key].slice(); else response.headers[key] = response.headersDistinct[key].join(', '); }); if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) body = decodeChunked(body); response.complete = true; return { response: response, body: body }; }
-             ClientRequest.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var request = this, body = Buffer.concat(this._chunks); if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n'; var received = []; var socket = this.socket = this.connection = net.createConnection({ host: this._options.hostname, port: this._options.port }); this.emit('socket', socket); socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); }); socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); }); socket.on('data', function(data) { received.push(Buffer.from(data)); }); socket.on('end', function() { try { var parsed = parseResponse(Buffer.concat(received), socket), response = parsed.response; request.emit('response', response); var value = response._encoding ? parsed.body.toString(response._encoding) : parsed.body; if (parsed.body.length) response.emit('data', value); response.readable = false; response.emit('end'); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } }); return this; }; ClientRequest.prototype.abort = function() { this.aborted = true; this.emit('abort'); return this.destroy(); }; ClientRequest.prototype.destroy = function(error) { this.destroyed = true; if (this.socket) this.socket.destroy(error); return this; }; ClientRequest.prototype.setTimeout = function(timeout, callback) { if (typeof callback === 'function') this.once('timeout', callback); return this; }; ClientRequest.prototype.setNoDelay = ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
+             ClientRequest.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var request = this, body = Buffer.concat(this._chunks); if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n'; var received = [], transport = this._options._transport || net, connectOptions = Object.assign({}, this._options, { host: this._options.hostname, port: this._options.port }); var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions); this.emit('socket', socket); socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); }); socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); }); socket.on('data', function(data) { received.push(Buffer.from(data)); }); socket.on('end', function() { try { var parsed = parseResponse(Buffer.concat(received), socket), response = parsed.response; request.emit('response', response); var value = response._encoding ? parsed.body.toString(response._encoding) : parsed.body; if (parsed.body.length) response.emit('data', value); response.readable = false; response.emit('end'); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } }); return this; }; ClientRequest.prototype.abort = function() { this.aborted = true; this.emit('abort'); return this.destroy(); }; ClientRequest.prototype.destroy = function(error) { this.destroyed = true; if (this.socket) this.socket.destroy(error); return this; }; ClientRequest.prototype.setTimeout = function(timeout, callback) { if (typeof callback === 'function') this.once('timeout', callback); return this; }; ClientRequest.prototype.setNoDelay = ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
              function request(input, options, callback) { return new ClientRequest(input, options, callback); } function get(input, options, callback) { var result = request(input, options, callback); result.end(); return result; }
              function ServerResponse(request) { EventEmitter.call(this); this.req = request; this.socket = this.connection = request.socket; this.statusCode = 200; this.statusMessage = null; this.sendDate = true; this.headersSent = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; }
              ServerResponse.prototype = Object.create(EventEmitter.prototype); ServerResponse.prototype.constructor = ServerResponse; ServerResponse.prototype.setHeader = ClientRequest.prototype.setHeader; ServerResponse.prototype.getHeader = ClientRequest.prototype.getHeader; ServerResponse.prototype.getHeaders = ClientRequest.prototype.getHeaders; ServerResponse.prototype.getHeaderNames = ClientRequest.prototype.getHeaderNames; ServerResponse.prototype.hasHeader = ClientRequest.prototype.hasHeader; ServerResponse.prototype.removeHeader = ClientRequest.prototype.removeHeader; ServerResponse.prototype.writeHead = function(statusCode, statusMessage, headers) { this.statusCode = Number(statusCode); if (typeof statusMessage === 'object') { headers = statusMessage; statusMessage = undefined; } if (statusMessage !== undefined) this.statusMessage = String(statusMessage); if (headers) for (var name of Object.keys(headers)) this.setHeader(name, headers[name]); this.headersSent = true; return this; }; ServerResponse.prototype.flushHeaders = function() { this.headersSent = true; return this; }; ServerResponse.prototype.write = function(chunk, encoding, callback) { if (this.writableEnded) throw new Error('write after end'); var value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding); this._chunks.push(value); if (typeof callback === 'function') queueMicrotask(callback); return true; }; ServerResponse.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var body = Buffer.concat(this._chunks); if (!this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var message = this.statusMessage === null ? (STATUS_CODES[this.statusCode] || '') : this.statusMessage, response = 'HTTP/1.1 ' + this.statusCode + ' ' + message + '\r\n' + Object.keys(this._headers).map(function(key) { var value = this._headers[key]; if (Array.isArray(value)) return value.map(function(item) { return this._headerNames[key] + ': ' + item; }, this).join('\r\n'); return this._headerNames[key] + ': ' + value; }, this).join('\r\n') + '\r\n\r\n'; this.headersSent = true; var target = this; this.socket.end(Buffer.concat([Buffer.from(response), body]), function() { if (typeof callback === 'function') callback(); target.emit('finish'); target.emit('close'); }); return this; }; ServerResponse.prototype.destroy = function(error) { this.socket.destroy(error); return this; };
              function parseRequest(buffer, socket) { var marker = buffer.indexOf(Buffer.from('\r\n\r\n')), head = marker < 0 ? buffer.toString() : buffer.slice(0, marker).toString(), body = marker < 0 ? Buffer.alloc(0) : buffer.slice(marker + 4), lines = head.split('\r\n'), start = (lines.shift() || '').match(/^(\S+)\s+(\S+)\s+HTTP\/(\d+\.\d+)$/); if (!start) throw new Error('Parse Error: Invalid HTTP request'); var message = new IncomingMessage(socket); message.method = start[1]; message.url = start[2]; message.httpVersion = start[3]; lines.forEach(function(line) { var colon = line.indexOf(':'); if (colon < 0) return; var name = line.slice(0, colon), key = name.toLowerCase(), value = line.slice(colon + 1).trim(); message.rawHeaders.push(name, value); (message.headersDistinct[key] || (message.headersDistinct[key] = [])).push(value); message.headers[key] = message.headersDistinct[key].join(', '); }); message.complete = true; return { request: message, body: body }; }
-             function Server(options, listener) { if (!(this instanceof Server)) return new Server(options, listener); EventEmitter.call(this); if (typeof options === 'function') { listener = options; options = {}; } this.requestTimeout = 300000; this.headersTimeout = 60000; this.keepAliveTimeout = 5000; this.maxHeadersCount = null; this.listening = false; this._net = net.createServer(function(socket) { var chunks = [], handled = false; socket.on('data', function(chunk) { if (!handled) chunks.push(Buffer.from(chunk)); }); socket.on('end', function() { if (handled) return; handled = true; try { var parsed = parseRequest(Buffer.concat(chunks), socket), request = parsed.request, response = new ServerResponse(request); server.emit('request', request, response); if (parsed.body.length) request.emit('data', parsed.body); request.readable = false; request.emit('end'); } catch (error) { server.emit('clientError', error, socket); } }); }); var server = this; this._net.on('listening', function() { server.listening = true; server.emit('listening'); }); this._net.on('close', function() { server.listening = false; server.emit('close'); }); this._net.on('error', function(error) { server.emit('error', error); }); this._net.on('connection', function(socket) { server.emit('connection', socket); }); if (typeof listener === 'function') this.on('request', listener); }
+             function Server(options, listener) { if (!(this instanceof Server)) return new Server(options, listener); EventEmitter.call(this); if (typeof options === 'function') { listener = options; options = {}; } options = options || {}; this.requestTimeout = 300000; this.headersTimeout = 60000; this.keepAliveTimeout = 5000; this.maxHeadersCount = null; this.listening = false; var transport = options._transport || net, server = this, accept = function(socket) { var chunks = [], handled = false; socket.on('data', function(chunk) { if (!handled) chunks.push(Buffer.from(chunk)); }); socket.on('end', function() { if (handled) return; handled = true; try { var parsed = parseRequest(Buffer.concat(chunks), socket), request = parsed.request, response = new ServerResponse(request); server.emit('request', request, response); if (parsed.body.length) request.emit('data', parsed.body); request.readable = false; request.emit('end'); } catch (error) { server.emit('clientError', error, socket); } }); }; this._net = transport.createServer(options, accept); this._net.on('listening', function() { server.listening = true; server.emit('listening'); }); this._net.on('close', function() { server.listening = false; server.emit('close'); }); this._net.on('error', function(error) { server.emit('error', error); }); this._net.on('connection', function(socket) { server.emit('connection', socket); }); this._net.on('secureConnection', function(socket) { server.emit('secureConnection', socket); }); if (typeof listener === 'function') this.on('request', listener); }
              Server.prototype = Object.create(EventEmitter.prototype); Server.prototype.constructor = Server; Server.prototype.listen = function() { this._net.listen.apply(this._net, arguments); return this; }; Server.prototype.close = function(callback) { this._net.close(callback); return this; }; Server.prototype.address = function() { return this._net.address(); }; Server.prototype.getConnections = function(callback) { return this._net.getConnections(callback); }; Server.prototype.closeAllConnections = function() { return this._net.closeAllConnections(); }; Server.prototype.closeIdleConnections = function() { return this._net.closeIdleConnections(); }; Server.prototype.ref = function() { this._net.ref(); return this; }; Server.prototype.unref = function() { this._net.unref(); return this; }; function createServer(options, listener) { return new Server(options, listener); }
-             var METHODS = ['ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE','GET','HEAD','LINK','LOCK','M-SEARCH','MERGE','MKACTIVITY','MKCALENDAR','MKCOL','MOVE','NOTIFY','OPTIONS','PATCH','POST','PROPFIND','PROPPATCH','PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE','SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE']; var STATUS_CODES = { 200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable' };
-             module.exports = { request: request, get: get, createServer: createServer, ClientRequest: ClientRequest, IncomingMessage: IncomingMessage, ServerResponse: ServerResponse, Server: Server, METHODS: METHODS, STATUS_CODES: STATUS_CODES, maxHeaderSize: 16384, globalAgent: { protocol: 'http:' } }; module.exports.default = module.exports; module.exports.__esModule = true;
+             var METHODS = ['ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE','GET','HEAD','LINK','LOCK','M-SEARCH','MERGE','MKACTIVITY','MKCALENDAR','MKCOL','MOVE','NOTIFY','OPTIONS','PATCH','POST','PROPFIND','PROPPATCH','PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE','SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE']; var STATUS_CODES = { 200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable' };
+             function createSecureModule(tls) { function secureOptions(options) { return Object.assign({}, options || {}, { _transport: tls, _defaultProtocol: 'https:' }); } function secureRequest(input, options, callback) { if (typeof options === 'function') { callback = options; options = undefined; } return new ClientRequest(input, secureOptions(options), callback); } function secureGet(input, options, callback) { var result = secureRequest(input, options, callback); result.end(); return result; } function secureCreateServer(options, listener) { if (typeof options === 'function') { listener = options; options = {}; } return new Server(Object.assign({}, options || {}, { _transport: tls }), listener); } return { request: secureRequest, get: secureGet, createServer: secureCreateServer, ClientRequest: ClientRequest, IncomingMessage: IncomingMessage, ServerResponse: ServerResponse, Server: Server, METHODS: METHODS, STATUS_CODES: STATUS_CODES, maxHeaderSize: 16384, globalAgent: { protocol: 'https:' }, Agent: function Agent(options) { Object.assign(this, options || {}); this.protocol = 'https:'; } }; }
+             module.exports = { request: request, get: get, createServer: createServer, ClientRequest: ClientRequest, IncomingMessage: IncomingMessage, ServerResponse: ServerResponse, Server: Server, METHODS: METHODS, STATUS_CODES: STATUS_CODES, maxHeaderSize: 16384, globalAgent: { protocol: 'http:' }, __createSecureModule: createSecureModule }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
+        ),
+        "https" => Some(
+            "var http = require('node:http'), tls = require('node:tls'); module.exports = http.__createSecureModule(tls); module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "buffer" => Some(
             "function byteLength(value, encoding) { return globalThis.Buffer.byteLength(value, encoding); }\n\
@@ -6886,6 +6893,194 @@ mod tests {
         assert!(response.ends_with("\r\n\r\npong"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn https_client_verifies_a_custom_ca_and_parses_http() {
+        use rustls::pki_types::ServerName;
+        use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+        use rustls::{
+            ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection,
+            StreamOwned,
+        };
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::process::Command;
+        use std::sync::Arc;
+
+        let certificate_dir = temp_registry("builtin_https_certificate");
+        let key_pem = certificate_dir.join("key.pem");
+        let cert_pem = certificate_dir.join("cert.pem");
+        let key_der = certificate_dir.join("key.der");
+        let cert_der = certificate_dir.join("cert.der");
+        assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-keyout",
+            ])
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_pem)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&cert_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&cert_der)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+            .arg(&key_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&key_der)
+            .status()
+            .unwrap()
+            .success());
+        let certificate = CertificateDer::from(fs::read(&cert_der).unwrap());
+        let private_key = PrivatePkcs8KeyDer::from(fs::read(&key_der).unwrap()).into();
+        let config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate], private_key)
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(config).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /secure HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nX-Secure: yes\r\nConnection: close\r\n\r\nsecret")
+                .unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+        });
+
+        let dir = temp_registry("builtin_https_client");
+        fs::write(
+            dir.join("index.js"),
+            "var https = require('node:https'); module.exports = async function (port, ca) { return await new Promise(function(resolve, reject) { var request = https.get({ hostname: '127.0.0.1', port: port, path: '/secure', ca: ca }, function(response) { var body = []; response.setEncoding('utf8'); response.on('data', function(chunk) { body.push(chunk); }); response.on('end', function() { resolve([response.statusCode, response.headers['x-secure'], body.join(''), request.protocol, request.socket.encrypted, request.socket.authorized, https.globalAgent.protocol]); }); }); request.on('error', reject); }); };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_https_client_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 6);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsClient = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseHttpsClient").unwrap();
+        let ca = fs::read_to_string(&cert_pem).unwrap();
+        let arguments = CString::new(serde_json::to_string(&(port, ca)).unwrap()).unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[200,"yes","secret","https:",true,true,"https:"]"#
+        );
+        server.join().unwrap();
+
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server_port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(fs::read(&cert_der).unwrap()))
+            .unwrap();
+        let client_config = Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let tls_client = std::thread::spawn(move || {
+            let socket = loop {
+                match TcpStream::connect(("127.0.0.1", server_port)) {
+                    Ok(socket) => break socket,
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+                }
+            };
+            let connection =
+                ClientConnection::new(client_config, ServerName::try_from("localhost").unwrap())
+                    .unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            stream
+                .write_all(
+                    b"GET /from-rust HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        });
+        let server_dir = temp_registry("builtin_https_server");
+        fs::write(
+            server_dir.join("index.js"),
+            "var https = require('node:https'); module.exports = async function (port, cert, key) { var observed; var server = https.createServer({ cert: cert, key: key }, function(request, response) { observed = [request.method, request.url, request.socket.encrypted, request.socket.authorized]; response.statusCode = 202; response.setHeader('X-TLS', 'yes'); response.end('secure-server', function() { server.close(); }); }); await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); }); return [observed, server.listening, server instanceof https.Server]; };",
+        )
+        .unwrap();
+        let server_node_modules = temp_registry("builtin_https_server_node_modules");
+        let (server_bundle, _, server_file_count, _) =
+            bundle_commonjs_package(&server_node_modules, "secure-pkg", &server_dir, "index.js")
+                .unwrap();
+        assert_eq!(server_file_count, 6);
+        let server_script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {server_bundle} globalThis.exerciseHttpsServer = module.exports;");
+        let server_source = CString::new(server_script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(server_source.as_ptr()), 1);
+        let server_function = CString::new("exerciseHttpsServer").unwrap();
+        let server_arguments = CString::new(
+            serde_json::to_string(&(
+                server_port,
+                fs::read_to_string(&cert_pem).unwrap(),
+                fs::read_to_string(&key_pem).unwrap(),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let server_result =
+            thaw_quickjs::thaw_js_call(server_function.as_ptr(), server_arguments.as_ptr());
+        let server_result = unsafe { CStr::from_ptr(server_result) }.to_string_lossy();
+        assert_eq!(
+            server_result,
+            r#"[["GET","/from-rust",true,true],false,true]"#
+        );
+        let response = tls_client.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 202 Accepted\r\n"));
+        assert!(response.contains("X-TLS: yes\r\n"));
+        assert!(response.ends_with("\r\n\r\nsecure-server"));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        let _ = fs::remove_dir_all(&server_dir);
+        let _ = fs::remove_dir_all(&server_node_modules);
+        let _ = fs::remove_dir_all(&certificate_dir);
     }
 
     #[test]
