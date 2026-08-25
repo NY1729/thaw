@@ -1193,7 +1193,10 @@ pub fn classify(func: &DtsFunction) -> Classification {
 fn supports_variadic_element(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
-        HirType::Array(element) => element.as_ref() == &HirType::F64,
+        HirType::Array(element) => matches!(
+            element.as_ref(),
+            HirType::F64 | HirType::Str | HirType::JsValue
+        ),
         HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
             supports_variadic_element(payload)
         }
@@ -1211,6 +1214,17 @@ fn classify_variadic_ts_type(
 ) -> DtsType {
     if let TsType::TsParenthesizedType(parenthesized) = ty {
         return classify_variadic_ts_type(&parenthesized.type_ann, interfaces, generic_interfaces);
+    }
+    if let TsType::TsArrayType(array) = ty {
+        return match classify_ts_type(&array.elem_type, interfaces, generic_interfaces) {
+            DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::JsValue)) => {
+                DtsType::Native(HirType::Array(Box::new(element)))
+            }
+            DtsType::Native(other) => DtsType::Unsupported(format!(
+                "variadic array element type {other:?} requires explicit marshalling"
+            )),
+            unsupported => unsupported,
+        };
     }
     let TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) = ty
     else {
@@ -1914,6 +1928,14 @@ mod tests {
             (
                 "export declare function arrays(...values: number[][]): number;",
                 HirType::Array(Box::new(HirType::F64)),
+            ),
+            (
+                "export declare function strings(...values: string[][]): number;",
+                HirType::Array(Box::new(HirType::Str)),
+            ),
+            (
+                "export declare function handles(...values: JsValue[][]): number;",
+                HirType::Array(Box::new(HirType::JsValue)),
             ),
             (
                 "export declare function objects(...values: { value: number; meta: { enabled: boolean; label: string }; samples: number[] }[]): number;",
