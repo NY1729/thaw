@@ -4680,6 +4680,42 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                if let (Expr::Ident(identifier), Some(annotation)) =
+                    (init, binding.type_ann.as_ref())
+                {
+                    if let Some((expected, callable_name)) =
+                        self.generic_callable_annotation_signature(&annotation.type_ann)?
+                    {
+                        let source_name = self.resolve_binding(identifier.sym.as_ref());
+                        if let Some(arrow) = self.generic_arrows.get(&source_name).cloned() {
+                            let actual = self.generic_arrow_signature(&arrow)?;
+                            self.validate_generic_callable_shape(
+                                &expected,
+                                &actual,
+                                &callable_name,
+                            )?;
+                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            self.generic_arrows.insert(hir_name, arrow);
+                            continue;
+                        }
+                        if let Some(target) =
+                            self.generic_named_templates.get(&source_name).cloned()
+                        {
+                            let actual = self
+                                .signatures
+                                .get(&target)
+                                .expect("named generic template target");
+                            self.validate_generic_callable_shape(
+                                &expected,
+                                actual,
+                                &callable_name,
+                            )?;
+                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            self.generic_named_templates.insert(hir_name, target);
+                            continue;
+                        }
+                    }
+                }
                 let annotated = binding
                     .type_ann
                     .as_ref()
@@ -13082,6 +13118,25 @@ impl<'a> FnLowerer<'a> {
             .flatten()
     }
 
+    fn generic_callable_annotation_signature(
+        &self,
+        ty: &TsType,
+    ) -> Result<Option<(FnSignature, Symbol)>, String> {
+        if let Some(alias) = self.generic_function_alias_from_type(ty) {
+            return Ok(Some((
+                self.generic_function_alias_signature(alias)?,
+                alias.id.sym.to_string(),
+            )));
+        }
+        if let Some(interface) = self.generic_function_interface_from_type(ty) {
+            return Ok(Some((
+                self.generic_function_interface_signature(interface)?,
+                interface.id.sym.to_string(),
+            )));
+        }
+        Ok(None)
+    }
+
     fn generic_function_interface_signature(
         &self,
         interface: &TsInterfaceDecl,
@@ -13968,6 +14023,10 @@ mod tests {
             (
                 "type Identity = <T>(value: T) => T; function bad<T>(value: T): string { return \"wrong\"; } function main(): void { const invalid: Identity = bad; }",
                 "incompatible with function type alias `Identity`",
+            ),
+            (
+                "type Identity = <T>(value: T) => T; type Stringify = <T>(value: T) => string; function main(): void { const identity: Identity = <T>(value: T): T => value; const invalid: Stringify = identity; }",
+                "incompatible with function type alias `Stringify`",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
