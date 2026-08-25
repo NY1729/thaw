@@ -331,6 +331,9 @@ The workspace crates have narrow responsibilities:
   incremental reads, the HTTP parser emits decoded content-length, chunked or
   close-delimited body chunks as they arrive, and body completion closes the
   Web stream independently of the initial fetch Promise
+  Aborting after headers have resolved still destroys the active transport,
+  errors a pending body reader with the signal reason and releases its abort
+  listener; cancelling the body stream performs the same transport cleanup
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
