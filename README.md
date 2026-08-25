@@ -325,7 +325,8 @@ The workspace crates have narrow responsibilities:
   transport, exposes the reply as a `Response` with a `ReadableStream` body,
   preserves repeated response headers, follows up to 20 relative or absolute
   redirects with standard POST rewriting, supports `manual`/`error` redirect
-  modes, and rejects with the AbortSignal reason or a transport `TypeError`
+  modes, removes body headers after method rewriting and credentials across
+  origins, and rejects with the AbortSignal reason or a transport `TypeError`
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
