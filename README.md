@@ -340,7 +340,9 @@ The workspace crates have narrow responsibilities:
   at the negotiated frame size, backpressure above the available window and
   resume on WINDOW_UPDATE. HPACK supports RFC Huffman strings, connection-local
   encoder/decoder dynamic tables, indexed literals, table-size updates and
-  never-indexed sensitive fields. TLS/ALPN transport remains an explicit gap
+  never-indexed sensitive fields. HTTPS clients and secure servers negotiate
+  `h2` through rustls ALPN, validate custom certificate authorities and reuse
+  the same streaming frame state machine over encrypted connections
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
