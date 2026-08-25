@@ -13532,6 +13532,20 @@ mod tests {
                 value = 4;
                 return value + 1;
             }
+            function render(value: string | number | boolean): string {
+                if (typeof value === "string") return value + "!";
+                if (typeof value === "number") return String(value + 1);
+                return value ? "true" : "false";
+            }
+            function renderNested(value: string | number | boolean): string {
+                if (typeof value === "string") {
+                    return value + "?";
+                } else if (typeof value === "number") {
+                    return String(value * 2);
+                } else {
+                    return value ? "yes" : "no";
+                }
+            }
             function fieldKind(value: { data: string | number }): string {
                 return typeof value.data;
             }
@@ -13547,6 +13561,12 @@ mod tests {
                 console.log(describeReverse("ok"));
                 console.log(describeReverse(5));
                 console.log(reassigned());
+                console.log(render("three"));
+                console.log(render(2));
+                console.log(render(false));
+                console.log(renderNested("nested"));
+                console.log(renderNested(3));
+                console.log(renderNested(true));
                 console.log(fieldKind({ data: "field" }));
                 console.log(fieldKind({ data: 7 }));
                 console.log(kind(await delayed("later")));
@@ -13555,7 +13575,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
-            "string\nnumber\nhello!\n43\nok?\n10\n5\nstring\nnumber\nstring\nnumber\n"
+            "string\nnumber\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
         );
     }
 
