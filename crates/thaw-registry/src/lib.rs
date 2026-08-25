@@ -203,6 +203,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "zlib" => {
             "export declare function gzipSync(argsArray: any): any;\nexport declare function gunzipSync(argsArray: any): any;\nexport declare function deflateSync(argsArray: any): any;\nexport declare function inflateSync(argsArray: any): any;\nexport declare function deflateRawSync(argsArray: any): any;\nexport declare function inflateRawSync(argsArray: any): any;\nexport declare function gzip(argsArray: any): void;\nexport declare function gunzip(argsArray: any): void;\n"
         }
+        "worker_threads" => {
+            "export declare const isMainThread: boolean;\nexport declare const threadId: number;\nexport declare const workerData: any;\nexport declare const parentPort: any;\nexport declare const MessageChannel: any;\nexport declare const MessagePort: any;\nexport declare function receiveMessageOnPort(argsArray: any): any;\nexport declare function setEnvironmentData(argsArray: any): void;\nexport declare function getEnvironmentData(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -3070,7 +3073,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3108,6 +3111,13 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
             "function input(value) { return Buffer.isBuffer(value) ? value : Buffer.from(value); } function run(operation, format, value) { return Buffer.from(__thaw_zlib_hex(operation, format, input(value).toString('hex')), 'hex'); } function sync(operation, format) { return function(value) { return run(operation, format, value); }; } function async(syncFunction) { return function(value, options, callback) { if (typeof options === 'function') callback = options; try { var result = syncFunction(value, options); queueMicrotask(function() { callback(null, result); }); } catch (error) { queueMicrotask(function() { callback(error); }); } }; }\n\
              var gzipSync = sync('compress', 'gzip'), gunzipSync = sync('decompress', 'gzip'), deflateSync = sync('compress', 'deflate'), inflateSync = sync('decompress', 'deflate'), deflateRawSync = sync('compress', 'deflateRaw'), inflateRawSync = sync('decompress', 'deflateRaw');\n\
              module.exports = { gzipSync: gzipSync, gunzipSync: gunzipSync, deflateSync: deflateSync, inflateSync: inflateSync, deflateRawSync: deflateRawSync, inflateRawSync: inflateRawSync, gzip: async(gzipSync), gunzip: async(gunzipSync), deflate: async(deflateSync), inflate: async(inflateSync), deflateRaw: async(deflateRawSync), inflateRaw: async(inflateRawSync), constants: { Z_OK: 0, Z_STREAM_END: 1, Z_DEFAULT_COMPRESSION: -1 } }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "worker_threads" => Some(
+            "var environmentData = globalThis.__thaw_worker_environment_data || (globalThis.__thaw_worker_environment_data = new Map()); var SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');\n\
+             function receiveMessageOnPort(port) { if (!(port instanceof MessagePort)) throw new TypeError('port must be a MessagePort'); var record = port.__thawQueue.shift(); return record ? { message: record.data } : undefined; }\n\
+             function setEnvironmentData(key, value) { environmentData.set(key, structuredClone(value)); } function getEnvironmentData(key) { var value = environmentData.get(key); return value === undefined ? undefined : structuredClone(value); }\n\
+             function moveMessagePortToContext(port) { if (!(port instanceof MessagePort)) throw new TypeError('port must be a MessagePort'); return port; } function markAsUntransferable() {} function markAsUncloneable() {} function isMarkedAsUntransferable() { return false; }\n\
+             module.exports = { isMainThread: true, threadId: 0, workerData: null, parentPort: null, resourceLimits: {}, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, receiveMessageOnPort: receiveMessageOnPort, setEnvironmentData: setEnvironmentData, getEnvironmentData: getEnvironmentData, moveMessagePortToContext: moveMessagePortToContext, markAsUntransferable: markAsUntransferable, markAsUncloneable: markAsUncloneable, isMarkedAsUntransferable: isMarkedAsUntransferable, SHARE_ENV: SHARE_ENV }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         _ => None,
     }
@@ -5313,6 +5323,31 @@ mod tests {
         );
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(result, r#"[31,139,true,true,true,0]"#);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn worker_threads_builtin_exchanges_cloned_messages() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_worker_threads");
+        fs::write(
+            dir.join("index.js"),
+            "var workers = require('node:worker_threads'); module.exports = async function () { var channel = new workers.MessageChannel(); var original = { value: 7 }; channel.port1.postMessage(original); original.value = 9; var received = workers.receiveMessageOnPort(channel.port2); var pending = new Promise(function(resolve) { channel.port2.once('message', resolve); }); channel.port1.postMessage(new Map([['answer', 42]])); var asynchronous = await pending; workers.setEnvironmentData('config', { enabled: true }); var environment = workers.getEnvironmentData('config'); environment.enabled = false; var freshEnvironment = workers.getEnvironmentData('config'); channel.port1.unref(); var refed = channel.port1.hasRef(); channel.port1.ref(); channel.port1.close(); channel.port2.close(); return [workers.isMainThread, workers.threadId, workers.parentPort, received.message.value, asynchronous.get('answer'), freshEnvironment.enabled, refed, channel.port1.hasRef(), workers.SHARE_ENV === Symbol.for('nodejs.worker_threads.SHARE_ENV'), workers.receiveMessageOnPort(channel.port2) === undefined]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_worker_threads_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkers = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseWorkers").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[true,0,null,7,42,true,false,true,true,true]"#);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
