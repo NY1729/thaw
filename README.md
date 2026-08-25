@@ -320,7 +320,9 @@ The workspace crates have narrow responsibilities:
   high-water-mark return values, queued length and `drain` notification.
   Synchronously completed `_write`/`_writev` operations defer user callbacks
   until after `write()` returns and reject repeated completion callbacks with
-  `ERR_MULTIPLE_CALLBACK`.
+  `ERR_MULTIPLE_CALLBACK`. When asynchronous writes release backpressure,
+  `drain` clears `writableNeedDrain` and the next queued write starts before
+  the completed write's callback, matching Node's ordering.
   Nested `cork()`/`uncork()` defers writes and uses `_writev` batches when
   available; `end()` safely releases any remaining cork level.
   Completion is deferred like Node: repeated `end()` callbacks settle exactly
