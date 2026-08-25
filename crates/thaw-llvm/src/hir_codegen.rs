@@ -14229,6 +14229,7 @@ mod tests {
             type Numeric = <T extends number>(value: T) => T;
             type DefaultFactory = <T = string>() => T;
             type AsyncIdentity = <T>(value: T) => Promise<T>;
+            type Stringify = <T>(value: T) => string;
             function namedIdentity<T>(value: T): T { return value; }
             async function namedAsyncIdentity<T>(value: T): Promise<T> { return value; }
             async function main(): Promise<void> {
@@ -14251,6 +14252,7 @@ mod tests {
                 const inferredFunctionReturn: Identity = function<T>(value: T) { return value; };
                 const conditionalReturn: Identity = <T>(value: T) => true ? value : value;
                 const branchedReturn: Identity = function<T>(value: T) { if (true) { return value; } return value; };
+                const literalReturn: Stringify = <T>(value: T) => "constant";
                 const asyncIdentity: AsyncIdentity = namedAsyncIdentity;
                 console.log(identity(24));
                 console.log(identity("alias"));
@@ -14277,11 +14279,12 @@ mod tests {
                 console.log(await asyncIdentity<string>("async-alias"));
                 console.log(conditionalReturn(36));
                 console.log(branchedReturn<string>("branched-return"));
+                console.log(literalReturn(true));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\n"
         );
     }
 

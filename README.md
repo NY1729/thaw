@@ -385,7 +385,8 @@ The workspace crates have narrow responsibilities:
   its annotated parameters. Direct identity returns infer that parameter's
   generic pattern for arrow and function expressions, including conditional
   expressions and `if`/block paths whose every return selects the same
-  parameter. The equivalent
+  parameter. Primitive number, string and boolean literal returns infer their
+  concrete type through the same control-flow check. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Callable assignment compares the effective Promise-wrapped return of named
