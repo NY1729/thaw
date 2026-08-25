@@ -149,17 +149,20 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
 pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
     let name = specifier.strip_prefix("node:").unwrap_or(specifier);
     let dts_source = match name {
-        "util" => {
+        "util" | "sys" => {
             "export declare function inspect(argsArray: any): any;\nexport declare function format(argsArray: any): any;\nexport declare function formatWithOptions(argsArray: any): any;\nexport declare function inherits(argsArray: any): void;\nexport declare function promisify(argsArray: any): any;\nexport declare function callbackify(argsArray: any): any;\nexport declare function deprecate(argsArray: any): any;\nexport declare function stripVTControlCharacters(argsArray: any): any;\nexport declare function toUSVString(argsArray: any): any;\nexport declare function parseArgs(argsArray: any): any;\nexport declare const TextEncoder: any;\nexport declare const TextDecoder: any;\n"
         }
         "util/types" => {
             "export declare function isDate(argsArray: any): boolean;\nexport declare function isRegExp(argsArray: any): boolean;\nexport declare function isMap(argsArray: any): boolean;\nexport declare function isSet(argsArray: any): boolean;\nexport declare function isPromise(argsArray: any): boolean;\nexport declare function isArrayBuffer(argsArray: any): boolean;\nexport declare function isTypedArray(argsArray: any): boolean;\nexport declare function isNativeError(argsArray: any): boolean;\n"
         }
-        "path" => {
+        "path" | "path/posix" | "path/win32" => {
             "export declare function resolve(argsArray: any): any;\nexport declare function join(argsArray: any): any;\nexport declare function dirname(argsArray: any): any;\nexport declare function basename(argsArray: any): any;\nexport declare function extname(argsArray: any): any;\nexport declare function normalize(argsArray: any): any;\nexport declare function relative(argsArray: any): any;\nexport declare function isAbsolute(argsArray: any): any;\nexport declare function parse(argsArray: any): any;\nexport declare function format(argsArray: any): any;\nexport declare function toNamespacedPath(argsArray: any): any;\n"
         }
         "process" => {
             "export declare function cwd(argsArray: any): any;\nexport declare function chdir(argsArray: any): void;\nexport declare function uptime(argsArray: any): any;\nexport declare function hrtime(argsArray: any): any;\nexport declare function memoryUsage(argsArray: any): any;\nexport declare function cpuUsage(argsArray: any): any;\nexport declare function emitWarning(argsArray: any): void;\n"
+        }
+        "domain" => {
+            "export declare const active: any;\nexport declare const Domain: any;\nexport declare function create(argsArray: any): any;\nexport declare function createDomain(argsArray: any): any;\n"
         }
         "child_process" => {
             "export declare const ChildProcess: any;\nexport declare function spawn(argsArray: any): any;\nexport declare function exec(argsArray: any): any;\nexport declare function execFile(argsArray: any): any;\nexport declare function spawnSync(argsArray: any): any;\nexport declare function execFileSync(argsArray: any): any;\nexport declare function execSync(argsArray: any): any;\n"
@@ -3286,6 +3289,12 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
+        "path/posix" => Some(
+            "module.exports = require('node:path').posix; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "path/win32" => Some(
+            "module.exports = require('node:path').win32; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         "url" => Some(
             "function pathToFileURL(path) {\n\
              \x20\x20var value = String(path);\n\
@@ -3354,6 +3363,26 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { stringify: stringify, encode: stringify, parse: parse, decode: parse, escape: escape, unescape: unescape };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
+        ),
+        "sys" => Some(
+            "module.exports = require('node:util');\n",
+        ),
+        "domain" => Some(
+            r#"var EventEmitter = require('node:events'), stack = [];
+             function Domain() { if (!(this instanceof Domain)) return new Domain(); EventEmitter.call(this); this.members = []; }
+             Domain.prototype = Object.create(EventEmitter.prototype); Domain.prototype.constructor = Domain;
+             Domain.prototype.enter = function() { stack.push(module.exports.active); module.exports.active = this; if (globalThis.process) process.domain = this; return this; };
+             Domain.prototype.exit = function() { if (module.exports.active !== this) return this; module.exports.active = stack.length ? stack.pop() : null; if (globalThis.process) process.domain = module.exports.active || null; return this; };
+             Domain.prototype.add = function(emitter) { if (!emitter || (typeof emitter !== 'object' && typeof emitter !== 'function')) throw new TypeError('emitter must be an object'); if (emitter.domain && emitter.domain !== this && emitter.domain.remove) emitter.domain.remove(emitter); if (this.members.indexOf(emitter) < 0) this.members.push(emitter); emitter.domain = this; return this; };
+             Domain.prototype.remove = function(emitter) { var index = this.members.indexOf(emitter); if (index >= 0) this.members.splice(index, 1); if (emitter && emitter.domain === this) emitter.domain = null; return this; };
+             Domain.prototype._handle = function(error) { if (!(error instanceof Error)) error = new Error(String(error)); error.domain = this; error.domainThrown = true; if (this.listenerCount('error')) { this.emit('error', error); return; } throw error; };
+             Domain.prototype.run = function(fn) { var args = Array.prototype.slice.call(arguments, 1); this.enter(); try { return fn.apply(undefined, args); } catch (error) { return this._handle(error); } finally { this.exit(); } };
+             Domain.prototype.bind = function(fn) { if (typeof fn !== 'function') throw new TypeError('callback must be a function'); var domain = this; function bound() { var args = arguments, receiver = this; return domain.run(function() { return fn.apply(receiver, args); }); } bound.domain = domain; return bound; };
+             Domain.prototype.intercept = function(fn) { if (typeof fn !== 'function') throw new TypeError('callback must be a function'); var domain = this; function intercepted(error) { if (error) return domain._handle(error); var args = Array.prototype.slice.call(arguments, 1), receiver = this; return domain.run(function() { return fn.apply(receiver, args); }); } intercepted.domain = domain; return intercepted; };
+             Domain.prototype.dispose = function() { this.exit(); this.members.slice().forEach(this.remove, this); this.removeAllListeners(); return this; };
+             function create() { return new Domain(); }
+             module.exports = { Domain: Domain, create: create, createDomain: create, active: null }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
         ),
         "events" => Some(
             "function EventEmitter() {\n\
@@ -3816,7 +3845,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','timers','timers/promises','tls','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','timers','timers/promises','tls','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -5881,6 +5910,35 @@ mod tests {
         assert_eq!(
             result,
             r#"["/a/c/","../c/d",".gz","archive.tar",{"root":"/","dir":"/tmp","base":"archive.tar.gz","ext":".gz","name":"archive.tar"},"/tmp/archive.tar.gz",true,true,"C:\\b",true,":",";"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn legacy_builtin_aliases_and_domains_preserve_node_behavior() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_legacy_aliases_domain");
+        fs::write(
+            dir.join("index.js"),
+            "var path = require('node:path'), posix = require('path/posix'), win32 = require('node:path/win32'), util = require('node:util'), sys = require('sys'), domain = require('node:domain'), EventEmitter = require('node:events'); module.exports = function () { var errors = [], values = [], active = false, d = domain.create(); d.on('error', function(error) { errors.push([error.message, error.domain === d, error.domainThrown]); }); d.run(function() { active = domain.active === d && process.domain === d; throw new Error('run'); }); var receiver = { value: 4, callback: d.bind(function(extra) { values.push(this.value + extra); throw new Error('bound'); }) }; receiver.callback(3); var intercepted = d.intercept(function(value) { values.push(value); }); intercepted(new Error('intercepted')); intercepted(null, 9); var emitter = new EventEmitter(); d.add(emitter); var added = emitter.domain === d && d.members[0] === emitter; d.remove(emitter); return [posix === path.posix, win32 === path.win32, sys === util, posix.join('a', 'b'), win32.join('C:\\\\a', 'b'), active, domain.active, process.domain, errors, values, added, emitter.domain, d.members.length]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_legacy_aliases_domain_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 8);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseLegacyBuiltins = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseLegacyBuiltins").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,true,true,"a/b","C:\\a\\b",true,null,null,[["run",true,true],["bound",true,true],["intercepted",true,true]],[7,9],true,null,0]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
