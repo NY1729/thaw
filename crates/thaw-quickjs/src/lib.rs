@@ -328,14 +328,35 @@ fn decode_private_key(spec: &str) -> Result<PrivateKeyDer<'static>, String> {
     }
 }
 
-fn tls_connect(
-    host: &str,
+fn decode_alpn_protocols(spec: &str) -> Vec<Vec<u8>> {
+    spec.split(',')
+        .filter(|value| !value.is_empty())
+        .map(hex_decode)
+        .collect()
+}
+
+struct TlsClientOptions<'a> {
+    host: &'a str,
     port: u16,
-    server_name: &str,
-    ca_spec: &str,
-    cert_spec: &str,
-    key_spec: &str,
-) -> String {
+    server_name: &'a str,
+    ca_spec: &'a str,
+    cert_spec: &'a str,
+    key_spec: &'a str,
+    alpn_spec: &'a str,
+    report_alpn: bool,
+}
+
+fn tls_connect(options: TlsClientOptions<'_>) -> String {
+    let TlsClientOptions {
+        host,
+        port,
+        server_name,
+        ca_spec,
+        cert_spec,
+        key_spec,
+        alpn_spec,
+        report_alpn,
+    } = options;
     let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
         let certificates = match decode_certificates(certificate_spec) {
@@ -367,6 +388,8 @@ fn tls_connect(
             Err(error) => return format!("err:{error}"),
         }
     };
+    let mut config = config;
+    config.alpn_protocols = decode_alpn_protocols(alpn_spec);
     let config = Arc::new(config);
     let name = match ServerName::try_from(server_name.to_string()) {
         Ok(name) => name,
@@ -393,19 +416,42 @@ fn tls_connect(
         streams
             .1
             .insert(handle, StreamOwned::new(connection, socket));
-        format!("ok:{handle}")
+        if report_alpn {
+            let protocol = streams
+                .1
+                .get(&handle)
+                .and_then(|stream| stream.conn.alpn_protocol())
+                .map(hex_encode)
+                .unwrap_or_default();
+            format!("ok:{handle}:{protocol}")
+        } else {
+            format!("ok:{handle}")
+        }
     })
 }
 
-fn tls_server_listen(
-    host: &str,
+struct TlsServerOptions<'a> {
+    host: &'a str,
     port: u16,
-    cert_spec: &str,
-    key_spec: &str,
-    ca_spec: &str,
+    cert_spec: &'a str,
+    key_spec: &'a str,
+    ca_spec: &'a str,
     request_cert: bool,
     reject_unauthorized: bool,
-) -> String {
+    alpn_spec: &'a str,
+}
+
+fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
+    let TlsServerOptions {
+        host,
+        port,
+        cert_spec,
+        key_spec,
+        ca_spec,
+        request_cert,
+        reject_unauthorized,
+        alpn_spec,
+    } = options;
     let certificates = match decode_certificates(cert_spec) {
         Ok(certificates) => certificates,
         Err(error) => return format!("err:{error}"),
@@ -444,7 +490,10 @@ fn tls_server_listen(
         builder.with_no_client_auth()
     };
     let config = match builder.with_single_cert(certificates, private_key) {
-        Ok(config) => Arc::new(config),
+        Ok(mut config) => {
+            config.alpn_protocols = decode_alpn_protocols(alpn_spec);
+            Arc::new(config)
+        }
         Err(error) => return format!("err:{error}"),
     };
     let socket = match TcpListener::bind((host, port)) {
@@ -508,7 +557,17 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
         streams
             .1
             .insert(stream_handle, StreamOwned::new(connection, socket));
-        format!("ok:{stream_handle}:{}:{}", peer.ip(), peer.port())
+        let protocol = streams
+            .1
+            .get(&stream_handle)
+            .and_then(|stream| stream.conn.alpn_protocol())
+            .map(hex_encode)
+            .unwrap_or_default();
+        format!(
+            "ok:{stream_handle}:{}:{}:{protocol}",
+            peer.ip(),
+            peer.port()
+        )
     })
 }
 
@@ -605,6 +664,26 @@ fn tls_destroy(handle: u32) {
     TLS_SERVER_STREAMS.with(|streams| {
         streams.borrow_mut().1.remove(&handle);
     });
+}
+
+fn tls_alpn(handle: u32) -> String {
+    let client = TLS_STREAMS.with(|streams| {
+        streams
+            .borrow()
+            .1
+            .get(&handle)
+            .and_then(|stream| stream.conn.alpn_protocol().map(hex_encode))
+    });
+    client.unwrap_or_else(|| {
+        TLS_SERVER_STREAMS.with(|streams| {
+            streams
+                .borrow()
+                .1
+                .get(&handle)
+                .and_then(|stream| stream.conn.alpn_protocol().map(hex_encode))
+                .unwrap_or_default()
+        })
+    })
 }
 
 fn to_str(ptr: *const c_char) -> String {
@@ -842,7 +921,16 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_connect_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, server_name: String, ca: String| {
-                        tls_connect(&host, port as u16, &server_name, &ca, "", "")
+                        tls_connect(TlsClientOptions {
+                            host: &host,
+                            port: port as u16,
+                            server_name: &server_name,
+                            ca_spec: &ca,
+                            cert_spec: "",
+                            key_spec: "",
+                            alpn_spec: "",
+                            report_alpn: false,
+                        })
                     },
                 )
                 .expect("failed to create JavaScript TLS connector");
@@ -854,10 +942,41 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                      ca: String,
                      cert: String,
                      key: String| {
-                        tls_connect(&host, port as u16, &server_name, &ca, &cert, &key)
+                        tls_connect(TlsClientOptions {
+                            host: &host,
+                            port: port as u16,
+                            server_name: &server_name,
+                            ca_spec: &ca,
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            alpn_spec: "",
+                            report_alpn: false,
+                        })
                     },
                 )
                 .expect("failed to create JavaScript mutual TLS connector");
+                let tls_connect_with_options_function = Function::new(
+                    ctx.clone(),
+                    |host: String,
+                     port: u32,
+                     server_name: String,
+                     ca: String,
+                     cert: String,
+                     key: String,
+                     alpn: String| {
+                        tls_connect(TlsClientOptions {
+                            host: &host,
+                            port: port as u16,
+                            server_name: &server_name,
+                            ca_spec: &ca,
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            alpn_spec: &alpn,
+                            report_alpn: true,
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript TLS options connector");
                 let tls_write_function =
                     Function::new(ctx.clone(), |handle: u32, value: String| {
                         tls_write(handle, &hex_decode(&value))
@@ -869,10 +988,21 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_destroy_function =
                     Function::new(ctx.clone(), |handle: u32| tls_destroy(handle))
                         .expect("failed to create JavaScript TLS closer");
+                let tls_alpn_function = Function::new(ctx.clone(), |handle: u32| tls_alpn(handle))
+                    .expect("failed to create JavaScript TLS ALPN reader");
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
-                        tls_server_listen(&host, port as u16, &cert, &key, "", false, true)
+                        tls_server_listen(TlsServerOptions {
+                            host: &host,
+                            port: port as u16,
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            ca_spec: "",
+                            request_cert: false,
+                            reject_unauthorized: true,
+                            alpn_spec: "",
+                        })
                     },
                 )
                 .expect("failed to create JavaScript TLS listener");
@@ -884,18 +1014,41 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                      key: String,
                      ca: String,
                      reject_unauthorized: bool| {
-                        tls_server_listen(
-                            &host,
-                            port as u16,
-                            &cert,
-                            &key,
-                            &ca,
-                            true,
+                        tls_server_listen(TlsServerOptions {
+                            host: &host,
+                            port: port as u16,
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            ca_spec: &ca,
+                            request_cert: true,
                             reject_unauthorized,
-                        )
+                            alpn_spec: "",
+                        })
                     },
                 )
                 .expect("failed to create JavaScript mutual TLS listener");
+                let tls_server_listen_with_options_function = Function::new(
+                    ctx.clone(),
+                    |host: String,
+                     port: u32,
+                     cert: String,
+                     key: String,
+                     ca: String,
+                     flags: u32,
+                     alpn: String| {
+                        tls_server_listen(TlsServerOptions {
+                            host: &host,
+                            port: port as u16,
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            ca_spec: &ca,
+                            request_cert: flags & 1 != 0,
+                            reject_unauthorized: flags & 2 != 0,
+                            alpn_spec: &alpn,
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript TLS options listener");
                 let tls_server_accept_function =
                     Function::new(ctx.clone(), |handle: u32| tls_server_accept(handle))
                         .expect("failed to create JavaScript TLS acceptor");
@@ -968,6 +1121,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     )
                     .expect("failed to install JavaScript mutual TLS connector");
                 ctx.globals()
+                    .set(
+                        "__thaw_tls_connect_with_options",
+                        tls_connect_with_options_function,
+                    )
+                    .expect("failed to install JavaScript TLS options connector");
+                ctx.globals()
                     .set("__thaw_tls_write", tls_write_function)
                     .expect("failed to install JavaScript TLS writer");
                 ctx.globals()
@@ -977,6 +1136,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .set("__thaw_tls_destroy", tls_destroy_function)
                     .expect("failed to install JavaScript TLS closer");
                 ctx.globals()
+                    .set("__thaw_tls_alpn", tls_alpn_function)
+                    .expect("failed to install JavaScript TLS ALPN reader");
+                ctx.globals()
                     .set("__thaw_tls_server_listen", tls_server_listen_function)
                     .expect("failed to install JavaScript TLS listener");
                 ctx.globals()
@@ -985,6 +1147,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         tls_server_listen_with_ca_function,
                     )
                     .expect("failed to install JavaScript mutual TLS listener");
+                ctx.globals()
+                    .set(
+                        "__thaw_tls_server_listen_with_options",
+                        tls_server_listen_with_options_function,
+                    )
+                    .expect("failed to install JavaScript TLS options listener");
                 ctx.globals()
                     .set("__thaw_tls_server_accept", tls_server_accept_function)
                     .expect("failed to install JavaScript TLS acceptor");
