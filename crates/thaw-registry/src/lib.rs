@@ -155,6 +155,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         }
         "process" => "export declare function cwd(argsArray: any): any;\n",
         "buffer" => "export declare function byteLength(argsArray: any): any;\n",
+        "url" => {
+            "export declare const URL: any;\nexport declare const URLSearchParams: any;\nexport declare function pathToFileURL(argsArray: any): any;\nexport declare function fileURLToPath(argsArray: any): any;\nexport declare function urlToHttpOptions(argsArray: any): any;\n"
+        }
         "fs" => {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
@@ -2510,6 +2513,31 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20return idx === -1 ? n : n.substring(idx + 1);\n\
              }\n\
              module.exports = { resolve: resolve, join: join, dirname: dirname, basename: basename, normalize: __thaw_path_normalize, sep: '/' };\n\
+             module.exports.default = module.exports;\n\
+             module.exports.__esModule = true;\n",
+        ),
+        "url" => Some(
+            "function pathToFileURL(path) {\n\
+             \x20\x20var value = String(path);\n\
+             \x20\x20if (value.charAt(0) !== '/') value = '/' + value;\n\
+             \x20\x20var encoded = value.split('/').map(function(part) { return encodeURIComponent(part); }).join('/');\n\
+             \x20\x20return new globalThis.URL('file://' + encoded);\n\
+             }\n\
+             function fileURLToPath(input) {\n\
+             \x20\x20var url = input instanceof globalThis.URL ? input : new globalThis.URL(input);\n\
+             \x20\x20if (url.protocol !== 'file:') throw new TypeError('URL must use the file: protocol');\n\
+             \x20\x20if (url.hostname !== '' && url.hostname !== 'localhost') throw new TypeError('file URL host must be empty or localhost');\n\
+             \x20\x20if (/%2f|%5c/i.test(url.pathname)) throw new TypeError('file URL path must not include encoded separators');\n\
+             \x20\x20return decodeURIComponent(url.pathname);\n\
+             }\n\
+             function urlToHttpOptions(input) {\n\
+             \x20\x20var url = input instanceof globalThis.URL ? input : new globalThis.URL(input);\n\
+             \x20\x20var options = { protocol: url.protocol, hostname: url.hostname, hash: url.hash, search: url.search, pathname: url.pathname, path: url.pathname + url.search, href: url.href };\n\
+             \x20\x20if (url.port !== '') options.port = Number(url.port);\n\
+             \x20\x20if (url.username !== '' || url.password !== '') options.auth = decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password);\n\
+             \x20\x20return options;\n\
+             }\n\
+             module.exports = { URL: globalThis.URL, URLSearchParams: globalThis.URLSearchParams, pathToFileURL: pathToFileURL, fileURLToPath: fileURLToPath, urlToHttpOptions: urlToHttpOptions };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
