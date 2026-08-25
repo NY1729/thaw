@@ -3188,6 +3188,8 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              Server.prototype.on = TLSSocket.prototype.on; Server.prototype.once = TLSSocket.prototype.once; Server.prototype.off = Server.prototype.removeListener = TLSSocket.prototype.off; Server.prototype.emit = TLSSocket.prototype.emit;
              Server.prototype.listen = function(port, host, callback) { var options = typeof port === 'object' ? port : { port: port, host: host }; if (typeof host === 'function') callback = host; if (typeof callback === 'function') this.once('listening', callback); var hostname = String(options.host || '127.0.0.1'); var cert = this._options.cert, key = this._options.key; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; if (cert === undefined || key === undefined) { queueMicrotask(() => this.emit('error', new Error('cert and key are required'))); return this; } var outcome = __thaw_tls_server_listen(hostname, Number(options.port), Buffer.from(cert).toString('hex'), Buffer.from(key).toString('hex')); if (outcome.indexOf('ok:') !== 0) { queueMicrotask(() => this.emit('error', new Error(outcome.substring(4)))); return this; } var fields = outcome.split(':'); this._handle = Number(fields[1]); this._address = { address: hostname, family: hostname.indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(fields[2]) }; this.listening = true; queueMicrotask(() => { this.emit('listening'); var accepted = __thaw_tls_server_accept(this._handle); if (accepted.indexOf('ok:') !== 0) { this.emit('tlsClientError', new Error(accepted.substring(4))); return; } var peer = accepted.split(':'); var socket = new TLSSocket(); socket._handle = Number(peer[1]); socket.authorized = true; socket.readable = true; socket.writable = true; socket.remoteAddress = peer[2]; socket.remotePort = Number(peer[3]); socket.remoteFamily = peer[2].indexOf(':') >= 0 ? 'IPv6' : 'IPv4'; this.connections++; this.emit('secureConnection', socket); var incoming = __thaw_tls_server_read(socket._handle); if (incoming.indexOf('ok:') === 0) { var data = Buffer.from(incoming.substring(3), 'hex'); if (data.length) { socket.bytesRead += data.length; socket.emit('data', data); } socket.emit('end'); } else socket.emit('error', new Error(incoming.substring(4))); }); return this; };
              Server.prototype.address = function() { return this._address; }; Server.prototype.getConnections = function(callback) { queueMicrotask(() => callback(null, this.connections)); }; Server.prototype.close = function(callback) { if (typeof callback === 'function') this.once('close', callback); if (this._handle) __thaw_tls_server_close(this._handle); this._handle = 0; this.listening = false; queueMicrotask(() => this.emit('close')); return this; }; Server.prototype.ref = function() { this._refed = true; return this; }; Server.prototype.unref = function() { this._refed = false; return this; }; function createServer(options, listener) { return new Server(options, listener); }
+             var connectWithoutIdentity = TLSSocket.prototype.connect; TLSSocket.prototype.connect = function(options, listener) { options = options || {}; if (options.cert === undefined && options.key === undefined) return connectWithoutIdentity.call(this, options, listener); var cert = options.cert, key = options.key; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; var nativeConnect = __thaw_tls_connect; __thaw_tls_connect = function(host, port, servername, ca) { return __thaw_tls_connect_with_identity(host, port, servername, ca, cert === undefined ? '' : Buffer.from(cert).toString('hex'), key === undefined ? '' : Buffer.from(key).toString('hex')); }; try { return connectWithoutIdentity.call(this, options, listener); } finally { __thaw_tls_connect = nativeConnect; } };
+             var listenWithoutClientAuth = Server.prototype.listen; Server.prototype.listen = function() { if (!this._options.requestCert) return listenWithoutClientAuth.apply(this, arguments); var ca = this._options.ca; if (Array.isArray(ca)) ca = ca[0]; var caHex = ca === undefined ? '' : Buffer.from(ca).toString('hex'); var rejectUnauthorized = this._options.rejectUnauthorized !== false; var nativeListen = __thaw_tls_server_listen; __thaw_tls_server_listen = function(host, port, cert, key) { return __thaw_tls_server_listen_with_ca(host, port, cert, key, caHex, rejectUnauthorized); }; try { return listenWithoutClientAuth.apply(this, arguments); } finally { __thaw_tls_server_listen = nativeListen; } };
              module.exports.Server = Server; module.exports.createServer = createServer;
 "#,
         )),
@@ -5912,7 +5914,8 @@ mod tests {
     #[test]
     fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
         use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-        use rustls::{ServerConfig, ServerConnection, StreamOwned};
+        use rustls::server::WebPkiClientVerifier;
+        use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
         use std::ffi::{CStr, CString};
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -5924,6 +5927,9 @@ mod tests {
         let cert_pem = certificate_dir.join("cert.pem");
         let key_der = certificate_dir.join("key.der");
         let cert_der = certificate_dir.join("cert.der");
+        let client_key_pem = certificate_dir.join("client-key.pem");
+        let client_cert_pem = certificate_dir.join("client-cert.pem");
+        let client_cert_der = certificate_dir.join("client-cert.der");
         assert!(Command::new("openssl")
             .args([
                 "req",
@@ -5953,10 +5959,44 @@ mod tests {
             .status
             .success());
         assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=thaw-client",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature",
+                "-addext",
+                "extendedKeyUsage=clientAuth",
+                "-keyout",
+            ])
+            .arg(&client_key_pem)
+            .arg("-out")
+            .arg(&client_cert_pem)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
             .args(["x509", "-in"])
             .arg(&cert_pem)
             .args(["-outform", "DER", "-out"])
             .arg(&cert_der)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&client_cert_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&client_cert_der)
             .status()
             .unwrap()
             .success());
@@ -5971,9 +6011,16 @@ mod tests {
         let certificate_bytes = fs::read(&cert_der).unwrap();
         let certificate = CertificateDer::from(certificate_bytes.clone());
         let private_key = PrivatePkcs8KeyDer::from(fs::read(&key_der).unwrap()).into();
+        let mut client_roots = RootCertStore::empty();
+        client_roots
+            .add(CertificateDer::from(fs::read(&client_cert_der).unwrap()))
+            .unwrap();
+        let client_verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .unwrap();
         let config = Arc::new(
             ServerConfig::builder()
-                .with_no_client_auth()
+                .with_client_cert_verifier(client_verifier)
                 .with_single_cert(vec![certificate], private_key)
                 .unwrap(),
         );
@@ -5998,9 +6045,27 @@ mod tests {
                 let _ = write!(output, "{byte:02x}");
                 output
             });
+        let client_cert_hex =
+            fs::read(&client_cert_pem)
+                .unwrap()
+                .iter()
+                .fold(String::new(), |mut output, byte| {
+                    use std::fmt::Write as _;
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                });
+        let client_key_hex =
+            fs::read(&client_key_pem)
+                .unwrap()
+                .iter()
+                .fold(String::new(), |mut output, byte| {
+                    use std::fmt::Write as _;
+                    let _ = write!(output, "{byte:02x}");
+                    output
+                });
 
         let dir = temp_registry("builtin_tls");
-        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function (port, caHex) { var events = []; var socket = new tls.TLSSocket(); socket.on('connect', function() { events.push('connect'); }); socket.on('secureConnect', function() { events.push('secureConnect'); }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var closed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect({ host: '127.0.0.1', port: port, servername: 'localhost', ca: Buffer.from(caHex, 'hex') }); socket.end('ping'); await closed; return [events, socket.authorized, socket.authorizationError, socket.encrypted, socket.getProtocol(), socket.getCipher().version, socket.bytesWritten, socket.bytesRead, tls.getCiphers().length, tls.DEFAULT_MIN_VERSION]; };").unwrap();
+        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function (port, caHex, certHex, keyHex) { var events = []; var socket = new tls.TLSSocket(); socket.on('connect', function() { events.push('connect'); }); socket.on('secureConnect', function() { events.push('secureConnect'); }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var closed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect({ host: '127.0.0.1', port: port, servername: 'localhost', ca: Buffer.from(caHex, 'hex'), cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex') }); socket.end('ping'); await closed; return [events, socket.authorized, socket.authorizationError, socket.encrypted, socket.getProtocol(), socket.getCipher().version, socket.bytesWritten, socket.bytesRead, tls.getCiphers().length, tls.DEFAULT_MIN_VERSION]; };").unwrap();
         let empty_node_modules = temp_registry("builtin_tls_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -6009,7 +6074,10 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("exerciseTls").unwrap();
-        let arguments = CString::new(format!("[{port},\"{ca_hex}\"]")).unwrap();
+        let arguments = CString::new(format!(
+            "[{port},\"{ca_hex}\",\"{client_cert_hex}\",\"{client_key_hex}\"]"
+        ))
+        .unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(
@@ -6024,7 +6092,7 @@ mod tests {
 
     #[test]
     fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
-        use rustls::pki_types::{CertificateDer, ServerName};
+        use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
         use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
         use std::ffi::{CStr, CString};
         use std::io::{Read, Write};
@@ -6037,6 +6105,10 @@ mod tests {
         let key_pem = certificate_dir.join("key.pem");
         let cert_pem = certificate_dir.join("cert.pem");
         let cert_der = certificate_dir.join("cert.der");
+        let client_key_pem = certificate_dir.join("client-key.pem");
+        let client_cert_pem = certificate_dir.join("client-cert.pem");
+        let client_key_der = certificate_dir.join("client-key.der");
+        let client_cert_der = certificate_dir.join("client-cert.der");
         assert!(Command::new("openssl")
             .args([
                 "req",
@@ -6066,10 +6138,52 @@ mod tests {
             .status
             .success());
         assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=thaw-client",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature",
+                "-addext",
+                "extendedKeyUsage=clientAuth",
+                "-keyout",
+            ])
+            .arg(&client_key_pem)
+            .arg("-out")
+            .arg(&client_cert_pem)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
             .args(["x509", "-in"])
             .arg(&cert_pem)
             .args(["-outform", "DER", "-out"])
             .arg(&cert_der)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&client_cert_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&client_cert_der)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+            .arg(&client_key_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&client_key_der)
             .status()
             .unwrap()
             .success());
@@ -6084,7 +6198,11 @@ mod tests {
         let config = Arc::new(
             ClientConfig::builder()
                 .with_root_certificates(roots)
-                .with_no_client_auth(),
+                .with_client_auth_cert(
+                    vec![CertificateDer::from(fs::read(&client_cert_der).unwrap())],
+                    PrivatePkcs8KeyDer::from(fs::read(&client_key_der).unwrap()).into(),
+                )
+                .unwrap(),
         );
         let client = std::thread::spawn(move || {
             let socket = (0..50)
@@ -6118,8 +6236,9 @@ mod tests {
         };
         let cert_hex = to_hex(&fs::read(&cert_pem).unwrap());
         let key_hex = to_hex(&fs::read(&key_pem).unwrap());
+        let client_ca_hex = to_hex(&fs::read(&client_cert_pem).unwrap());
         let dir = temp_registry("builtin_tls_server");
-        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function(port, certHex, keyHex) { var events = []; var server; var closed = new Promise(function(resolve, reject) { server = tls.createServer({ cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex') }, function(socket) { events.push('secureConnection'); socket.on('error', reject); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); socket.end('pong', function() { server.close(); }); }); }); server.on('listening', function() { events.push('listening'); }); server.on('error', reject); server.on('tlsClientError', reject); server.on('close', function() { events.push('close'); resolve(); }); server.listen(port, '127.0.0.1'); }); await closed; return [events, server.listening, server.address().port, server.connections]; };").unwrap();
+        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function(port, certHex, keyHex, clientCaHex) { var events = []; var server; var closed = new Promise(function(resolve, reject) { server = tls.createServer({ cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ca: Buffer.from(clientCaHex, 'hex'), requestCert: true, rejectUnauthorized: true }, function(socket) { events.push('secureConnection'); socket.on('error', reject); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); socket.end('pong', function() { server.close(); }); }); }); server.on('listening', function() { events.push('listening'); }); server.on('error', reject); server.on('tlsClientError', reject); server.on('close', function() { events.push('close'); resolve(); }); server.listen(port, '127.0.0.1'); }); await closed; return [events, server.listening, server.address().port, server.connections]; };").unwrap();
         let empty_node_modules = temp_registry("builtin_tls_server_node_modules");
         let (bundle, _, file_count, _) =
             bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -6128,7 +6247,10 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("exerciseTlsServer").unwrap();
-        let arguments = CString::new(format!("[{port},\"{cert_hex}\",\"{key_hex}\"]")).unwrap();
+        let arguments = CString::new(format!(
+            "[{port},\"{cert_hex}\",\"{key_hex}\",\"{client_ca_hex}\"]"
+        ))
+        .unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(
