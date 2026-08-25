@@ -14012,6 +14012,34 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_interface_defaults_and_constraints() {
+        let source = r#"
+            interface Outcome<T, E = string> { value: T; error: E }
+            interface SamePair<T, U = T> { first: T; second: U }
+            interface Numeric<T extends number> { value: T }
+            function outcome(value: number): Outcome<number> {
+                return { error: "none", value };
+            }
+            function pair(value: string): SamePair<string> {
+                return { second: value, first: value };
+            }
+            function numeric(value: number): Numeric<number> { return { value }; }
+            function main(): void {
+                const result: Outcome<number> = outcome(5);
+                console.log(result.value);
+                console.log(result.error);
+                const values: SamePair<string> = pair("pair");
+                console.log(values.first + values.second);
+                console.log(numeric(8).value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_interface_defaults_constraints"),
+            "5\nnone\npairpair\n8\n"
+        );
+    }
+
+    #[test]
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }

@@ -1928,43 +1928,74 @@ fn resolve_generic_interface(
         ));
     }
 
-    let type_param_decl = decl
+    let parameters = &decl
         .type_params
         .as_ref()
-        .expect("caller only reaches here for a generic interface");
-    let type_param_names: Vec<Symbol> = type_param_decl
-        .params
-        .iter()
-        .map(|p| p.name.sym.to_string())
-        .collect();
+        .expect("caller only reaches here for a generic interface")
+        .params;
 
     let type_args: &[Box<TsType>] = ty_ref
         .type_params
         .as_ref()
         .map(|params| params.params.as_slice())
         .unwrap_or(&[]);
-    if type_args.len() != type_param_names.len() {
+    let required = parameters
+        .iter()
+        .take_while(|parameter| parameter.default.is_none())
+        .count();
+    if type_args.len() < required || type_args.len() > parameters.len() {
+        let expected = if required == parameters.len() {
+            required.to_string()
+        } else {
+            format!("{required}..={}", parameters.len())
+        };
         return Err(format!(
-            "interface `{name}` expects {} type argument(s), got {}",
-            type_param_names.len(),
+            "interface `{name}` expects {expected} type argument(s), got {}",
             type_args.len()
         ));
     }
-    let resolved_args = type_args
-        .iter()
-        .map(|arg| match outer_substitution {
-            Some(outer) => resolve_ts_type_with_substitution(
-                arg,
-                outer,
+    let mut substitution = HashMap::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let concrete = if let Some(argument) = type_args.get(index) {
+            match outer_substitution {
+                Some(outer) => resolve_ts_type_with_substitution(
+                    argument,
+                    outer,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?,
+                None => lower_ts_type(argument, interfaces, generic_interfaces)?,
+            }
+        } else {
+            resolve_ts_type_with_substitution(
+                parameter
+                    .default
+                    .as_ref()
+                    .expect("arity validation requires a default"),
+                &substitution,
                 interfaces,
                 generic_interfaces,
                 in_progress,
-            ),
-            None => lower_ts_type(arg, interfaces, generic_interfaces),
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let substitution: HashMap<Symbol, HirType> =
-        type_param_names.into_iter().zip(resolved_args).collect();
+            )?
+        };
+        if let Some(constraint) = &parameter.constraint {
+            let constraint = resolve_ts_type_with_substitution(
+                constraint,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            if !type_satisfies_constraint(&concrete, &constraint) {
+                return Err(format!(
+                    "type argument {concrete:?} does not satisfy constraint {constraint:?} for `{}` in interface `{name}`",
+                    parameter.name.sym
+                ));
+            }
+        }
+        substitution.insert(parameter.name.sym.to_string(), concrete);
+    }
 
     in_progress.push(name.to_string());
 
@@ -12981,6 +13012,17 @@ mod tests {
 
         let module = thaw_parser::parse_typescript(
             "type Numeric<T extends number> = { value: T }; function bad(value: Numeric<string>): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("does not satisfy constraint F64"));
+    }
+
+    #[test]
+    fn validates_generic_interface_defaults_and_constraints() {
+        let module = thaw_parser::parse_typescript(
+            "interface Numeric<T extends number> { value: T } function bad(value: Numeric<string>): void {}",
         )
         .unwrap();
         assert!(lower_module(&module)
