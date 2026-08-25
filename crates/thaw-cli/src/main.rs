@@ -3857,9 +3857,10 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
+        let expected_tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:/tmp\nfalse\na=1&a=2&space=two%20words\n{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}\n{\"_events\":{}}\nfile:///tmp/a%20b\n/tmp/a b\n{\"auth\":\"user:pass\",\"hash\":\"#c\",\"hostname\":\"example.test\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"path\":\"/a?b=1\",\"pathname\":\"/a\",\"port\":8443,\"protocol\":\"https:\",\"search\":\"?b=1\"}\n"
+            format!("a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:{expected_tmpdir}\nfalse\na=1&a=2&space=two%20words\n{{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}}\n{{\"_events\":{{}}}}\nfile:///tmp/a%20b\n/tmp/a b\n{{\"auth\":\"user:pass\",\"hash\":\"#c\",\"hostname\":\"example.test\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"path\":\"/a?b=1\",\"pathname\":\"/a\",\"port\":8443,\"protocol\":\"https:\",\"search\":\"?b=1\"}}\n")
         );
         let _ = std::fs::remove_dir_all(dir);
     }
