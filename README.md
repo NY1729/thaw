@@ -302,6 +302,9 @@ The workspace crates have narrow responsibilities:
   objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views
 - QuickJS bundles provide iterable `URLSearchParams` values with form
   encoding, duplicate keys, record/pair initialization, mutation and sorting
+- QuickJS bundles expose `URL` parsing for hierarchical URLs and relative
+  references, component accessors, default-port normalization, `canParse`/
+  `parse`, and live synchronization with `URLSearchParams`
 - QuickJS bundles expose minimal `Event`/`EventTarget` globals with function
   and listener-object callbacks, removal, one-shot listeners, cancellation,
   and immediate-propagation stopping
