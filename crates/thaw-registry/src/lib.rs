@@ -161,6 +161,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "url" => {
             "export declare const URL: any;\nexport declare const URLSearchParams: any;\nexport declare function pathToFileURL(argsArray: any): any;\nexport declare function fileURLToPath(argsArray: any): any;\nexport declare function urlToHttpOptions(argsArray: any): any;\n"
         }
+        "querystring" => {
+            "export declare function stringify(argsArray: any): any;\nexport declare function encode(argsArray: any): any;\nexport declare function parse(argsArray: any): any;\nexport declare function decode(argsArray: any): any;\nexport declare function escape(argsArray: any): any;\nexport declare function unescape(argsArray: any): any;\n"
+        }
         "fs" => {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
@@ -2544,6 +2547,50 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
+        "querystring" => Some(
+            "function escape(value) { return encodeURIComponent(String(value)); }\n\
+             function unescape(value) {\n\
+             \x20\x20try { return decodeURIComponent(String(value).replace(/\\+/g, ' ')); } catch (_) { return String(value); }\n\
+             }\n\
+             function primitive(value) {\n\
+             \x20\x20return value === null || value === undefined ? '' : (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean' ? String(value) : '');\n\
+             }\n\
+             function stringify(object, separator, assignment, options) {\n\
+             \x20\x20separator = separator === undefined ? '&' : String(separator);\n\
+             \x20\x20assignment = assignment === undefined ? '=' : String(assignment);\n\
+             \x20\x20var encoder = options && typeof options.encodeURIComponent === 'function' ? options.encodeURIComponent : escape;\n\
+             \x20\x20if (object === null || typeof object !== 'object') return '';\n\
+             \x20\x20var fields = [];\n\
+             \x20\x20Object.keys(object).forEach(function(key) {\n\
+             \x20\x20\x20\x20var values = Array.isArray(object[key]) ? object[key] : [object[key]];\n\
+             \x20\x20\x20\x20if (values.length === 0) return;\n\
+             \x20\x20\x20\x20values.forEach(function(value) { fields.push(encoder(key) + assignment + encoder(primitive(value))); });\n\
+             \x20\x20});\n\
+             \x20\x20return fields.join(separator);\n\
+             }\n\
+             function parse(text, separator, assignment, options) {\n\
+             \x20\x20var result = Object.create(null);\n\
+             \x20\x20var source = String(text);\n\
+             \x20\x20separator = separator === undefined ? '&' : String(separator);\n\
+             \x20\x20assignment = assignment === undefined ? '=' : String(assignment);\n\
+             \x20\x20var decoder = options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : unescape;\n\
+             \x20\x20var maxKeys = options && options.maxKeys !== undefined ? Number(options.maxKeys) : 1000;\n\
+             \x20\x20var fields = source === '' ? [] : source.split(separator);\n\
+             \x20\x20if (maxKeys > 0) fields = fields.slice(0, maxKeys);\n\
+             \x20\x20fields.forEach(function(field) {\n\
+             \x20\x20\x20\x20var index = field.indexOf(assignment);\n\
+             \x20\x20\x20\x20var key = decoder(index < 0 ? field : field.substring(0, index));\n\
+             \x20\x20\x20\x20var value = decoder(index < 0 ? '' : field.substring(index + assignment.length));\n\
+             \x20\x20\x20\x20if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = value;\n\
+             \x20\x20\x20\x20else if (Array.isArray(result[key])) result[key].push(value);\n\
+             \x20\x20\x20\x20else result[key] = [result[key], value];\n\
+             \x20\x20});\n\
+             \x20\x20return result;\n\
+             }\n\
+             module.exports = { stringify: stringify, encode: stringify, parse: parse, decode: parse, escape: escape, unescape: unescape };\n\
+             module.exports.default = module.exports;\n\
+             module.exports.__esModule = true;\n",
+        ),
         // Same real dependency chain as `path` above (`node-gyp-build.js`
         // reads `os.arch()`/`os.platform()` to build its target string).
         "os" => Some(
@@ -4010,6 +4057,46 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert_eq!(result, "\"linux\"");
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn querystring_builtin_runs_through_bundled_commonjs_require() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_querystring");
+        fs::write(
+            dir.join("index.js"),
+            "var querystring = require('querystring');\n\
+             module.exports = function () {\n\
+             \x20 return querystring.stringify({ a: [1, 2], space: 'two words' }) + ':' + JSON.stringify(querystring.parse('x=1&x=2'));\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_querystring_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseQuerystring = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseQuerystring").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#""a=1&a=2&space=two%20words:{\"x\":[\"1\",\"2\"]}""#
+        );
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
