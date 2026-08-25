@@ -1504,6 +1504,27 @@ fn resolve_generic_interface_dependencies(
             )?;
         }
     }
+    let inserted_progress = !in_progress.iter().any(|active| active == name);
+    if inserted_progress {
+        in_progress.push(name.to_string());
+    }
+    for member in &decl.body.body {
+        if let TsTypeElement::TsPropertySignature(property) = member {
+            if let Some(annotation) = &property.type_ann {
+                resolve_type_dependencies(
+                    &annotation.type_ann,
+                    raw,
+                    aliases,
+                    generic,
+                    resolved,
+                    in_progress,
+                )?;
+            }
+        }
+    }
+    if inserted_progress {
+        in_progress.pop();
+    }
     dependency_progress.pop();
     Ok(())
 }
@@ -1539,16 +1560,18 @@ fn resolve_type_dependencies(
                 if interfaces.contains_key(name) || aliases.contains_key(name) {
                     resolve_named_type(name, interfaces, aliases, generic, resolved, in_progress)?;
                 } else if let Some(decl) = generic.interfaces.get(name) {
-                    resolve_generic_interface_dependencies(
-                        name,
-                        decl,
-                        interfaces,
-                        aliases,
-                        generic,
-                        resolved,
-                        in_progress,
-                        &mut Vec::new(),
-                    )?;
+                    if !in_progress.iter().any(|active| active == name) {
+                        resolve_generic_interface_dependencies(
+                            name,
+                            decl,
+                            interfaces,
+                            aliases,
+                            generic,
+                            resolved,
+                            in_progress,
+                            &mut Vec::new(),
+                        )?;
+                    }
                 } else if let Some(decl) = generic.aliases.get(name) {
                     if !in_progress.iter().any(|active| active == name) {
                         in_progress.push(name.to_string());
