@@ -358,7 +358,9 @@ The workspace crates have narrow responsibilities:
   diagnose premature close, support side selection and AbortSignal, and can
   remove their settlement listeners. Custom readable/writable/transform
   `destroy(error, callback)` hooks may clean up asynchronously; final errors
-  and `close` are emitted once after the hook completes;
+  and `close` are emitted once after the hook completes. Asynchronous
+  `construct(callback)` hooks gate readable pulls, queued writes and finalization;
+  construction failures run normal destruction and reject queued callbacks;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
