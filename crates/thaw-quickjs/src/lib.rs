@@ -161,6 +161,33 @@ fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
     serde_json::json!({ "ok": false, "code": code, "operation": operation, "path": path, "message": error.to_string() }).to_string()
 }
 
+#[cfg(unix)]
+fn fs_symlink(target: &str, link: &str) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn fs_symlink(_target: &str, _link: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symbolic links are unsupported",
+    ))
+}
+
+#[cfg(unix)]
+fn fs_chmod(path: &str, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn fs_chmod(_path: &str, _mode: u32) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "chmod is unsupported",
+    ))
+}
+
 fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
@@ -177,6 +204,10 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "realpath" => std::fs::canonicalize(&path).map(|resolved| serde_json::json!({ "ok": true, "path": resolved.to_string_lossy() })),
         "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let created = format!("{}{}", path, hex_encode(&random)); std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created })) })(),
         "truncate" => std::fs::OpenOptions::new().write(true).open(&path).and_then(|file| file.set_len(value.parse::<u64>().unwrap_or(0))).map(|_| serde_json::json!({ "ok": true })),
+        "link" => std::fs::hard_link(&path, &value).map(|_| serde_json::json!({ "ok": true })),
+        "symlink" => fs_symlink(&path, &value).map(|_| serde_json::json!({ "ok": true })),
+        "readlink" => std::fs::read_link(&path).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy() })),
+        "chmod" => fs_chmod(&path, value.parse::<u32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),
     };
     result
