@@ -402,8 +402,9 @@ The workspace crates have narrow responsibilities:
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots
   or custom PEM/DER certificates and PEM PKCS#8/RSA keys, then exposes verified
   TLSSocket and createServer write/end/data/secureConnection lifecycles;
-  multi-client serving, client-certificate authentication and unrestricted
-  certificate bypass remain later steps
+  client certificates and server-side `requestCert`/custom-CA verification are
+  supported; multi-client serving and unrestricted certificate bypass remain
+  later steps
 - `node:os` reads host CPU, memory, uptime, load, hostname, release, home/tmp and
   user information while exposing Node-shaped loopback interfaces and constants
 - `node:http` exposes native `serveOnce(port, body)` and

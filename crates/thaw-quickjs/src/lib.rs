@@ -39,6 +39,7 @@ use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName,
 };
+use rustls::server::WebPkiClientVerifier;
 use rustls::{
     ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
@@ -327,7 +328,14 @@ fn decode_private_key(spec: &str) -> Result<PrivateKeyDer<'static>, String> {
     }
 }
 
-fn tls_connect(host: &str, port: u16, server_name: &str, ca_spec: &str) -> String {
+fn tls_connect(
+    host: &str,
+    port: u16,
+    server_name: &str,
+    ca_spec: &str,
+    cert_spec: &str,
+    key_spec: &str,
+) -> String {
     let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
         let certificates = match decode_certificates(certificate_spec) {
@@ -340,11 +348,26 @@ fn tls_connect(host: &str, port: u16, server_name: &str, ca_spec: &str) -> Strin
             }
         }
     }
-    let config = Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    );
+    let builder = ClientConfig::builder().with_root_certificates(roots);
+    let config = if cert_spec.is_empty() && key_spec.is_empty() {
+        builder.with_no_client_auth()
+    } else if cert_spec.is_empty() || key_spec.is_empty() {
+        return "err:client cert and key must be provided together".to_string();
+    } else {
+        let certificates = match decode_certificates(cert_spec) {
+            Ok(certificates) => certificates,
+            Err(error) => return format!("err:{error}"),
+        };
+        let key = match decode_private_key(key_spec) {
+            Ok(key) => key,
+            Err(error) => return format!("err:{error}"),
+        };
+        match builder.with_client_auth_cert(certificates, key) {
+            Ok(config) => config,
+            Err(error) => return format!("err:{error}"),
+        }
+    };
+    let config = Arc::new(config);
     let name = match ServerName::try_from(server_name.to_string()) {
         Ok(name) => name,
         Err(error) => return format!("err:{error}"),
@@ -374,7 +397,15 @@ fn tls_connect(host: &str, port: u16, server_name: &str, ca_spec: &str) -> Strin
     })
 }
 
-fn tls_server_listen(host: &str, port: u16, cert_spec: &str, key_spec: &str) -> String {
+fn tls_server_listen(
+    host: &str,
+    port: u16,
+    cert_spec: &str,
+    key_spec: &str,
+    ca_spec: &str,
+    request_cert: bool,
+    reject_unauthorized: bool,
+) -> String {
     let certificates = match decode_certificates(cert_spec) {
         Ok(certificates) => certificates,
         Err(error) => return format!("err:{error}"),
@@ -383,10 +414,36 @@ fn tls_server_listen(host: &str, port: u16, cert_spec: &str, key_spec: &str) -> 
         Ok(private_key) => private_key,
         Err(error) => return format!("err:{error}"),
     };
-    let config = match ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, private_key)
-    {
+    let builder = ServerConfig::builder();
+    let builder = if request_cert {
+        let mut roots = RootCertStore::empty();
+        for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
+            let ca_certificates = match decode_certificates(certificate_spec) {
+                Ok(certificates) => certificates,
+                Err(error) => return format!("err:{error}"),
+            };
+            for certificate in ca_certificates {
+                if let Err(error) = roots.add(certificate) {
+                    return format!("err:{error}");
+                }
+            }
+        }
+        let verifier = if reject_unauthorized {
+            WebPkiClientVerifier::builder(Arc::new(roots)).build()
+        } else {
+            WebPkiClientVerifier::builder(Arc::new(roots))
+                .allow_unauthenticated()
+                .build()
+        };
+        let verifier = match verifier {
+            Ok(verifier) => verifier,
+            Err(error) => return format!("err:{error}"),
+        };
+        builder.with_client_cert_verifier(verifier)
+    } else {
+        builder.with_no_client_auth()
+    };
+    let config = match builder.with_single_cert(certificates, private_key) {
         Ok(config) => Arc::new(config),
         Err(error) => return format!("err:{error}"),
     };
@@ -766,10 +823,22 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_connect_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, server_name: String, ca: String| {
-                        tls_connect(&host, port as u16, &server_name, &ca)
+                        tls_connect(&host, port as u16, &server_name, &ca, "", "")
                     },
                 )
                 .expect("failed to create JavaScript TLS connector");
+                let tls_connect_with_identity_function = Function::new(
+                    ctx.clone(),
+                    |host: String,
+                     port: u32,
+                     server_name: String,
+                     ca: String,
+                     cert: String,
+                     key: String| {
+                        tls_connect(&host, port as u16, &server_name, &ca, &cert, &key)
+                    },
+                )
+                .expect("failed to create JavaScript mutual TLS connector");
                 let tls_write_function =
                     Function::new(ctx.clone(), |handle: u32, value: String| {
                         tls_write(handle, &hex_decode(&value))
@@ -784,10 +853,30 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
-                        tls_server_listen(&host, port as u16, &cert, &key)
+                        tls_server_listen(&host, port as u16, &cert, &key, "", false, true)
                     },
                 )
                 .expect("failed to create JavaScript TLS listener");
+                let tls_server_listen_with_ca_function = Function::new(
+                    ctx.clone(),
+                    |host: String,
+                     port: u32,
+                     cert: String,
+                     key: String,
+                     ca: String,
+                     reject_unauthorized: bool| {
+                        tls_server_listen(
+                            &host,
+                            port as u16,
+                            &cert,
+                            &key,
+                            &ca,
+                            true,
+                            reject_unauthorized,
+                        )
+                    },
+                )
+                .expect("failed to create JavaScript mutual TLS listener");
                 let tls_server_accept_function =
                     Function::new(ctx.clone(), |handle: u32| tls_server_accept(handle))
                         .expect("failed to create JavaScript TLS acceptor");
@@ -851,6 +940,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .set("__thaw_tls_connect", tls_connect_function)
                     .expect("failed to install JavaScript TLS connector");
                 ctx.globals()
+                    .set(
+                        "__thaw_tls_connect_with_identity",
+                        tls_connect_with_identity_function,
+                    )
+                    .expect("failed to install JavaScript mutual TLS connector");
+                ctx.globals()
                     .set("__thaw_tls_write", tls_write_function)
                     .expect("failed to install JavaScript TLS writer");
                 ctx.globals()
@@ -862,6 +957,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_tls_server_listen", tls_server_listen_function)
                     .expect("failed to install JavaScript TLS listener");
+                ctx.globals()
+                    .set(
+                        "__thaw_tls_server_listen_with_ca",
+                        tls_server_listen_with_ca_function,
+                    )
+                    .expect("failed to install JavaScript mutual TLS listener");
                 ctx.globals()
                     .set("__thaw_tls_server_accept", tls_server_accept_function)
                     .expect("failed to install JavaScript TLS acceptor");
