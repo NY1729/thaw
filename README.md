@@ -351,7 +351,9 @@ The workspace crates have narrow responsibilities:
   module-local type, with stable mangled symbols and call-site rewriting; the
   same specialization is deduplicated. Inferred type tuples validate primitive,
   union, structural-object, and earlier-parameter-dependent `extends`
-  constraints before specialization
+  constraints before specialization. Uninferred parameters use trailing
+  defaults in declaration order, including defaults that reference an earlier
+  inferred parameter
 - Generic variables nested in number arrays and fixed-layout numeric objects
   are inferred recursively and encoded into specialization symbols
 - Function type variables used as arguments to named generic interfaces such
