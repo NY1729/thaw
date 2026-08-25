@@ -319,6 +319,10 @@ The workspace crates have narrow responsibilities:
   returns remote-object and exception-detail records from the live QuickJS
   global context; `open()` tracks a process-local URL but does not expose an
   external Chrome DevTools websocket
+- `node:repl` provides an embeddable `REPLServer` with callback evaluation,
+  strict/sloppy modes, history, buffered input, custom dot commands and prompt
+  output. It can drive in-memory or user-supplied streams; Thaw does not attach
+  a compiled executable to an interactive terminal automatically
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
