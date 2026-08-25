@@ -3909,6 +3909,60 @@ const PLATFORM_GLOBALS: &str = r#"
       }
     };
   }
+  if (typeof globalThis.Headers !== 'function') {
+    const headerLists = new WeakMap();
+    const headerName = value => {
+      const name = String(value).toLowerCase();
+      if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(name)) throw new TypeError(`invalid header name: ${value}`);
+      return name;
+    };
+    const headerValue = value => {
+      const text = String(value);
+      if (/[\0\r\n]/.test(text)) throw new TypeError(`invalid header value: ${text}`);
+      return text.replace(/^[\t ]+|[\t ]+$/g, '');
+    };
+    const headersList = value => { const list = headerLists.get(value); if (!list) throw new TypeError('invalid Headers receiver'); return list; };
+    const normalizedHeaderEntries = value => {
+      const grouped = new Map();
+      for (const [name, item] of headersList(value)) { const values = grouped.get(name) || []; values.push(item); grouped.set(name, values); }
+      const entries = [];
+      for (const name of Array.from(grouped.keys()).sort()) {
+        const values = grouped.get(name);
+        if (name === 'set-cookie') for (const item of values) entries.push([name, item]);
+        else entries.push([name, values.join(', ')]);
+      }
+      return entries;
+    };
+    class Headers {
+      constructor(init = undefined) {
+        headerLists.set(this, []);
+        if (init === undefined) return;
+        if (headerLists.has(init)) { for (const [name, value] of headersList(init)) this.append(name, value); return; }
+        if (init !== null && typeof init[Symbol.iterator] === 'function') {
+          for (const entry of init) { const pair = Array.from(entry); if (pair.length !== 2) throw new TypeError('header pair must contain exactly two items'); this.append(pair[0], pair[1]); }
+          return;
+        }
+        if (init === null || (typeof init !== 'object' && typeof init !== 'function')) throw new TypeError('Headers init must be an object');
+        for (const name of Object.keys(init)) this.append(name, init[name]);
+      }
+      append(name, value) { headersList(this).push([headerName(name), headerValue(value)]); }
+      delete(name) { const normalized = headerName(name), list = headersList(this); headerLists.set(this, list.filter(entry => entry[0] !== normalized)); }
+      get(name) { const normalized = headerName(name), values = headersList(this).filter(entry => entry[0] === normalized).map(entry => entry[1]); return values.length ? values.join(', ') : null; }
+      has(name) { const normalized = headerName(name); return headersList(this).some(entry => entry[0] === normalized); }
+      set(name, value) { const normalized = headerName(name), text = headerValue(value), list = headersList(this).filter(entry => entry[0] !== normalized); list.push([normalized, text]); headerLists.set(this, list); }
+      getSetCookie() { return headersList(this).filter(entry => entry[0] === 'set-cookie').map(entry => entry[1]); }
+      *keys() { for (const entry of normalizedHeaderEntries(this)) yield entry[0]; }
+      *values() { for (const entry of normalizedHeaderEntries(this)) yield entry[1]; }
+      *entries() { yield* normalizedHeaderEntries(this); }
+      forEach(callback, thisArg = undefined) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); for (const [name, value] of normalizedHeaderEntries(this)) callback.call(thisArg, value, name, this); }
+      [Symbol.iterator]() { return this.entries(); }
+      get [Symbol.toStringTag]() { return 'Headers'; }
+    }
+    for (const name of ['append', 'delete', 'get', 'has', 'set', 'getSetCookie', 'keys', 'values', 'entries', 'forEach']) {
+      const descriptor = Object.getOwnPropertyDescriptor(Headers.prototype, name); descriptor.enumerable = true; Object.defineProperty(Headers.prototype, name, descriptor);
+    }
+    globalThis.Headers = Headers;
+  }
   if (typeof globalThis.ReadableStream !== 'function') {
     const webInvalidState = message => { const error = new TypeError(message); error.code = 'ERR_INVALID_STATE'; return error; };
     class ReadableStreamDefaultController {
