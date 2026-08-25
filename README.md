@@ -346,7 +346,8 @@ The workspace crates have narrow responsibilities:
   through synchronous and callback APIs
 - `MessageChannel`/`MessagePort` provide structured-cloned asynchronous and
   synchronous delivery, while `BroadcastChannel` distributes isolated copies
-  by channel name; `node:worker_threads` exposes the main-thread identity,
+  by channel name and supports synchronous `receiveMessageOnPort()` reads;
+  `node:worker_threads` exposes the main-thread identity,
   environment data and lifecycle APIs; `Worker` supports isolated eval scopes,
   JavaScript `data:` URLs, statically referenced workers written as
   `new URL("./worker.js", import.meta.url)`, a literal `"./worker.js"`, or a
