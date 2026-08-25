@@ -4566,12 +4566,26 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
-                let value = self.lower_expr(init)?;
-
-                let ty = match &binding.type_ann {
-                    Some(ann) => {
-                        lower_ts_type(&ann.type_ann, self.interfaces, self.generic_interfaces)?
+                let annotated = binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        lower_ts_type(
+                            &annotation.type_ann,
+                            self.interfaces,
+                            self.generic_interfaces,
+                        )
+                    })
+                    .transpose()?;
+                let value = match (init, annotated.as_ref()) {
+                    (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
+                        self.lower_contextual_arrow(arrow, params, Some(ret))?
                     }
+                    _ => self.lower_expr(init)?,
+                };
+
+                let ty = match annotated {
+                    Some(ty) => ty,
                     None => self.infer_expr_type(&value).map_err(|e| {
                         format!(
                             "cannot infer the type of `{name}`: {e} \
@@ -13189,6 +13203,21 @@ mod tests {
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn validates_annotated_generic_arrow_constraints() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            function main(): void {
+                const invalid: (value: string) => string =
+                    <T extends number>(value: T): T => value;
+            }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
     }
 
     #[test]

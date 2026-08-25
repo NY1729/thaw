@@ -14118,6 +14118,29 @@ mod tests {
     }
 
     #[test]
+    fn compiles_annotated_contextual_generic_arrows() {
+        let source = r#"
+            function main(): void {
+                const numberIdentity: (value: number) => number =
+                    <T>(value: T): T => value;
+                const stringIdentity: (value: string) => string =
+                    <T extends string>(value: T): T => value;
+                const choose: (left: number, right: string) => number =
+                    <T, U>(left: T, right: U): T => left;
+                const inferredParameter: (value: number) => number = value => value + 1;
+                console.log(numberIdentity(13));
+                console.log(stringIdentity("context"));
+                console.log(choose(8, "ignored"));
+                console.log(inferredParameter(4));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "annotated_generic_arrows"),
+            "13\ncontext\n8\n5\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
