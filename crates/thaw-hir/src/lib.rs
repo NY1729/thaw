@@ -158,7 +158,8 @@ pub struct FfiSignature {
     pub symbol: Symbol,
     pub params: Vec<HirType>,
     /// Element type of a trailing C varargs sequence. Lowering accepts
-    /// TypeScript rest declarations of number, boolean, or string arrays.
+    /// TypeScript rest declarations with supported scalar or aggregate
+    /// element layouts.
     pub variadic: Option<HirType>,
     pub variadic_abi: FfiVariadicAbi,
     pub ret: HirType,

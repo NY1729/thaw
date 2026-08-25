@@ -1156,20 +1156,13 @@ pub fn classify(func: &DtsFunction) -> Classification {
 
     let variadic = match &func.rest_param {
         None => None,
-        Some((
-            _,
-            DtsType::Native(
-                ty @ (HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue),
+        Some((_, DtsType::Native(ty))) if supports_variadic_element(ty) => Some(ty.clone()),
+        Some((name, DtsType::Native(other))) => return Classification::Fallback {
+            function: func.name.clone(),
+            reason: format!(
+                "rest parameter `{name}` has unsupported native variadic element layout {other:?}"
             ),
-        )) => Some(ty.clone()),
-        Some((name, DtsType::Native(other))) => {
-            return Classification::Fallback {
-                function: func.name.clone(),
-                reason: format!(
-                    "rest parameter `{name}`: native variadic ABI supports only number[], boolean[], string[], or JsValue[], found {other:?}[]"
-                ),
-            }
-        }
+        },
         Some((name, DtsType::Unsupported(reason))) => {
             return Classification::Fallback {
                 function: func.name.clone(),
@@ -1193,6 +1186,20 @@ pub fn classify(func: &DtsFunction) -> Classification {
         aggregate_return_abi: FfiAggregateAbi::Internal,
         aggregate_return_layout: None,
     }))
+}
+
+fn supports_variadic_element(ty: &HirType) -> bool {
+    match ty {
+        HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
+        HirType::Array(element) => element.as_ref() == &HirType::F64,
+        HirType::Object(fields) => fields.iter().all(|(_, field)| {
+            matches!(
+                field,
+                HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
+            )
+        }),
+        _ => false,
+    }
 }
 
 /// Classifies every function in `functions`, but only once per distinct
@@ -1839,18 +1846,43 @@ mod tests {
 
     #[test]
     fn object_rest_signature_falls_back() {
-        let funcs =
-            parse_dts("export declare function merge(...values: { value: number }[]): number;")
-                .unwrap();
+        let funcs = parse_dts(
+            "export declare function merge(...values: { nested: { value: number } }[]): number;",
+        )
+        .unwrap();
         let classification = classify(&funcs[0]);
         assert!(
             matches!(
                 classification,
                 Classification::Fallback { ref reason, .. }
-                    if reason.contains("supports only number[], boolean[], string[], or JsValue[]")
+                    if reason.contains("unsupported native variadic element layout")
             ),
             "{classification:?}"
         );
+    }
+
+    #[test]
+    fn aggregate_rest_signatures_classify_as_variadic_fast_paths() {
+        for (source, expected) in [
+            (
+                "export declare function arrays(...values: number[][]): number;",
+                HirType::Array(Box::new(HirType::F64)),
+            ),
+            (
+                "export declare function objects(...values: { value: number; enabled: boolean; label: string }[]): number;",
+                HirType::Object(vec![
+                    ("value".into(), HirType::F64),
+                    ("enabled".into(), HirType::Bool),
+                    ("label".into(), HirType::Str),
+                ]),
+            ),
+        ] {
+            let functions = parse_dts(source).unwrap();
+            let Classification::FastPath(signature) = classify(&functions[0]) else {
+                panic!("aggregate rest signature should classify as FastPath");
+            };
+            assert_eq!(signature.variadic, Some(expected));
+        }
     }
 
     #[test]
