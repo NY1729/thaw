@@ -206,6 +206,39 @@ fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) ->
     }
 }
 
+fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
+    time.ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
+#[cfg(unix)]
+fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
+    use std::os::unix::fs::MetadataExt;
+    let ctime = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1_000_000.0;
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": metadata.mode(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()) })
+}
+
+#[cfg(not(unix))]
+fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
+    let modified = system_time_millis(metadata.modified());
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": if metadata.is_dir() { 16877 } else { 33188 }, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
+}
+
+fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
+    let mut values = value.split(',');
+    let accessed = values.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+    let modified = values.next().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+    let times = std::fs::FileTimes::new()
+        .set_accessed(std::time::UNIX_EPOCH + Duration::from_secs_f64(accessed.max(0.0)))
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs_f64(modified.max(0.0)));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(path)?
+        .set_times(times)
+}
+
 fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
@@ -214,7 +247,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
         "mkdir" => if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
-        "stat" => std::fs::metadata(&path).map(|metadata| serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly() })),
+        "stat" => std::fs::metadata(&path).map(fs_metadata_record),
         "unlink" => std::fs::remove_file(&path).map(|_| serde_json::json!({ "ok": true })),
         "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
@@ -227,6 +260,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "symlink" => fs_symlink(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "readlink" => std::fs::read_link(&path).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy() })),
         "chmod" => fs_chmod(&path, value.parse::<u32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
+        "utimes" => fs_utimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),
     };
     result

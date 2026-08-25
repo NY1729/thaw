@@ -438,6 +438,8 @@ The workspace crates have narrow responsibilities:
   stream creation, close-state errors and async-dispose support
 - Hard links, symbolic links, link-target reads and Unix permission changes
   are exposed through synchronous, callback and Promise APIs
+- Stats timestamps come from host metadata, and `utimes` updates access and
+  modification times through sync, callback, Promise and FileHandle APIs
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
   classes with ranged/chunked reads, append mode, byte counters and
   open/ready/finish/end/close lifecycle events
