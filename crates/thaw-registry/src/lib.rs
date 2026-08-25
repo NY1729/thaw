@@ -161,6 +161,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "buffer" => {
             "export declare const Buffer: any;\nexport declare const SlowBuffer: any;\nexport declare function byteLength(argsArray: any): any;\nexport declare function isUtf8(argsArray: any): any;\nexport declare function isAscii(argsArray: any): any;\nexport declare function transcode(argsArray: any): any;\n"
         }
+        "string_decoder" => {
+            "export declare function StringDecoder(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2794,6 +2797,31 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
+        "string_decoder" => Some(
+            "function normalizeEncoding(encoding) { var value = String(encoding || 'utf8').toLowerCase().replace(/[-_]/g, ''); if (!globalThis.Buffer.isEncoding(value)) throw new TypeError('Unknown encoding: ' + encoding); return value; }\n\
+             function utf8CompleteLength(buffer) {\n\
+             \x20\x20var index = buffer.length - 1; while (index >= 0 && (buffer[index] & 192) === 128) index--;\n\
+             \x20\x20if (index < 0) return Math.max(0, buffer.length - Math.min(buffer.length, 3));\n\
+             \x20\x20var lead = buffer[index]; var expected = lead >= 240 && lead <= 247 ? 4 : lead >= 224 && lead <= 239 ? 3 : lead >= 192 && lead <= 223 ? 2 : 1;\n\
+             \x20\x20return buffer.length - index < expected ? index : buffer.length;\n\
+             }\n\
+             function StringDecoder(encoding) {\n\
+             \x20\x20if (!(this instanceof StringDecoder)) return new StringDecoder(encoding);\n\
+             \x20\x20this.encoding = normalizeEncoding(encoding); this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; this.lastChar = globalThis.Buffer.alloc(4);\n\
+             }\n\
+             StringDecoder.prototype.write = function(value) {\n\
+             \x20\x20var input = globalThis.Buffer.from(value); var combined = this._pending.length ? globalThis.Buffer.concat([this._pending, input]) : input; var complete = combined.length;\n\
+             \x20\x20if (this.encoding === 'utf8' || this.encoding === 'utf') complete = utf8CompleteLength(combined);\n\
+             \x20\x20else if (this.encoding === 'utf16le' || this.encoding === 'ucs2') complete -= complete % 2;\n\
+             \x20\x20else if (this.encoding === 'base64' || this.encoding === 'base64url') complete -= complete % 3;\n\
+             \x20\x20this._pending = globalThis.Buffer.from(combined.subarray(complete)); this.lastNeed = this._pending.length; this.lastTotal = complete === combined.length ? 0 : this.lastNeed + 1;\n\
+             \x20\x20return combined.subarray(0, complete).toString(this.encoding);\n\
+             };\n\
+             StringDecoder.prototype.text = function(value, offset) { return this.write(globalThis.Buffer.from(value).subarray(offset || 0)); };\n\
+             StringDecoder.prototype.end = function(value) { var output = value === undefined ? '' : this.write(value); if (this._pending.length) output += this._pending.toString(this.encoding); this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; return output; };\n\
+             module.exports = { StringDecoder: StringDecoder };\n\
+             module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -4474,6 +4502,48 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,"e99baa","6Zuq",3,true,false,true,"68006900"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn string_decoder_preserves_multibyte_boundaries() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_string_decoder");
+        fs::write(
+            dir.join("index.js"),
+            "var StringDecoder = require('node:string_decoder').StringDecoder;\n\
+             module.exports = function () {\n\
+             \x20 var utf8 = new StringDecoder('utf8'); var snow = Buffer.from('雪'); var utf8Parts = [utf8.write(snow.subarray(0, 1)), utf8.write(snow.subarray(1, 2)), utf8.write(snow.subarray(2)), utf8.end()];\n\
+             \x20 var utf16 = new StringDecoder('utf16le'); var wide = Buffer.from('A雪', 'utf16le'); var utf16Parts = [utf16.write(wide.subarray(0, 3)), utf16.end(wide.subarray(3))];\n\
+             \x20 var base64 = new StringDecoder('base64'); var hello = Buffer.from('hello'); var encoded = base64.write(hello.subarray(0, 2)) + base64.write(hello.subarray(2)) + base64.end();\n\
+             \x20 var incomplete = new StringDecoder(); var replacement = incomplete.end(Buffer.from([0xe9]));\n\
+             \x20 return [utf8Parts, utf16Parts, encoded, replacement, utf8.lastNeed, utf8.encoding];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_string_decoder_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseStringDecoder = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseStringDecoder").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["","","雪",""],["A","雪"],"aGVsbG8=","�",0,"utf8"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
