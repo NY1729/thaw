@@ -125,7 +125,10 @@ The workspace crates have narrow responsibilities:
 - `number`, `string`, `boolean`, `null`, `void`, `Json`, number arrays and fixed-shape
   objects; function types may be parenthesized where TypeScript grammar
   requires it (including `FunctionType | undefined`)
-- `interface`, interface inheritance and generic interface instantiation
+- `interface`, interface inheritance and generic interface instantiation;
+  generic interfaces accept trailing type-parameter defaults (including
+  defaults that reference earlier parameters) and validate concrete
+  primitive/union or structural-object constraints
 - Numeric and string `enum` declarations lower to typed native constants,
   including implicit numeric numbering, preceding-member constant expressions,
   bracketed string member reads, runtime numeric reverse lookup (unknown values
