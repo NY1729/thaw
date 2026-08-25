@@ -1503,6 +1503,7 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
         Expr::Lit(Lit::Num(_)) => Some(TsKeywordTypeKind::TsNumberKeyword),
         Expr::Lit(Lit::Str(_)) => Some(TsKeywordTypeKind::TsStringKeyword),
         Expr::Lit(Lit::Bool(_)) => Some(TsKeywordTypeKind::TsBooleanKeyword),
+        Expr::Lit(Lit::Null(_)) => Some(TsKeywordTypeKind::TsNullKeyword),
         _ => None,
     };
     if let Some(keyword) = keyword {
@@ -1511,7 +1512,7 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
     let Expr::Ident(returned) = returned else {
         return None;
     };
-    params
+    let parameter = params
         .iter()
         .position(|parameter| {
             let Pat::Ident(binding) = parameter else {
@@ -1519,7 +1520,12 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
             };
             binding.id.sym == returned.sym
         })
-        .map(InferredGenericReturn::Parameter)
+        .map(InferredGenericReturn::Parameter);
+    parameter.or_else(|| {
+        (returned.sym == *"undefined").then_some(InferredGenericReturn::Keyword(
+            TsKeywordTypeKind::TsUndefinedKeyword,
+        ))
+    })
 }
 
 fn collect_generic_return_parameters(
@@ -14377,6 +14383,10 @@ mod tests {
             (
                 "type Stringify = <T>(value: T) => string; function main(): void { const invalid: Stringify = <T>(value: T) => 1; }",
                 "incompatible with function type alias `Stringify`",
+            ),
+            (
+                "type Nullify = <T>(value: T) => null; function main(): void { const invalid: Nullify = <T>(value: T) => undefined; }",
+                "incompatible with function type alias `Nullify`",
             ),
             (
                 "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",
