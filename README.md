@@ -300,8 +300,11 @@ The workspace crates have narrow responsibilities:
   `performance.now()` values scoped to the shared JavaScript context
 - QuickJS bundles provide cycle-preserving `structuredClone` support for
   objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views
+- QuickJS bundles expose minimal `Event`/`EventTarget` globals with function
+  and listener-object callbacks, removal, one-shot listeners, cancellation,
+  and immediate-propagation stopping
 - QuickJS bundles provide `AbortController`/`AbortSignal` with reasons,
-  `onabort`, listener registration, `throwIfAborted`, static abort/timeout
+  `onabort`, `EventTarget` inheritance, `throwIfAborted`, static abort/timeout
   signals integrated with the timer queue, and `AbortSignal.any()` composition
 - A `DOMException` implementation supplies standard names and legacy codes;
   Base64 validation, structured cloning, aborts and timeouts use their
