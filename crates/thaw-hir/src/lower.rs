@@ -4719,6 +4719,19 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                if let (Expr::Ident(identifier), None) = (init, binding.type_ann.as_ref()) {
+                    let source_name = self.resolve_binding(identifier.sym.as_ref());
+                    if let Some(arrow) = self.generic_arrows.get(&source_name).cloned() {
+                        let hir_name = self.bind_local(&name, HirType::Dynamic);
+                        self.generic_arrows.insert(hir_name, arrow);
+                        continue;
+                    }
+                    if let Some(target) = self.generic_named_templates.get(&source_name).cloned() {
+                        let hir_name = self.bind_local(&name, HirType::Dynamic);
+                        self.generic_named_templates.insert(hir_name, target);
+                        continue;
+                    }
+                }
                 let annotated = binding
                     .type_ann
                     .as_ref()
