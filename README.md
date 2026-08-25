@@ -265,7 +265,8 @@ The workspace crates have narrow responsibilities:
   bindings with shadowing, live namespace/re-export bindings, synchronous
   cycles, acyclic top-level await, JSON import attributes, package `imports`,
   conditional exact/wildcard `exports`, selected Node built-in polyfills,
-  scoped packages and package version locking
+  scoped packages, virtual per-module CommonJS `__filename`/`__dirname`, and
+  package version locking
 - Relative user-module graphs (`./file`, `./file.ts`, and `./dir/index.ts`)
   with named/default imports, aliases, named re-exports, export-all,
   module-local symbol isolation, dependency deduplication and cycle diagnostics
@@ -350,8 +351,9 @@ The workspace crates have narrow responsibilities:
   JavaScript `data:` URLs, statically referenced workers written as
   `new URL("./worker.js", import.meta.url)`, a literal `"./worker.js"`, or a
   constant-foldable string/template expression (including an unshadowed
-  top-level `const`), and their bundled `require()` dependencies, CommonJS or
-  ESM worker entry syntax, cloned `workerData`, `parentPort` message exchange,
+  top-level `const` and `path.join/resolve(__dirname, ...)`), and their bundled
+  `require()` dependencies, CommonJS or ESM worker entry syntax, cloned
+  `workerData`, `parentPort` message exchange,
   per-worker `argv`, copied or `SHARE_ENV` process environments, reported
   resource limits, protected transfer/clone markers, lifecycle events and
   EventEmitter-style listener management and termination (runtime-computed
