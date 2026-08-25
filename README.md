@@ -356,7 +356,9 @@ The workspace crates have narrow responsibilities:
   iterators and destroy every materialized stage with the original error.
   Callback and Promise `finished()` wait for both enabled Duplex sides,
   diagnose premature close, support side selection and AbortSignal, and can
-  remove their settlement listeners;
+  remove their settlement listeners. Custom readable/writable/transform
+  `destroy(error, callback)` hooks may clean up asynchronously; final errors
+  and `close` are emitted once after the hook completes;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
