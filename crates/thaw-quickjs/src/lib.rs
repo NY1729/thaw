@@ -3766,7 +3766,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (typeof stream._source.pull === 'function') Promise.resolve(stream._source.pull(stream._controller)).catch(error => stream._controller.error(error));
         return result;
       }
-      cancel(reason) { return this._stream.cancel(reason); }
+      cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(new TypeError('reader is released')); }
       releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
     }
     globalThis.ReadableStream = class ReadableStream {
@@ -3778,7 +3778,8 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       get locked() { return this._reader !== null; }
       getReader() { return new ReadableStreamDefaultReader(this); }
-      cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); if (this._state === 'closed') return Promise.resolve(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
+      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
+      cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); return this._cancel(reason); }
       async pipeTo(destination, options = {}) { const reader = this.getReader(), writer = destination.getWriter(); try { while (true) { const result = await reader.read(); if (result.done) break; await writer.write(result.value); } if (!options.preventClose) await writer.close(); } catch (error) { if (!options.preventAbort) await writer.abort(error); throw error; } finally { reader.releaseLock(); writer.releaseLock(); } }
       pipeThrough(transform, options) { this.pipeTo(transform.writable, options).catch(error => transform.readable._controller.error(error)); return transform.readable; }
       values(options = {}) { const reader = this.getReader(); return { next: () => reader.read(), return: async () => { if (!options.preventCancel) await reader.cancel(); reader.releaseLock(); return { value: undefined, done: true }; }, [Symbol.asyncIterator]() { return this; } }; }

@@ -380,6 +380,9 @@ The workspace crates have narrow responsibilities:
   streams, and an explicit zero high-water mark is preserved. Readable,
   Writable and Duplex streams convert in both directions between Node and WHATWG
   stream interfaces while preserving object-mode values and close/error flow.
+  From-Web adapters retain their reader/writer lock for their lifetime and
+  defer Node `error`/`close` until asynchronous underlying cancel/abort work
+  settles; reader-owned cancellation bypasses the public locked-stream guard.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
