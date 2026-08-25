@@ -1481,6 +1481,40 @@ fn function_expression_as_arrow(
     })
 }
 
+fn inferred_generic_arrow_return_type(arrow: &swc_ecma_ast::ArrowExpr) -> Option<Box<TsType>> {
+    let returned = match arrow.body.as_ref() {
+        ArrowFunctionBody::Expr(expression) => expression.as_ref(),
+        ArrowFunctionBody::FunctionBody(body) => {
+            let [Stmt::Return(return_statement)] = body.stmts.as_slice() else {
+                return None;
+            };
+            return_statement.arg.as_deref()?
+        }
+    };
+    let returned = match returned {
+        Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
+        Expr::TsAs(assertion) => assertion.expr.as_ref(),
+        Expr::TsTypeAssertion(assertion) => assertion.expr.as_ref(),
+        expression => expression,
+    };
+    let Expr::Ident(returned) = returned else {
+        return None;
+    };
+    arrow.params.iter().find_map(|parameter| {
+        let Pat::Ident(binding) = parameter else {
+            return None;
+        };
+        (binding.id.sym == returned.sym)
+            .then(|| {
+                binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| annotation.type_ann.clone())
+            })
+            .flatten()
+    })
+}
+
 /// Resolves every top-level `interface` declaration, so `lower_ts_type` can
 /// treat a `TsTypeRef` naming one exactly like an inline `{ ... }` type
 /// literal. Interfaces may be declared in any order and may reference each
@@ -13232,7 +13266,8 @@ impl<'a> FnLowerer<'a> {
             generic_return_type: arrow
                 .return_type
                 .as_ref()
-                .map(|annotation| annotation.type_ann.clone()),
+                .map(|annotation| annotation.type_ann.clone())
+                .or_else(|| inferred_generic_arrow_return_type(arrow)),
         })
     }
 
@@ -14263,7 +14298,7 @@ mod tests {
                 "defaults do not match function type alias `Factory`",
             ),
             (
-                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => value; }",
+                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"not inferred\"; }",
                 "needs an explicit return type",
             ),
         ] {
