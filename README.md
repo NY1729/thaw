@@ -322,8 +322,10 @@ The workspace crates have narrow responsibilities:
   available; `end()` safely releases any remaining cork level.
   Destroying a writable rejects queued and in-flight callbacks exactly once,
   clears buffered length and prevents a later `finish` event.
-  Readables track buffered length, support object mode and pause/resume their
-  pipes until a backpressured destination drains. Their async iterators yield
+  Readables and writables track buffered length and support object mode,
+  including independent `readableObjectMode` and `writableObjectMode` on
+  Duplex and Transform streams. Pipes pause until a backpressured destination
+  drains. Readable async iterators yield
   buffered and future chunks, reject stream errors and destroy on early return;
   callback and Promise pipelines accept AbortSignal options, remove settlement
   listeners, destroy every stage with the same error and preserve original
