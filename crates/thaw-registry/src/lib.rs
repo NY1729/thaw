@@ -6252,6 +6252,37 @@ mod tests {
     }
 
     #[test]
+    fn web_readable_tracks_strategy_pull_and_delayed_close() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_readable_strategy");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var sizes = [], desiredAtClose, source = new ReadableStream({ start: function(controller) { controller.enqueue('a'); controller.enqueue('bb'); controller.close(); desiredAtClose = controller.desiredSize; } }, { highWaterMark: 4, size: function(value) { sizes.push(value); return value.length; } }), reader = source.getReader(), closed = false; reader.closed.then(function() { closed = true; }); await Promise.resolve(); var closedWithQueue = closed, first = await reader.read(), closedAfterFirst = closed, second = await reader.read(); await reader.closed; var releases = [], pulls = 0, active = 0, maxActive = 0, pulling = new ReadableStream({ pull: function(controller) { pulls++; active++; maxActive = Math.max(maxActive, active); var value = pulls; return new Promise(function(resolve) { releases.push(function() { controller.enqueue(value); active--; resolve(); }); }); } }, { highWaterMark: 2 }); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var initialPulls = pulls; releases.shift()(); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var refilledPulls = pulls; releases.shift()(); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var stoppedAtMark = pulls, pullingReader = pulling.getReader(), pulledFirst = await pullingReader.read(), pulledSecond = await pullingReader.read(), byteController, bytes = new ReadableStream({ type: 'bytes', start: function(controller) { byteController = controller; controller.enqueue(Uint8Array.from([1, 2])); } }, { highWaterMark: 3 }), byteDesiredBefore = byteController.desiredSize, byteReader = bytes.getReader({ mode: 'byob' }), byteValue = await byteReader.read(new Uint8Array(1)), byteDesiredAfter = byteController.desiredSize; byteController.close(); await byteReader.read(new Uint8Array(2)); await byteReader.read(new Uint8Array(1)); var invalidHighWaterMark, invalidByteSize; try { new ReadableStream({}, { highWaterMark: -1 }); } catch (error) { invalidHighWaterMark = error.code; } try { new ReadableStream({ type: 'bytes' }, { size: function() { return 1; } }); } catch (error) { invalidByteSize = error.code; } return [sizes, desiredAtClose, closedWithQueue, first.value, closedAfterFirst, second.value, closed, initialPulls, refilledPulls, stoppedAtMark, maxActive, pulledFirst.value, pulledSecond.value, byteDesiredBefore, Array.from(byteValue.value), byteDesiredAfter, invalidHighWaterMark, invalidByteSize]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_readable_strategy_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebReadableStrategy = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebReadableStrategy")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["a","bb"],1,false,"a",false,"bb",true,1,2,2,1,1,2,1,[1],2,"ERR_INVALID_ARG_VALUE","ERR_INVALID_ARG_VALUE"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_pipe_to_propagates_completion_errors_and_abort() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_pipe_to_options");

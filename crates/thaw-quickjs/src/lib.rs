@@ -3742,19 +3742,20 @@ const PLATFORM_GLOBALS: &str = r#"
       constructor(stream) { this._stream = stream; }
       enqueue(chunk) {
         const stream = this._stream;
-        if (stream._state !== 'readable') throw new TypeError('stream is not readable');
+        if (stream._state !== 'readable' || stream._closeRequested) throw new TypeError('stream is not readable');
         if (stream._reads.length) stream._reads.shift().resolve({ value: chunk, done: false });
-        else stream._queue.push(chunk);
+        else { let size; try { size = stream._chunkSize(chunk); } catch (error) { this.error(error); throw error; } stream._queue.push(chunk); stream._queueSizes.push(size); stream._queueTotalSize += size; }
+        stream._callPullIfNeeded();
       }
       close() {
-        const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'closed'; while (stream._reads.length) stream._reads.shift().resolve({ value: undefined, done: true }); stream._resolveClosed();
+        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) return;
+        stream._closeRequested = true; stream._finishCloseIfReady();
       }
       error(error) {
         const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'errored'; stream._error = error; while (stream._reads.length) stream._reads.shift().reject(error); stream._rejectClosed(error);
+        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; while (stream._reads.length) stream._reads.shift().reject(error); stream._rejectClosed(error);
       }
-      get desiredSize() { return this._stream._state === 'readable' ? 1 - this._stream._queue.length : null; }
+      get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
     }
     const byobResultView = (view, byteLength) => {
       const elements = Math.floor(byteLength / view.BYTES_PER_ELEMENT);
@@ -3784,32 +3785,33 @@ const PLATFORM_GLOBALS: &str = r#"
       constructor(stream) { this._stream = stream; }
       enqueue(chunk) {
         const stream = this._stream;
-        if (stream._state !== 'readable') throw new TypeError('stream is not readable');
+        if (stream._state !== 'readable' || stream._closeRequested) throw new TypeError('stream is not readable');
         if (!ArrayBuffer.isView(chunk) || chunk.byteLength === 0) throw new TypeError('byte stream chunks must be non-empty ArrayBuffer views');
-        stream._queue.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); stream._drainByob();
-        if (stream._reads.length && stream._queue.length) stream._reads.shift().resolve({ value: stream._queue.shift(), done: false });
+        stream._queue.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); stream._queueSizes.push(chunk.byteLength); stream._queueTotalSize += chunk.byteLength; stream._drainByob();
+        if (stream._reads.length && stream._queue.length) stream._reads.shift().resolve({ value: stream._dequeue(), done: false });
+        stream._callPullIfNeeded();
       }
       close() {
-        const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'closed'; stream._drainByob(); while (stream._reads.length) stream._reads.shift().resolve({ value: undefined, done: true }); stream._resolveClosed();
+        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) return;
+        stream._closeRequested = true; stream._drainByob(); stream._finishCloseIfReady();
       }
       error(error) {
         const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'errored'; stream._error = error; stream._byobRequest = null; while (stream._reads.length) stream._reads.shift().reject(error); while (stream._byobReads.length) stream._byobReads.shift().reject(error); stream._rejectClosed(error);
+        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; stream._byobRequest = null; while (stream._reads.length) stream._reads.shift().reject(error); while (stream._byobReads.length) stream._byobReads.shift().reject(error); stream._rejectClosed(error);
       }
       get byobRequest() { return this._stream._byobRequest; }
-      get desiredSize() { return this._stream._state === 'readable' ? -this._stream._queue.reduce((total, chunk) => total + chunk.byteLength, 0) : null; }
+      get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
     }
     class ReadableStreamDefaultReader {
       constructor(stream) { if (stream.locked) throw webInvalidState('ReadableStream is locked'); this._stream = stream; stream._reader = this; this.closed = stream._closed; }
       read() {
         const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
         if (stream._byteStream && stream._autoAllocateChunkSize) return stream._readInto(new Uint8Array(stream._autoAllocateChunkSize), this, 1);
-        if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
+        if (stream._queue.length) { const value = stream._dequeue(); stream._finishCloseIfReady(); stream._callPullIfNeeded(); return Promise.resolve({ value, done: false }); }
         if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
         if (stream._state === 'errored') return Promise.reject(stream._error);
         const result = new Promise((resolve, reject) => stream._reads.push({ reader: this, resolve, reject }));
-        if (typeof stream._source.pull === 'function') Promise.resolve(stream._source.pull(stream._controller)).catch(error => stream._controller.error(error));
+        stream._callPullIfNeeded();
         return result;
       }
       cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
@@ -3856,44 +3858,59 @@ const PLATFORM_GLOBALS: &str = r#"
           }
         });
       }
-      constructor(source = {}) {
+      constructor(source = {}, strategy = {}) {
         if (source.type !== undefined && source.type !== 'bytes') { const error = new TypeError('invalid source.type'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         if (source.autoAllocateChunkSize !== undefined && (source.type !== 'bytes' || !Number.isInteger(Number(source.autoAllocateChunkSize)) || Number(source.autoAllocateChunkSize) <= 0)) throw new RangeError('invalid autoAllocateChunkSize');
-        this._source = source; this._byteStream = source.type === 'bytes'; this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._reads = []; this._byobReads = []; this._byobRequest = null; this._state = 'readable'; this._error = undefined; this._reader = null;
+        if (source.type === 'bytes' && strategy.size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        const defaultHighWaterMark = source.type === 'bytes' ? 0 : 1, highWaterMark = strategy.highWaterMark === undefined ? defaultHighWaterMark : Number(strategy.highWaterMark);
+        if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        this._source = source; this._byteStream = source.type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = typeof strategy.size === 'function' ? strategy.size : () => 1; this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._state = 'readable'; this._closeRequested = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
         this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; });
         this._closed.catch(() => {}); this._controller = this._byteStream ? new ReadableByteStreamController(this) : new ReadableStreamDefaultController(this);
-        try { if (typeof source.start === 'function') Promise.resolve(source.start(this._controller)).catch(error => this._controller.error(error)); } catch (error) { this._controller.error(error); }
+        try { Promise.resolve(typeof source.start === 'function' ? source.start(this._controller) : undefined).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error)); } catch (error) { this._controller.error(error); }
       }
       get locked() { return this._reader !== null; }
       getReader(options = {}) { if (options.mode === undefined) return new ReadableStreamDefaultReader(this); if (options.mode === 'byob') return new ReadableStreamBYOBReader(this); const error = new TypeError('invalid reader mode'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+      _chunkSize(chunk) { const size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } return size; }
+      _dequeue() { const value = this._queue.shift(), size = this._queueSizes.shift() || 0; this._queueTotalSize = Math.max(0, this._queueTotalSize - size); return value; }
+      _finishCloseIfReady() { if (!this._closeRequested || this._queue.length || this._state !== 'readable') return; this._state = 'closed'; this._byobRequest = null; while (this._reads.length) this._reads.shift().resolve({ value: undefined, done: true }); while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, read.filled), done: read.filled === 0 }); } this._resolveClosed(); }
+      _callPullIfNeeded() {
+        if (!this._started || this._state !== 'readable' || this._closeRequested || typeof this._source.pull !== 'function') return;
+        if (!this._reads.length && !this._byobReads.length && this._highWaterMark - this._queueTotalSize <= 0) return;
+        if (this._pulling) { this._pullAgain = true; return; }
+        this._pulling = true;
+        Promise.resolve().then(() => this._source.pull(this._controller)).then(() => { this._pulling = false; if (this._pullAgain) { this._pullAgain = false; this._callPullIfNeeded(); } }, error => { this._pulling = false; this._controller.error(error); });
+      }
       _drainByob() {
         while (this._byobReads.length && this._queue.length) {
           const read = this._byobReads[0], target = new Uint8Array(read.view.buffer, read.view.byteOffset, read.view.byteLength);
           while (read.filled < target.byteLength && this._queue.length) {
             const chunk = this._queue[0], length = Math.min(chunk.byteLength, target.byteLength - read.filled); target.set(chunk.subarray(0, length), read.filled); read.filled += length;
-            if (length === chunk.byteLength) this._queue.shift(); else this._queue[0] = chunk.subarray(length);
+            this._queueTotalSize = Math.max(0, this._queueTotalSize - length);
+            if (length === chunk.byteLength) { this._queue.shift(); this._queueSizes.shift(); } else { this._queue[0] = chunk.subarray(length); this._queueSizes[0] -= length; }
           }
           if (read.filled < read.minBytes && this._state === 'readable') break;
           this._byobReads.shift(); if (this._byobRequest && this._byobRequest._read === read) this._byobRequest = null; read.resolve({ value: byobResultView(read.view, read.filled), done: false });
         }
+        this._finishCloseIfReady();
         if (this._state === 'closed' && !this._queue.length) {
           this._byobRequest = null; while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, 0), done: true }); }
         }
-        this._prepareByobRequest();
+        this._prepareByobRequest(); this._callPullIfNeeded();
       }
       _prepareByobRequest() {
         if (!this._byobReads.length || this._state !== 'readable' || this._byobRequest) return;
         const read = this._byobReads[0], remaining = new Uint8Array(read.view.buffer, read.view.byteOffset + read.filled, read.view.byteLength - read.filled);
         this._byobRequest = new ReadableStreamBYOBRequest(this, { ...read, view: remaining });
         this._byobRequest._read = read;
-        if (typeof this._source.pull === 'function') Promise.resolve().then(() => this._source.pull(this._controller)).catch(error => this._controller.error(error));
+        this._callPullIfNeeded();
       }
       _readInto(view, reader, min) {
         if (this._state === 'errored') return Promise.reject(this._error);
         const result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, minBytes: min * view.BYTES_PER_ELEMENT, filled: 0, resolve, reject })); this._drainByob(); this._prepareByobRequest();
         return result;
       }
-      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
+      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
       cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); return this._cancel(reason); }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');

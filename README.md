@@ -408,7 +408,10 @@ The workspace crates have narrow responsibilities:
   branches with shared object identity, propagates close/error to both sides,
   and defers one-sided cancellation until the other branch finishes; when both
   branches cancel, their reasons are forwarded to the source as an ordered
-  pair.
+  pair. Readable queuing strategies use custom chunk sizes and high-water marks;
+  pulls are automatically scheduled and serialized until capacity is filled,
+  while close remains pending until queued chunks have been consumed. Byte and
+  BYOB queues use the same byte-accurate desired-size accounting.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
