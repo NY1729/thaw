@@ -718,6 +718,7 @@ fn validate_generic_function(fn_decl: &FnDecl) -> Result<Vec<Symbol>, String> {
         return Ok(Vec::new());
     };
     let name = fn_decl.ident.sym.as_str();
+    validate_trailing_type_parameter_defaults("generic function", name, type_params)?;
     if type_params.params.is_empty() || fn_decl.function.return_type.is_none() {
         return Err(format!(
             "generic function `{name}` needs type parameters and a return annotation"
@@ -728,6 +729,25 @@ fn validate_generic_function(fn_decl: &FnDecl) -> Result<Vec<Symbol>, String> {
         .iter()
         .map(|param| param.name.sym.to_string())
         .collect())
+}
+
+fn validate_trailing_type_parameter_defaults(
+    declaration_kind: &str,
+    name: &str,
+    parameters: &swc_ecma_ast::TsTypeParamDecl,
+) -> Result<(), String> {
+    let mut saw_default = false;
+    for parameter in &parameters.params {
+        if parameter.default.is_some() {
+            saw_default = true;
+        } else if saw_default {
+            return Err(format!(
+                "{declaration_kind} `{name}` has required type parameter `{}` after an optional type parameter",
+                parameter.name.sym
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn supports_generic_native_layout(ty: &HirType) -> bool {
@@ -1281,7 +1301,12 @@ fn resolve_interfaces(
         match item {
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) => {
                 let name = iface.id.sym.to_string();
-                if iface.type_params.is_some() {
+                if let Some(parameters) = &iface.type_params {
+                    validate_trailing_type_parameter_defaults(
+                        "generic interface",
+                        &name,
+                        parameters,
+                    )?;
                     generic.interfaces.insert(name, iface.as_ref());
                 } else {
                     raw.insert(name, iface.as_ref());
@@ -1289,7 +1314,12 @@ fn resolve_interfaces(
             }
             ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
                 let name = alias.id.sym.to_string();
-                if alias.type_params.is_some() {
+                if let Some(parameters) = &alias.type_params {
+                    validate_trailing_type_parameter_defaults(
+                        "generic type alias",
+                        &name,
+                        parameters,
+                    )?;
                     generic.aliases.insert(name, alias.as_ref());
                 } else {
                     aliases.insert(name, alias.as_ref());
@@ -12652,6 +12682,29 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("does not satisfy constraint F64"), "{error}");
+    }
+
+    #[test]
+    fn rejects_required_type_parameters_after_defaults() {
+        for (source, kind) in [
+            (
+                "interface Invalid<T = string, U> { first: T; second: U } function main(): void {}",
+                "generic interface",
+            ),
+            (
+                "type Invalid<T = string, U> = { first: T; second: U }; function main(): void {}",
+                "generic type alias",
+            ),
+            (
+                "function invalid<T = string, U>(value: U): U { return value; } function main(): void { invalid(1); }",
+                "generic function",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(kind), "{error}");
+            assert!(error.contains("required type parameter `U`"), "{error}");
+        }
     }
 
     #[test]
