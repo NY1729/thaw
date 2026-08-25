@@ -241,7 +241,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function gzipSync(argsArray: any): any;\nexport declare function gunzipSync(argsArray: any): any;\nexport declare function deflateSync(argsArray: any): any;\nexport declare function inflateSync(argsArray: any): any;\nexport declare function deflateRawSync(argsArray: any): any;\nexport declare function inflateRawSync(argsArray: any): any;\nexport declare function gzip(argsArray: any): void;\nexport declare function gunzip(argsArray: any): void;\n"
         }
         "worker_threads" => {
-            "export declare const isMainThread: boolean;\nexport declare const threadId: number;\nexport declare const workerData: any;\nexport declare const parentPort: any;\nexport declare const MessageChannel: any;\nexport declare const MessagePort: any;\nexport declare function receiveMessageOnPort(argsArray: any): any;\nexport declare function setEnvironmentData(argsArray: any): void;\nexport declare function getEnvironmentData(argsArray: any): any;\n"
+            "export declare const isMainThread: boolean;\nexport declare const threadId: number;\nexport declare const workerData: any;\nexport declare const parentPort: any;\nexport declare const MessageChannel: any;\nexport declare const MessagePort: any;\nexport declare function Worker(argsArray: any): any;\nexport declare function receiveMessageOnPort(argsArray: any): any;\nexport declare function setEnvironmentData(argsArray: any): void;\nexport declare function getEnvironmentData(argsArray: any): any;\n"
         }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare function homedir(argsArray: any): any;\nexport declare function hostname(argsArray: any): any;\nexport declare function cpus(argsArray: any): any;\nexport declare function totalmem(argsArray: any): any;\nexport declare function freemem(argsArray: any): any;\nexport declare function uptime(argsArray: any): any;\nexport declare const EOL: string;\n"
@@ -3241,13 +3241,19 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              var gzipSync = sync('compress', 'gzip'), gunzipSync = sync('decompress', 'gzip'), deflateSync = sync('compress', 'deflate'), inflateSync = sync('decompress', 'deflate'), deflateRawSync = sync('compress', 'deflateRaw'), inflateRawSync = sync('decompress', 'deflateRaw');\n\
              module.exports = { gzipSync: gzipSync, gunzipSync: gunzipSync, deflateSync: deflateSync, inflateSync: inflateSync, deflateRawSync: deflateRawSync, inflateRawSync: inflateRawSync, gzip: async(gzipSync), gunzip: async(gunzipSync), deflate: async(deflateSync), inflate: async(inflateSync), deflateRaw: async(deflateRawSync), inflateRaw: async(inflateRawSync), constants: { Z_OK: 0, Z_STREAM_END: 1, Z_DEFAULT_COMPRESSION: -1 } }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
-        "worker_threads" => Some(
+        "worker_threads" => Some(concat!(
             "var environmentData = globalThis.__thaw_worker_environment_data || (globalThis.__thaw_worker_environment_data = new Map()); var SHARE_ENV = Symbol.for('nodejs.worker_threads.SHARE_ENV');\n\
              function receiveMessageOnPort(port) { if (!(port instanceof MessagePort)) throw new TypeError('port must be a MessagePort'); var record = port.__thawQueue.shift(); return record ? { message: record.data } : undefined; }\n\
              function setEnvironmentData(key, value) { environmentData.set(key, structuredClone(value)); } function getEnvironmentData(key) { var value = environmentData.get(key); return value === undefined ? undefined : structuredClone(value); }\n\
              function moveMessagePortToContext(port) { if (!(port instanceof MessagePort)) throw new TypeError('port must be a MessagePort'); return port; } function markAsUntransferable() {} function markAsUncloneable() {} function isMarkedAsUntransferable() { return false; }\n\
              module.exports = { isMainThread: true, threadId: 0, workerData: null, parentPort: null, resourceLimits: {}, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, receiveMessageOnPort: receiveMessageOnPort, setEnvironmentData: setEnvironmentData, getEnvironmentData: getEnvironmentData, moveMessagePortToContext: moveMessagePortToContext, markAsUntransferable: markAsUntransferable, markAsUncloneable: markAsUncloneable, isMarkedAsUntransferable: isMarkedAsUntransferable, SHARE_ENV: SHARE_ENV }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
-        ),
+            r#"
+             var nextWorkerId = globalThis.__thaw_next_worker_id || 1; function runWorkerSource(source, context) { context.globalThis = context; context.global = context; var scope = new Proxy(context, { has: function(target, key) { return key !== 'scope' && key !== 'source'; }, get: function(target, key) { if (key === Symbol.unscopables) return undefined; return key in target ? target[key] : undefined; }, set: function(target, key, value) { target[key] = value; return true; } }); return Function('scope', 'source', 'with (scope) { return eval(source); }')(scope, String(source)); }
+             function Worker(filename, options) { if (!(this instanceof Worker)) return new Worker(filename, options); options = options || {}; if (!options.eval) throw new Error('Thaw Worker currently requires { eval: true }'); this._events = Object.create(null); this.threadId = nextWorkerId++; globalThis.__thaw_next_worker_id = nextWorkerId; this.resourceLimits = {}; this.performance = { eventLoopUtilization: function() { return { idle: 0, active: 0, utilization: 0 }; } }; this.stdin = null; this.stdout = null; this.stderr = null; this._terminated = false; this._exited = false; var worker = this, channel = new MessageChannel(); this._port = channel.port1; this._workerPort = channel.port2; this._port.on('message', function(value) { worker.emit('message', value); }); this._port.on('messageerror', function(error) { worker.emit('messageerror', error); }); this._workerPort.on('close', function() { worker._finish(0); }); var data = options.workerData === undefined ? undefined : structuredClone(options.workerData); queueMicrotask(function() { if (worker._terminated) return; worker.emit('online'); var childModule = { isMainThread: false, threadId: worker.threadId, workerData: data, parentPort: worker._workerPort, resourceLimits: worker.resourceLimits, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, receiveMessageOnPort: receiveMessageOnPort, setEnvironmentData: setEnvironmentData, getEnvironmentData: getEnvironmentData, SHARE_ENV: SHARE_ENV }; var context = { eval: eval, console: console, Buffer: Buffer, structuredClone: structuredClone, MessageChannel: MessageChannel, MessagePort: MessagePort, BroadcastChannel: globalThis.BroadcastChannel, setTimeout: setTimeout, clearTimeout: clearTimeout, setInterval: setInterval, clearInterval: clearInterval, queueMicrotask: queueMicrotask, require: function(name) { if (name === 'worker_threads' || name === 'node:worker_threads') return childModule; return require(name); } }; try { runWorkerSource(String(filename), context); if (!(worker._workerPort.__thawNodeListeners.get('message') || []).length) worker._workerPort.close(); } catch (error) { worker.emit('error', error); worker._finish(1); } }); }
+             Worker.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; }; Worker.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; }; Worker.prototype.off = Worker.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; }; Worker.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; }; Worker.prototype.postMessage = function(value, transfer) { if (!this._terminated) this._port.postMessage(value, transfer); }; Worker.prototype._finish = function(code) { if (this._exited) return; this._exited = true; var worker = this; queueMicrotask(function() { worker.emit('exit', Number(code)); }); }; Worker.prototype.terminate = function() { if (!this._terminated) { this._terminated = true; this._workerPort.close(); this._port.close(); this._finish(1); } return Promise.resolve(1); }; Worker.prototype.ref = function() { this._port.ref(); return this; }; Worker.prototype.unref = function() { this._port.unref(); return this; }; Worker.prototype.getHeapSnapshot = function() { return Promise.resolve({}); };
+             module.exports.Worker = Worker;
+"#,
+        )),
         _ => None,
     }
 }
@@ -5477,6 +5483,34 @@ mod tests {
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(result, r#"[true,0,null,7,42,true,false,true,true,true]"#);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn worker_threads_eval_worker_isolates_state_and_exchanges_messages() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_worker_eval");
+        fs::write(
+            dir.join("index.js"),
+            "var workers = require('node:worker_threads'); module.exports = async function () { var events = []; var source = \"var wt = require('node:worker_threads'); globalThis.workerOnly = 99; wt.parentPort.on('message', function(value) { wt.parentPort.postMessage({ answer: wt.workerData.base + value, main: wt.isMainThread, threadId: wt.threadId, isolated: globalThis.workerOnly }); wt.parentPort.close(); });\"; var worker = new workers.Worker(source, { eval: true, workerData: { base: 40 } }); var completed = new Promise(function(resolve) { worker.on('online', function() { events.push('online'); }); worker.on('message', function(value) { events.push('message:' + value.answer + ':' + value.main + ':' + (value.threadId > 0) + ':' + value.isolated); }); worker.on('error', function(error) { events.push('error:' + error.stack); resolve(); }); worker.on('exit', function(code) { events.push('exit:' + code); resolve(); }); }); worker.postMessage(2); await completed; return [events, typeof globalThis.workerOnly, worker.threadId > 0, worker.ref() === worker, worker.unref() === worker, await worker.terminate()]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_worker_eval_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorker = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseWorker").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["online","message:42:false:true:99","exit:0"],"undefined",true,true,true,1]"#
+        );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
