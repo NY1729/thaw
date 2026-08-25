@@ -14092,6 +14092,32 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_instantiation_function_values() {
+        let source = r#"
+            function identity<T>(value: T): T { return value; }
+            function pair<T, U = string>(left: T, right: U): { left: T; right: U } {
+                return { left, right };
+            }
+            function main(): void {
+                const numberIdentity: (value: number) => number = identity<number>;
+                const stringIdentity: (value: string) => string = identity<string>;
+                console.log(numberIdentity(11));
+                console.log(stringIdentity("instantiated"));
+                const makePair: (left: number, right: string) => { left: number; right: string } =
+                    pair<number>;
+                const value = makePair(2, "pair");
+                console.log(value.left);
+                console.log(value.right);
+                console.log([6, 7].map(numberIdentity)[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_instantiation_values"),
+            "11\ninstantiated\n2\npair\n7\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
