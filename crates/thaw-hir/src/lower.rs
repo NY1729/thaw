@@ -1427,6 +1427,7 @@ fn lower_generic_instance(
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
+    function_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
 }
 
 impl GenericInterfaces<'_> {
@@ -1464,7 +1465,13 @@ fn resolve_interfaces(
             }
             ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
                 let name = alias.id.sym.to_string();
-                if let Some(parameters) = &alias.type_params {
+                if matches!(
+                    alias.type_ann.as_ref(),
+                    TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function))
+                        if function.type_params.is_some()
+                ) {
+                    generic.function_aliases.insert(name, alias.as_ref());
+                } else if let Some(parameters) = &alias.type_params {
                     validate_trailing_type_parameter_defaults(
                         "generic type alias",
                         &name,
@@ -1499,6 +1506,16 @@ fn resolve_interfaces(
     {
         return Err(format!(
             "type alias `{name}` conflicts with a generic interface declaration"
+        ));
+    }
+    if let Some(name) = generic.function_aliases.keys().find(|name| {
+        raw.contains_key(*name)
+            || aliases.contains_key(*name)
+            || generic.interfaces.contains_key(*name)
+            || generic.aliases.contains_key(*name)
+    }) {
+        return Err(format!(
+            "generic function type alias `{name}` conflicts with another type declaration"
         ));
     }
 
@@ -3457,6 +3474,7 @@ struct FnLowerer<'a> {
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     generic_call_returns: HashMap<Symbol, HirType>,
     generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,
+    generic_named_templates: HashMap<Symbol, Symbol>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
 }
@@ -3500,6 +3518,7 @@ impl<'a> FnLowerer<'a> {
             call_constraints,
             generic_call_returns: HashMap::new(),
             generic_arrows: HashMap::new(),
+            generic_named_templates: HashMap::new(),
             loop_depth: 0,
             labels: Vec::new(),
         }
@@ -3536,6 +3555,7 @@ impl<'a> FnLowerer<'a> {
         let saved_nullish_narrowings = self.nullish_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
+        let saved_generic_named_templates = self.generic_named_templates.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
         self.narrowings = saved_narrowings;
@@ -3543,6 +3563,7 @@ impl<'a> FnLowerer<'a> {
         self.nullish_narrowings = saved_nullish_narrowings;
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
+        self.generic_named_templates = saved_generic_named_templates;
         lowered
     }
 
@@ -4570,6 +4591,45 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
+                if let (Expr::Arrow(arrow), Some(annotation)) = (init, binding.type_ann.as_ref()) {
+                    if arrow.type_params.is_some() {
+                        if let Some(alias) =
+                            self.generic_function_alias_from_type(&annotation.type_ann)
+                        {
+                            let expected = self.generic_function_alias_signature(alias)?;
+                            let actual = self.generic_arrow_signature(arrow)?;
+                            self.validate_generic_callable_shape(
+                                &expected,
+                                &actual,
+                                alias.id.sym.as_ref(),
+                            )?;
+                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            self.generic_arrows.insert(hir_name, arrow.clone());
+                            continue;
+                        }
+                    }
+                }
+                if let (Expr::Ident(identifier), Some(annotation)) =
+                    (init, binding.type_ann.as_ref())
+                {
+                    if let Some(alias) = self.generic_function_alias_from_type(&annotation.type_ann)
+                    {
+                        if let Some(actual) = self.signatures.get(identifier.sym.as_ref()) {
+                            if !actual.generic_type_params.is_empty() {
+                                let expected = self.generic_function_alias_signature(alias)?;
+                                self.validate_generic_callable_shape(
+                                    &expected,
+                                    actual,
+                                    alias.id.sym.as_ref(),
+                                )?;
+                                let hir_name = self.bind_local(&name, HirType::Dynamic);
+                                self.generic_named_templates
+                                    .insert(hir_name, identifier.sym.to_string());
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let annotated = binding
                     .type_ann
                     .as_ref()
@@ -6470,6 +6530,16 @@ impl<'a> FnLowerer<'a> {
                                     )
                                 })
                                 .or_else(|| {
+                                    self.generic_named_templates.get(name).and_then(|target| {
+                                        self.signatures.get(target).map(|signature| {
+                                            HirType::Function(
+                                                signature.params.clone(),
+                                                Box::new(signature.ret.clone()),
+                                            )
+                                        })
+                                    })
+                                })
+                                .or_else(|| {
                                     self.signatures.get(name).map(|signature| {
                                         let ret = if signature.is_async {
                                             HirType::Promise(Box::new(signature.ret.clone()))
@@ -7233,9 +7303,12 @@ impl<'a> FnLowerer<'a> {
                 return self.lower_contextual_arrow(arrow, parameter_types, expected_return)
             }
             Expr::Ident(ident) => {
-                let name = self.resolve_binding(ident.sym.as_ref());
+                let mut name = self.resolve_binding(ident.sym.as_ref());
                 if let Some(arrow) = self.generic_arrows.get(&name).cloned() {
                     return self.lower_contextual_arrow(&arrow, parameter_types, expected_return);
+                }
+                if let Some(target) = self.generic_named_templates.get(&name) {
+                    name = target.clone();
                 }
                 if self.scope.contains_key(&name) {
                     self.lower_expr(expr)?
@@ -8905,6 +8978,12 @@ impl<'a> FnLowerer<'a> {
                             .map(|arrow| arrow.params.len())
                     })
                     .or_else(|| {
+                        self.generic_named_templates
+                            .get(&name)
+                            .and_then(|target| self.signatures.get(target))
+                            .map(|signature| signature.params.len())
+                    })
+                    .or_else(|| {
                         self.signatures
                             .get(&name)
                             .map(|signature| signature.params.len())
@@ -8943,6 +9022,12 @@ impl<'a> FnLowerer<'a> {
                         self.generic_arrows
                             .get(&name)
                             .map(|arrow| arrow.params.len())
+                    })
+                    .or_else(|| {
+                        self.generic_named_templates
+                            .get(&name)
+                            .and_then(|target| self.signatures.get(target))
+                            .map(|signature| signature.params.len())
                     })
                     .or_else(|| {
                         self.signatures
@@ -8989,6 +9074,12 @@ impl<'a> FnLowerer<'a> {
                             .map(|arrow| arrow.params.len())
                     })
                     .or_else(|| {
+                        self.generic_named_templates
+                            .get(&name)
+                            .and_then(|target| self.signatures.get(target))
+                            .map(|signature| signature.params.len())
+                    })
+                    .or_else(|| {
                         self.signatures
                             .get(&name)
                             .map(|signature| signature.params.len())
@@ -9025,6 +9116,12 @@ impl<'a> FnLowerer<'a> {
                         self.generic_arrows
                             .get(&name)
                             .map(|arrow| arrow.params.len())
+                    })
+                    .or_else(|| {
+                        self.generic_named_templates
+                            .get(&name)
+                            .and_then(|target| self.signatures.get(target))
+                            .map(|signature| signature.params.len())
                     })
                     .or_else(|| {
                         self.signatures
@@ -12102,6 +12199,13 @@ impl<'a> FnLowerer<'a> {
         if let Some(arrow) = self.generic_arrows.get(&callee_name).cloned() {
             return self.lower_generic_arrow_call(&callee_name, &arrow, call);
         }
+        if let Some(target) = self.generic_named_templates.get(&callee_name).cloned() {
+            let mut forwarded = call.clone();
+            forwarded.callee = Callee::Expr(Box::new(Expr::Ident(
+                swc_ecma_ast::Ident::new_no_ctxt(target.into(), call.span),
+            )));
+            return self.lower_call(&forwarded);
+        }
 
         if matches!(callee_name.as_str(), "isNaN" | "isFinite") {
             let [argument] = call.args.as_slice() else {
@@ -12887,6 +12991,209 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
+    fn generic_function_alias_from_type(
+        &self,
+        ty: &TsType,
+    ) -> Option<&swc_ecma_ast::TsTypeAliasDecl> {
+        let TsType::TsTypeRef(reference) = ty else {
+            return None;
+        };
+        let swc_ecma_ast::TsEntityName::Ident(identifier) = &reference.type_name else {
+            return None;
+        };
+        reference
+            .type_params
+            .is_none()
+            .then(|| {
+                self.generic_interfaces
+                    .function_aliases
+                    .get(identifier.sym.as_ref())
+                    .copied()
+            })
+            .flatten()
+    }
+
+    fn generic_function_alias_signature(
+        &self,
+        alias: &swc_ecma_ast::TsTypeAliasDecl,
+    ) -> Result<FnSignature, String> {
+        let TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) =
+            alias.type_ann.as_ref()
+        else {
+            return Err(format!(
+                "type alias `{}` is not a generic function type",
+                alias.id.sym
+            ));
+        };
+        let type_params = function
+            .type_params
+            .as_ref()
+            .ok_or_else(|| format!("function type alias `{}` is not generic", alias.id.sym))?;
+        validate_trailing_type_parameter_defaults(
+            "generic function type alias",
+            alias.id.sym.as_ref(),
+            type_params,
+        )?;
+        let generic_type_params = type_params
+            .params
+            .iter()
+            .map(|parameter| parameter.name.sym.to_string())
+            .collect::<Vec<_>>();
+        let substitutions = generic_type_params
+            .iter()
+            .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
+            .collect::<HashMap<_, _>>();
+        let generic_param_patterns = function
+            .params
+            .iter()
+            .map(|parameter| {
+                let TsFnParam::Ident(parameter) = parameter else {
+                    return Err(format!(
+                        "generic function type alias `{}` requires identifier parameters",
+                        alias.id.sym
+                    ));
+                };
+                let annotation = parameter.type_ann.as_ref().ok_or_else(|| {
+                    format!(
+                        "generic function type alias `{}` parameter `{}` needs an annotation",
+                        alias.id.sym, parameter.id.sym
+                    )
+                })?;
+                generic_type_pattern(
+                    &annotation.type_ann,
+                    &substitutions,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    &mut Vec::new(),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(FnSignature {
+            params: Vec::new(),
+            variadic: None,
+            ret: HirType::Dynamic,
+            is_async: false,
+            is_extern: false,
+            source_range: (alias.span.lo.0, alias.span.hi.0),
+            generic_type_params,
+            generic_type_constraints: type_params
+                .params
+                .iter()
+                .map(|parameter| parameter.constraint.clone())
+                .collect(),
+            generic_type_defaults: type_params
+                .params
+                .iter()
+                .map(|parameter| parameter.default.clone())
+                .collect(),
+            generic_param_patterns,
+            generic_return_type: Some(function.type_ann.type_ann.clone()),
+        })
+    }
+
+    fn validate_generic_callable_shape(
+        &self,
+        expected: &FnSignature,
+        actual: &FnSignature,
+        alias_name: &str,
+    ) -> Result<(), String> {
+        if expected.generic_type_params.len() != actual.generic_type_params.len()
+            || expected.generic_param_patterns.len() != actual.generic_param_patterns.len()
+        {
+            return Err(format!(
+                "generic arrow does not match function type alias `{alias_name}` arity"
+            ));
+        }
+        let canonical = (0..expected.generic_type_params.len())
+            .map(|index| {
+                HirType::Object(vec![(format!("__generic_parameter_{index}"), HirType::F64)])
+            })
+            .collect::<Vec<_>>();
+        let expected_substitution = expected
+            .generic_type_params
+            .iter()
+            .cloned()
+            .zip(canonical.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let actual_substitution = actual
+            .generic_type_params
+            .iter()
+            .cloned()
+            .zip(canonical.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let expected_params = expected
+            .generic_param_patterns
+            .iter()
+            .map(|pattern| instantiate_generic_pattern(pattern, &expected_substitution))
+            .collect::<Result<Vec<_>, _>>()?;
+        let actual_params = actual
+            .generic_param_patterns
+            .iter()
+            .map(|pattern| instantiate_generic_pattern(pattern, &actual_substitution))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_return = resolve_ts_type_with_substitution(
+            expected
+                .generic_return_type
+                .as_ref()
+                .expect("generic alias return type"),
+            &expected_substitution,
+            self.interfaces,
+            self.generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        let actual_return = resolve_ts_type_with_substitution(
+            actual
+                .generic_return_type
+                .as_ref()
+                .expect("generic arrow return type"),
+            &actual_substitution,
+            self.interfaces,
+            self.generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        if expected_params != actual_params || expected_return != actual_return {
+            return Err(format!(
+                "generic arrow has signature {actual_params:?} -> {actual_return:?}, incompatible with function type alias `{alias_name}` {expected_params:?} -> {expected_return:?}"
+            ));
+        }
+        for (expected_constraint, actual_constraint) in expected
+            .generic_type_constraints
+            .iter()
+            .zip(&actual.generic_type_constraints)
+        {
+            let expected_constraint = expected_constraint
+                .as_ref()
+                .map(|constraint| {
+                    resolve_ts_type_with_substitution(
+                        constraint,
+                        &expected_substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .transpose()?;
+            let actual_constraint = actual_constraint
+                .as_ref()
+                .map(|constraint| {
+                    resolve_ts_type_with_substitution(
+                        constraint,
+                        &actual_substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .transpose()?;
+            if expected_constraint != actual_constraint {
+                return Err(format!(
+                    "generic arrow constraints do not match function type alias `{alias_name}`"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn lower_optional_call(&mut self, call: &swc_ecma_ast::OptCall) -> Result<HirExpr, String> {
         let optional_member = match call.callee.as_ref() {
             Expr::Member(member) => Some(member),
@@ -13492,6 +13799,28 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("does not satisfy constraint F64"), "{error}");
+    }
+
+    #[test]
+    fn validates_generic_function_type_alias_assignments() {
+        for (source, expected) in [
+            (
+                "type Identity = <T>(value: T) => T; function main(): void { const bad: Identity = <U>(value: U): string => String(value); }",
+                "incompatible with function type alias `Identity`",
+            ),
+            (
+                "type Numeric = <T extends number>(value: T) => T; function main(): void { const bad: Numeric = <U extends string>(value: U): U => value; }",
+                "constraints do not match function type alias `Numeric`",
+            ),
+            (
+                "type Identity = <T>(value: T) => T; function bad<T>(value: T): string { return \"wrong\"; } function main(): void { const invalid: Identity = bad; }",
+                "incompatible with function type alias `Identity`",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
