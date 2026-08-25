@@ -336,8 +336,10 @@ The workspace crates have narrow responsibilities:
   HTTP/2 prefaces and SETTINGS/PING/HEADERS/DATA/RST_STREAM/GOAWAY frames,
   HPACK literal/static-table headers, stream lifecycle events and packed
   settings helpers. Large header blocks are fragmented and reconstructed with
-  CONTINUATION frames. TLS/ALPN transport, HPACK Huffman/dynamic tables and
-  connection-level flow control remain explicit gaps
+  CONTINUATION frames. DATA writes honor connection and stream windows, split
+  at the negotiated frame size, backpressure above the available window and
+  resume on WINDOW_UPDATE. TLS/ALPN transport and HPACK Huffman/dynamic tables
+  remain explicit gaps
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
