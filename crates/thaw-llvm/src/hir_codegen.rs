@@ -14051,6 +14051,27 @@ mod tests {
     }
 
     #[test]
+    fn compiles_contextually_specialized_generic_callbacks() {
+        let source = r#"
+            function identity<T>(value: T): T { return value; }
+            async function main(): Promise<void> {
+                const numbers = [1, 2].map(identity);
+                const strings = ["a", "b"].map(identity);
+                console.log(numbers[1]);
+                console.log(strings[0]);
+                const promised: number = await new Promise<number>((resolve, reject) => {
+                    resolve(3);
+                }).then(identity);
+                console.log(promised);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_callback_specialization"),
+            "2\na\n3\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
