@@ -444,6 +444,9 @@ The workspace crates have narrow responsibilities:
   across synchronous, callback, Promise and FileHandle APIs
 - `watchFile`/`unwatchFile` provide host-backed Stats change notifications,
   listener sharing, configurable polling and watcher ref/unref controls
+- `fs.watch` exposes `FSWatcher` change/rename events for files and
+  directories, including recursive paths, Buffer filenames and abort/close
+  lifecycle controls
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
   classes with ranged/chunked reads, append mode, byte counters and
   open/ready/finish/end/close lifecycle events
