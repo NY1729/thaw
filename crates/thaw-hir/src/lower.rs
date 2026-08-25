@@ -1504,6 +1504,48 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
         Expr::Lit(Lit::Str(_)) => Some(TsKeywordTypeKind::TsStringKeyword),
         Expr::Lit(Lit::Bool(_)) => Some(TsKeywordTypeKind::TsBooleanKeyword),
         Expr::Lit(Lit::Null(_)) => Some(TsKeywordTypeKind::TsNullKeyword),
+        Expr::Tpl(_) => Some(TsKeywordTypeKind::TsStringKeyword),
+        Expr::Unary(unary) => match unary.op {
+            UnaryOp::Bang => Some(TsKeywordTypeKind::TsBooleanKeyword),
+            UnaryOp::TypeOf => Some(TsKeywordTypeKind::TsStringKeyword),
+            UnaryOp::Void => Some(TsKeywordTypeKind::TsUndefinedKeyword),
+            UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde => {
+                Some(TsKeywordTypeKind::TsNumberKeyword)
+            }
+            _ => None,
+        },
+        Expr::Bin(binary)
+            if matches!(
+                binary.op,
+                BinaryOp::EqEq
+                    | BinaryOp::NotEq
+                    | BinaryOp::EqEqEq
+                    | BinaryOp::NotEqEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq
+                    | BinaryOp::In
+                    | BinaryOp::InstanceOf
+            ) =>
+        {
+            Some(TsKeywordTypeKind::TsBooleanKeyword)
+        }
+        Expr::Call(call) => match &call.callee {
+            Callee::Expr(callee) => match callee.as_ref() {
+                Expr::Ident(identifier) if identifier.sym == *"String" => {
+                    Some(TsKeywordTypeKind::TsStringKeyword)
+                }
+                Expr::Ident(identifier) if identifier.sym == *"Number" => {
+                    Some(TsKeywordTypeKind::TsNumberKeyword)
+                }
+                Expr::Ident(identifier) if identifier.sym == *"Boolean" => {
+                    Some(TsKeywordTypeKind::TsBooleanKeyword)
+                }
+                _ => None,
+            },
+            _ => None,
+        },
         _ => None,
     };
     if let Some(keyword) = keyword {
@@ -14378,7 +14420,7 @@ mod tests {
             ),
             (
                 "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => String(value); }",
-                "needs an explicit return type",
+                "incompatible with function type alias `Identity`",
             ),
             (
                 "type Stringify = <T>(value: T) => string; function main(): void { const invalid: Stringify = <T>(value: T) => 1; }",
