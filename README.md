@@ -383,7 +383,9 @@ The workspace crates have narrow responsibilities:
   contract. Assignments to these polymorphic annotations require an explicit
   implementation return type when the body does not directly return one of
   its annotated parameters. Direct identity returns infer that parameter's
-  generic pattern for arrow and function expressions. The equivalent
+  generic pattern for arrow and function expressions, including conditional
+  expressions and `if`/block paths whose every return selects the same
+  parameter. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Callable assignment compares the effective Promise-wrapped return of named

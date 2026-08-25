@@ -14249,6 +14249,8 @@ mod tests {
                 const factory: DefaultFactory = <Value = string>(): Value => "default";
                 const inferredReturn: Identity = <T>(value: T) => value;
                 const inferredFunctionReturn: Identity = function<T>(value: T) { return value; };
+                const conditionalReturn: Identity = <T>(value: T) => true ? value : value;
+                const branchedReturn: Identity = function<T>(value: T) { if (true) { return value; } return value; };
                 const asyncIdentity: AsyncIdentity = namedAsyncIdentity;
                 console.log(identity(24));
                 console.log(identity("alias"));
@@ -14273,11 +14275,13 @@ mod tests {
                 console.log(inferredReturn<string>("inferred-return"));
                 console.log(inferredFunctionReturn(35));
                 console.log(await asyncIdentity<string>("async-alias"));
+                console.log(conditionalReturn(36));
+                console.log(branchedReturn<string>("branched-return"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\n"
         );
     }
 
