@@ -664,7 +664,10 @@ The workspace crates have narrow responsibilities:
 - `node:stream/consumers` collects event streams or async iterables as Buffer,
   text, JSON, ArrayBuffer or Blob; Blob/File support includes slicing and bytes
 - `node:stream/web` shares global Readable/Writable/Transform streams with
-  readers, writers, piping, async iteration, queuing strategies and text codecs
+  readers, writers, piping, async iteration, queuing strategies and text codecs.
+  Readable byte streams expose byte controllers, BYOB readers/requests,
+  minimum-fill reads and default-reader auto-allocation; queued bytes split
+  across supplied views, and byte-stream `tee()` retains BYOB-capable branches
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
   native gzip, deflate and raw-deflate implementation
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots

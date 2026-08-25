@@ -189,7 +189,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function arrayBuffer(argsArray: any): any;\nexport declare function blob(argsArray: any): any;\nexport declare function buffer(argsArray: any): any;\nexport declare function json(argsArray: any): any;\nexport declare function text(argsArray: any): any;\n"
         }
         "stream/web" => {
-            "export declare const ReadableStream: any;\nexport declare const WritableStream: any;\nexport declare const TransformStream: any;\nexport declare const TextEncoderStream: any;\nexport declare const TextDecoderStream: any;\nexport declare const CompressionStream: any;\nexport declare const DecompressionStream: any;\n"
+            "export declare const ReadableStream: any;\nexport declare const ReadableByteStreamController: any;\nexport declare const ReadableStreamBYOBReader: any;\nexport declare const ReadableStreamBYOBRequest: any;\nexport declare const WritableStream: any;\nexport declare const TransformStream: any;\nexport declare const TextEncoderStream: any;\nexport declare const TextDecoderStream: any;\nexport declare const CompressionStream: any;\nexport declare const DecompressionStream: any;\n"
         }
         "readline" => {
             "export declare function createInterface(argsArray: any): any;\nexport declare function Interface(argsArray: any): any;\nexport declare function clearLine(argsArray: any): boolean;\nexport declare function clearScreenDown(argsArray: any): boolean;\nexport declare function cursorTo(argsArray: any): boolean;\nexport declare function moveCursor(argsArray: any): boolean;\n"
@@ -3640,7 +3640,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
             "function collect(stream) { if (stream && typeof stream[Symbol.asyncIterator] === 'function') return (async function() { var chunks = []; for await (var chunk of stream) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks); })(); return new Promise(function(resolve, reject) { var chunks = []; function cleanup() { if (stream.off) { stream.off('data', data); stream.off('end', end); stream.off('error', reject); } } function data(chunk) { chunks.push(Buffer.from(chunk)); } function end() { cleanup(); resolve(Buffer.concat(chunks)); } if (!stream || typeof stream.on !== 'function') { reject(new TypeError('stream must be readable')); return; } stream.on('data', data); stream.once('end', end); stream.once('error', reject); }); } function buffer(stream) { return collect(stream); } function text(stream) { return collect(stream).then(function(value) { return value.toString('utf8'); }); } function json(stream) { return text(stream).then(JSON.parse); } function arrayBuffer(stream) { return collect(stream).then(function(value) { var copy = Uint8Array.from(value); return copy.buffer; }); } function blob(stream) { return collect(stream).then(function(value) { return new Blob([value]); }); } module.exports = { arrayBuffer: arrayBuffer, blob: blob, buffer: buffer, json: json, text: text }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "stream/web" => Some(
-            "module.exports = { ReadableStream: globalThis.ReadableStream, ReadableStreamDefaultReader: globalThis.ReadableStreamDefaultReader, ReadableStreamDefaultController: globalThis.ReadableStreamDefaultController, WritableStream: globalThis.WritableStream, WritableStreamDefaultWriter: globalThis.WritableStreamDefaultWriter, TransformStream: globalThis.TransformStream, ByteLengthQueuingStrategy: globalThis.ByteLengthQueuingStrategy, CountQueuingStrategy: globalThis.CountQueuingStrategy, TextEncoderStream: globalThis.TextEncoderStream, TextDecoderStream: globalThis.TextDecoderStream, CompressionStream: globalThis.CompressionStream, DecompressionStream: globalThis.DecompressionStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+            "module.exports = { ReadableStream: globalThis.ReadableStream, ReadableStreamDefaultReader: globalThis.ReadableStreamDefaultReader, ReadableStreamDefaultController: globalThis.ReadableStreamDefaultController, ReadableByteStreamController: globalThis.ReadableByteStreamController, ReadableStreamBYOBReader: globalThis.ReadableStreamBYOBReader, ReadableStreamBYOBRequest: globalThis.ReadableStreamBYOBRequest, WritableStream: globalThis.WritableStream, WritableStreamDefaultWriter: globalThis.WritableStreamDefaultWriter, TransformStream: globalThis.TransformStream, ByteLengthQueuingStrategy: globalThis.ByteLengthQueuingStrategy, CountQueuingStrategy: globalThis.CountQueuingStrategy, TextEncoderStream: globalThis.TextEncoderStream, TextDecoderStream: globalThis.TextDecoderStream, CompressionStream: globalThis.CompressionStream, DecompressionStream: globalThis.DecompressionStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "diagnostics_channel" => Some(
             "var registry = globalThis.__thawDiagnosticChannels || (globalThis.__thawDiagnosticChannels = new Map());\n\
@@ -6126,6 +6126,35 @@ mod tests {
         assert_eq!(
             result,
             r#"[2,true,true,true,true,true,true,true,true,["left","right"],true,true,true,true,"ERR_INVALID_STATE"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn readable_byte_streams_support_byob_readers() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_readable_stream_byob");
+        fs::write(
+            dir.join("index.js"),
+            "var web = require('node:stream/web'); module.exports = async function () { var requestClass, viewClass, desired, source = new ReadableStream({ type: 'bytes', pull: function(controller) { var request = controller.byobRequest; requestClass = request.constructor === web.ReadableStreamBYOBRequest; viewClass = request.view instanceof Uint8Array; desired = controller.desiredSize; request.view[0] = 65; request.view[1] = 66; request.respond(2); controller.close(); } }), reader = source.getReader({ mode: 'byob' }), first = await reader.read(new Uint8Array(8)), done = await reader.read(new Uint8Array(4)), queued = new ReadableStream({ type: 'bytes', start: function(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); controller.close(); } }), queuedReader = queued.getReader({ mode: 'byob' }), queuedFirst = await queuedReader.read(new Uint8Array(2)), queuedSecond = await queuedReader.read(new Uint8Array(4)), queuedDone = await queuedReader.read(new Uint8Array(1)), defaultReader = new ReadableStream({ type: 'bytes', start: function(controller) { controller.enqueue(new Uint8Array([9])); controller.close(); } }).getReader(), defaultValue = await defaultReader.read(), minController, minStream = new ReadableStream({ type: 'bytes', start: function(controller) { minController = controller; } }), minReader = minStream.getReader({ mode: 'byob' }), minSettled = false, minRead = minReader.read(new Uint8Array(5), { min: 3 }).then(function(result) { minSettled = true; return result; }); minController.enqueue(new Uint8Array([1, 2])); await Promise.resolve(); await Promise.resolve(); var waitedForMin = !minSettled; minController.enqueue(new Uint8Array([3, 4])); var minResult = await minRead, allocatedInfo, allocated = new ReadableStream({ type: 'bytes', autoAllocateChunkSize: 4, pull: function(controller) { allocatedInfo = controller.byobRequest.view.byteLength; controller.byobRequest.view[0] = 7; controller.byobRequest.respond(1); controller.close(); } }), allocatedReader = allocated.getReader(), allocatedValue = await allocatedReader.read(), teeSource = new ReadableStream({ type: 'bytes', start: function(controller) { controller.enqueue(new Uint8Array([5, 6])); controller.close(); } }), teeBranches = teeSource.tee(), teeLeft = await teeBranches[0].getReader({ mode: 'byob' }).read(new Uint8Array(2)), teeRight = await teeBranches[1].getReader({ mode: 'byob' }).read(new Uint8Array(2)), wrongStream, wrongMode; try { new ReadableStream().getReader({ mode: 'byob' }); } catch (error) { wrongStream = error.code; } try { new ReadableStream().getReader({ mode: 'invalid' }); } catch (error) { wrongMode = error.code; } return [requestClass, viewClass, desired, Array.from(first.value), first.done, done.value.byteLength, done.done, Array.from(queuedFirst.value), Array.from(queuedSecond.value), queuedDone.value.byteLength, queuedDone.done, Array.from(defaultValue.value), waitedForMin, Array.from(minResult.value), allocatedInfo, Array.from(allocatedValue.value), Array.from(teeLeft.value), Array.from(teeRight.value), teeLeft.value !== teeRight.value, wrongStream, wrongMode, web.ReadableByteStreamController === globalThis.ReadableByteStreamController, web.ReadableStreamBYOBReader === globalThis.ReadableStreamBYOBReader]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_readable_stream_byob_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamByob = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseReadableStreamByob").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,true,0,[65,66],false,0,true,[1,2],[3],0,true,[9],true,[1,2,3,4],4,[7],[5,6],[5,6],true,"ERR_INVALID_ARG_VALUE","ERR_INVALID_ARG_VALUE",true,true]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
