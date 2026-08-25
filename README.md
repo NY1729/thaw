@@ -361,7 +361,9 @@ The workspace crates have narrow responsibilities:
   and async disposal (runtime-computed worker paths and parallel OS threads
   remain later); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
-  streams, including redirected console output
+  streams, including redirected console output; `postMessageToThread()` routes
+  structured-cloned values by thread ID to isolated `process` `workerMessage`
+  listeners with Node-style failure codes
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
