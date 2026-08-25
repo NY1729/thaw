@@ -32,6 +32,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -47,8 +48,6 @@ use rustls::{
     ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
 };
 use sha2::{Digest, Sha256, Sha512};
-use std::sync::Arc;
-
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 type TlsStreamTable = (u32, HashMap<u32, TlsStream>);
 type TlsServerStream = StreamOwned<ServerConnection, TcpStream>;
@@ -150,7 +149,7 @@ thread_local! {
     static TLS_LISTENERS: RefCell<(u32, HashMap<u32, TlsListener>)> = RefCell::new((1, HashMap::new()));
     static TLS_CLIENT_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
     static TLS_SERVER_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
-    static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new() });
+    static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new(), shared_env: Arc::new(Mutex::new(HashMap::new())) });
 }
 
 enum HostWorkerCommand {
@@ -195,9 +194,19 @@ struct HostWorker {
     thread: Option<JoinHandle<()>>,
 }
 
+struct HostWorkerStart {
+    bundle_source: String,
+    source: String,
+    worker_data_json: String,
+    config_json: String,
+    thread_id: u32,
+    shared_env: Arc<Mutex<HashMap<String, String>>>,
+}
+
 struct HostWorkerTable {
     next_handle: u32,
     workers: HashMap<u32, HostWorker>,
+    shared_env: Arc<Mutex<HashMap<String, String>>>,
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -1082,6 +1091,13 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         globalThis.module = {{ exports: {{}} }};
         globalThis.exports = globalThis.module.exports;
         process.env = Object.assign({{}}, __thaw_host_worker_config.env || {{}});
+        if (__thaw_host_worker_config.shareEnv) process.env = new Proxy({{}}, {{
+          get(target, key) {{ return typeof key === 'symbol' ? target[key] : __thaw_shared_env_get(String(key)); }},
+          set(target, key, value) {{ if (typeof key !== 'symbol') __thaw_shared_env_set(String(key), String(value)); else target[key] = value; return true; }},
+          deleteProperty(target, key) {{ return typeof key === 'symbol' ? delete target[key] : __thaw_shared_env_delete(String(key)); }},
+          ownKeys() {{ return JSON.parse(__thaw_shared_env_keys()); }},
+          getOwnPropertyDescriptor(target, key) {{ if (typeof key === 'symbol') return Object.getOwnPropertyDescriptor(target, key); const value = __thaw_shared_env_get(String(key)); return value === undefined ? undefined : {{ value, writable: true, enumerable: true, configurable: true }}; }}
+        }});
         process.argv = Array.from(__thaw_host_worker_config.argv || []);
         process.execArgv = Array.from(__thaw_host_worker_config.execArgv || []);
         const __thaw_stdin_listeners = new Map();
@@ -1180,24 +1196,21 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
 }
 
 fn run_host_worker(
-    bundle_source: String,
-    source: String,
-    worker_data_json: String,
-    config_json: String,
-    thread_id: u32,
+    start: HostWorkerStart,
     commands: Receiver<HostWorkerCommand>,
     events: Sender<HostWorkerEvent>,
 ) {
     let result = with_context(|ctx| -> Result<i32, String> {
-        if !bundle_source.is_empty() {
-            load_impl(ctx.clone(), &bundle_source)?;
+        install_shared_environment_functions(&ctx, start.shared_env.clone())?;
+        if !start.bundle_source.is_empty() {
+            load_impl(ctx.clone(), &start.bundle_source)?;
         }
         load_impl(
             ctx.clone(),
-            &host_worker_bootstrap(&worker_data_json, &config_json, thread_id),
+            &host_worker_bootstrap(&start.worker_data_json, &start.config_json, start.thread_id),
         )?;
         let _ = events.send(HostWorkerEvent::Online);
-        load_impl(ctx.clone(), &source)?;
+        load_impl(ctx.clone(), &start.source)?;
         loop {
             while ctx.execute_pending_job() {}
             let run_due: Function = ctx
@@ -1298,6 +1311,78 @@ fn run_host_worker(
     }
 }
 
+fn install_shared_environment_functions(
+    ctx: &Ctx<'_>,
+    shared_env: Arc<Mutex<HashMap<String, String>>>,
+) -> Result<(), String> {
+    let getter_env = shared_env.clone();
+    let getter = Function::new(ctx.clone(), move |key: String| {
+        getter_env
+            .lock()
+            .expect("shared Worker environment poisoned")
+            .get(&key)
+            .cloned()
+    })
+    .map_err(|error| error.to_string())?;
+    let setter_env = shared_env.clone();
+    let setter = Function::new(ctx.clone(), move |key: String, value: String| {
+        setter_env
+            .lock()
+            .expect("shared Worker environment poisoned")
+            .insert(key, value);
+    })
+    .map_err(|error| error.to_string())?;
+    let delete_env = shared_env.clone();
+    let deleter = Function::new(ctx.clone(), move |key: String| {
+        delete_env
+            .lock()
+            .expect("shared Worker environment poisoned")
+            .remove(&key)
+            .is_some()
+    })
+    .map_err(|error| error.to_string())?;
+    let keys_env = shared_env;
+    let keys = Function::new(ctx.clone(), move || {
+        serde_json::to_string(
+            &keys_env
+                .lock()
+                .expect("shared Worker environment poisoned")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".into())
+    })
+    .map_err(|error| error.to_string())?;
+    ctx.globals()
+        .set("__thaw_shared_env_get", getter)
+        .map_err(|error| error.to_string())?;
+    ctx.globals()
+        .set("__thaw_shared_env_set", setter)
+        .map_err(|error| error.to_string())?;
+    ctx.globals()
+        .set("__thaw_shared_env_delete", deleter)
+        .map_err(|error| error.to_string())?;
+    ctx.globals()
+        .set("__thaw_shared_env_keys", keys)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn initialize_shared_environment(json: String) -> bool {
+    let Ok(values) = serde_json::from_str::<HashMap<String, String>>(&json) else {
+        return false;
+    };
+    HOST_WORKERS.with(|table| {
+        *table
+            .borrow()
+            .shared_env
+            .lock()
+            .expect("shared Worker environment poisoned") = values;
+    });
+    true
+}
+
 fn spawn_host_worker(
     bundle_source: String,
     source: String,
@@ -1307,13 +1392,17 @@ fn spawn_host_worker(
 ) -> u32 {
     let (command_sender, command_receiver) = mpsc::channel();
     let (event_sender, event_receiver) = mpsc::channel();
+    let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
     let thread = std::thread::spawn(move || {
         run_host_worker(
-            bundle_source,
-            source,
-            worker_data_json,
-            config_json,
-            thread_id,
+            HostWorkerStart {
+                bundle_source,
+                source,
+                worker_data_json,
+                config_json,
+                thread_id,
+                shared_env,
+            },
             command_receiver,
             event_sender,
         );
@@ -1518,6 +1607,14 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         format!("{:?}", std::thread::current().id()),
                     )
                     .expect("failed to install OS thread identity");
+                let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
+                install_shared_environment_functions(&ctx, shared_env)
+                    .expect("failed to install shared Worker environment accessors");
+                let shared_env_init = Function::new(ctx.clone(), initialize_shared_environment)
+                    .expect("failed to create shared Worker environment initializer");
+                ctx.globals()
+                    .set("__thaw_shared_env_init", shared_env_init)
+                    .expect("failed to install shared Worker environment initializer");
                 let stdout = Function::new(ctx.clone(), |text: String| {
                     print!("{text}");
                     let _ = io::stdout().flush();
