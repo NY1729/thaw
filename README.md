@@ -394,6 +394,8 @@ The workspace crates have narrow responsibilities:
   readable pushes accept Buffer/TypedArray/DataView input, ignore undefined,
   reject invalid types, return false after destruction and diagnose pushes
   after EOF with `ERR_STREAM_PUSH_AFTER_EOF`;
+  sized `read(n)` waits for `n` buffered bytes/characters until EOF,
+  `read(0)` does not consume data, and object-mode reads return one item;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
