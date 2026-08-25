@@ -14072,9 +14072,12 @@ mod tests {
         let source = r#"
             interface NumberEntry extends Entry<number> { enabled: boolean }
             interface Holder { entry: Entry<number> }
+            interface TextPair extends Pair<string> { label: string }
+            interface PairHolder { pair: Pair<number> }
             interface Root { name: string }
             interface Entry<T> extends Root { value: T }
             interface DefaultEntry extends Entry<string> { count: number }
+            type Pair<T> = { first: T; second: T };
             function main(): void {
                 const number: NumberEntry = { name: "number", value: 12, enabled: true };
                 console.log(number.name);
@@ -14086,11 +14089,15 @@ mod tests {
                 const holder: Holder = { entry: { name: "nested", value: 21 } };
                 console.log(holder.entry.name);
                 console.log(holder.entry.value);
+                const pair: TextPair = { first: "a", second: "b", label: "pair" };
+                console.log(pair.first + pair.second);
+                const pairHolder: PairHolder = { pair: { first: 4, second: 5 } };
+                console.log(pairHolder.pair.second);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "concrete_generic_base"),
-            "number\n12\ntrue\nready\n3\nnested\n21\n"
+            "number\n12\ntrue\nready\n3\nnested\n21\nab\n5\n"
         );
     }
 
