@@ -5983,7 +5983,8 @@ mod tests {
             stream.conn.send_close_notify();
             stream.flush().unwrap();
         });
-        let ca_hex = certificate_bytes
+        let ca_hex = fs::read(&cert_pem)
+            .unwrap()
             .iter()
             .fold(String::new(), |mut output, byte| {
                 use std::fmt::Write as _;

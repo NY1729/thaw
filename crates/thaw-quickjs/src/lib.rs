@@ -33,6 +33,7 @@ use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
 use std::time::Duration;
 
+use base64::Engine as _;
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -259,11 +260,37 @@ fn udp_close(handle: u32) {
     });
 }
 
-fn tls_connect(host: &str, port: u16, server_name: &str, ca_der: &[u8]) -> String {
+fn tls_connect(host: &str, port: u16, server_name: &str, ca_spec: &str) -> String {
     let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    if !ca_der.is_empty() {
-        if let Err(error) = roots.add(CertificateDer::from(ca_der.to_vec())) {
-            return format!("err:{error}");
+    for certificate in ca_spec.split(',').filter(|value| !value.is_empty()) {
+        let bytes = hex_decode(certificate);
+        let certificates = if bytes.starts_with(b"-----BEGIN CERTIFICATE-----") {
+            let text = String::from_utf8_lossy(&bytes);
+            let mut remaining = text.as_ref();
+            let mut decoded = Vec::new();
+            while let Some(start) = remaining.find("-----BEGIN CERTIFICATE-----") {
+                remaining = &remaining[start + "-----BEGIN CERTIFICATE-----".len()..];
+                let Some(end) = remaining.find("-----END CERTIFICATE-----") else {
+                    return "err:unterminated PEM certificate".to_string();
+                };
+                let encoded = remaining[..end]
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>();
+                match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                    Ok(value) => decoded.push(value),
+                    Err(error) => return format!("err:{error}"),
+                }
+                remaining = &remaining[end + "-----END CERTIFICATE-----".len()..];
+            }
+            decoded
+        } else {
+            vec![bytes]
+        };
+        for certificate in certificates {
+            if let Err(error) = roots.add(CertificateDer::from(certificate)) {
+                return format!("err:{error}");
+            }
         }
     }
     let config = Arc::new(
@@ -503,7 +530,7 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_connect_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, server_name: String, ca: String| {
-                        tls_connect(&host, port as u16, &server_name, &hex_decode(&ca))
+                        tls_connect(&host, port as u16, &server_name, &ca)
                     },
                 )
                 .expect("failed to create JavaScript TLS connector");
