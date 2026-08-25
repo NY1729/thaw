@@ -707,6 +707,46 @@ fn net_finish(handle: u32) -> String {
     })
 }
 
+fn net_shutdown_write(handle: u32) -> String {
+    NET_STREAMS.with(|streams| {
+        let streams = streams.borrow();
+        let Some(stream) = streams.1.get(&handle) else {
+            return "err:socket is closed".to_string();
+        };
+        stream
+            .shutdown(Shutdown::Write)
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|error| format!("err:{error}"))
+    })
+}
+
+fn net_poll_read(handle: u32) -> String {
+    NET_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let Some(stream) = streams.1.get_mut(&handle) else {
+            return "err:socket is closed".to_string();
+        };
+        if let Err(error) = stream.set_nonblocking(true) {
+            return format!("err:{error}");
+        }
+        let mut value = vec![0u8; 16 * 1024];
+        let result = stream.read(&mut value);
+        let _ = stream.set_nonblocking(false);
+        match result {
+            Ok(0) => {
+                streams.1.remove(&handle);
+                "eof".to_string()
+            }
+            Ok(length) => {
+                value.truncate(length);
+                format!("ok:{}", hex_encode(&value))
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
+            Err(error) => format!("err:{error}"),
+        }
+    })
+}
+
 fn net_destroy(handle: u32) {
     NET_STREAMS.with(|streams| {
         if let Some(stream) = streams.borrow_mut().1.remove(&handle) {
@@ -1292,6 +1332,86 @@ fn tls_finish(handle: u32) -> String {
             let mut value = Vec::new();
             match stream.read_to_end(&mut value) {
                 Ok(_) => format!("ok:{}", hex_encode(&value)),
+                Err(error) => format!("err:{error}"),
+            }
+        })
+    })
+}
+
+fn tls_shutdown_write(handle: u32) -> String {
+    let client = TLS_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let stream = streams.1.get_mut(&handle)?;
+        stream.conn.send_close_notify();
+        Some(
+            stream
+                .flush()
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| format!("err:{error}")),
+        )
+    });
+    client.unwrap_or_else(|| {
+        TLS_SERVER_STREAMS.with(|streams| {
+            let mut streams = streams.borrow_mut();
+            let Some(stream) = streams.1.get_mut(&handle) else {
+                return "err:socket is closed".to_string();
+            };
+            stream.conn.send_close_notify();
+            stream
+                .flush()
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| format!("err:{error}"))
+        })
+    })
+}
+
+fn tls_poll_read(handle: u32) -> String {
+    let client = TLS_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let stream = streams.1.get_mut(&handle)?;
+        let _ = stream.sock.set_nonblocking(true);
+        let mut value = vec![0u8; 16 * 1024];
+        let result = stream.read(&mut value);
+        let _ = stream.sock.set_nonblocking(false);
+        Some(match result {
+            Ok(0) => {
+                streams.1.remove(&handle);
+                TLS_CLIENT_CERTIFICATES.with(|certificates| {
+                    certificates.borrow_mut().remove(&handle);
+                });
+                "eof".to_string()
+            }
+            Ok(length) => {
+                value.truncate(length);
+                format!("ok:{}", hex_encode(&value))
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
+            Err(error) => format!("err:{error}"),
+        })
+    });
+    client.unwrap_or_else(|| {
+        TLS_SERVER_STREAMS.with(|streams| {
+            let mut streams = streams.borrow_mut();
+            let Some(stream) = streams.1.get_mut(&handle) else {
+                return "err:socket is closed".to_string();
+            };
+            let _ = stream.sock.set_nonblocking(true);
+            let mut value = vec![0u8; 16 * 1024];
+            let result = stream.read(&mut value);
+            let _ = stream.sock.set_nonblocking(false);
+            match result {
+                Ok(0) => {
+                    streams.1.remove(&handle);
+                    TLS_SERVER_CERTIFICATES.with(|certificates| {
+                        certificates.borrow_mut().remove(&handle);
+                    });
+                    "eof".to_string()
+                }
+                Ok(length) => {
+                    value.truncate(length);
+                    format!("ok:{}", hex_encode(&value))
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => "pending".to_string(),
                 Err(error) => format!("err:{error}"),
             }
         })
@@ -2755,6 +2875,11 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 .expect("failed to create JavaScript TCP writer");
                 let tcp_finish = Function::new(ctx.clone(), |handle: u32| net_finish(handle))
                     .expect("failed to create JavaScript TCP finisher");
+                let tcp_shutdown =
+                    Function::new(ctx.clone(), |handle: u32| net_shutdown_write(handle))
+                        .expect("failed to create JavaScript TCP shutdown function");
+                let tcp_poll_read = Function::new(ctx.clone(), |handle: u32| net_poll_read(handle))
+                    .expect("failed to create JavaScript TCP polling reader");
                 let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
                     .expect("failed to create JavaScript TCP closer");
                 let tcp_listen = Function::new(ctx.clone(), |host: String, port: u32| {
@@ -2860,6 +2985,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_finish_function =
                     Function::new(ctx.clone(), |handle: u32| tls_finish(handle))
                         .expect("failed to create JavaScript TLS finisher");
+                let tls_shutdown_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_shutdown_write(handle))
+                        .expect("failed to create JavaScript TLS shutdown function");
+                let tls_poll_read_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_poll_read(handle))
+                        .expect("failed to create JavaScript TLS polling reader");
                 let tls_destroy_function =
                     Function::new(ctx.clone(), |handle: u32| tls_destroy(handle))
                         .expect("failed to create JavaScript TLS closer");
@@ -2988,6 +3119,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .set("__thaw_net_finish", tcp_finish)
                     .expect("failed to install JavaScript TCP finisher");
                 ctx.globals()
+                    .set("__thaw_net_shutdown", tcp_shutdown)
+                    .expect("failed to install JavaScript TCP shutdown function");
+                ctx.globals()
+                    .set("__thaw_net_poll_read", tcp_poll_read)
+                    .expect("failed to install JavaScript TCP polling reader");
+                ctx.globals()
                     .set("__thaw_net_destroy", tcp_destroy)
                     .expect("failed to install JavaScript TCP closer");
                 ctx.globals()
@@ -3038,6 +3175,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_tls_finish", tls_finish_function)
                     .expect("failed to install JavaScript TLS finisher");
+                ctx.globals()
+                    .set("__thaw_tls_shutdown", tls_shutdown_function)
+                    .expect("failed to install JavaScript TLS shutdown function");
+                ctx.globals()
+                    .set("__thaw_tls_poll_read", tls_poll_read_function)
+                    .expect("failed to install JavaScript TLS polling reader");
                 ctx.globals()
                     .set("__thaw_tls_destroy", tls_destroy_function)
                     .expect("failed to install JavaScript TLS closer");
