@@ -344,7 +344,10 @@ The workspace crates have narrow responsibilities:
   `some`, `every`, `find` and `reduce` operations with AbortSignal checks.
   Transforming helpers preserve input order with bounded `concurrency`, while
   `iterator({ destroyOnReturn: false })` permits partial non-destructive
-  consumption and `Symbol.asyncDispose` destroys abandoned readables;
+  consumption and `Symbol.asyncDispose` destroys abandoned readables. Stream
+  instances expose flowing, aborted, closed, object-mode and pending-drain
+  state; readable `unshift()`/legacy `wrap()` and writable
+  `setDefaultEncoding()` cover common compatibility paths;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
