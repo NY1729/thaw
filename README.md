@@ -471,6 +471,9 @@ The workspace crates have narrow responsibilities:
   per-module special cases. `http.createServer()` parses real HTTP/1.1 requests
   into streamed `IncomingMessage` values and emits `ServerResponse` status,
   headers, repeated cookies and buffered body writes over the same TCP server
+- `node:https` reuses that HTTP message and lifecycle layer over `node:tls`:
+  `request()`/`get()` validate custom CAs and `createServer()` accepts PEM
+  certificates and keys, with both directions verified against rustls peers
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
