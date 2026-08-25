@@ -586,7 +586,7 @@ fn lower_dts_function(
         let ty = match rest.type_ann.as_ref() {
             Some(annotation) => match annotation.type_ann.as_ref() {
                 TsType::TsArrayType(array) => {
-                    classify_ts_type(&array.elem_type, interfaces, generic_interfaces)
+                    classify_variadic_ts_type(&array.elem_type, interfaces, generic_interfaces)
                 }
                 other => DtsType::Unsupported(format!(
                     "rest parameter must have an array type, found {}",
@@ -1194,10 +1194,62 @@ fn supports_variadic_element(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
         HirType::Array(element) => element.as_ref() == &HirType::F64,
+        HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+            supports_variadic_element(payload)
+        }
         HirType::Object(fields) => fields
             .iter()
             .all(|(_, field)| supports_variadic_element(field)),
         _ => false,
+    }
+}
+
+fn classify_variadic_ts_type(
+    ty: &TsType,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> DtsType {
+    if let TsType::TsParenthesizedType(parenthesized) = ty {
+        return classify_variadic_ts_type(&parenthesized.type_ann, interfaces, generic_interfaces);
+    }
+    let TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) = ty
+    else {
+        return classify_ts_type(ty, interfaces, generic_interfaces);
+    };
+    let mut payload = None;
+    let mut has_null = false;
+    let mut has_undefined = false;
+    for element in &union.types {
+        match element.as_ref() {
+            TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsNullKeyword => {
+                has_null = true;
+            }
+            TsType::TsKeywordType(keyword)
+                if keyword.kind == TsKeywordTypeKind::TsUndefinedKeyword =>
+            {
+                has_undefined = true;
+            }
+            other => match classify_ts_type(other, interfaces, generic_interfaces) {
+                DtsType::Native(ty) if payload.is_none() => payload = Some(ty),
+                DtsType::Native(_) => {
+                    return DtsType::Unsupported(
+                        "variadic tagged union requires exactly one payload type".into(),
+                    )
+                }
+                unsupported => return unsupported,
+            },
+        }
+    }
+    let Some(payload) = payload else {
+        return DtsType::Unsupported("variadic tagged union has no payload type".into());
+    };
+    match (has_null, has_undefined) {
+        (false, true) => DtsType::Native(HirType::Optional(Box::new(payload))),
+        (true, false) => DtsType::Native(HirType::Nullable(Box::new(payload))),
+        (true, true) => DtsType::Native(HirType::Nullish(Box::new(payload))),
+        (false, false) => DtsType::Unsupported(
+            "variadic union must include null or undefined in addition to its payload".into(),
+        ),
     }
 }
 
@@ -1884,6 +1936,38 @@ mod tests {
             let functions = parse_dts(source).unwrap();
             let Classification::FastPath(signature) = classify(&functions[0]) else {
                 panic!("aggregate rest signature should classify as FastPath");
+            };
+            assert_eq!(signature.variadic, Some(expected));
+        }
+    }
+
+    #[test]
+    fn tagged_rest_signatures_classify_as_variadic_fast_paths() {
+        for (source, expected) in [
+            (
+                "export declare function optional(...values: (number | undefined)[]): number;",
+                HirType::Optional(Box::new(HirType::F64)),
+            ),
+            (
+                "export declare function nullable(...values: (number | null)[]): number;",
+                HirType::Nullable(Box::new(HirType::F64)),
+            ),
+            (
+                "export declare function nullish(...values: (number | null | undefined)[]): number;",
+                HirType::Nullish(Box::new(HirType::F64)),
+            ),
+            (
+                "export declare function aggregate(...values: ({ value: number } | undefined)[]): number;",
+                HirType::Optional(Box::new(HirType::Object(vec![(
+                    "value".into(),
+                    HirType::F64,
+                )]))),
+            ),
+        ] {
+            let functions = parse_dts(source).unwrap();
+            let classification = classify(&functions[0]);
+            let Classification::FastPath(signature) = classification else {
+                panic!("tagged rest signature should classify as FastPath: {classification:?}");
             };
             assert_eq!(signature.variadic, Some(expected));
         }

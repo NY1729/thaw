@@ -5081,8 +5081,81 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn compile_optional_none(&mut self, payload: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
-        let value = self.basic_type(payload)?.const_zero();
+        let value = self.compile_zero_value(payload)?;
         self.build_optional_value(value, payload, false)
+    }
+
+    fn compile_zero_value(&mut self, ty: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
+        match ty {
+            HirType::Array(element) if element.as_ref() == &HirType::F64 => {
+                let i64_type = self.context.i64_type();
+                let allocation = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_arena_alloc").unwrap(),
+                        &[
+                            i64_type.const_int(ARRAY_HEADER_BYTES, false).into(),
+                            i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
+                        ],
+                        "zero_array_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_arena_alloc returned no zero-array pointer")?
+                    .into_pointer_value();
+                self.builder
+                    .build_store(allocation, i64_type.const_zero())
+                    .map_err(|error| error.to_string())?;
+                Ok(allocation.into())
+            }
+            HirType::Object(fields) => {
+                let i64_type = self.context.i64_type();
+                let allocation = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_arena_alloc").unwrap(),
+                        &[
+                            i64_type
+                                .const_int(object_storage_bytes(fields).max(1), false)
+                                .into(),
+                            i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
+                        ],
+                        "zero_object_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_arena_alloc returned no zero-object pointer")?
+                    .into_pointer_value();
+                for (index, (_, field_type)) in fields.iter().enumerate() {
+                    let field = self.compile_zero_value(field_type)?;
+                    let pointer = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                self.context.i8_type(),
+                                allocation,
+                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                "zero_object_field",
+                            )
+                            .map_err(|error| error.to_string())?
+                    };
+                    self.builder
+                        .build_store(pointer, field)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(allocation.into())
+            }
+            HirType::Optional(payload) | HirType::Nullable(payload) => {
+                let value = self.compile_zero_value(payload)?;
+                self.build_optional_value(value, payload, false)
+            }
+            HirType::Nullish(payload) => {
+                let value = self.compile_zero_value(payload)?;
+                self.build_nullish_value(value, payload, 2)
+            }
+            other => Ok(self.basic_type(other)?.const_zero()),
+        }
     }
 
     fn build_optional_value(
@@ -5117,7 +5190,7 @@ impl<'ctx> HirCompiler<'ctx> {
         payload: &HirType,
         tag: u64,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let value = self.basic_type(payload)?.const_zero();
+        let value = self.compile_zero_value(payload)?;
         self.build_nullish_value(value, payload, tag)
     }
 
@@ -10638,6 +10711,50 @@ impl<'ctx> HirCompiler<'ctx> {
                 output.push(data.into());
                 output.push(length.into());
             }
+            HirType::Optional(payload) | HirType::Nullable(payload) => {
+                let tagged = value.into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(tagged, 0, "ffi_aggregate_vararg_optional_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let promoted = self
+                    .builder
+                    .build_int_z_extend(
+                        tag,
+                        self.context.i32_type(),
+                        "ffi_aggregate_vararg_optional_tag_i32",
+                    )
+                    .map_err(|error| error.to_string())?;
+                output.push(promoted.into());
+                let value = self
+                    .builder
+                    .build_extract_value(tagged, 1, "ffi_aggregate_vararg_optional_value")
+                    .map_err(|error| error.to_string())?;
+                self.append_ffi_aggregate_vararg(value, payload, output)?;
+            }
+            HirType::Nullish(payload) => {
+                let tagged = value.into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(tagged, 0, "ffi_aggregate_vararg_nullish_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let promoted = self
+                    .builder
+                    .build_int_z_extend(
+                        tag,
+                        self.context.i32_type(),
+                        "ffi_aggregate_vararg_nullish_tag_i32",
+                    )
+                    .map_err(|error| error.to_string())?;
+                output.push(promoted.into());
+                let value = self
+                    .builder
+                    .build_extract_value(tagged, 1, "ffi_aggregate_vararg_nullish_value")
+                    .map_err(|error| error.to_string())?;
+                self.append_ffi_aggregate_vararg(value, payload, output)?;
+            }
             HirType::Object(fields) => {
                 let base = value.into_pointer_value();
                 for (index, (_, field_type)) in fields.iter().enumerate() {
@@ -10823,7 +10940,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         compiled_args.push(promoted.into());
                     }
                     HirType::Str | HirType::JsValue => compiled_args.push(value.into()),
-                    HirType::Array(_) | HirType::Object(_) => self
+                    HirType::Array(_)
+                    | HirType::Object(_)
+                    | HirType::Optional(_)
+                    | HirType::Nullable(_)
+                    | HirType::Nullish(_) => self
                         .append_ffi_aggregate_vararg(value, variadic, &mut compiled_args)
                         .map_err(|error| format!("FFI function `{}`: {error}", sig.symbol))?,
                     other => {
@@ -18929,6 +19050,18 @@ mod tests {
                     samples: number[];
                 }[]
             ): number;
+            declare function native_optional_total(
+                count: number, ...values: (number | undefined)[]
+            ): number;
+            declare function native_nullable_total(
+                count: number, ...values: (number | null)[]
+            ): number;
+            declare function native_nullish_total(
+                count: number, ...values: (number | null | undefined)[]
+            ): number;
+            declare function native_optional_object_total(
+                count: number, ...values: ({ value: number } | undefined)[]
+            ): number;
             declare function native_sum_i32(count: number, ...values: number[]): number;
             declare function native_sum_i64(count: number, ...values: number[]): number;
             declare function native_sum_u32(count: number, ...values: number[]): number;
@@ -18946,6 +19079,10 @@ mod tests {
                     { value: 2, meta: { enabled: true, label: "abc" }, samples: [1, 2] },
                     { value: 4, meta: { enabled: false, label: "x" }, samples: [3, 4, 5] }
                 ));
+                console.log(native_optional_total(2, 2, undefined));
+                console.log(native_nullable_total(2, 3, null));
+                console.log(native_nullish_total(3, 4, null, undefined));
+                console.log(native_optional_object_total(2, { value: 5 }, undefined));
                 console.log(native_sum_i32(2, 0 - 2, 5));
                 console.log(native_sum_i64(2, 0 - 4, 10));
                 console.log(native_sum_u32(2, 20, 22));
@@ -18975,6 +19112,15 @@ mod tests {
         }));
         assert!(program.extern_functions.iter().any(|signature| {
             matches!(&signature.variadic, Some(HirType::Object(fields)) if fields.len() == 3)
+        }));
+        assert!(program.extern_functions.iter().any(|signature| {
+            signature.variadic == Some(HirType::Optional(Box::new(HirType::F64)))
+        }));
+        assert!(program.extern_functions.iter().any(|signature| {
+            signature.variadic == Some(HirType::Nullable(Box::new(HirType::F64)))
+        }));
+        assert!(program.extern_functions.iter().any(|signature| {
+            signature.variadic == Some(HirType::Nullish(Box::new(HirType::F64)))
         }));
         for (symbol, abi) in [
             ("native_sum_i32", thaw_hir::FfiVariadicAbi::I32),
@@ -19056,6 +19202,38 @@ mod tests {
                }\n\
                va_end(args); return sum;\n\
              }\n\
+             double native_optional_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 sum += va_arg(args, int); sum += va_arg(args, double);\n\
+               }\n\
+               va_end(args); return sum;\n\
+             }\n\
+             double native_nullable_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 sum += va_arg(args, int); sum += va_arg(args, double);\n\
+               }\n\
+               va_end(args); return sum;\n\
+             }\n\
+             double native_nullish_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 sum += va_arg(args, int); sum += va_arg(args, double);\n\
+               }\n\
+               va_end(args); return sum;\n\
+             }\n\
+             double native_optional_object_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 sum += va_arg(args, int); sum += va_arg(args, double);\n\
+               }\n\
+               va_end(args); return sum;\n\
+             }\n\
              double native_sum_i32(double raw_count, ...) {\n\
                int count = (int)raw_count; int sum = 0; va_list args;\n\
                va_start(args, raw_count);\n\
@@ -19104,7 +19282,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "0\n10\n3\n9\n40\n15\n26\n3\n6\n42\n42\n"
+            "0\n10\n3\n9\n40\n15\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
