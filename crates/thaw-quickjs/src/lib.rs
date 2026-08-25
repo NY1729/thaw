@@ -303,13 +303,13 @@ fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     use std::os::unix::fs::MetadataExt;
     let ctime = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1_000_000.0;
-    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": metadata.mode(), "uid": metadata.uid(), "gid": metadata.gid(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()) })
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "mode": metadata.mode(), "uid": metadata.uid(), "gid": metadata.gid(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()) })
 }
 
 #[cfg(not(unix))]
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     let modified = system_time_millis(metadata.modified());
-    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": if metadata.is_dir() { 16877 } else { 33188 }, "uid": 0, "gid": 0, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "symlink": metadata.file_type().is_symlink(), "readonly": metadata.permissions().readonly(), "mode": if metadata.is_dir() { 16877 } else { 33188 }, "uid": 0, "gid": 0, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
 }
 
 fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
