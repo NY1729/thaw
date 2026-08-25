@@ -1157,12 +1157,14 @@ pub fn classify(func: &DtsFunction) -> Classification {
     let variadic = match &func.rest_param {
         None => None,
         Some((_, DtsType::Native(ty))) if supports_variadic_element(ty) => Some(ty.clone()),
-        Some((name, DtsType::Native(other))) => return Classification::Fallback {
-            function: func.name.clone(),
-            reason: format!(
+        Some((name, DtsType::Native(other))) => {
+            return Classification::Fallback {
+                function: func.name.clone(),
+                reason: format!(
                 "rest parameter `{name}` has unsupported native variadic element layout {other:?}"
             ),
-        },
+            }
+        }
         Some((name, DtsType::Unsupported(reason))) => {
             return Classification::Fallback {
                 function: func.name.clone(),
@@ -1192,12 +1194,9 @@ fn supports_variadic_element(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
         HirType::Array(element) => element.as_ref() == &HirType::F64,
-        HirType::Object(fields) => fields.iter().all(|(_, field)| {
-            matches!(
-                field,
-                HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
-            )
-        }),
+        HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, field)| supports_variadic_element(field)),
         _ => false,
     }
 }
@@ -1847,16 +1846,12 @@ mod tests {
     #[test]
     fn object_rest_signature_falls_back() {
         let funcs = parse_dts(
-            "export declare function merge(...values: { nested: { value: number } }[]): number;",
+            "export declare function merge(...values: { value: number | undefined }[]): number;",
         )
         .unwrap();
         let classification = classify(&funcs[0]);
         assert!(
-            matches!(
-                classification,
-                Classification::Fallback { ref reason, .. }
-                    if reason.contains("unsupported native variadic element layout")
-            ),
+            matches!(classification, Classification::Fallback { .. }),
             "{classification:?}"
         );
     }
@@ -1869,11 +1864,20 @@ mod tests {
                 HirType::Array(Box::new(HirType::F64)),
             ),
             (
-                "export declare function objects(...values: { value: number; enabled: boolean; label: string }[]): number;",
+                "export declare function objects(...values: { value: number; meta: { enabled: boolean; label: string }; samples: number[] }[]): number;",
                 HirType::Object(vec![
                     ("value".into(), HirType::F64),
-                    ("enabled".into(), HirType::Bool),
-                    ("label".into(), HirType::Str),
+                    (
+                        "meta".into(),
+                        HirType::Object(vec![
+                            ("enabled".into(), HirType::Bool),
+                            ("label".into(), HirType::Str),
+                        ]),
+                    ),
+                    (
+                        "samples".into(),
+                        HirType::Array(Box::new(HirType::F64)),
+                    ),
                 ]),
             ),
         ] {

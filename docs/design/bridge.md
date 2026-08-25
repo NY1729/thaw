@@ -352,7 +352,7 @@ extern "C" fn thaw_dynamic_call(
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
   booleanおよび符号付き／符号なし整数bitfieldも明示できる。
-  scalar、`number[]`、scalar固定object以外のvariadicは未対応。
+  scalar、`number[]`、それらから再帰構成した固定object以外のvariadicは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -427,13 +427,13 @@ parameter whose element is `number`, `boolean`, `string`, `JsValue`,
 `number[]`, or a scalar fixed object is represented as an LLVM variadic
 declaration. Scalar values are passed as C `double`, default-promoted `int`,
 NUL-terminated `const char *`, or opaque `uint64_t` handles. Each `number[]`
-element expands to `(const double *, int64_t)`. Each fixed object expands to
-its declaration-ordered number, promoted-boolean, string, or handle fields;
-fixed arguments remain
+element expands to `(const double *, int64_t)`. Each fixed object recursively
+expands its declaration-ordered number, promoted-boolean, string, handle,
+`number[]`, or child-object fields; fixed arguments remain
 subject to the ordinary marshal rules. Version 4 `variadicAbi` can replace the
 number default with `i32`, `i64`, `u32`, or `u64`; LLVM performs the requested
-floating-point-to-integer conversion before the variadic call. Nested aggregate
-rest element types remain future extensions.
+floating-point-to-integer conversion before the variadic call. Tagged nullable
+and non-number-array rest layouts remain future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
