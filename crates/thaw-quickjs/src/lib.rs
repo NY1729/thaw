@@ -188,6 +188,44 @@ fn fs_chmod(_path: &str, _mode: u32) -> io::Result<()> {
     ))
 }
 
+#[cfg(unix)]
+fn fs_chown(path: &str, value: &str, follow: bool) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut values = value.split(',');
+    let uid = values
+        .next()
+        .unwrap_or("0")
+        .parse::<libc::uid_t>()
+        .unwrap_or(0);
+    let gid = values
+        .next()
+        .unwrap_or("0")
+        .parse::<libc::gid_t>()
+        .unwrap_or(0);
+    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let result = unsafe {
+        if follow {
+            libc::chown(path.as_ptr(), uid, gid)
+        } else {
+            libc::lchown(path.as_ptr(), uid, gid)
+        }
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn fs_chown(_path: &str, _value: &str, _follow: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "ownership changes are unsupported",
+    ))
+}
+
 fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.is_dir() {
@@ -217,13 +255,13 @@ fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     use std::os::unix::fs::MetadataExt;
     let ctime = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1_000_000.0;
-    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": metadata.mode(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()) })
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": metadata.mode(), "uid": metadata.uid(), "gid": metadata.gid(), "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": system_time_millis(metadata.modified()), "ctimeMs": ctime, "birthtimeMs": system_time_millis(metadata.created()) })
 }
 
 #[cfg(not(unix))]
 fn fs_metadata_record(metadata: std::fs::Metadata) -> serde_json::Value {
     let modified = system_time_millis(metadata.modified());
-    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": if metadata.is_dir() { 16877 } else { 33188 }, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
+    serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly(), "mode": if metadata.is_dir() { 16877 } else { 33188 }, "uid": 0, "gid": 0, "atimeMs": system_time_millis(metadata.accessed()), "mtimeMs": modified, "ctimeMs": modified, "birthtimeMs": system_time_millis(metadata.created()) })
 }
 
 fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
@@ -248,6 +286,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "mkdir" => if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
         "stat" => std::fs::metadata(&path).map(fs_metadata_record),
+        "lstat" => std::fs::symlink_metadata(&path).map(fs_metadata_record),
         "unlink" => std::fs::remove_file(&path).map(|_| serde_json::json!({ "ok": true })),
         "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
@@ -261,6 +300,8 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "readlink" => std::fs::read_link(&path).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy() })),
         "chmod" => fs_chmod(&path, value.parse::<u32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
         "utimes" => fs_utimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
+        "chown" => fs_chown(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
+        "lchown" => fs_chown(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),
     };
     result
