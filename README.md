@@ -336,6 +336,9 @@ The workspace crates have narrow responsibilities:
   concatenation, shared slices, copying, filling, search and integer access
 - QuickJS bundles expose `performance.timeOrigin` and elapsed-millisecond
   `performance.now()` values scoped to the shared JavaScript context
+- The Performance Timeline adds mark/measure entries, queries, clearing,
+  buffered observers and sync/async timerify; `node:perf_hooks` shares it and
+  exposes nodeTiming, event-loop utilization and delay histogram shapes
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields

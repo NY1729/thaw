@@ -194,6 +194,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "crypto" => {
             "export declare function createHash(argsArray: any): any;\nexport declare function createHmac(argsArray: any): any;\nexport declare function randomBytes(argsArray: any): any;\nexport declare function randomFill(argsArray: any): any;\nexport declare function randomFillSync(argsArray: any): any;\nexport declare function randomInt(argsArray: any): any;\nexport declare function randomUUID(argsArray: any): any;\nexport declare function timingSafeEqual(argsArray: any): any;\nexport declare function getHashes(argsArray: any): any;\n"
         }
+        "perf_hooks" => {
+            "export declare const performance: any;\nexport declare function monitorEventLoopDelay(argsArray: any): any;\nexport declare function createHistogram(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -3061,7 +3064,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3077,6 +3080,15 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         ),
         "crypto" => Some(
             "module.exports = globalThis.__thaw_crypto_module; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "perf_hooks" => Some(
+            "function Histogram() { this.enabled = false; this.min = 0; this.max = 0; this.mean = 0; this.stddev = 0; this.exceeds = 0; this.count = 0; this.percentiles = new Map([[0, 0], [50, 0], [75, 0], [90, 0], [99, 0], [100, 0]]); }\n\
+             Histogram.prototype.enable = function() { this.enabled = true; return true; }; Histogram.prototype.disable = function() { this.enabled = false; return true; }; Histogram.prototype.reset = function() { this.min = this.max = this.mean = this.stddev = this.exceeds = this.count = 0; }; Histogram.prototype.percentile = function() { return 0; }; Histogram.prototype.percentileBigInt = function() { return 0n; };\n\
+             function monitorEventLoopDelay() { return new Histogram(); } function createHistogram() { return new Histogram(); }\n\
+             var started = globalThis.performance.timeOrigin; globalThis.performance.nodeTiming = globalThis.performance.nodeTiming || { name: 'node', entryType: 'node', startTime: 0, duration: globalThis.performance.now(), nodeStart: 0, v8Start: 0, bootstrapComplete: 0, environment: 0, loopStart: 0, loopExit: -1, idleTime: 0 };\n\
+             globalThis.performance.eventLoopUtilization = globalThis.performance.eventLoopUtilization || function(previous) { var active = globalThis.performance.now(); if (previous) active = Math.max(0, active - Number(previous.active || 0)); return { idle: 0, active: active, utilization: active === 0 ? 0 : 1 }; };\n\
+             module.exports = { performance: globalThis.performance, PerformanceEntry: globalThis.PerformanceEntry, PerformanceMark: globalThis.PerformanceMark, PerformanceMeasure: globalThis.PerformanceMeasure, PerformanceObserver: globalThis.PerformanceObserver, PerformanceObserverEntryList: globalThis.PerformanceObserverEntryList, monitorEventLoopDelay: monitorEventLoopDelay, createHistogram: createHistogram, constants: { NODE_PERFORMANCE_GC_MAJOR: 4, NODE_PERFORMANCE_GC_MINOR: 1, NODE_PERFORMANCE_GC_INCREMENTAL: 8, NODE_PERFORMANCE_GC_WEAKCB: 16 }, timerify: globalThis.performance.timerify };\n\
+             module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         _ => None,
     }
@@ -5187,6 +5199,42 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",64,7,true,true,true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn perf_hooks_builtin_shares_the_performance_timeline() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_perf_hooks");
+        fs::write(
+            dir.join("index.js"),
+            "var hooks = require('node:perf_hooks');\n\
+             module.exports = function () { hooks.performance.clearMarks(); hooks.performance.clearMeasures(); hooks.performance.mark('start', { startTime: 2 }); hooks.performance.mark('end', { startTime: 7 }); var measure = hooks.performance.measure('elapsed', 'start', 'end'); var histogram = hooks.monitorEventLoopDelay({ resolution: 10 }); var enabled = histogram.enable(); var disabled = histogram.disable(); var utilization = hooks.performance.eventLoopUtilization(); return [hooks.performance === globalThis.performance, measure.duration, hooks.PerformanceObserver === globalThis.PerformanceObserver, enabled, disabled, histogram.percentile(99), typeof histogram.percentileBigInt(99), utilization.idle, utilization.active >= 0, utilization.utilization >= 0, hooks.performance.nodeTiming.name, hooks.constants.NODE_PERFORMANCE_GC_MAJOR]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_perf_hooks_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exercisePerformanceHooks = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exercisePerformanceHooks").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,5,true,true,true,0,"bigint",0,true,true,"node",4]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
