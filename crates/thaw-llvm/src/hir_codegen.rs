@@ -13953,6 +13953,37 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_type_alias_instantiations() {
+        let source = r#"
+            type Boxed<T> = { value: T };
+            type Wrapped<T> = Boxed<T>;
+            type List<T> = T[];
+            type Maybe<T> = T | undefined;
+            type Mapper<T, U> = (value: T) => U;
+            function first<T>(boxed: Wrapped<T>): T { return boxed.value; }
+            function maybe(flag: boolean): Maybe<number> {
+                return flag ? 5 : undefined;
+            }
+            function apply(callback: Mapper<number, string>): string {
+                return callback(4);
+            }
+            function main(): void {
+                console.log(first({ value: 3 }));
+                console.log(first({ value: "generic" }));
+                const values: List<string> = ["a", "b"];
+                console.log(values[1]);
+                console.log(maybe(true));
+                console.log(maybe(false));
+                console.log(apply((value: number): string => "value=" + String(value)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_type_aliases"),
+            "3\ngeneric\nb\n5\nundefined\nvalue=4\n"
+        );
+    }
+
+    #[test]
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }

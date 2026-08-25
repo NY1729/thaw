@@ -771,7 +771,7 @@ fn generic_type_pattern(
             if let Some(pattern) = substitutions.get(name) {
                 return Ok(pattern.clone());
             }
-            if let Some(interface) = generic_interfaces.get(name) {
+            if let Some(interface) = generic_interfaces.interfaces.get(name) {
                 if in_progress.iter().any(|active| active == name) {
                     return Err(format!("generic interface `{name}` is self-referential"));
                 }
@@ -849,6 +849,57 @@ fn generic_type_pattern(
                     .collect::<Result<Vec<_>, String>>();
                 in_progress.pop();
                 return Ok(GenericTypePattern::Object(fields?));
+            }
+            if let Some(alias) = generic_interfaces.aliases.get(name) {
+                if in_progress.iter().any(|active| active == name) {
+                    return Err(format!("generic type alias `{name}` is self-referential"));
+                }
+                let parameter_names = alias
+                    .type_params
+                    .as_ref()
+                    .expect("generic alias type parameters")
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.sym.to_string())
+                    .collect::<Vec<_>>();
+                let arguments = reference
+                    .type_params
+                    .as_ref()
+                    .map(|parameters| parameters.params.as_slice())
+                    .unwrap_or_default();
+                if arguments.len() != parameter_names.len() {
+                    return Err(format!(
+                        "generic type alias `{name}` expects {} type argument(s), got {}",
+                        parameter_names.len(),
+                        arguments.len()
+                    ));
+                }
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| {
+                        generic_type_pattern(
+                            argument,
+                            substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let nested = parameter_names
+                    .into_iter()
+                    .zip(arguments)
+                    .collect::<HashMap<_, _>>();
+                in_progress.push(name.to_string());
+                let result = generic_type_pattern(
+                    &alias.type_ann,
+                    &nested,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+                in_progress.pop();
+                return result;
             }
             if let Some(inner) = reference
                 .type_params
@@ -1084,7 +1135,17 @@ fn lower_generic_instance(
 /// the generic map). Supporting that needs the eager resolution pass
 /// itself to be substitution-aware, deferred until a real use case asks
 /// for it.
-type GenericInterfaces<'a> = HashMap<Symbol, &'a TsInterfaceDecl>;
+#[derive(Default)]
+struct GenericInterfaces<'a> {
+    interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
+    aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
+}
+
+impl GenericInterfaces<'_> {
+    fn new() -> Self {
+        Self::default()
+    }
+}
 
 /// Resolves every top-level `interface` declaration, so `lower_ts_type` can
 /// treat a `TsTypeRef` naming one exactly like an inline `{ ... }` type
@@ -1097,13 +1158,13 @@ fn resolve_interfaces(
 ) -> Result<(HashMap<Symbol, HirType>, GenericInterfaces<'_>), String> {
     let mut raw: HashMap<Symbol, &TsInterfaceDecl> = HashMap::new();
     let mut aliases = HashMap::new();
-    let mut generic: GenericInterfaces = HashMap::new();
+    let mut generic = GenericInterfaces::new();
     for item in &module.body {
         match item {
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(iface))) => {
                 let name = iface.id.sym.to_string();
                 if iface.type_params.is_some() {
-                    generic.insert(name, iface.as_ref());
+                    generic.interfaces.insert(name, iface.as_ref());
                 } else {
                     raw.insert(name, iface.as_ref());
                 }
@@ -1111,9 +1172,10 @@ fn resolve_interfaces(
             ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
                 let name = alias.id.sym.to_string();
                 if alias.type_params.is_some() {
-                    return Err(format!("generic type alias `{name}` is not supported yet"));
+                    generic.aliases.insert(name, alias.as_ref());
+                } else {
+                    aliases.insert(name, alias.as_ref());
                 }
-                aliases.insert(name, alias.as_ref());
             }
             _ => {}
         }
@@ -1122,6 +1184,23 @@ fn resolve_interfaces(
     if let Some(name) = raw.keys().find(|name| aliases.contains_key(*name)) {
         return Err(format!(
             "type alias `{name}` conflicts with an interface declaration"
+        ));
+    }
+    if let Some(name) = generic.aliases.keys().find(|name| {
+        raw.contains_key(*name)
+            || aliases.contains_key(*name)
+            || generic.interfaces.contains_key(*name)
+    }) {
+        return Err(format!(
+            "generic type alias `{name}` conflicts with another type declaration"
+        ));
+    }
+    if let Some(name) = aliases
+        .keys()
+        .find(|name| generic.interfaces.contains_key(*name))
+    {
+        return Err(format!(
+            "type alias `{name}` conflicts with a generic interface declaration"
         ));
     }
 
@@ -1727,8 +1806,19 @@ fn lower_ts_type(
                 // `resolve_generic_interface`'s doc comment for scope
                 // limits (no nested-inside-another-interface use, no
                 // `extends` on the generic interface itself).
-                if let Some(decl) = generic_interfaces.get(name) {
+                if let Some(decl) = generic_interfaces.interfaces.get(name) {
                     return resolve_generic_interface(
+                        name,
+                        decl,
+                        ty_ref,
+                        interfaces,
+                        generic_interfaces,
+                        None,
+                        &mut Vec::new(),
+                    );
+                }
+                if let Some(decl) = generic_interfaces.aliases.get(name) {
+                    return resolve_generic_alias(
                         name,
                         decl,
                         ty_ref,
@@ -1911,6 +2001,69 @@ fn resolve_generic_interface(
     Ok(HirType::Object(fields))
 }
 
+fn resolve_generic_alias(
+    name: &str,
+    decl: &swc_ecma_ast::TsTypeAliasDecl,
+    ty_ref: &swc_ecma_ast::TsTypeRef,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    outer_substitution: Option<&HashMap<Symbol, HirType>>,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<HirType, String> {
+    if in_progress.iter().any(|active| active == name) {
+        return Err(format!(
+            "generic type alias `{name}` is (indirectly) self-referential"
+        ));
+    }
+    let parameter_names = decl
+        .type_params
+        .as_ref()
+        .expect("caller only reaches generic aliases")
+        .params
+        .iter()
+        .map(|parameter| parameter.name.sym.to_string())
+        .collect::<Vec<_>>();
+    let arguments = ty_ref
+        .type_params
+        .as_ref()
+        .map(|parameters| parameters.params.as_slice())
+        .unwrap_or_default();
+    if arguments.len() != parameter_names.len() {
+        return Err(format!(
+            "type alias `{name}` expects {} type argument(s), got {}",
+            parameter_names.len(),
+            arguments.len()
+        ));
+    }
+    let arguments = arguments
+        .iter()
+        .map(|argument| match outer_substitution {
+            Some(outer) => resolve_ts_type_with_substitution(
+                argument,
+                outer,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ),
+            None => lower_ts_type(argument, interfaces, generic_interfaces),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let substitution = parameter_names
+        .into_iter()
+        .zip(arguments)
+        .collect::<HashMap<_, _>>();
+    in_progress.push(name.to_string());
+    let result = resolve_ts_type_with_substitution(
+        &decl.type_ann,
+        &substitution,
+        interfaces,
+        generic_interfaces,
+        in_progress,
+    );
+    in_progress.pop();
+    result
+}
+
 /// Like `lower_ts_type`, but a bare `TsTypeRef` matching one of `Name`'s
 /// type parameters resolves to the corresponding concrete `HirType`
 /// instead of erroring as an unknown reference. Recurses into itself (not
@@ -1930,8 +2083,19 @@ fn resolve_ts_type_with_substitution(
             if let Some(concrete) = substitution.get(ref_name) {
                 return Ok(concrete.clone());
             }
-            if let Some(decl) = generic_interfaces.get(ref_name) {
+            if let Some(decl) = generic_interfaces.interfaces.get(ref_name) {
                 return resolve_generic_interface(
+                    ref_name,
+                    decl,
+                    ty_ref,
+                    interfaces,
+                    generic_interfaces,
+                    Some(substitution),
+                    in_progress,
+                );
+            }
+            if let Some(decl) = generic_interfaces.aliases.get(ref_name) {
+                return resolve_generic_alias(
                     ref_name,
                     decl,
                     ty_ref,
@@ -1993,6 +2157,136 @@ fn resolve_ts_type_with_substitution(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let mut elements = Vec::new();
+            for element in &union.types {
+                let element = resolve_ts_type_with_substitution(
+                    element,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                if !elements.contains(&element) {
+                    elements.push(element);
+                }
+            }
+            if let [element] = elements.as_slice() {
+                return Ok(element.clone());
+            }
+            if elements.len() == 3
+                && elements.contains(&HirType::Null)
+                && elements.contains(&HirType::Undefined)
+            {
+                if let Some(payload) = elements
+                    .iter()
+                    .find(|element| !matches!(element, HirType::Null | HirType::Undefined))
+                {
+                    return Ok(HirType::Nullish(Box::new(payload.clone())));
+                }
+            }
+            if elements.len() == 2 {
+                if let Some(payload) = elements
+                    .iter()
+                    .find(|element| **element != HirType::Undefined)
+                    .filter(|_| elements.contains(&HirType::Undefined))
+                {
+                    return Ok(HirType::Optional(Box::new(payload.clone())));
+                }
+                if let Some(payload) = elements
+                    .iter()
+                    .find(|element| **element != HirType::Null)
+                    .filter(|_| elements.contains(&HirType::Null))
+                {
+                    return Ok(HirType::Nullable(Box::new(payload.clone())));
+                }
+            }
+            Ok(HirType::Union(elements))
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
+            intersection,
+        )) => {
+            let elements = intersection
+                .types
+                .iter()
+                .map(|element| {
+                    resolve_ts_type_with_substitution(
+                        element,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let Some(first) = elements.first() else {
+                return Err("empty intersection type is not supported".into());
+            };
+            if elements.iter().all(|element| element == first) {
+                return Ok(first.clone());
+            }
+            if elements
+                .iter()
+                .all(|element| matches!(element, HirType::Object(_)))
+            {
+                let mut fields = Vec::<(Symbol, HirType)>::new();
+                for element in elements {
+                    let HirType::Object(element_fields) = element else {
+                        unreachable!()
+                    };
+                    for (name, ty) in element_fields {
+                        if let Some((_, existing)) =
+                            fields.iter().find(|(existing, _)| existing == &name)
+                        {
+                            if existing != &ty {
+                                return Err(format!(
+                                    "intersection field `{name}` has conflicting types"
+                                ));
+                            }
+                        } else {
+                            fields.push((name, ty));
+                        }
+                    }
+                }
+                return Ok(HirType::Object(fields));
+            }
+            Err(format!("unsupported intersection type {elements:?}"))
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            if function.type_params.is_some() {
+                return Err("generic function types are not supported yet".into());
+            }
+            let params = function
+                .params
+                .iter()
+                .map(|parameter| {
+                    let TsFnParam::Ident(parameter) = parameter else {
+                        return Err("function types only support identifier parameters".into());
+                    };
+                    let annotation = parameter.type_ann.as_ref().ok_or_else(|| {
+                        format!(
+                            "function parameter `{}` needs a type annotation",
+                            parameter.id.sym
+                        )
+                    })?;
+                    resolve_ts_type_with_substitution(
+                        &annotation.type_ann,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let ret = resolve_ts_type_with_substitution(
+                &function.type_ann.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            Ok(HirType::Function(params, Box::new(ret)))
+        }
         TsType::TsTypeLit(type_lit) => {
             let fields = type_lit
                 .members
@@ -5719,10 +6013,18 @@ impl<'a> FnLowerer<'a> {
                 } else if !matches!(consequent_type, HirType::Union(_))
                     && !matches!(alternate_type, HirType::Union(_))
                 {
-                    let union = HirType::Union(vec![consequent_type, alternate_type]);
-                    consequent = self.coerce_to_declared(&union, consequent)?;
-                    alternate = self.coerce_to_declared(&union, alternate)?;
-                    union
+                    let result = match (&consequent_type, &alternate_type) {
+                        (HirType::Undefined, payload) | (payload, HirType::Undefined) => {
+                            HirType::Optional(Box::new(payload.clone()))
+                        }
+                        (HirType::Null, payload) | (payload, HirType::Null) => {
+                            HirType::Nullable(Box::new(payload.clone()))
+                        }
+                        _ => HirType::Union(vec![consequent_type, alternate_type]),
+                    };
+                    consequent = self.coerce_to_declared(&result, consequent)?;
+                    alternate = self.coerce_to_declared(&result, alternate)?;
+                    result
                 } else {
                     return Err(format!(
                         "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"
@@ -12606,6 +12908,25 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("self-referential"));
+    }
+
+    #[test]
+    fn validates_generic_type_alias_instantiations() {
+        let module = thaw_parser::parse_typescript(
+            "type Boxed<T> = { value: T }; function bad(value: Boxed<number, string>): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("expects 1 type argument(s), got 2"));
+
+        let module = thaw_parser::parse_typescript(
+            "type Loop<T> = Loop<T>; function bad(value: Loop<number>): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("generic type alias `Loop` is (indirectly) self-referential"));
     }
 
     #[test]
