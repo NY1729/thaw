@@ -1333,11 +1333,12 @@ fn rewrite_static_worker_urls(
     package_name: &str,
     package_dir: &Path,
 ) -> Result<String, String> {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        Callee, Expr, ExprOrSpread, ImportDecl, ImportSpecifier, Lit, MemberProp, NewExpr, Pat,
-        Prop, PropName, PropOrSpread, VarDeclarator,
+        BindingIdent, Callee, Decl, Expr, ExprOrSpread, ImportDecl, ImportSpecifier, Lit,
+        MemberProp, ModuleItem, NewExpr, Pat, Prop, PropName, PropOrSpread, Stmt, VarDeclKind,
+        VarDeclarator,
     };
     use thaw_parser::common::Spanned;
 
@@ -1451,9 +1452,13 @@ fn rewrite_static_worker_urls(
         true
     }
 
-    fn static_worker_path(expression: &Expr) -> Option<String> {
+    fn static_worker_path(
+        expression: &Expr,
+        constants: &BTreeMap<String, String>,
+    ) -> Option<String> {
         match expression {
             Expr::Lit(Lit::Str(path)) => Some(path.value.to_string_lossy().into_owned()),
+            Expr::Ident(identifier) => constants.get(identifier.sym.as_ref()).cloned(),
             Expr::Tpl(template) if template.quasis.len() == template.exprs.len() + 1 => {
                 let mut path = String::new();
                 for (index, quasi) in template.quasis.iter().enumerate() {
@@ -1465,24 +1470,62 @@ fn rewrite_static_worker_urls(
                             .unwrap_or_else(|| quasi.raw.to_string()),
                     );
                     if let Some(expression) = template.exprs.get(index) {
-                        path.push_str(&static_worker_path(expression)?);
+                        path.push_str(&static_worker_path(expression, constants)?);
                     }
                 }
                 Some(path)
             }
-            Expr::Paren(parenthesized) => static_worker_path(&parenthesized.expr),
+            Expr::Paren(parenthesized) => static_worker_path(&parenthesized.expr, constants),
             Expr::Bin(binary) if binary.op == thaw_parser::ast::BinaryOp::Add => Some(format!(
                 "{}{}",
-                static_worker_path(&binary.left)?,
-                static_worker_path(&binary.right)?
+                static_worker_path(&binary.left, constants)?,
+                static_worker_path(&binary.right, constants)?
             )),
             _ => None,
+        }
+    }
+
+    fn top_level_worker_path_constants(
+        module: &thaw_parser::ast::Module,
+        binding_counts: &BTreeMap<String, usize>,
+    ) -> BTreeMap<String, String> {
+        let mut constants = BTreeMap::new();
+        for item in &module.body {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) = item else {
+                continue;
+            };
+            if declaration.kind != VarDeclKind::Const {
+                continue;
+            }
+            for declarator in &declaration.decls {
+                let (Pat::Ident(binding), Some(initializer)) =
+                    (&declarator.name, declarator.init.as_deref())
+                else {
+                    continue;
+                };
+                if binding_counts.get(binding.id.sym.as_ref()) != Some(&1) {
+                    continue;
+                }
+                if let Some(path) = static_worker_path(initializer, &constants) {
+                    constants.insert(binding.id.sym.to_string(), path);
+                }
+            }
+        }
+        constants
+    }
+
+    #[derive(Default)]
+    struct BindingCounts(BTreeMap<String, usize>);
+    impl Visit for BindingCounts {
+        fn visit_binding_ident(&mut self, binding: &BindingIdent) {
+            *self.0.entry(binding.id.sym.to_string()).or_default() += 1;
         }
     }
 
     struct WorkerUrls {
         constructors: BTreeSet<String>,
         namespaces: BTreeSet<String>,
+        path_constants: BTreeMap<String, String>,
         spans: Vec<WorkerUrlSpan>,
     }
     impl Visit for WorkerUrls {
@@ -1505,7 +1548,7 @@ fn rewrite_static_worker_urls(
             let Some(first) = arguments.first() else {
                 return;
             };
-            if let Some(path) = static_worker_path(&first.expr) {
+            if let Some(path) = static_worker_path(&first.expr, &self.path_constants) {
                 if !static_file_options(arguments) {
                     expression.visit_children_with(self);
                     return;
@@ -1556,9 +1599,13 @@ fn rewrite_static_worker_urls(
     };
     let mut bindings = WorkerBindings::default();
     module.visit_with(&mut bindings);
+    let mut binding_counts = BindingCounts::default();
+    module.visit_with(&mut binding_counts);
+    let path_constants = top_level_worker_path_constants(&module, &binding_counts.0);
     let mut workers = WorkerUrls {
         constructors: bindings.constructors,
         namespaces: bindings.namespaces,
+        path_constants,
         spans: Vec::new(),
     };
     module.visit_with(&mut workers);
@@ -5882,7 +5929,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); return events; };",
+            "var Worker = require('node:worker_threads').Worker; const workerFile = './' + 'worker.js'; function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); await run(new Worker(workerFile, { workerData: 3 }), events); return events; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
@@ -5897,7 +5944,7 @@ mod tests {
         let arguments = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-        assert_eq!(result, "[42,0,22,0,10,0]");
+        assert_eq!(result, "[42,0,22,0,10,0,6,0]");
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
 
@@ -5912,6 +5959,11 @@ mod tests {
         let rewritten = rewrite_static_worker_urls(eval_source, &dir.join("index.js"), "pkg", &dir)
             .expect("eval Worker source must not be treated as a file");
         assert_eq!(rewritten, eval_source);
+        let shadowed_source = "var Worker = require('node:worker_threads').Worker; const workerFile = './missing.js'; function start(workerFile) { return new Worker(workerFile); }";
+        let rewritten =
+            rewrite_static_worker_urls(shadowed_source, &dir.join("index.js"), "pkg", &dir)
+                .expect("a shadowed constant Worker path must remain dynamic");
+        assert_eq!(rewritten, shadowed_source);
         let _ = fs::remove_dir_all(dir);
     }
 
