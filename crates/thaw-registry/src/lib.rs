@@ -10795,6 +10795,34 @@ mod tests {
     }
 
     #[test]
+    fn web_compression_streams_emit_and_decode_incrementally() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_compression_incremental");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var encoder = new TextEncoder(), compression = new CompressionStream('gzip'), compressionWriter = compression.writable.getWriter(), compressionReader = compression.readable.getReader(), firstCompressedRead = compressionReader.read(); await compressionWriter.write(encoder.encode('hello')); var firstCompressed = await firstCompressedRead, compressed = [firstCompressed.value], collectCompressed = (async function() { while (true) { var result = await compressionReader.read(); if (result.done) break; compressed.push(result.value); } })(); await compressionWriter.write(encoder.encode(' world')); await compressionWriter.close(); await collectCompressed; var decompression = new DecompressionStream('gzip'), decompressionWriter = decompression.writable.getWriter(), decompressionReader = decompression.readable.getReader(), decoded = [], collectDecoded = (async function() { while (true) { var result = await decompressionReader.read(); if (result.done) break; decoded.push(result.value); } })(); var decodedBeforeClose = false; for (var index = 0; index < compressed.length; index++) { await decompressionWriter.write(compressed[index]); if (index === 0) { await new Promise(function(resolve) { setTimeout(resolve, 0); }); decodedBeforeClose = decoded.length > 0; } } await decompressionWriter.close(); await collectDecoded; var total = decoded.reduce(function(sum, chunk) { return sum + chunk.byteLength; }, 0), bytes = new Uint8Array(total), offset = 0; decoded.forEach(function(chunk) { bytes.set(chunk, offset); offset += chunk.byteLength; }); var cancelReason = new Error('stop'), cancelledWith, transform = new TransformStream({ cancel: function(reason) { cancelledWith = reason; } }), transformWriter = transform.writable.getWriter(); await transform.readable.cancel(cancelReason); var writerError = await transformWriter.closed.catch(function(error) { return error; }); return [firstCompressed.value.byteLength > 0, compressed.length > 1, decodedBeforeClose, new TextDecoder().decode(bytes), cancelledWith === cancelReason, writerError === cancelReason]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_compression_incremental_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCompressionIncremental = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseCompressionIncremental")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[true,true,true,"hello world",true,true]"#);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
         use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
         use rustls::server::WebPkiClientVerifier;
