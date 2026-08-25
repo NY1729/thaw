@@ -332,6 +332,11 @@ The workspace crates have narrow responsibilities:
   `node:tls` constructors, agents, header validators and secure contexts;
   `_http_common` also exposes the parser-pool and leniency constants expected
   by packages that still reach into Node internals
+- `node:http2` implements cleartext h2c client/server sessions over real TCP,
+  HTTP/2 prefaces and SETTINGS/PING/HEADERS/DATA/RST_STREAM/GOAWAY frames,
+  HPACK literal/static-table headers, stream lifecycle events and packed
+  settings helpers. TLS/ALPN transport, HPACK Huffman/dynamic tables,
+  CONTINUATION frames and connection-level flow control remain explicit gaps
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
