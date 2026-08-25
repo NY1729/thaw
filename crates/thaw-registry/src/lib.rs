@@ -167,6 +167,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "trace_events" => {
             "export declare const Tracing: any;\nexport declare function createTracing(argsArray: any): any;\nexport declare function getEnabledCategories(argsArray: any): string;\n"
         }
+        "inspector" | "inspector/promises" => {
+            "export declare const Session: any;\nexport declare function open(argsArray: any): any;\nexport declare function close(argsArray: any): void;\nexport declare function url(argsArray: any): any;\nexport declare function waitForDebugger(argsArray: any): void;\n"
+        }
         "_stream_readable" | "_stream_writable" | "_stream_duplex" | "_stream_transform"
         | "_stream_passthrough" | "_stream_wrap" => {
             "export declare const Stream: any;\nexport declare const Readable: any;\nexport declare const Writable: any;\nexport declare const Duplex: any;\nexport declare const Transform: any;\nexport declare const PassThrough: any;\n"
@@ -3819,6 +3822,30 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { Tracing: Tracing, createTracing: createTracing, getEnabledCategories: getEnabledCategories }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
+        "inspector" => Some(
+            r#"var EventEmitter = require('node:events'), opened = false, inspectorUrl, isolateId = 'thaw-quickjs-main';
+             function remoteObject(value, returnByValue) { var type = value === null ? 'object' : typeof value, result = { type: type }; if (value === null) result.subtype = 'null'; else if (type === 'undefined') result.description = 'undefined'; else if (type === 'number' && !Number.isFinite(value)) { result.unserializableValue = String(value); result.description = String(value); } else if (type === 'bigint') { result.unserializableValue = String(value) + 'n'; result.description = String(value) + 'n'; } else if (type === 'symbol' || type === 'function') result.description = String(value); else if (type === 'object' && !returnByValue) { result.className = value.constructor && value.constructor.name || 'Object'; result.description = result.className; } else result.value = value; return result; }
+             function Session() { if (!(this instanceof Session)) return new Session(); EventEmitter.call(this); this._connected = false; }
+             Session.prototype = Object.create(EventEmitter.prototype); Session.prototype.constructor = Session;
+             Session.prototype.connect = function() { if (this._connected) { var error = new Error('The inspector session is already connected'); error.code = 'ERR_INSPECTOR_ALREADY_CONNECTED'; throw error; } this._connected = true; };
+             Session.prototype.connectToMainThread = Session.prototype.connect;
+             Session.prototype.disconnect = function() { this._connected = false; this.removeAllListeners(); };
+             Session.prototype.post = function(method, params, callback) { if (typeof params === 'function') { callback = params; params = {}; } params = params || {}; if (typeof callback !== 'function') callback = function(error) { if (error) throw error; }; var session = this; queueMicrotask(function() { if (!session._connected) { var disconnected = new Error('Session is not connected'); disconnected.code = 'ERR_INSPECTOR_NOT_CONNECTED'; callback(disconnected); return; } var result = {}; try { if (method === 'Runtime.evaluate') { try { var value = (0, eval)(String(params.expression || '')); result.result = remoteObject(value, Boolean(params.returnByValue)); } catch (error) { result.result = remoteObject(error, false); result.exceptionDetails = { text: error.message, exception: remoteObject(error, false), lineNumber: 0, columnNumber: 0 }; } } else if (method === 'Runtime.getIsolateId') result = { id: isolateId }; else if (method === 'Schema.getDomains') result = { domains: ['Runtime','Debugger','Profiler','HeapProfiler','Schema'].map(function(name) { return { name: name, version: '1.3' }; }) }; else if (/^(Runtime|Debugger|Profiler|HeapProfiler)\.(enable|disable)$/.test(String(method))) result = {}; else { var unsupported = new Error('Inspector protocol method is not supported: ' + method); unsupported.code = 'ERR_INSPECTOR_COMMAND'; throw unsupported; } callback(null, result); } catch (error) { callback(error); } }); };
+             function open(port, host, wait) { port = port === undefined ? 9229 : Number(port); host = host === undefined ? '127.0.0.1' : String(host); opened = true; inspectorUrl = 'ws://' + host + ':' + port + '/thaw'; return { dispose: close }; }
+             function close() { opened = false; inspectorUrl = undefined; }
+             function url() { return opened ? inspectorUrl : undefined; }
+             function waitForDebugger() { if (!opened) { var error = new Error('Inspector is not active'); error.code = 'ERR_INSPECTOR_NOT_ACTIVE'; throw error; } }
+             module.exports = { Session: Session, open: open, close: close, url: url, waitForDebugger: waitForDebugger, console: globalThis.console }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
+        ),
+        "inspector/promises" => Some(
+            r#"var inspector = require('node:inspector');
+             function Session() { inspector.Session.call(this); }
+             Session.prototype = Object.create(inspector.Session.prototype); Session.prototype.constructor = Session;
+             Session.prototype.post = function(method, params) { var session = this; return new Promise(function(resolve, reject) { inspector.Session.prototype.post.call(session, method, params || {}, function(error, result) { if (error) reject(error); else resolve(result); }); }); };
+             module.exports = { Session: Session, open: inspector.open, close: inspector.close, url: inspector.url, waitForDebugger: inspector.waitForDebugger, console: inspector.console }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
+        ),
         "dgram" => Some(
             "function Socket(type, listener) { if (!(this instanceof Socket)) return new Socket(type, listener); var options = typeof type === 'object' ? type : { type: type }; this.type = options.type || 'udp4'; if (this.type !== 'udp4' && this.type !== 'udp6') throw new TypeError('Bad socket type'); this._events = Object.create(null); this._handle = 0; this._address = null; this._remote = null; this._refed = true; if (typeof listener === 'function') this.on('message', listener); } Socket.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; }; Socket.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; }; Socket.prototype.off = Socket.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; }; Socket.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; };\n\
              Socket.prototype.bind = function(port, address, callback) { var options = typeof port === 'object' ? port : { port: port, address: address }; if (typeof address === 'function') callback = address; if (typeof callback === 'function') this.once('listening', callback); var host = String(options.address || (this.type === 'udp6' ? '::' : '0.0.0.0')); var outcome = __thaw_udp_bind(host, Number(options.port || 0)); if (outcome.indexOf('ok|') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EADDRINUSE'; queueMicrotask(() => this.emit('error', error)); return this; } var fields = outcome.split('|'); this._handle = Number(fields[1]); this._address = { address: fields[2], family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: Number(fields[3]) }; queueMicrotask(() => { this.emit('listening'); var incoming = __thaw_udp_receive(this._handle); if (incoming.indexOf('ok|') !== 0) { if (this._handle) { var error = new Error(incoming.substring(4)); error.code = 'EIO'; this.emit('error', error); } return; } var parts = incoming.split('|'); var message = Buffer.from(parts[1], 'hex'); this.emit('message', message, { address: parts[2], family: parts[2].indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(parts[3]), size: Number(parts[4]) }); }); return this; }; Socket.prototype.send = function(message) { var args = Array.prototype.slice.call(arguments, 1); var callback = typeof args[args.length - 1] === 'function' ? args.pop() : null; var port, address; if (args.length >= 4 && typeof args[0] === 'number' && typeof args[1] === 'number') { var offset = args.shift(), length = args.shift(); message = Buffer.from(message).subarray(offset, offset + length); } port = args.length ? Number(args.shift()) : this._remote && this._remote.port; address = args.length ? String(args.shift()) : this._remote && this._remote.address; if (!this._handle) { var bound = __thaw_udp_bind(this.type === 'udp6' ? '::' : '0.0.0.0', 0); if (bound.indexOf('ok|') !== 0) throw new Error(bound.substring(4)); var fields = bound.split('|'); this._handle = Number(fields[1]); this._address = { address: fields[2], family: this.type === 'udp6' ? 'IPv6' : 'IPv4', port: Number(fields[3]) }; } if (!port || !address) throw new TypeError('Port and address are required'); var buffer = Array.isArray(message) ? Buffer.concat(message.map(function(value) { return Buffer.from(value); })) : Buffer.from(message); var outcome = __thaw_udp_send(this._handle, buffer.toString('hex'), address, port); if (outcome.indexOf('ok|') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EIO'; if (callback) queueMicrotask(function() { callback(error); }); else queueMicrotask(() => this.emit('error', error)); } else if (callback) queueMicrotask(function() { callback(null, Number(outcome.substring(3))); }); return this; };\n\
@@ -3869,7 +3896,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['_stream_duplex','_stream_passthrough','_stream_readable','_stream_transform','_stream_wrap','_stream_writable','assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','timers','timers/promises','tls','trace_events','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['_stream_duplex','_stream_passthrough','_stream_readable','_stream_transform','_stream_wrap','_stream_writable','assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','inspector','inspector/promises','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','timers','timers/promises','tls','trace_events','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -5992,6 +6019,35 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,true,true,true,true,true,["node","v8"],["v8","custom"],[false,"",true,"node,v8","custom,node,v8",false,"custom,v8",""]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn inspector_sessions_evaluate_through_callback_and_promise_protocols() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_inspector_sessions");
+        fs::write(
+            dir.join("index.js"),
+            "var inspector = require('node:inspector'), promises = require('node:inspector/promises'); function post(session, method, params) { return new Promise(function(resolve) { session.post(method, params, function(error, result) { resolve(error ? { error: error.code } : result); }); }); } module.exports = async function () { var before = inspector.url(), disposable = inspector.open(9333, 'localhost'), opened = inspector.url(), callbackSession = new inspector.Session(); callbackSession.connect(); var evaluated = await post(callbackSession, 'Runtime.evaluate', { expression: '6 * 7', returnByValue: true }), exception = await post(callbackSession, 'Runtime.evaluate', { expression: 'throw new Error(\"boom\")' }), isolate = await post(callbackSession, 'Runtime.getIsolateId'), schema = await post(callbackSession, 'Schema.getDomains'), unsupported = await post(callbackSession, 'Network.enable'); callbackSession.disconnect(); var disconnected = await post(callbackSession, 'Runtime.enable'), promiseSession = new promises.Session(); promiseSession.connectToMainThread(); var object = await promiseSession.post('Runtime.evaluate', { expression: '({ answer: 42 })', returnByValue: true }); await promiseSession.post('Debugger.enable'); promiseSession.disconnect(); disposable.dispose(); return [before, opened, inspector.url(), evaluated.result, exception.exceptionDetails.text, isolate.id, schema.domains.map(function(value) { return value.name; }), unsupported.error, disconnected.error, object.result.value, inspector.console === console]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_inspector_sessions_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseInspector = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseInspector").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[null,"ws://localhost:9333/thaw",null,{"type":"number","value":42},"boom","thaw-quickjs-main",["Runtime","Debugger","Profiler","HeapProfiler","Schema"],"ERR_INSPECTOR_COMMAND","ERR_INSPECTOR_NOT_CONNECTED",{"answer":42},true]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
