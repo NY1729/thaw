@@ -219,6 +219,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "v8" => {
             "export declare function serialize(argsArray: any): any;\nexport declare function deserialize(argsArray: any): any;\nexport declare function getHeapStatistics(argsArray: any): any;\nexport declare function getHeapSpaceStatistics(argsArray: any): any;\nexport declare function getHeapCodeStatistics(argsArray: any): any;\nexport declare function cachedDataVersionTag(argsArray: any): number;\nexport declare function setFlagsFromString(argsArray: any): void;\n"
         }
+        "vm" => {
+            "export declare function Script(argsArray: any): any;\nexport declare function createContext(argsArray: any): any;\nexport declare function isContext(argsArray: any): boolean;\nexport declare function runInContext(argsArray: any): any;\nexport declare function runInNewContext(argsArray: any): any;\nexport declare function runInThisContext(argsArray: any): any;\nexport declare function compileFunction(argsArray: any): any;\nexport declare function measureMemory(argsArray: any): any;\n"
+        }
         "zlib" => {
             "export declare function gzipSync(argsArray: any): any;\nexport declare function gunzipSync(argsArray: any): any;\nexport declare function deflateSync(argsArray: any): any;\nexport declare function inflateSync(argsArray: any): any;\nexport declare function deflateRawSync(argsArray: any): any;\nexport declare function inflateRawSync(argsArray: any): any;\nexport declare function gzip(argsArray: any): void;\nexport declare function gunzip(argsArray: any): void;\n"
         }
@@ -3127,7 +3130,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','querystring','readline','readline/promises','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','querystring','readline','readline/promises','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3171,6 +3174,11 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function getHeapStatistics() { return { total_heap_size: 0, total_heap_size_executable: 0, total_physical_size: 0, total_available_size: 0, used_heap_size: 0, heap_size_limit: Number.MAX_SAFE_INTEGER, malloced_memory: 0, peak_malloced_memory: 0, does_zap_garbage: 0, number_of_native_contexts: 1, number_of_detached_contexts: 0, total_global_handles_size: 0, used_global_handles_size: 0, external_memory: 0 }; }\n\
              function getHeapSpaceStatistics() { return []; } function getHeapCodeStatistics() { return { code_and_metadata_size: 0, bytecode_and_metadata_size: 0, external_script_source_size: 0, cpu_profiler_metadata_size: 0 }; } function cachedDataVersionTag() { return 0; } function setFlagsFromString() {}\n\
              module.exports = { serialize: serialize, deserialize: deserialize, getHeapStatistics: getHeapStatistics, getHeapSpaceStatistics: getHeapSpaceStatistics, getHeapCodeStatistics: getHeapCodeStatistics, cachedDataVersionTag: cachedDataVersionTag, setFlagsFromString: setFlagsFromString }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "vm" => Some(
+            "var contexts = globalThis.__thaw_vm_contexts || (globalThis.__thaw_vm_contexts = new WeakSet()); function createContext(object, options) { var context = object === undefined ? {} : object; if ((typeof context !== 'object' && typeof context !== 'function') || context === null) throw new TypeError('contextObject must be an object'); contexts.add(context); if (!Object.prototype.hasOwnProperty.call(context, 'globalThis')) Object.defineProperty(context, 'globalThis', { value: context, configurable: true }); if (!Object.prototype.hasOwnProperty.call(context, 'global')) Object.defineProperty(context, 'global', { value: context, configurable: true }); return context; } function isContext(value) { return (typeof value === 'object' || typeof value === 'function') && value !== null && contexts.has(value); } function scopeFor(context) { return new Proxy(context, { has: function(target, key) { return key !== 'scope' && key !== 'source'; }, get: function(target, key) { if (key === Symbol.unscopables) return undefined; return key in target ? target[key] : globalThis[key]; }, set: function(target, key, value) { target[key] = value; return true; } }); } function runInContext(code, context, options) { if (!isContext(context)) throw new TypeError('contextifiedObject must be a vm.Context'); return Function('scope', 'source', 'with (scope) { return eval(source); }')(scopeFor(context), String(code)); } function runInNewContext(code, context, options) { return runInContext(code, createContext(context === undefined ? {} : context), options); } function runInThisContext(code, options) { return (0, eval)(String(code)); }\n\
+             function Script(code, options) { if (!(this instanceof Script)) return new Script(code, options); this.code = String(code); this.filename = options && options.filename ? String(options.filename) : 'evalmachine.<anonymous>'; this.cachedDataRejected = false; this.sourceMapURL = undefined; Function(this.code); } Script.prototype.runInContext = function(context, options) { return runInContext(this.code, context, options); }; Script.prototype.runInNewContext = function(context, options) { return runInNewContext(this.code, context, options); }; Script.prototype.runInThisContext = function(options) { return runInThisContext(this.code, options); }; Script.prototype.createCachedData = function() { return Buffer.from(this.code, 'utf8'); }; function compileFunction(code, params, options) { params = params || []; var fn = Function.apply(null, params.concat(String(code))); if (options && options.filename) Object.defineProperty(fn, 'filename', { value: String(options.filename) }); return fn; } function measureMemory(options) { return Promise.resolve({ total: { jsMemoryEstimate: 0, jsMemoryRange: [0, 0] }, current: { jsMemoryEstimate: 0, jsMemoryRange: [0, 0] }, other: [] }); } function getDefaultContext() { return globalThis; }\n\
+             module.exports = { Script: Script, createScript: function(code, options) { return new Script(code, options); }, createContext: createContext, isContext: isContext, runInContext: runInContext, runInNewContext: runInNewContext, runInThisContext: runInThisContext, compileFunction: compileFunction, measureMemory: measureMemory, constants: { USE_MAIN_CONTEXT_DEFAULT_LOADER: Symbol.for('vm_dynamic_import_main_context_default'), DONT_CONTEXTIFY: Symbol.for('vm_context_no_contextify') }, getDefaultContext: getDefaultContext }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "zlib" => Some(
             "function input(value) { return Buffer.isBuffer(value) ? value : Buffer.from(value); } function run(operation, format, value) { return Buffer.from(__thaw_zlib_hex(operation, format, input(value).toString('hex')), 'hex'); } function sync(operation, format) { return function(value) { return run(operation, format, value); }; } function async(syncFunction) { return function(value, options, callback) { if (typeof options === 'function') callback = options; try { var result = syncFunction(value, options); queueMicrotask(function() { callback(null, result); }); } catch (error) { queueMicrotask(function() { callback(error); }); } }; }\n\
@@ -5689,6 +5697,30 @@ mod tests {
             )
         );
         assert_eq!(client.join().unwrap(), "pong");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_vm");
+        fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_vm_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseVm = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseVm").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[12,12,13,7,42,17,true,false,true,false,0,true,"symbol"]"#
+        );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
