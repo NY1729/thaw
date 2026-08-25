@@ -347,9 +347,10 @@ The workspace crates have narrow responsibilities:
   synchronous delivery, while `BroadcastChannel` distributes isolated copies
   by channel name; `node:worker_threads` exposes the main-thread identity,
   environment data and lifecycle APIs; `Worker` supports isolated eval scopes,
-  JavaScript `data:` URLs, cloned `workerData`, `parentPort` message exchange,
-  lifecycle events and termination (filesystem-backed workers and parallel OS
-  threads remain later)
+  JavaScript `data:` URLs, statically referenced single-file workers written as
+  `new URL("./worker.js", import.meta.url)`, cloned `workerData`, `parentPort`
+  message exchange, lifecycle events and termination (dynamic worker paths,
+  worker dependency graphs and parallel OS threads remain later)
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
