@@ -385,8 +385,9 @@ The workspace crates have narrow responsibilities:
 - `node:net` provides IPv4/IPv6 detection, validated `SocketAddress` values and
   address/range/subnet `BlockList` checks. `Socket`/`createConnection` perform
   real TCP writes and return peer data after `end()` half-closes the connection;
-  `Server`/`createServer` accept and reply to a real TCP connection with Node-like
-  listening/connection/data/close events. Multi-client streaming remains later
+  `Server`/`createServer` continuously accept and reply to real TCP connections
+  with Node-like listening/connection/data/close events, active connection
+  tracking and `maxConnections` admission control
 - `node:vm` supports context creation/detection, Script execution in current or
   sandboxed contexts, cached source data, function compilation and memory shapes
 - `node:punycode` implements RFC 3492 encode/decode, IDN domain conversion and
