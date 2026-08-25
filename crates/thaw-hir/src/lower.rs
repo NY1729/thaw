@@ -1503,6 +1503,25 @@ fn lower_ts_type(
             };
             if elements.iter().all(|element| element == first) {
                 Ok(first.clone())
+            } else if elements.iter().all(|element| matches!(element, HirType::Object(_))) {
+                let mut merged = Vec::<(Symbol, HirType)>::new();
+                for element in elements {
+                    let HirType::Object(fields) = element else { unreachable!() };
+                    for (name, ty) in fields {
+                        if let Some((_, existing)) =
+                            merged.iter().find(|(existing, _)| existing == &name)
+                        {
+                            if existing != &ty {
+                                return Err(format!(
+                                    "intersection field `{name}` has conflicting types {existing:?} and {ty:?}"
+                                ));
+                            }
+                        } else {
+                            merged.push((name, ty));
+                        }
+                    }
+                }
+                Ok(HirType::Object(merged))
             } else {
                 Err(format!("unsupported intersection type {elements:?}"))
             }
