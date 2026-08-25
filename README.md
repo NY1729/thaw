@@ -387,6 +387,8 @@ The workspace crates have narrow responsibilities:
   real TCP writes and return peer data after `end()` half-closes the connection;
   `Server`/`createServer` accept and reply to a real TCP connection with Node-like
   listening/connection/data/close events. Multi-client streaming remains later
+- `node:vm` supports context creation/detection, Script execution in current or
+  sandboxed contexts, cached source data, function compilation and memory shapes
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
