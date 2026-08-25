@@ -378,6 +378,8 @@ The workspace crates have narrow responsibilities:
   promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:constants` and `fs.constants` share Linux-compatible access, open,
   file-type and copy flags for dependency feature detection
+- `node:readline` and `node:readline/promises` support streamed line splitting,
+  callback/Promise questions, async iteration, history and ANSI cursor helpers
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
