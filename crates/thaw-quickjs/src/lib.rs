@@ -26,8 +26,10 @@
 //! retained for C ABI compatibility with older callers.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::os::raw::c_char;
 use std::time::Duration;
 
@@ -71,6 +73,60 @@ fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
 
 thread_local! {
     static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
+    static NET_STREAMS: RefCell<(u32, HashMap<u32, TcpStream>)> = RefCell::new((1, HashMap::new()));
+}
+
+fn net_connect(host: &str, port: u16) -> String {
+    match TcpStream::connect((host, port)) {
+        Ok(stream) => {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            NET_STREAMS.with(|streams| {
+                let mut streams = streams.borrow_mut();
+                let handle = streams.0;
+                streams.0 = streams.0.wrapping_add(1).max(1);
+                streams.1.insert(handle, stream);
+                format!("ok:{handle}")
+            })
+        }
+        Err(error) => format!("err:{error}"),
+    }
+}
+
+fn net_write(handle: u32, value: &[u8]) -> String {
+    NET_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        match streams.1.get_mut(&handle) {
+            Some(stream) => stream
+                .write_all(value)
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| format!("err:{error}")),
+            None => "err:socket is closed".to_string(),
+        }
+    })
+}
+
+fn net_finish(handle: u32) -> String {
+    NET_STREAMS.with(|streams| {
+        let Some(mut stream) = streams.borrow_mut().1.remove(&handle) else {
+            return "err:socket is closed".to_string();
+        };
+        if let Err(error) = stream.shutdown(Shutdown::Write) {
+            return format!("err:{error}");
+        }
+        let mut value = Vec::new();
+        match stream.read_to_end(&mut value) {
+            Ok(_) => format!("ok:{}", hex_encode(&value)),
+            Err(error) => format!("err:{error}"),
+        }
+    })
+}
+
+fn net_destroy(handle: u32) {
+    NET_STREAMS.with(|streams| {
+        if let Some(stream) = streams.borrow_mut().1.remove(&handle) {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    });
 }
 
 fn to_str(ptr: *const c_char) -> String {
@@ -196,6 +252,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     },
                 )
                 .expect("failed to create JavaScript compression function");
+                let tcp_connect = Function::new(ctx.clone(), |host: String, port: u32| {
+                    net_connect(&host, port as u16)
+                })
+                .expect("failed to create JavaScript TCP connector");
+                let tcp_write = Function::new(ctx.clone(), |handle: u32, value: String| {
+                    net_write(handle, &hex_decode(&value))
+                })
+                .expect("failed to create JavaScript TCP writer");
+                let tcp_finish = Function::new(ctx.clone(), |handle: u32| net_finish(handle))
+                    .expect("failed to create JavaScript TCP finisher");
+                let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
+                    .expect("failed to create JavaScript TCP closer");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -208,6 +276,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");
+                ctx.globals()
+                    .set("__thaw_net_connect", tcp_connect)
+                    .expect("failed to install JavaScript TCP connector");
+                ctx.globals()
+                    .set("__thaw_net_write", tcp_write)
+                    .expect("failed to install JavaScript TCP writer");
+                ctx.globals()
+                    .set("__thaw_net_finish", tcp_finish)
+                    .expect("failed to install JavaScript TCP finisher");
+                ctx.globals()
+                    .set("__thaw_net_destroy", tcp_destroy)
+                    .expect("failed to install JavaScript TCP closer");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
