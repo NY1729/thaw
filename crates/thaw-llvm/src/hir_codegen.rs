@@ -14197,6 +14197,26 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_callbacks_for_user_functions() {
+        let source = r#"
+            function apply(callback: (value: number) => number, value: number): number {
+                return callback(value);
+            }
+            function identity<T>(value: T): T { return value; }
+            function main(): void {
+                const local = <T>(value: T): T => value;
+                console.log(apply(identity, 22));
+                console.log(apply(local, 23));
+                console.log(apply(<T extends number>(value: T): T => value + 1, 23));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_user_callbacks"),
+            "22\n23\n24\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
