@@ -288,7 +288,8 @@ The workspace crates have narrow responsibilities:
 - Minimal importable `node:path`, `node:util`, `node:process`, and `node:buffer`
   modules backed by the same QuickJS polyfills used by npm dependencies
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
-  `setInterval`/`clearInterval`, and `queueMicrotask`. Promise waits drive the
+  `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
+  `queueMicrotask`. Promise waits drive the
   timer queue after pending microtasks, preserve timer registration order, and
   forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
   `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM

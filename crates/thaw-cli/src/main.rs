@@ -3758,7 +3758,10 @@ mod tests {
                     const events = [];
                     const cancelled = setTimeout(() => events.push('cancelled'), 0);
                     clearTimeout(cancelled);
+                    const cancelledImmediate = setImmediate(() => events.push('cancelled-immediate'));
+                    clearImmediate(cancelledImmediate);
                     queueMicrotask(() => events.push('microtask'));
+                    setImmediate(value => events.push(value), 'immediate');
                     let ticks = 0;
                     const interval = setInterval(() => {
                         ticks++;
@@ -3792,7 +3795,10 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "microtask:2:雪\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "microtask,immediate:2:雪\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
