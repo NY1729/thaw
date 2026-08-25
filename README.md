@@ -395,6 +395,8 @@ The workspace crates have narrow responsibilities:
   close events, connected destinations, address metadata and buffer controls
 - `node:stream/consumers` collects event streams or async iterables as Buffer,
   text, JSON, ArrayBuffer or Blob; Blob/File support includes slicing and bytes
+- `node:stream/web` shares global Readable/Writable/Transform streams with
+  readers, writers, piping, async iteration, queuing strategies and text codecs
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
