@@ -2375,7 +2375,7 @@ struct FnLowerer<'a> {
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,
-    union_narrowings: HashMap<Symbol, (usize, Vec<HirType>)>,
+    union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -2388,6 +2388,8 @@ struct FnLowerer<'a> {
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
 }
+
+type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
 
 impl<'a> FnLowerer<'a> {
     fn stmt_is_iteration(stmt: &Stmt) -> bool {
@@ -2492,16 +2494,19 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                     }
-                    if let Some((name, index, elements, equal_when_true)) =
+                    if let Some((name, matching, allowed, elements, equal_when_true)) =
                         self.union_typeof_narrowing(&if_stmt.test)
                     {
-                        let continuing_index = if equal_when_true {
-                            (elements.len() == 2).then_some(1 - index)
+                        let continuing = if equal_when_true {
+                            allowed
+                                .into_iter()
+                                .filter(|index| !matching.contains(index))
+                                .collect::<Vec<_>>()
                         } else {
-                            Some(index)
+                            matching
                         };
-                        if let Some(index) = continuing_index {
-                            self.union_narrowings.insert(name, (index, elements));
+                        if !continuing.is_empty() {
+                            self.union_narrowings.insert(name, (continuing, elements));
                         }
                     }
                 }
@@ -2744,7 +2749,7 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
-    fn union_typeof_narrowing(&self, expr: &Expr) -> Option<(Symbol, usize, Vec<HirType>, bool)> {
+    fn union_typeof_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
         let Expr::Bin(binary) = expr else { return None };
         let equal_when_true = match binary.op {
             BinaryOp::EqEqEq | BinaryOp::EqEq => true,
@@ -2770,25 +2775,29 @@ impl<'a> FnLowerer<'a> {
         let HirType::Union(elements) = self.scope.get(&name)? else {
             return None;
         };
-        let matching = elements
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let matching = allowed
             .iter()
-            .enumerate()
-            .filter(|(_, member)| native_typeof_name(member) == Some(type_name.as_ref()))
-            .map(|(index, _)| index)
+            .copied()
+            .filter(|index| native_typeof_name(&elements[*index]) == Some(type_name.as_ref()))
             .collect::<Vec<_>>();
-        (matching.len() == 1).then(|| (name, matching[0], elements.clone(), equal_when_true))
+        (!matching.is_empty()).then(|| (name, matching, allowed, elements.clone(), equal_when_true))
     }
 
     fn lower_body_with_union_narrowing(
         &mut self,
         stmt: &Stmt,
-        narrowing: Option<&(Symbol, usize, Vec<HirType>)>,
+        narrowing: Option<&(Symbol, Vec<usize>, Vec<HirType>)>,
         optional: Option<&(Symbol, HirType, u8)>,
     ) -> Result<Vec<HirStmt>, String> {
         let saved = self.union_narrowings.clone();
-        if let Some((name, index, elements)) = narrowing {
+        if let Some((name, allowed, elements)) = narrowing {
             self.union_narrowings
-                .insert(name.clone(), (*index, elements.clone()));
+                .insert(name.clone(), (allowed.clone(), elements.clone()));
         }
         let lowered = self.lower_body_with_optional_narrowing(stmt, optional);
         self.union_narrowings = saved;
@@ -2843,26 +2852,32 @@ impl<'a> FnLowerer<'a> {
                     .map(|(name, payload, _, nullable)| {
                         (name.clone(), payload.clone(), *nullable)
                     });
-                let then_union = union_narrowing.as_ref().and_then(
-                    |(name, index, elements, equal)| {
-                        if *equal {
-                            Some((name.clone(), *index, elements.clone()))
-                        } else if elements.len() == 2 {
-                            Some((name.clone(), 1 - *index, elements.clone()))
+                let then_union = union_narrowing.as_ref().map(
+                    |(name, matching, allowed, elements, equal)| {
+                        let narrowed = if *equal {
+                            matching.clone()
                         } else {
-                            None
-                        }
+                            allowed
+                                .iter()
+                                .filter(|index| !matching.contains(index))
+                                .copied()
+                                .collect()
+                        };
+                        (name.clone(), narrowed, elements.clone())
                     },
                 );
-                let else_union = union_narrowing.as_ref().and_then(
-                    |(name, index, elements, equal)| {
-                        if !*equal {
-                            Some((name.clone(), *index, elements.clone()))
-                        } else if elements.len() == 2 {
-                            Some((name.clone(), 1 - *index, elements.clone()))
+                let else_union = union_narrowing.as_ref().map(
+                    |(name, matching, allowed, elements, equal)| {
+                        let narrowed = if !*equal {
+                            matching.clone()
                         } else {
-                            None
-                        }
+                            allowed
+                                .iter()
+                                .filter(|index| !matching.contains(index))
+                                .copied()
+                                .collect()
+                        };
+                        (name.clone(), narrowed, elements.clone())
                     },
                 );
                 let then_branch = self
@@ -5022,12 +5037,14 @@ impl<'a> FnLowerer<'a> {
                         _ => {}
                     }
                 }
-                if let Some((index, elements)) = self.union_narrowings.get(&name) {
-                    return Ok(HirExpr::UnionValue(
-                        Box::new(HirExpr::Var(name)),
-                        *index,
-                        elements.clone(),
-                    ));
+                if let Some((allowed, elements)) = self.union_narrowings.get(&name) {
+                    if let [index] = allowed.as_slice() {
+                        return Ok(HirExpr::UnionValue(
+                            Box::new(HirExpr::Var(name)),
+                            *index,
+                            elements.clone(),
+                        ));
+                    }
                 }
                 match self
                     .narrowings
@@ -6941,7 +6958,7 @@ impl<'a> FnLowerer<'a> {
             } else if let Some(HirType::Union(elements)) = self.scope.get(&name) {
                 if let Some(index) = elements.iter().position(|member| member == &rhs_type) {
                     self.union_narrowings
-                        .insert(name, (index, elements.clone()));
+                        .insert(name, (vec![index], elements.clone()));
                 } else {
                     self.union_narrowings.remove(&name);
                 }

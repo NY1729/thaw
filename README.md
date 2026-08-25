@@ -138,8 +138,8 @@ The workspace crates have narrow responsibilities:
   locals, function parameters/returns, fixed-shape object fields, nested calls,
   async frames, and homogeneous arrays (including index updates and spread
   concatenation). `typeof` observes the runtime member and narrows two-member
-  unions in both equality and inequality branches, after terminating guard
-  clauses, and after assignment to a known member
+  and larger unions through nested equality/inequality branches, terminating
+  guard clauses, residual tag sets, and assignment to a known member
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
@@ -664,8 +664,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes,
-  tuples, heterogeneous intersections, multi-member residual narrowing,
-  multi-capture export keys and the
+  tuples, heterogeneous intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant
