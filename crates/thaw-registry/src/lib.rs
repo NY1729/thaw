@@ -6074,6 +6074,35 @@ mod tests {
     }
 
     #[test]
+    fn web_stream_locks_can_be_released_and_reacquired() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_stream_release_locks");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var readableController, readable = new ReadableStream({ start: function(controller) { readableController = controller; } }), reader = readable.getReader(), pendingRead = reader.read().catch(function(error) { return error; }); reader.releaseLock(); var pendingReadError = await pendingRead, oldReadError, oldReaderClosed; try { await reader.read(); } catch (error) { oldReadError = error; } try { await reader.closed; } catch (error) { oldReaderClosed = error; } var readerUnlocked = !readable.locked, replacementReader = readable.getReader(); readableController.enqueue('value'); var replacementRead = await replacementReader.read(), releaseWrite, writeGate = new Promise(function(resolve) { releaseWrite = resolve; }), writable = new WritableStream({ write: function() { return writeGate; } }), writer = writable.getWriter(), pendingWrite = writer.write('x'); writer.releaseLock(); var oldWriteError, oldWriterReady, oldWriterClosed; try { await writer.write('y'); } catch (error) { oldWriteError = error; } try { await writer.ready; } catch (error) { oldWriterReady = error; } try { await writer.closed; } catch (error) { oldWriterClosed = error; } var writerUnlocked = !writable.locked, replacementWriter = writable.getWriter(); releaseWrite(); await pendingWrite; await replacementWriter.close(); return [pendingReadError.code, oldReadError.code, oldReaderClosed.code, readerUnlocked, replacementRead, oldWriteError.code, oldWriterReady.code, oldWriterClosed.code, writerUnlocked, writable.locked]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_stream_release_locks_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebStreamLocks = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebStreamLocks").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["ERR_INVALID_STATE","ERR_INVALID_STATE","ERR_INVALID_STATE",true,{"value":"value","done":false},"ERR_INVALID_STATE","ERR_INVALID_STATE","ERR_INVALID_STATE",true,true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn stream_web_adapters_retain_locks_and_await_teardown() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_stream_web_adapter_locks");
