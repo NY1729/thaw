@@ -84,6 +84,9 @@ const PLATFORM_GLOBALS: &str = r#"
   globalThis.setInterval = (callback, delay = 0, ...args) =>
     schedule(callback, delay, true, args);
   globalThis.clearInterval = globalThis.clearTimeout;
+  globalThis.setImmediate = (callback, ...args) =>
+    schedule(callback, 0, false, args);
+  globalThis.clearImmediate = globalThis.clearTimeout;
   globalThis.queueMicrotask = callback => {
     if (typeof callback !== 'function') {
       throw new TypeError('microtask callback must be a function');
@@ -973,6 +976,21 @@ mod tests {
             1
         );
         assert_eq!(call("cancelled", "[]"), r#""right""#);
+    }
+
+    #[test]
+    fn immediate_forwards_arguments_and_can_be_cancelled() {
+        assert_eq!(
+            load(
+                "function immediate(value) { return new Promise(resolve => {\n\
+                   const cancelled = setImmediate(() => resolve('wrong'));\n\
+                   clearImmediate(cancelled);\n\
+                   setImmediate((left, right) => resolve(left + right), value, 2);\n\
+                 }); }"
+            ),
+            1
+        );
+        assert_eq!(call("immediate", "[40]"), "42");
     }
 
     #[test]
