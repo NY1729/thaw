@@ -6045,6 +6045,35 @@ mod tests {
     }
 
     #[test]
+    fn web_writable_serializes_abort_behind_pending_writes() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_writable_abort_order");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var release, gate = new Promise(function(resolve) { release = resolve; }), events = [], reason = new Error('stop'), writable = new WritableStream({ write: function() { events.push('write-start'); return gate.then(function() { events.push('write-end'); }); }, abort: function(error) { events.push(['abort', error === reason]); } }), writer = writable.getWriter(), directAbort, directClose; try { await writable.abort(reason); } catch (error) { directAbort = error.code; } try { await writable.close(); } catch (error) { directClose = error.code; } var write = writer.write('x').then(function() { events.push('write-resolve'); }), abort = writer.abort(reason).then(function() { events.push('abort-resolve'); }), pending = events.slice(); release(); await Promise.all([write, abort]); var closedError; try { await writer.closed; } catch (error) { closedError = error; } var laterError; try { await writer.write('y'); } catch (error) { laterError = error; } var repeated = await writer.abort(new Error('ignored')); return [directAbort, directClose, pending, events, closedError === reason, laterError === reason, repeated]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_writable_abort_order_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebWritableAbort = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebWritableAbort").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["ERR_INVALID_STATE","ERR_INVALID_STATE",[],["write-start","write-end",["abort",true],"write-resolve","abort-resolve"],true,true,null]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn stream_web_adapters_retain_locks_and_await_teardown() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_stream_web_adapter_locks");
