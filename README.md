@@ -365,7 +365,10 @@ The workspace crates have narrow responsibilities:
   `ERR_STREAM_PREMATURE_CLOSE`. Function stages receive an AbortSignal and
   compose as object-mode transforms; Promise-returning body functions expose a
   writable-only sink and reject non-null return values with
-  `ERR_INVALID_RETURN_VALUE`. Destroying a `Duplex.from()` iterable adapter
+  `ERR_INVALID_RETURN_VALUE`. A composition ending in such a sink is
+  readable-ended from construction, delays `finish` until the sink Promise
+  settles, and propagates the original rejection while destroying every stage.
+  Destroying a `Duplex.from()` iterable adapter
   closes its source iterator exactly once so generator `finally` cleanup runs.
   Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
