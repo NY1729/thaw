@@ -381,8 +381,9 @@ The workspace crates have narrow responsibilities:
   modulo type-parameter names before call-site specialization. Generic defaults
   are checked the same way so omitted call-site types retain the annotated
   contract. Assignments to these polymorphic annotations require an explicit
-  implementation return type instead of guessing a generic return pattern.
-  The equivalent
+  implementation return type when the body does not directly return one of
+  its annotated parameters. Direct identity returns infer that parameter's
+  generic pattern for arrow and function expressions. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Pure callable interfaces with one generic call signature, such as
