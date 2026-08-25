@@ -14072,6 +14072,26 @@ mod tests {
     }
 
     #[test]
+    fn compiles_contextual_generic_arrow_callbacks() {
+        let source = r#"
+            async function main(): Promise<void> {
+                const numbers = [3, 4].map(<T>(value: T): T => value);
+                const strings = ["x", "y"].map(<T extends string>(value: T): T => value);
+                console.log(numbers[0]);
+                console.log(strings[1]);
+                const promised: number = await new Promise<number>((resolve, reject) => {
+                    resolve(5);
+                }).then(<T extends number>(value: T): T => value);
+                console.log(promised);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "contextual_generic_arrows"),
+            "3\ny\n5\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };

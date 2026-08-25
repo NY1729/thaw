@@ -6900,8 +6900,8 @@ impl<'a> FnLowerer<'a> {
         parameter_types: &[HirType],
         expected_return: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if arrow.is_async || arrow.is_generator || arrow.type_params.is_some() {
-            return Err("async, generator, and generic Promise callbacks are not supported".into());
+        if arrow.is_async || arrow.is_generator {
+            return Err("async and generator Promise callbacks are not supported".into());
         }
         if arrow.params.len() != parameter_types.len() {
             return Err(format!(
@@ -6910,6 +6910,103 @@ impl<'a> FnLowerer<'a> {
                 arrow.params.len()
             ));
         }
+        let generic_return = if let Some(type_params) = &arrow.type_params {
+            validate_trailing_type_parameter_defaults(
+                "generic arrow function",
+                "<anonymous>",
+                type_params,
+            )?;
+            let generic_type_params = type_params
+                .params
+                .iter()
+                .map(|parameter| parameter.name.sym.to_string())
+                .collect::<Vec<_>>();
+            let substitutions = generic_type_params
+                .iter()
+                .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
+                .collect::<HashMap<_, _>>();
+            let generic_param_patterns = arrow
+                .params
+                .iter()
+                .map(|parameter| {
+                    let Pat::Ident(binding) = parameter else {
+                        return Err(
+                            "generic contextual arrows require identifier parameters".into()
+                        );
+                    };
+                    let annotation = binding
+                        .type_ann
+                        .as_ref()
+                        .ok_or("generic contextual arrow parameters need type annotations")?;
+                    generic_type_pattern(
+                        &annotation.type_ann,
+                        &substitutions,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let signature = FnSignature {
+                params: Vec::new(),
+                variadic: None,
+                ret: HirType::Dynamic,
+                is_async: false,
+                is_extern: false,
+                source_range: (arrow.span.lo.0, arrow.span.hi.0),
+                generic_type_params,
+                generic_type_constraints: type_params
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.constraint.clone())
+                    .collect(),
+                generic_type_defaults: type_params
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.default.clone())
+                    .collect(),
+                generic_param_patterns,
+                generic_return_type: arrow
+                    .return_type
+                    .as_ref()
+                    .map(|annotation| annotation.type_ann.clone()),
+            };
+            let types = infer_generic_type_tuple(
+                &signature,
+                parameter_types,
+                self.interfaces,
+                self.generic_interfaces,
+            )?;
+            let substitution = signature
+                .generic_type_params
+                .iter()
+                .cloned()
+                .zip(types)
+                .collect::<HashMap<_, _>>();
+            arrow
+                .return_type
+                .as_ref()
+                .map(|annotation| {
+                    resolve_ts_type_with_substitution(
+                        &annotation.type_ann,
+                        &substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if let (Some(declared), Some(contextual)) = (&generic_return, expected_return) {
+            if contextual != &HirType::Dynamic && declared != contextual {
+                return Err(format!(
+                    "generic callback declares return type {declared:?}, expected {contextual:?}"
+                ));
+            }
+        }
+        let expected_return = generic_return.as_ref().or(expected_return);
         let saved_scope = self.scope.clone();
         let saved_bindings = self.bindings.clone();
         let saved_return = self.ret_type.clone();
@@ -12963,6 +13060,20 @@ mod tests {
             error.contains("cannot specialize generic callback `numeric`"),
             "{error}"
         );
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
+    }
+
+    #[test]
+    fn validates_contextual_generic_arrow_constraints() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            function main(): void {
+                ["wrong"].map(<T extends number>(value: T): T => value);
+            }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
         assert!(error.contains("does not satisfy constraint F64"), "{error}");
     }
 
