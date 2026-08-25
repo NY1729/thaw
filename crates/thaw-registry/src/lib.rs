@@ -167,6 +167,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "events" => {
             "export declare function EventEmitter(argsArray: any): any;\nexport declare function once(argsArray: any): any;\n"
         }
+        "assert" | "assert/strict" => {
+            "export declare function ok(argsArray: any): void;\nexport declare function equal(argsArray: any): void;\nexport declare function notEqual(argsArray: any): void;\nexport declare function strictEqual(argsArray: any): void;\nexport declare function notStrictEqual(argsArray: any): void;\nexport declare function deepEqual(argsArray: any): void;\nexport declare function notDeepEqual(argsArray: any): void;\nexport declare function deepStrictEqual(argsArray: any): void;\nexport declare function notDeepStrictEqual(argsArray: any): void;\nexport declare function fail(argsArray: any): void;\nexport declare function throws(argsArray: any): any;\nexport declare function doesNotThrow(argsArray: any): void;\n"
+        }
         "fs" => {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
@@ -1469,12 +1472,11 @@ fn bundle_commonjs_package(
             }
             // Not a real npm package under `node_modules_dir` -- maybe a
             // Node core builtin Thaw has a polyfill for.
-            if let Some(builtin_source) = builtin_module_source(resolution_spec) {
-                let builtin_key = if resolution_spec.starts_with("node:") {
-                    format!("{resolution_spec}{suffix}")
-                } else {
-                    format!("node:{resolution_spec}{suffix}")
-                };
+            let builtin_name = resolution_spec
+                .strip_prefix("node:")
+                .unwrap_or(resolution_spec);
+            if let Some(builtin_source) = builtin_module_source(builtin_name) {
+                let builtin_key = format!("node:{builtin_name}{suffix}");
                 requires.push((spec, builtin_key.clone()));
                 if !visited.contains(&builtin_key) {
                     visited.push(builtin_key.clone());
@@ -2647,6 +2649,44 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.once = once;\n\
              module.exports.default = EventEmitter;\n\
              module.exports.__esModule = true;\n",
+        ),
+        "assert" | "assert/strict" => Some(
+            "function AssertionError(options) {\n\
+             \x20\x20options = options || {}; this.name = 'AssertionError'; this.code = 'ERR_ASSERTION';\n\
+             \x20\x20this.actual = options.actual; this.expected = options.expected; this.operator = options.operator;\n\
+             \x20\x20this.generatedMessage = options.message === undefined;\n\
+             \x20\x20this.message = options.message === undefined ? 'Expected values to satisfy ' + (options.operator || 'assertion') : String(options.message);\n\
+             \x20\x20if (Error.captureStackTrace) Error.captureStackTrace(this, options.stackStartFn || AssertionError);\n\
+             }\n\
+             AssertionError.prototype = Object.create(Error.prototype); AssertionError.prototype.constructor = AssertionError;\n\
+             function failure(actual, expected, message, operator, start) { throw new AssertionError({ actual: actual, expected: expected, message: message, operator: operator, stackStartFn: start }); }\n\
+             function deep(actual, expected, seen) {\n\
+             \x20\x20if (Object.is(actual, expected)) return true;\n\
+             \x20\x20if (actual === null || expected === null || typeof actual !== 'object' || typeof expected !== 'object') return false;\n\
+             \x20\x20if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false;\n\
+             \x20\x20seen = seen || new Map(); if (seen.get(actual) === expected) return true; seen.set(actual, expected);\n\
+             \x20\x20if (actual instanceof Date) return expected instanceof Date && actual.getTime() === expected.getTime();\n\
+             \x20\x20if (actual instanceof RegExp) return expected instanceof RegExp && actual.source === expected.source && actual.flags === expected.flags;\n\
+             \x20\x20if (ArrayBuffer.isView(actual)) { if (!ArrayBuffer.isView(expected) || actual.length !== expected.length) return false; for (var i = 0; i < actual.length; i++) if (!Object.is(actual[i], expected[i])) return false; return true; }\n\
+             \x20\x20var left = Object.keys(actual); var right = Object.keys(expected); if (left.length !== right.length) return false;\n\
+             \x20\x20for (var index = 0; index < left.length; index++) { var key = left[index]; if (!Object.prototype.hasOwnProperty.call(expected, key) || !deep(actual[key], expected[key], seen)) return false; }\n\
+             \x20\x20return true;\n\
+             }\n\
+             function ok(value, message) { if (!value) failure(value, true, message, '==', ok); }\n\
+             function equal(actual, expected, message) { if (actual != expected) failure(actual, expected, message, '==', equal); }\n\
+             function notEqual(actual, expected, message) { if (actual == expected) failure(actual, expected, message, '!=', notEqual); }\n\
+             function strictEqual(actual, expected, message) { if (!Object.is(actual, expected)) failure(actual, expected, message, 'strictEqual', strictEqual); }\n\
+             function notStrictEqual(actual, expected, message) { if (Object.is(actual, expected)) failure(actual, expected, message, 'notStrictEqual', notStrictEqual); }\n\
+             function deepStrictEqual(actual, expected, message) { if (!deep(actual, expected)) failure(actual, expected, message, 'deepStrictEqual', deepStrictEqual); }\n\
+             function notDeepStrictEqual(actual, expected, message) { if (deep(actual, expected)) failure(actual, expected, message, 'notDeepStrictEqual', notDeepStrictEqual); }\n\
+             function fail(message) { failure(undefined, undefined, message || 'Failed', 'fail', fail); }\n\
+             function matches(error, expected) { if (expected === undefined) return true; if (expected instanceof RegExp) return expected.test(String(error && error.message || error)); if (typeof expected === 'function') return error instanceof expected || expected(error) === true; return true; }\n\
+             function throws(block, expected, message) { var caught; try { block(); } catch (error) { caught = error; } if (caught === undefined || !matches(caught, expected)) failure(caught, expected, message, 'throws', throws); return caught; }\n\
+             function doesNotThrow(block, expected, message) { try { block(); } catch (error) { if (matches(error, expected)) failure(error, undefined, message, 'doesNotThrow', doesNotThrow); throw error; } }\n\
+             ok.AssertionError = AssertionError; ok.ok = ok; ok.equal = equal; ok.notEqual = notEqual; ok.strictEqual = strictEqual; ok.notStrictEqual = notStrictEqual;\n\
+             ok.deepEqual = deepStrictEqual; ok.notDeepEqual = notDeepStrictEqual; ok.deepStrictEqual = deepStrictEqual; ok.notDeepStrictEqual = notDeepStrictEqual;\n\
+             ok.fail = fail; ok.throws = throws; ok.doesNotThrow = doesNotThrow; ok.strict = ok; ok.default = ok; ok.__esModule = true;\n\
+             module.exports = ok;\n",
         ),
         // Same real dependency chain as `path` above (`node-gyp-build.js`
         // reads `os.arch()`/`os.platform()` to build its target string).
@@ -4202,6 +4242,49 @@ mod tests {
         assert_eq!(
             result,
             r#"["once:1,regular:1,regular:2",true,true,false,0,0]"#
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn assert_builtin_reports_structured_failures_through_commonjs_require() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_assert");
+        fs::write(
+            dir.join("index.js"),
+            "var assert = require('node:assert/strict');\n\
+             module.exports = function () {\n\
+             \x20 assert.deepStrictEqual({ a: [1, 2], date: new Date(3) }, { date: new Date(3), a: [1, 2] });\n\
+             \x20 assert.throws(function() { throw new TypeError('bad value'); }, /bad/);\n\
+             \x20 var failure; try { assert.strictEqual(1, 2, 'different'); } catch (error) { failure = [error instanceof assert.AssertionError, error.name, error.code, error.actual, error.expected, error.operator, error.message]; }\n\
+             \x20 return failure;\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_assert_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseAssert = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseAssert").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,"AssertionError","ERR_ASSERTION",1,2,"strictEqual","different"]"#
         );
 
         let _ = fs::remove_dir_all(&dir);
