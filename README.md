@@ -142,7 +142,9 @@ The workspace crates have narrow responsibilities:
   guard clauses, residual tag sets, and assignment to a known member. Union
   values can be logged directly with runtime dispatch for primitive members;
   strict equality/inequality against concrete members short-circuits on the
-  tag and applies the member's native comparison semantics
+  tag and applies the member's native comparison semantics. Equality between
+  two values of the same union compares tags first and dispatches to the
+  matching member semantics, including NaN and string-content behavior
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary

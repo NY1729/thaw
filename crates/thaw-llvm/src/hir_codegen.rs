@@ -4836,6 +4836,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::UnionMemberIsEqual(union, member, index, elements) => {
                 self.compile_union_member_equality(union, member, *index, elements)
             }
+            HirExpr::UnionIsEqual(left, right, elements) => {
+                self.compile_union_equality(left, right, elements)
+            }
             HirExpr::NullishValue(value, _) => {
                 let nullish = self.compile_expr(value)?.into_struct_value();
                 self.builder
@@ -5398,6 +5401,113 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             _ => Err(format!("cannot compare union member with type {ty:?}")),
         }
+    }
+
+    fn compile_union_equality(
+        &mut self,
+        left: &HirExpr,
+        right: &HirExpr,
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if elements.is_empty() {
+            return Err("cannot compare empty unions".into());
+        }
+        let left = self.compile_expr(left)?.into_struct_value();
+        let right = self.compile_expr(right)?.into_struct_value();
+        let left_tag = self
+            .builder
+            .build_extract_value(left, 0, "union_left_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let right_tag = self
+            .builder
+            .build_extract_value(right, 0, "union_right_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let tags_equal = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, left_tag, right_tag, "union_tags_equal")
+            .map_err(|error| error.to_string())?;
+        let left_payload = self
+            .builder
+            .build_extract_value(left, 1, "union_left_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let right_payload = self
+            .builder
+            .build_extract_value(right, 1, "union_right_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let function = self.current_function();
+        let dispatch = self
+            .context
+            .append_basic_block(function, "union_equal_dispatch");
+        let mismatch = self
+            .context
+            .append_basic_block(function, "union_tags_differ");
+        let merge = self
+            .context
+            .append_basic_block(function, "union_equal_merge");
+        let result = self
+            .builder
+            .build_alloca(self.context.bool_type(), "union_equal_result")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(tags_equal, dispatch, mismatch)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(mismatch);
+        self.builder
+            .build_store(result, self.context.bool_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(dispatch);
+        for (index, member) in elements.iter().enumerate() {
+            let matched = self
+                .context
+                .append_basic_block(function, "union_equal_member");
+            let next = (index + 1 != elements.len()).then(|| {
+                self.context
+                    .append_basic_block(function, "union_equal_next")
+            });
+            if let Some(next) = next {
+                let is_member = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        left_tag,
+                        self.context.i8_type().const_int(index as u64, false),
+                        "union_equal_member_tag",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(is_member, matched, next)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                self.builder
+                    .build_unconditional_branch(matched)
+                    .map_err(|error| error.to_string())?;
+            }
+            self.builder.position_at_end(matched);
+            let left = self.unpack_union_payload(left_payload, member)?;
+            let right = self.unpack_union_payload(right_payload, member)?;
+            let equal = self.compile_native_strict_equality(left, right, member)?;
+            self.builder
+                .build_store(result, equal)
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
+            if let Some(next) = next {
+                self.builder.position_at_end(next);
+            }
+        }
+        self.builder.position_at_end(merge);
+        self.builder
+            .build_load(self.context.bool_type(), result, "union_equal")
+            .map_err(|error| error.to_string())
     }
 
     fn compile_optional_none(&mut self, payload: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
@@ -8609,7 +8719,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::UnionInject(_, _, elements) => Some(HirType::Union(elements.clone())),
             HirExpr::UnionTag(_, _) => Some(HirType::F64),
             HirExpr::UnionValue(_, index, elements) => elements.get(*index).cloned(),
-            HirExpr::UnionMemberIsEqual(..) => Some(HirType::Bool),
+            HirExpr::UnionMemberIsEqual(..) | HirExpr::UnionIsEqual(..) => Some(HirType::Bool),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
             HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
                 .iter()
@@ -13787,6 +13897,14 @@ mod tests {
                 console.log(value !== 2);
             }
             function unionNaN(value: string | number): boolean { return value === NaN; }
+            function unionEqual(
+                left: string | number,
+                right: string | number
+            ): boolean { return left === right; }
+            function unionNotEqual(
+                left: string | number,
+                right: string | number
+            ): boolean { return left !== right; }
             function kind(value: string | number): string { return typeof value; }
             function describe(value: string | number): string {
                 if (typeof value === "string") {
@@ -13836,6 +13954,12 @@ mod tests {
                 equality("same");
                 equality(2);
                 console.log(unionNaN(NaN));
+                console.log(unionEqual("same", "same"));
+                console.log(unionEqual("same", "other"));
+                console.log(unionEqual(4, 4));
+                console.log(unionEqual(4, "4"));
+                console.log(unionEqual(NaN, NaN));
+                console.log(unionNotEqual(4, "4"));
                 console.log(describe("hello"));
                 console.log(describe(42));
                 console.log(describeReverse("ok"));
@@ -13855,7 +13979,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
-            "string\nnumber\ndirect\n12\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\nfalse\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
+            "string\nnumber\ndirect\n12\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
         );
     }
 
