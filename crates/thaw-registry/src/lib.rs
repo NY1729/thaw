@@ -3513,6 +3513,81 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function parseResponse(buffer, socket) { var marker = buffer.indexOf(Buffer.from('\r\n\r\n')), head = marker < 0 ? '' : buffer.slice(0, marker).toString(), body = marker < 0 ? buffer : buffer.slice(marker + 4), lines = head.split('\r\n'), status = (lines.shift() || '').match(/^HTTP\/(\d+\.\d+)\s+(\d+)(?:\s+(.*))?$/); if (!status) throw new Error('Parse Error: Invalid HTTP response'); var response = new IncomingMessage(socket); response.httpVersion = status[1]; response.statusCode = Number(status[2]); response.statusMessage = status[3] || ''; lines.forEach(function(line) { var colon = line.indexOf(':'); if (colon < 0) return; var name = line.slice(0, colon), key = name.toLowerCase(), value = line.slice(colon + 1).trim(); response.rawHeaders.push(name, value); (response.headersDistinct[key] || (response.headersDistinct[key] = [])).push(value); if (key === 'set-cookie') response.headers[key] = response.headersDistinct[key].slice(); else response.headers[key] = response.headersDistinct[key].join(', '); }); if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) body = decodeChunked(body); response.complete = true; return { response: response, body: body }; }
              ClientRequest.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var request = this, body = Buffer.concat(this._chunks); if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n'; var received = [], transport = this._options._transport || net, connectOptions = Object.assign({}, this._options, { host: this._options.hostname, port: this._options.port }); var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions); this.emit('socket', socket); socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); }); socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); }); socket.on('data', function(data) { received.push(Buffer.from(data)); }); socket.on('end', function() { try { var parsed = parseResponse(Buffer.concat(received), socket), response = parsed.response; request.emit('response', response); var value = response._encoding ? parsed.body.toString(response._encoding) : parsed.body; if (parsed.body.length) response.emit('data', value); response.readable = false; response.emit('end'); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } }); return this; }; ClientRequest.prototype.abort = function() { this.aborted = true; this.emit('abort'); return this.destroy(); }; ClientRequest.prototype.destroy = function(error) { this.destroyed = true; if (this.socket) this.socket.destroy(error); return this; }; ClientRequest.prototype.setTimeout = function(timeout, callback) { if (typeof callback === 'function') this.once('timeout', callback); return this; }; ClientRequest.prototype.setNoDelay = ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
              ClientRequest.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var request = this, body = Buffer.concat(this._chunks); if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n'; var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false, transport = this._options._transport || net, connectOptions = Object.assign({}, this._options, { host: this._options.hostname, port: this._options.port }); function finishResponse() { if (!response || ended) return; ended = true; response.complete = true; response.readable = false; response.emit('end'); } function emitBody(value) { if (!value.length || ended) return; if (remaining !== null) { var count = Math.min(remaining, value.length); if (count) response.emit('data', response._encoding ? value.subarray(0, count).toString(response._encoding) : value.subarray(0, count)); remaining -= count; if (remaining === 0) finishResponse(); return; } response.emit('data', response._encoding ? value.toString(response._encoding) : value); } function consume() { if (!response) { var marker = pending.indexOf(Buffer.from('\r\n\r\n')); if (marker < 0) return; var parsed = parseResponse(pending.subarray(0, marker + 4), request.socket); response = parsed.response; pending = pending.subarray(marker + 4); var length = response.headers['content-length']; remaining = length === undefined ? null : Math.max(0, Number(length)); request.emit('response', response); if (request.method === 'HEAD' || [101, 204, 205, 304].indexOf(response.statusCode) >= 0 || remaining === 0) { finishResponse(); pending = Buffer.alloc(0); return; } } if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) { while (!ended) { if (chunkSize === null) { var line = pending.indexOf(Buffer.from('\r\n')); if (line < 0) return; chunkSize = parseInt(pending.subarray(0, line).toString().split(';')[0], 16); if (!Number.isFinite(chunkSize)) throw new Error('Parse Error: Invalid chunk size'); pending = pending.subarray(line + 2); if (chunkSize === 0) { finishResponse(); return; } } if (pending.length < chunkSize + 2) return; emitBody(pending.subarray(0, chunkSize)); pending = pending.subarray(chunkSize + 2); chunkSize = null; } } else { var available = pending; pending = Buffer.alloc(0); emitBody(available); } } var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions); this.emit('socket', socket); socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); }); socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); }); socket.on('data', function(data) { try { pending = Buffer.concat([pending, Buffer.from(data)]); consume(); } catch (error) { request.emit('error', error); socket.destroy(); } }); socket.on('end', function() { try { consume(); if (!response) throw new Error('Parse Error: Invalid HTTP response'); finishResponse(); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } }); return this; };
+             ClientRequest.prototype.end = function(chunk, encoding, callback) {
+               if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+               else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+               if (chunk !== undefined) this.write(chunk, encoding);
+               if (this.writableEnded) return this;
+               this.finished = this.writableEnded = true;
+               var request = this, body = Buffer.concat(this._chunks);
+               if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length));
+               if (!this.hasHeader('connection')) this.setHeader('Connection', 'close');
+               var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n';
+               var pending = Buffer.alloc(0), response = null, remaining = null, chunkSize = null, ended = false;
+               function finishResponse() { if (!response || ended) return; ended = true; response.complete = true; response.readable = false; response.emit('end'); }
+               function emitBody(value) {
+                 if (!value.length || ended) return;
+                 if (remaining !== null) {
+                   var count = Math.min(remaining, value.length);
+                   if (count) response.emit('data', response._encoding ? value.subarray(0, count).toString(response._encoding) : value.subarray(0, count));
+                   remaining -= count; if (remaining === 0) finishResponse(); return;
+                 }
+                 response.emit('data', response._encoding ? value.toString(response._encoding) : value);
+               }
+               function parseTrailers(block) {
+                 response.trailersDistinct = {};
+                 if (!block) return;
+                 block.split('\r\n').forEach(function(line) {
+                   var colon = line.indexOf(':'); if (colon < 0) return;
+                   var name = line.slice(0, colon), key = name.toLowerCase(), value = line.slice(colon + 1).trim();
+                   response.rawTrailers.push(name, value);
+                   (response.trailersDistinct[key] || (response.trailersDistinct[key] = [])).push(value);
+                   if (key === 'set-cookie') response.trailers[key] = response.trailersDistinct[key].slice();
+                   else response.trailers[key] = response.trailersDistinct[key].join(', ');
+                 });
+               }
+               function consume() {
+                 while (!response) {
+                   var marker = pending.indexOf(Buffer.from('\r\n\r\n')); if (marker < 0) return;
+                   var parsed = parseResponse(pending.subarray(0, marker + 4), request.socket), candidate = parsed.response;
+                   pending = pending.subarray(marker + 4);
+                   if (candidate.statusCode >= 100 && candidate.statusCode < 200 && candidate.statusCode !== 101) {
+                     var information = { statusCode: candidate.statusCode, statusMessage: candidate.statusMessage, httpVersion: candidate.httpVersion, httpVersionMajor: Number(candidate.httpVersion.split('.')[0]), httpVersionMinor: Number(candidate.httpVersion.split('.')[1]), headers: candidate.headers, rawHeaders: candidate.rawHeaders };
+                     request.emit('information', information); if (candidate.statusCode === 100) request.emit('continue');
+                     continue;
+                   }
+                   response = candidate; response.trailersDistinct = {};
+                   var length = response.headers['content-length']; remaining = length === undefined ? null : Math.max(0, Number(length));
+                   request.emit('response', response);
+                   if (request.method === 'HEAD' || [101, 204, 205, 304].indexOf(response.statusCode) >= 0 || remaining === 0) { finishResponse(); pending = Buffer.alloc(0); return; }
+                 }
+                 if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) {
+                   while (!ended) {
+                     if (chunkSize === 0) {
+                       if (pending.length >= 2 && pending[0] === 13 && pending[1] === 10) { pending = pending.subarray(2); parseTrailers(''); finishResponse(); return; }
+                       var trailerEnd = pending.indexOf(Buffer.from('\r\n\r\n')); if (trailerEnd < 0) return;
+                       parseTrailers(pending.subarray(0, trailerEnd).toString()); pending = pending.subarray(trailerEnd + 4); finishResponse(); return;
+                     }
+                     if (chunkSize === null) {
+                       var line = pending.indexOf(Buffer.from('\r\n')); if (line < 0) return;
+                       chunkSize = parseInt(pending.subarray(0, line).toString().split(';')[0], 16);
+                       if (!Number.isFinite(chunkSize)) throw new Error('Parse Error: Invalid chunk size');
+                       pending = pending.subarray(line + 2); if (chunkSize === 0) continue;
+                     }
+                     if (pending.length < chunkSize + 2) return;
+                     emitBody(pending.subarray(0, chunkSize)); pending = pending.subarray(chunkSize + 2); chunkSize = null;
+                   }
+                 } else { var available = pending; pending = Buffer.alloc(0); emitBody(available); }
+               }
+               var transport = this._options._transport || net, connectOptions = Object.assign({}, this._options, { host: this._options.hostname, port: this._options.port });
+               var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions);
+               this.emit('socket', socket);
+               socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); });
+               socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); });
+               socket.on('data', function(data) { try { pending = Buffer.concat([pending, Buffer.from(data)]); consume(); } catch (error) { request.emit('error', error); socket.destroy(); } });
+               socket.on('end', function() { try { consume(); if (!response) throw new Error('Parse Error: Invalid HTTP response'); finishResponse(); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } });
+               return this;
+             };
              var endWithoutAgent = ClientRequest.prototype.end; ClientRequest.prototype.end = function() { if (this.agent && typeof this.agent.createConnection === 'function') { var agent = this.agent; this._options._transport = { createConnection: function(options) { return agent.createConnection(options); } }; } return endWithoutAgent.apply(this, arguments); };
              function request(input, options, callback) { return new ClientRequest(input, options, callback); } function get(input, options, callback) { var result = request(input, options, callback); result.end(); return result; }
              function ServerResponse(request) { EventEmitter.call(this); this.req = request; this.socket = this.connection = request.socket; this.statusCode = 200; this.statusMessage = null; this.sendDate = true; this.headersSent = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; }
@@ -10226,6 +10301,49 @@ mod tests {
         assert_eq!(
             result,
             r#"[200,"OK","1.1","yes",["a=1","b=2"],10,"thaw-ok",true,true,false,true,"OK"]"#
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn http_client_emits_informational_responses_and_parses_trailers() {
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\nHTTP/1.1 100 Continue\r\nX-Interim: yes\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Check, Set-Cookie\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\nX-Check: one\r\nX-Check: two\r\nSet-Cookie: t=1\r\n\r\n")
+                .unwrap();
+        });
+
+        let dir = temp_registry("builtin_http_information_trailers");
+        fs::write(
+            dir.join("index.js"),
+            "var http = require('node:http'); module.exports = async function (port) { return new Promise(function(resolve, reject) { var information = [], continued = 0, request = http.get({ hostname: '127.0.0.1', port: port, path: '/' }, function(response) { var chunks = []; response.on('data', function(chunk) { chunks.push(chunk); }); response.on('end', function() { resolve([information, continued, Buffer.concat(chunks).toString(), response.trailers['x-check'], response.trailers['set-cookie'], response.trailersDistinct['x-check'], response.rawTrailers.length, response.complete]); }); }); request.on('information', function(info) { information.push([info.statusCode, info.statusMessage, info.headers.link || info.headers['x-interim'], info.httpVersionMajor, info.httpVersionMinor]); }); request.on('continue', function() { continued++; }); request.on('error', reject); }); };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_http_information_trailers_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpInformation = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseHttpInformation").unwrap();
+        let arguments = CString::new(format!("[{port}]")).unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[[103,"Early Hints","</style.css>; rel=preload",1,1],[100,"Continue","yes",1,1]],1,"hello","one, two",["t=1"],["one","two"],6,true]"#
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(&dir);

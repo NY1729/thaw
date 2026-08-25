@@ -733,7 +733,7 @@ The workspace crates have narrow responsibilities:
   is exhausted, resume after a read, and reject with the same reason when the
   readable side is cancelled
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
-  native gzip, deflate and raw-deflate implementation. Stateful native handles
+  native gzip, deflate, raw-deflate and Brotli implementation. Stateful native handles
   flush output after each input chunk, allow decompression results before close,
   finalize trailers exactly once and release unfinished state on cancellation
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots
@@ -757,7 +757,10 @@ The workspace crates have narrow responsibilities:
 - QuickJS/npm bundles receive Node-shaped `http.request()` and `http.get()`
   clients over the native TCP transport, including `ClientRequest` lifecycle
   events, request headers and bodies, `IncomingMessage` status/header fields,
-  duplicate `set-cookie` preservation and chunked response decoding. Builtin
+  duplicate `set-cookie` preservation and chunked response decoding. Interim
+  100/103 responses emit Node-shaped `continue`/`information` events without
+  consuming the final response; chunked trailers populate `trailers`,
+  `trailersDistinct` and `rawTrailers` before `end`. Builtin
   CommonJS dependencies are collected recursively rather than through
   per-module special cases. `http.createServer()` parses real HTTP/1.1 requests
   into streamed `IncomingMessage` values and emits `ServerResponse` status,
