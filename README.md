@@ -445,6 +445,8 @@ The workspace crates have narrow responsibilities:
   Promise and FileHandle `statfs`, including BigInt-valued results
 - Hard links, symbolic links, link-target reads and Unix permission changes
   are exposed through synchronous, callback and Promise APIs
+- `lstat` and `Dirent.isSymbolicLink()` inspect links themselves while `stat`
+  follows targets, preserving host type bits, ownership and link size
 - Stats timestamps come from host metadata, and `utimes` updates access and
   modification times through sync, callback, Promise and FileHandle APIs
 - Unix ownership metadata and `chown`/`lchown` operations are host-backed
