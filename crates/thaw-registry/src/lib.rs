@@ -4006,7 +4006,13 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
-         globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n",
+         globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n\
+         globalThis.__thaw_worker_bundle_source =\n\
+         \x20\x20'var __thaw_bundle_cache = {};\\nvar __thaw_bundle_factories = {' +\n\
+         \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
+         \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
+         \x20\x20__thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' +\n\
+         \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\n';\n",
     );
 
     out.push_str(&format!(
@@ -5125,6 +5131,41 @@ mod tests {
         let _ = fs::remove_dir_all(&dir_a);
         let _ = fs::remove_dir_all(&dir_b);
         let _ = fs::remove_dir_all(&node_modules_dir);
+    }
+
+    #[test]
+    fn bundle_exports_self_contained_worker_runtime_source() {
+        use std::ffi::CString;
+
+        let node_modules_dir = temp_registry("worker_runtime_source_node_modules");
+        let dir = temp_registry("worker_runtime_source");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = function () { return require('./value')(); };",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("value.js"),
+            "module.exports = function () { return 42; };",
+        )
+        .unwrap();
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&node_modules_dir, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let source = CString::new(format!(
+            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle}"
+        ))
+        .unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+
+        let result = thaw_quickjs::eval_json(
+            "Function('require', __thaw_worker_bundle_source + \"return __thaw_bundle_create_require('pkg/index.js')('./value')();\")(function(name) { throw new Error(name); })",
+        )
+        .unwrap();
+        assert_eq!(result.as_deref(), Some("42"));
+
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_dir_all(node_modules_dir);
     }
 
     /// The exact shape found in `qs`'s real dependency chain:
