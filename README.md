@@ -491,6 +491,9 @@ The workspace crates have narrow responsibilities:
   numeric POSIX signals.
   `exec()` and `execFile()` collect those streams for Node-style
   success, nonzero-exit, ENOENT and max-buffer callbacks
+- `child_process.fork()` launches a Node child module with a bidirectional
+  JSON IPC channel. Parent and child `send()`, `message`, callback delivery,
+  `connected`, `disconnect` and closed-channel errors follow the Node shape
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
