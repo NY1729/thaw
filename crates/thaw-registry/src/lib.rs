@@ -244,7 +244,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare const isMainThread: boolean;\nexport declare const threadId: number;\nexport declare const workerData: any;\nexport declare const parentPort: any;\nexport declare const MessageChannel: any;\nexport declare const MessagePort: any;\nexport declare function receiveMessageOnPort(argsArray: any): any;\nexport declare function setEnvironmentData(argsArray: any): void;\nexport declare function getEnvironmentData(argsArray: any): any;\n"
         }
         "os" => {
-            "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
+            "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare function homedir(argsArray: any): any;\nexport declare function hostname(argsArray: any): any;\nexport declare function cpus(argsArray: any): any;\nexport declare function totalmem(argsArray: any): any;\nexport declare function freemem(argsArray: any): any;\nexport declare function uptime(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
         "url" => {
             "export declare const URL: any;\nexport declare const URLSearchParams: any;\nexport declare function pathToFileURL(argsArray: any): any;\nexport declare function fileURLToPath(argsArray: any): any;\nexport declare function urlToHttpOptions(argsArray: any): any;\n"
@@ -2926,7 +2926,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         // Same real dependency chain as `path` above (`node-gyp-build.js`
         // reads `os.arch()`/`os.platform()` to build its target string).
         "os" => Some(
-            "var __thaw_os = { arch: function() { return 'x64'; }, platform: function() { return 'linux'; }, type: function() { return 'Linux'; }, tmpdir: function() { return '/tmp'; }, EOL: '\\n' };\n\
+            "var info = JSON.parse(__thaw_os_info()); var __thaw_os = { arch: function() { return info.arch; }, platform: function() { return info.platform; }, type: function() { return info.type; }, tmpdir: function() { return info.tmpdir; }, homedir: function() { return info.homedir; }, hostname: function() { return info.hostname; }, release: function() { return info.release; }, version: function() { return info.version; }, machine: function() { return info.machine; }, endianness: function() { return info.endianness; }, cpus: function() { return structuredClone(info.cpus); }, totalmem: function() { return info.totalmem; }, freemem: function() { return info.freemem; }, uptime: function() { return info.uptime; }, loadavg: function() { return info.loadavg.slice(); }, userInfo: function() { return structuredClone(info.userInfo); }, networkInterfaces: function() { return { lo: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', mac: '00:00:00:00:00:00', internal: true, cidr: '127.0.0.1/8' }, { address: '::1', netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', family: 'IPv6', mac: '00:00:00:00:00:00', internal: true, cidr: '::1/128', scopeid: 0 }] }; }, getPriority: function() { return 0; }, setPriority: function() {}, EOL: info.platform === 'win32' ? '\\r\\n' : '\\n', devNull: info.platform === 'win32' ? '\\\\\\\\.\\\\nul' : '/dev/null', constants: { signals: { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15 }, errno: { EACCES: 13, EADDRINUSE: 98, ECONNREFUSED: 111, EEXIST: 17, EINVAL: 22, ENOENT: 2, ENOMEM: 12, ENOTDIR: 20, ETIMEDOUT: 110 } } };\n\
              module.exports = __thaw_os;\n\
              module.exports.default = __thaw_os;\n\
              module.exports.__esModule = true;\n",
@@ -6013,6 +6013,27 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
         let _ = fs::remove_dir_all(&certificate_dir);
+    }
+
+    #[test]
+    fn os_builtin_reports_real_host_shapes() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_os_info");
+        fs::write(dir.join("index.js"), "var os = require('node:os'); module.exports = function () { var cpus = os.cpus(); var interfaces = os.networkInterfaces(); var user = os.userInfo(); return [typeof os.arch() === 'string' && os.arch().length > 0, typeof os.platform() === 'string' && os.platform().length > 0, typeof os.hostname() === 'string' && os.hostname().length > 0, typeof os.homedir() === 'string', typeof os.tmpdir() === 'string', cpus.length > 0, typeof cpus[0].model === 'string', typeof cpus[0].speed === 'number', os.totalmem() >= os.freemem(), os.totalmem() > 0, os.uptime() >= 0, os.loadavg().length === 3, interfaces.lo.length === 2, interfaces.lo[0].internal, typeof user.username === 'string', os.endianness() === 'LE' || os.endianness() === 'BE', os.devNull === '/dev/null', os.constants.signals.SIGTERM === 15, os.constants.errno.ENOENT === 2, os.EOL === '\\n']; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_os_info_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseOsInfo = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseOsInfo").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, format!("[{}]", vec!["true"; 20].join(",")));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
     }
 
     /// The exact real-world pattern that motivated `path`/`os`/`fs`: a real
