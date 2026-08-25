@@ -310,7 +310,9 @@ The workspace crates have narrow responsibilities:
   forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
   `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM
   removal, fatal decoding errors and stateful streaming decode across split
-  code points. `TextDecoderStream` emits complete text incrementally and
+  code points. Lone UTF-16 surrogates encode as the Unicode replacement
+  character, while `TextEncoderStream` retains a trailing high surrogate for
+  the next chunk. `TextDecoderStream` emits complete text incrementally and
   propagates fatal flush errors to both sides of its transform
 - `node:timers` shares those global timer functions, while
   `node:timers/promises` provides abortable timeout/immediate Promises,
