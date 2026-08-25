@@ -363,7 +363,9 @@ The workspace crates have narrow responsibilities:
   options connect parent Writable/Readable streams to the child `process`
   streams, including redirected console output; `postMessageToThread()` routes
   structured-cloned values by thread ID to isolated `process` `workerMessage`
-  listeners with Node-style failure codes
+  listeners with Node-style failure codes; Worker diagnostics expose running-
+  state CPU usage, heap statistics, readable heap snapshots and stoppable CPU
+  profile shapes
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
