@@ -126,7 +126,8 @@ The workspace crates have narrow responsibilities:
   objects; function types may be parenthesized where TypeScript grammar
   requires it (including `FunctionType | undefined`)
 - `interface`, interface inheritance (including substituted generic bases such
-  as `Child<T> extends Base<T>`) and generic interface instantiation;
+  as `Child<T> extends Base<T>` and concrete bases such as
+  `NumberBox extends Box<number>`) and generic interface instantiation;
   generic interfaces accept trailing type-parameter defaults (including
   defaults that reference earlier parameters) and validate concrete
   primitive/union or structural-object constraints

@@ -14068,6 +14068,33 @@ mod tests {
     }
 
     #[test]
+    fn compiles_concrete_interface_extending_generic_base() {
+        let source = r#"
+            interface NumberEntry extends Entry<number> { enabled: boolean }
+            interface Holder { entry: Entry<number> }
+            interface Root { name: string }
+            interface Entry<T> extends Root { value: T }
+            interface DefaultEntry extends Entry<string> { count: number }
+            function main(): void {
+                const number: NumberEntry = { name: "number", value: 12, enabled: true };
+                console.log(number.name);
+                console.log(number.value);
+                console.log(number.enabled);
+                const text: DefaultEntry = { name: "text", value: "ready", count: 3 };
+                console.log(text.value);
+                console.log(text.count);
+                const holder: Holder = { entry: { name: "nested", value: 21 } };
+                console.log(holder.entry.name);
+                console.log(holder.entry.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "concrete_generic_base"),
+            "number\n12\ntrue\nready\n3\nnested\n21\n"
+        );
+    }
+
+    #[test]
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }
