@@ -406,8 +406,9 @@ The workspace crates have narrow responsibilities:
   supported, and a listening server continues accepting clients while tracking
   active connections; `ALPNProtocols` performs real negotiation and exposes the
   selected `alpnProtocol`; `getPeerCertificate()`/`getCertificate()` expose the
-  real DER `raw` certificate and SHA-256 fingerprint; unrestricted certificate
-  bypass remains a later step
+  real DER `raw` certificate, SHA-256 fingerprint, common-name subject/issuer,
+  validity range and serial number; unrestricted certificate bypass remains a
+  later step
 - `node:os` reads host CPU, memory, uptime, load, hostname, release, home/tmp and
   user information while exposing Node-shaped loopback interfaces and constants
 - `node:http` exposes native `serveOnce(port, body)` and
