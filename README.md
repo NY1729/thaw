@@ -296,6 +296,8 @@ The workspace crates have narrow responsibilities:
   removal, and fatal decoding errors
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
+- QuickJS bundles expose `performance.timeOrigin` and elapsed-millisecond
+  `performance.now()` values scoped to the shared JavaScript context
 - The ambient `process` global and importable `node:process`/`process` module
   share a microtask-backed `nextTick` that is asynchronous and forwards
   callback arguments
