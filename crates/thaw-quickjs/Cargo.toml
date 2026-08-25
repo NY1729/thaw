@@ -11,6 +11,7 @@ base64 = "0.22"
 brotli = "8"
 flate2 = "1"
 getrandom = "0.2"
+httlib-huffman = "0.3.4"
 libc = "0.2"
 rquickjs = "0.12.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
