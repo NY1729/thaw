@@ -487,7 +487,8 @@ The workspace crates have narrow responsibilities:
   events; writable stdin, readable output streams, kill/ref/unref and process
   metadata are exposed. Pipe, ignore and inherit stdio modes, timeout
   termination, AbortSignal cancellation and detached process metadata are
-  supported. `exec()` and `execFile()` collect those streams for Node-style
+  supported, and `kill(signal)` forwards named or numeric POSIX signals.
+  `exec()` and `execFile()` collect those streams for Node-style
   success, nonzero-exit, ENOENT and max-buffer callbacks
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
