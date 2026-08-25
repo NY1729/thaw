@@ -396,6 +396,9 @@ The workspace crates have narrow responsibilities:
   after EOF with `ERR_STREAM_PUSH_AFTER_EOF`;
   sized `read(n)` waits for `n` buffered bytes/characters until EOF,
   `read(0)` does not consume data, and object-mode reads return one item;
+  `unshift()` accepts binary views, validates invalid chunks, permits prepend
+  after EOF is queued but rejects it after the `end` event, while explicit
+  `resume()` drains data even without a data listener;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
