@@ -5546,15 +5546,24 @@ impl<'a> FnLowerer<'a> {
             Expr::Cond(conditional) => {
                 let test = self.lower_expr(&conditional.test)?;
                 self.expect_type(&HirType::Bool, &test, "conditional expression test")?;
-                let consequent = self.lower_expr(&conditional.cons)?;
-                let alternate = self.lower_expr(&conditional.alt)?;
+                let mut consequent = self.lower_expr(&conditional.cons)?;
+                let mut alternate = self.lower_expr(&conditional.alt)?;
                 let consequent_type = self.infer_expr_type(&consequent)?;
                 let alternate_type = self.infer_expr_type(&alternate)?;
-                if consequent_type != alternate_type {
+                let result_type = if consequent_type == alternate_type {
+                    consequent_type
+                } else if !matches!(consequent_type, HirType::Union(_))
+                    && !matches!(alternate_type, HirType::Union(_))
+                {
+                    let union = HirType::Union(vec![consequent_type, alternate_type]);
+                    consequent = self.coerce_to_declared(&union, consequent)?;
+                    alternate = self.coerce_to_declared(&union, alternate)?;
+                    union
+                } else {
                     return Err(format!(
                         "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"
                     ));
-                }
+                };
                 let body = HirExpr::Block(vec![HirStmt::If(
                     test,
                     vec![HirStmt::Return(Some(consequent))],
@@ -5575,7 +5584,7 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Lambda(
                         captures,
                         Vec::new(),
-                        consequent_type,
+                        result_type,
                         Box::new(body),
                     )),
                     Vec::new(),

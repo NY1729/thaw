@@ -144,7 +144,9 @@ The workspace crates have narrow responsibilities:
   strict equality/inequality against concrete members short-circuits on the
   tag and applies the member's native comparison semantics. Equality between
   two values of the same union compares tags first and dispatches to the
-  matching member semantics, including NaN and string-content behavior
+  matching member semantics, including NaN and string-content behavior.
+  Conditional expressions with two different native branch types construct a
+  tagged union directly and can feed annotations, returns, and nested calls
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
