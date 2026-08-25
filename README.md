@@ -372,6 +372,8 @@ The workspace crates have narrow responsibilities:
   callback arguments
 - `node:fs` exposes native synchronous UTF-8 `existsSync`, `readFileSync`,
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
+- Sandboxed QuickJS bundles resolve both `node:fs/promises` and `fs.promises`,
+  returning Node-shaped `ENOENT`/`EROFS` rejections instead of leaking host files
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
