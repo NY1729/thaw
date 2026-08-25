@@ -380,7 +380,9 @@ The workspace crates have narrow responsibilities:
   named generic function; parameter/return shapes and constraints are checked
   modulo type-parameter names before call-site specialization. Generic defaults
   are checked the same way so omitted call-site types retain the annotated
-  contract. The equivalent
+  contract. Assignments to these polymorphic annotations require an explicit
+  implementation return type instead of guessing a generic return pattern.
+  The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Pure callable interfaces with one generic call signature, such as

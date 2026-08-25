@@ -13483,6 +13483,11 @@ impl<'a> FnLowerer<'a> {
         actual: &FnSignature,
         alias_name: &str,
     ) -> Result<(), String> {
+        if actual.generic_return_type.is_none() {
+            return Err(format!(
+                "generic callable assigned to function type alias `{alias_name}` needs an explicit return type"
+            ));
+        }
         if expected.generic_type_params.len() != actual.generic_type_params.len()
             || expected.generic_param_patterns.len() != actual.generic_param_patterns.len()
         {
@@ -13531,7 +13536,7 @@ impl<'a> FnLowerer<'a> {
             actual
                 .generic_return_type
                 .as_ref()
-                .expect("generic arrow return type"),
+                .expect("generic callable return type was validated"),
             &actual_substitution,
             self.interfaces,
             self.generic_interfaces,
@@ -14256,6 +14261,10 @@ mod tests {
             (
                 "type Factory = <T = string>() => T; function main(): void { const invalid: Factory = <T = number>(): T => 1; }",
                 "defaults do not match function type alias `Factory`",
+            ),
+            (
+                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => value; }",
+                "needs an explicit return type",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
