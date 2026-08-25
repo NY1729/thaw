@@ -869,6 +869,9 @@ fn classify_ts_type(
             if ref_name == "Json" && ty_ref.type_params.is_none() {
                 return DtsType::Native(HirType::Json);
             }
+            if ref_name == "JsValue" && ty_ref.type_params.is_none() {
+                return DtsType::Native(HirType::JsValue);
+            }
             if ref_name == "Array" {
                 let Some(element) = ty_ref
                     .type_params
@@ -1153,14 +1156,17 @@ pub fn classify(func: &DtsFunction) -> Classification {
 
     let variadic = match &func.rest_param {
         None => None,
-        Some((_, DtsType::Native(ty @ (HirType::F64 | HirType::Bool | HirType::Str)))) => {
-            Some(ty.clone())
-        }
+        Some((
+            _,
+            DtsType::Native(
+                ty @ (HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue),
+            ),
+        )) => Some(ty.clone()),
         Some((name, DtsType::Native(other))) => {
             return Classification::Fallback {
                 function: func.name.clone(),
                 reason: format!(
-                    "rest parameter `{name}`: native variadic ABI supports only number[], boolean[], or string[], found {other:?}[]"
+                    "rest parameter `{name}`: native variadic ABI supports only number[], boolean[], string[], or JsValue[], found {other:?}[]"
                 ),
             }
         }
@@ -1807,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn boolean_and_string_rest_signatures_classify_as_variadic_fast_paths() {
+    fn boolean_string_and_handle_rest_signatures_classify_as_variadic_fast_paths() {
         for (source, expected) in [
             (
                 "export declare function all(...values: boolean[]): boolean;",
@@ -1816,6 +1822,10 @@ mod tests {
             (
                 "export declare function join(...values: string[]): string;",
                 HirType::Str,
+            ),
+            (
+                "export declare function handles(...values: JsValue[]): number;",
+                HirType::JsValue,
             ),
         ] {
             let funcs = parse_dts(source).unwrap();
@@ -1837,7 +1847,7 @@ mod tests {
             matches!(
                 classification,
                 Classification::Fallback { ref reason, .. }
-                    if reason.contains("supports only number[], boolean[], or string[]")
+                    if reason.contains("supports only number[], boolean[], string[], or JsValue[]")
             ),
             "{classification:?}"
         );
