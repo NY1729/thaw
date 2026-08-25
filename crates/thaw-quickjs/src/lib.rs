@@ -755,7 +755,7 @@ fn tls_alpn(handle: u32) -> String {
     })
 }
 
-fn tls_certificate(handle: u32, peer: bool) -> String {
+fn tls_certificate_bytes(handle: u32, peer: bool) -> Option<Vec<u8>> {
     let read = |certificates: &HashMap<u32, TlsCertificates>| {
         certificates
             .get(&handle)
@@ -766,13 +766,42 @@ fn tls_certificate(handle: u32, peer: bool) -> String {
                     pair.local.as_deref()
                 }
             })
-            .map(hex_encode)
+            .map(ToOwned::to_owned)
     };
     let client = TLS_CLIENT_CERTIFICATES.with(|certificates| read(&certificates.borrow()));
-    client.unwrap_or_else(|| {
-        TLS_SERVER_CERTIFICATES
-            .with(|certificates| read(&certificates.borrow()).unwrap_or_default())
+    client.or_else(|| TLS_SERVER_CERTIFICATES.with(|certificates| read(&certificates.borrow())))
+}
+
+fn tls_certificate(handle: u32, peer: bool) -> String {
+    tls_certificate_bytes(handle, peer)
+        .as_deref()
+        .map(hex_encode)
+        .unwrap_or_default()
+}
+
+fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
+    let Some(bytes) = tls_certificate_bytes(handle, peer) else {
+        return "{}".to_string();
+    };
+    let Ok((_, certificate)) = x509_parser::parse_x509_certificate(&bytes) else {
+        return "{}".to_string();
+    };
+    let common_name = |name: &x509_parser::x509::X509Name<'_>| {
+        name.iter_common_name()
+            .next()
+            .and_then(|attribute| attribute.as_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let validity = certificate.validity();
+    serde_json::json!({
+        "subject": { "CN": common_name(certificate.subject()) },
+        "issuer": { "CN": common_name(certificate.issuer()) },
+        "valid_from": validity.not_before.to_rfc2822().unwrap_or_else(|_| validity.not_before.to_string()),
+        "valid_to": validity.not_after.to_rfc2822().unwrap_or_else(|_| validity.not_after.to_string()),
+        "serialNumber": certificate.raw_serial_as_string().replace(':', "").to_uppercase(),
     })
+    .to_string()
 }
 
 fn to_str(ptr: *const c_char) -> String {
@@ -1085,6 +1114,16 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_local_certificate_function =
                     Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, false))
                         .expect("failed to create JavaScript TLS local certificate reader");
+                let tls_peer_certificate_metadata_function =
+                    Function::new(ctx.clone(), |handle: u32| {
+                        tls_certificate_metadata(handle, true)
+                    })
+                    .expect("failed to create JavaScript TLS peer certificate metadata reader");
+                let tls_local_certificate_metadata_function =
+                    Function::new(ctx.clone(), |handle: u32| {
+                        tls_certificate_metadata(handle, false)
+                    })
+                    .expect("failed to create JavaScript TLS local certificate metadata reader");
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
@@ -1242,6 +1281,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         tls_local_certificate_function,
                     )
                     .expect("failed to install JavaScript TLS local certificate reader");
+                ctx.globals()
+                    .set(
+                        "__thaw_tls_peer_certificate_metadata",
+                        tls_peer_certificate_metadata_function,
+                    )
+                    .expect("failed to install JavaScript TLS peer certificate metadata reader");
+                ctx.globals()
+                    .set(
+                        "__thaw_tls_local_certificate_metadata",
+                        tls_local_certificate_metadata_function,
+                    )
+                    .expect("failed to install JavaScript TLS local certificate metadata reader");
                 ctx.globals()
                     .set("__thaw_tls_server_listen", tls_server_listen_function)
                     .expect("failed to install JavaScript TLS listener");
