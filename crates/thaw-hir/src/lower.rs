@@ -1450,9 +1450,6 @@ fn function_expression_as_arrow(
     expression: &swc_ecma_ast::FnExpr,
 ) -> Result<swc_ecma_ast::ArrowExpr, String> {
     let function = expression.function.as_ref();
-    if expression.ident.is_some() {
-        return Err("named function expressions are not supported yet".into());
-    }
     if function.this_param.is_some()
         || !function.decorators.is_empty()
         || function

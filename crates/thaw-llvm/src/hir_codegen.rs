@@ -14242,6 +14242,7 @@ mod tests {
                 const parenthesized: (ParenthesizedForward) = literal;
                 const expression: Identity = function<T>(value: T): T { return value; };
                 const inferredExpression = function<T>(value: T): T { return value; };
+                const namedExpression: Identity = function localIdentity<T>(value: T): T { return value; };
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14260,11 +14261,12 @@ mod tests {
                 console.log(expression<string>("function-expression"));
                 console.log(inferredExpression(32));
                 console.log([33, 34].map(function<T>(value: T): T { return value; })[1]);
+                console.log(namedExpression<string>("named-expression"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\n"
         );
     }
 
