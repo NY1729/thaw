@@ -383,7 +383,9 @@ The workspace crates have narrow responsibilities:
 - `node:dns` and `node:dns/promises` resolve localhost and IP literals without
   network access, including family/all modes, reverse lookup and `ENOTFOUND`
 - `node:net` provides IPv4/IPv6 detection, validated `SocketAddress` values and
-  address/range/subnet `BlockList` checks; socket transports remain a later step
+  address/range/subnet `BlockList` checks. `Socket`/`createConnection` perform
+  real TCP writes and return peer data after `end()` half-closes the connection;
+  fully streaming reads and listening servers remain later transport steps
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
