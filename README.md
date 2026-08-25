@@ -309,7 +309,9 @@ The workspace crates have narrow responsibilities:
   timer queue after pending microtasks, preserve timer registration order, and
   forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
   `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM
-  removal, and fatal decoding errors
+  removal, fatal decoding errors and stateful streaming decode across split
+  code points. `TextDecoderStream` emits complete text incrementally and
+  propagates fatal flush errors to both sides of its transform
 - `node:timers` shares those global timer functions, while
   `node:timers/promises` provides abortable timeout/immediate Promises,
   scheduler wait/yield helpers and an async interval iterator

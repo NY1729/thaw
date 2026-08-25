@@ -4021,7 +4021,7 @@ const PLATFORM_GLOBALS: &str = r#"
       terminate() { this._readableController.close(); if (this._writable) { const error = webInvalidState('TransformStream has been terminated'); this._writable._errorStream(error); } }
     }
     globalThis.TransformStream = class TransformStream {
-      constructor(transformer = {}) { let readableController, writable; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); } }); const controller = new TransformStreamDefaultController(readableController); writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk); }, close() { return Promise.resolve(typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()); }, abort(error) { readableController.error(error); } }); controller._writable = writable; }
+      constructor(transformer = {}) { let readableController, writable; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); } }); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return Promise.resolve().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { readableController.error(error); } }); controller._writable = writable; }
     };
     globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
     const hexFromBytes = value => Array.from(value, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -4045,7 +4045,7 @@ const PLATFORM_GLOBALS: &str = r#"
     globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size(chunk) { return chunk.byteLength; } };
     globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size() { return 1; } };
     globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); const transform = new TransformStream({ transform(chunk, controller) { controller.enqueue(encoder.encode(String(chunk))); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
-    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const chunks = []; const transform = new TransformStream({ transform(chunk) { chunks.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); }, flush(controller) { const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0); const value = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { value.set(chunk, offset); offset += chunk.byteLength; } const text = decoder.decode(value); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
+    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const text = decoder.decode(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
   }
   if (typeof globalThis.MessageChannel !== 'function') {
     class MessagePort extends EventTarget {
@@ -4330,12 +4330,15 @@ const PLATFORM_GLOBALS: &str = r#"
       this.fatal = Boolean(options.fatal);
       this.ignoreBOM = Boolean(options.ignoreBOM);
       this.encoding = 'utf-8';
+      this._pending = new Uint8Array();
+      this._bomSeen = false;
     }
     decode(input = new Uint8Array(), options = {}) {
-      if (options.stream) throw new TypeError('streaming TextDecoder is not supported');
-      const bytes = input instanceof ArrayBuffer
+      const chunk = input instanceof ArrayBuffer
         ? new Uint8Array(input)
         : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      const streaming = Boolean(options.stream), bytes = new Uint8Array(this._pending.byteLength + chunk.byteLength);
+      bytes.set(this._pending); bytes.set(chunk, this._pending.byteLength); this._pending = new Uint8Array();
       let output = '';
       let index = 0;
       const invalid = () => {
@@ -4350,19 +4353,28 @@ const PLATFORM_GLOBALS: &str = r#"
         else if (first >= 0xe0 && first <= 0xef) { length = 2; code = first & 0x0f; minimum = 0x800; }
         else if (first >= 0xf0 && first <= 0xf4) { length = 3; code = first & 7; minimum = 0x10000; }
         else { invalid(); continue; }
-        if (index + length > bytes.length) { invalid(); break; }
-        let valid = true;
-        for (let offset = 0; offset < length; offset++) {
+        let valid = true, consumed = 0;
+        for (let offset = 0; offset < length && index + offset < bytes.length; offset++) {
           const continuation = bytes[index + offset];
           if ((continuation & 0xc0) !== 0x80) { valid = false; break; }
           code = code << 6 | continuation & 0x3f;
+          consumed++;
+        }
+        if (index + length > bytes.length) {
+          if (!valid) { index += consumed; invalid(); continue; }
+          if (streaming) { this._pending = bytes.slice(index - 1); break; }
+          invalid(); break;
         }
         if (!valid || code < minimum || code > 0x10ffff ||
-            (code >= 0xd800 && code <= 0xdfff)) { invalid(); continue; }
+            (code >= 0xd800 && code <= 0xdfff)) { index += consumed; invalid(); continue; }
         index += length;
         output += String.fromCodePoint(code);
       }
-      if (!this.ignoreBOM && output.charCodeAt(0) === 0xfeff) output = output.slice(1);
+      if (!this._bomSeen && output.length) {
+        this._bomSeen = true;
+        if (!this.ignoreBOM && output.charCodeAt(0) === 0xfeff) output = output.slice(1);
+      }
+      if (!streaming) { this._pending = new Uint8Array(); this._bomSeen = false; }
       return output;
     }
   };
@@ -5770,6 +5782,38 @@ mod tests {
             r#"{"result":{"read":3,"written":5},"bytes":[65,240,159,152,128]}"#
         );
         assert_eq!(call("decodeInvalid", "[]"), r#""a�b""#);
+    }
+
+    #[test]
+    fn text_decoder_streaming_retains_incomplete_utf8() {
+        assert_eq!(
+            load(
+                "function decodeStreaming() {\n\
+                   const decoder = new TextDecoder();\n\
+                   const first = decoder.decode(Uint8Array.from([0xf0, 0x9f]), { stream: true });\n\
+                   const second = decoder.decode(Uint8Array.from([0x98, 0x80, 0x41]), { stream: true });\n\
+                   const last = decoder.decode();\n\
+                   const invalid = new TextDecoder();\n\
+                   const invalidFirst = invalid.decode(Uint8Array.from([0xe2, 0x82]), { stream: true });\n\
+                   const invalidSecond = invalid.decode(Uint8Array.from([0x41]), { stream: true });\n\
+                   const incomplete = new TextDecoder();\n\
+                   incomplete.decode(Uint8Array.from([0xe2]), { stream: true });\n\
+                   const flushed = incomplete.decode();\n\
+                   let fatal = false; const strict = new TextDecoder('utf-8', { fatal: true });\n\
+                   strict.decode(Uint8Array.from([0xf0]), { stream: true });\n\
+                   try { strict.decode(); } catch (error) { fatal = error instanceof TypeError; }\n\
+                   const bom = new TextDecoder();\n\
+                   const bomFirst = bom.decode(Uint8Array.from([0xef, 0xbb]), { stream: true });\n\
+                   const bomSecond = bom.decode(Uint8Array.from([0xbf, 0x42]), { stream: true });\n\
+                   return [first, second, last, invalidFirst, invalidSecond, flushed, fatal, bomFirst, bomSecond];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("decodeStreaming", "[]"),
+            r#"["","😀A","","","�A","�",true,"","B"]"#
+        );
     }
 
     #[test]

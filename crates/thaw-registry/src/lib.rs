@@ -6255,7 +6255,7 @@ mod tests {
         let dir = temp_registry("builtin_web_pipe_through");
         fs::write(
             dir.join("index.js"),
-            "module.exports = async function () { function code(action) { try { action(); } catch (error) { return error.code; } } var lockedSource = new ReadableStream(), lockedReader = lockedSource.getReader(), sourceLockCode = code(function() { lockedSource.pipeThrough(new TransformStream()); }); lockedReader.releaseLock(); var lockedTransform = new TransformStream(), lockedWriter = lockedTransform.writable.getWriter(), destinationLockCode = code(function() { new ReadableStream().pipeThrough(lockedTransform); }); lockedWriter.releaseLock(); var source = new ReadableStream({ start: function(controller) { controller.enqueue('a'); controller.enqueue('b'); controller.close(); } }), upper = new TransformStream({ transform: function(value, controller) { controller.enqueue(value.toUpperCase()); } }), output = source.pipeThrough(upper), values = []; for await (var value of output) values.push(value); var failure = new Error('transform'), cancelledWith, failingSource = new ReadableStream({ start: function(controller) { controller.enqueue('x'); }, cancel: function(error) { cancelledWith = error; } }), failingTransform = new TransformStream({ transform: function() { throw failure; } }), failedOutput = failingSource.pipeThrough(failingTransform), failedReader = failedOutput.getReader(), received; try { await failedReader.read(); } catch (error) { received = error; } return [sourceLockCode, destinationLockCode, values, !source.locked, !upper.writable.locked, received === failure, cancelledWith === failure, !failingSource.locked]; };",
+            "module.exports = async function () { function code(action) { try { action(); } catch (error) { return error.code; } } var lockedSource = new ReadableStream(), lockedReader = lockedSource.getReader(), sourceLockCode = code(function() { lockedSource.pipeThrough(new TransformStream()); }); lockedReader.releaseLock(); var lockedTransform = new TransformStream(), lockedWriter = lockedTransform.writable.getWriter(), destinationLockCode = code(function() { new ReadableStream().pipeThrough(lockedTransform); }); lockedWriter.releaseLock(); var source = new ReadableStream({ start: function(controller) { controller.enqueue('a'); controller.enqueue('b'); controller.close(); } }), upper = new TransformStream({ transform: function(value, controller) { controller.enqueue(value.toUpperCase()); } }), output = source.pipeThrough(upper), values = []; for await (var value of output) values.push(value); var failure = new Error('transform'), cancelledWith, failingSource = new ReadableStream({ start: function(controller) { controller.enqueue('x'); }, cancel: function(error) { cancelledWith = error; } }), failingTransform = new TransformStream({ transform: function() { throw failure; } }), failedOutput = failingSource.pipeThrough(failingTransform), failedReader = failedOutput.getReader(), received; try { await failedReader.read(); } catch (error) { received = error; } await new Promise(function(resolve) { setTimeout(resolve, 0); }); return [sourceLockCode, destinationLockCode, values, !source.locked, !upper.writable.locked, received === failure, cancelledWith === failure, !failingSource.locked]; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("builtin_web_pipe_through_modules");
@@ -10517,6 +10517,37 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,"ONETWO",["value","closed"],"hé",{"value":7,"done":false},true,false,8,4,3,1]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_text_decoder_streaming");
+        fs::write(
+            dir.join("index.js"),
+            "var web = require('node:stream/web'); module.exports = async function () { var decoder = new web.TextDecoderStream(), writer = decoder.writable.getWriter(), reader = decoder.readable.getReader(), settled = false, pending = reader.read().then(function(result) { settled = true; return result; }); await writer.write(Uint8Array.from([0xf0, 0x9f])); await Promise.resolve(); await Promise.resolve(); var incompletePending = !settled; await writer.write(Uint8Array.from([0x98, 0x80, 0x41])); var decoded = await pending; await writer.close(); var done = await reader.read(), fatal = new TextDecoderStream('utf-8', { fatal: true }), fatalWriter = fatal.writable.getWriter(), fatalReader = fatal.readable.getReader(), fatalRead = fatalReader.read().catch(function(error) { return error; }); await fatalWriter.write(Uint8Array.from([0xe2])); var closeError = await fatalWriter.close().catch(function(error) { return error; }), readError = await fatalRead, closedError = await fatalWriter.closed.catch(function(error) { return error; }); return [incompletePending, decoded.value, done.done, closeError instanceof TypeError, readError === closeError, closedError === closeError, decoder.encoding, decoder.fatal, decoder.ignoreBOM]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_text_decoder_streaming_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTextDecoderStreaming = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseTextDecoderStreaming")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,"😀A",true,true,true,true,"utf-8",false,false]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
