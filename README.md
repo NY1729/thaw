@@ -323,6 +323,11 @@ The workspace crates have narrow responsibilities:
   strict/sloppy modes, history, buffered input, custom dot commands and prompt
   output. It can drive in-memory or user-supplied streams; Thaw does not attach
   a compiled executable to an interactive terminal automatically
+- `node:cluster` provides the primary/worker control surface, settings,
+  scheduling policy, worker registry and asynchronous lifecycle/message events.
+  Workers are process-local compatibility objects; spawning isolated copies of
+  the compiled executable and Node-compatible IPC handle transfer remain future
+  work
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
