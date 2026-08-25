@@ -468,6 +468,8 @@ The workspace crates have narrow responsibilities:
 - `fs.watch` exposes `FSWatcher` change/rename events for files and
   directories, including recursive paths, Buffer filenames and abort/close
   lifecycle controls
+- `fs/promises.watch` exposes those host changes as a queued async iterator,
+  with iterator return/throw cleanup and AbortSignal rejection
 - `globSync`, callback `glob` and the `fs/promises.glob` async iterator
   support `*`, `?`, `**`, multiple patterns, exclusions, cwd and Dirent output
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
