@@ -179,6 +179,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "diagnostics_channel" => {
             "export declare function channel(argsArray: any): any;\nexport declare function hasSubscribers(argsArray: any): any;\nexport declare function subscribe(argsArray: any): void;\nexport declare function unsubscribe(argsArray: any): any;\nexport declare function tracingChannel(argsArray: any): any;\n"
         }
+        "async_hooks" => {
+            "export declare function AsyncLocalStorage(argsArray: any): any;\nexport declare function AsyncResource(argsArray: any): any;\nexport declare function createHook(argsArray: any): any;\nexport declare function executionAsyncId(argsArray: any): any;\nexport declare function triggerAsyncId(argsArray: any): any;\nexport declare function executionAsyncResource(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2934,6 +2937,28 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              }\n\
              module.exports = { channel: channel, hasSubscribers: hasSubscribers, subscribe: subscribe, unsubscribe: unsubscribe, tracingChannel: tracingChannel, Channel: Channel }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "async_hooks" => Some(
+            "var storages = globalThis.__thawAsyncLocalStorages || (globalThis.__thawAsyncLocalStorages = new Set()); var nextAsyncId = globalThis.__thawNextAsyncId || 2; var currentAsyncId = 1; var currentTriggerId = 0; var currentResource = {};\n\
+             function restoreAfter(storage, previous, result) { if (result && typeof result.then === 'function') return Promise.resolve(result).finally(function() { storage._store = previous; }); storage._store = previous; return result; }\n\
+             function AsyncLocalStorage(options) { if (!(this instanceof AsyncLocalStorage)) return new AsyncLocalStorage(options); this._store = options && options.defaultValue; this.name = options && options.name || ''; this.enabled = true; storages.add(this); }\n\
+             AsyncLocalStorage.prototype.disable = function() { this.enabled = false; this._store = undefined; };\n\
+             AsyncLocalStorage.prototype.getStore = function() { return this.enabled ? this._store : undefined; };\n\
+             AsyncLocalStorage.prototype.enterWith = function(store) { this.enabled = true; this._store = store; storages.add(this); };\n\
+             AsyncLocalStorage.prototype.run = function(store, callback) { var args = Array.prototype.slice.call(arguments, 2); var previous = this._store; this.enabled = true; this._store = store; try { return restoreAfter(this, previous, callback.apply(null, args)); } catch (error) { this._store = previous; throw error; } };\n\
+             AsyncLocalStorage.prototype.exit = function(callback) { var args = Array.prototype.slice.call(arguments, 1); var previous = this._store; this._store = undefined; try { return restoreAfter(this, previous, callback.apply(null, args)); } catch (error) { this._store = previous; throw error; } };\n\
+             function captureStores() { return Array.from(storages).map(function(storage) { return [storage, storage.getStore()]; }); }\n\
+             function invokeCaptured(captured, callback, thisArg, args, index) { if (index === captured.length) return callback.apply(thisArg, args); var entry = captured[index]; return entry[0].run(entry[1], function() { return invokeCaptured(captured, callback, thisArg, args, index + 1); }); }\n\
+             AsyncLocalStorage.bind = function(callback) { var captured = captureStores(); return function() { return invokeCaptured(captured, callback, this, Array.prototype.slice.call(arguments), 0); }; };\n\
+             AsyncLocalStorage.snapshot = function() { var captured = captureStores(); return function(callback) { return invokeCaptured(captured, callback, null, Array.prototype.slice.call(arguments, 1), 0); }; };\n\
+             function AsyncResource(type, options) { if (!(this instanceof AsyncResource)) return new AsyncResource(type, options); this.type = String(type); this._asyncId = nextAsyncId++; globalThis.__thawNextAsyncId = nextAsyncId; this._triggerAsyncId = options && options.triggerAsyncId !== undefined ? Number(options.triggerAsyncId) : currentAsyncId; this._destroyed = false; }\n\
+             AsyncResource.prototype.asyncId = function() { return this._asyncId; }; AsyncResource.prototype.triggerAsyncId = function() { return this._triggerAsyncId; };\n\
+             AsyncResource.prototype.runInAsyncScope = function(callback, thisArg) { var args = Array.prototype.slice.call(arguments, 2); var previousId = currentAsyncId, previousTrigger = currentTriggerId, previousResource = currentResource; currentAsyncId = this._asyncId; currentTriggerId = this._triggerAsyncId; currentResource = this; try { return callback.apply(thisArg, args); } finally { currentAsyncId = previousId; currentTriggerId = previousTrigger; currentResource = previousResource; } };\n\
+             AsyncResource.prototype.emitDestroy = function() { this._destroyed = true; return this; }; AsyncResource.prototype.bind = function(callback, thisArg) { var self = this; return function() { return self.runInAsyncScope(callback, thisArg === undefined ? this : thisArg, ...arguments); }; };\n\
+             AsyncResource.bind = function(callback, type, thisArg) { return new AsyncResource(type || callback.name || 'bound-anonymous-fn').bind(callback, thisArg); };\n\
+             function createHook(callbacks) { return { enable: function() { return this; }, disable: function() { return this; }, callbacks: callbacks || {} }; }\n\
+             function executionAsyncId() { return currentAsyncId; } function triggerAsyncId() { return currentTriggerId; } function executionAsyncResource() { return currentResource; }\n\
+             module.exports = { AsyncLocalStorage: AsyncLocalStorage, AsyncResource: AsyncResource, createHook: createHook, executionAsyncId: executionAsyncId, triggerAsyncId: triggerAsyncId, executionAsyncResource: executionAsyncResource }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -4827,6 +4852,48 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,7,true,false,5,6,"bad",["store:4","store:10","work:5","store:12","start:","end:5","start:","asyncStart:6","asyncEnd:6","end:6","start:","error:bad","end:bad"]]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn async_hooks_preserve_storage_and_resource_scope() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_async_hooks");
+        fs::write(
+            dir.join("index.js"),
+            "var hooks = require('node:async_hooks');\n\
+             module.exports = async function () {\n\
+             \x20 var storage = new hooks.AsyncLocalStorage({ defaultValue: 'default', name: 'request' }); var events = [storage.getStore()]; var bound; var snapshot;\n\
+             \x20 var result = await storage.run('outer', async function(value) { events.push(storage.getStore() + ':' + value); bound = hooks.AsyncLocalStorage.bind(function(suffix) { return storage.getStore() + suffix; }); snapshot = hooks.AsyncLocalStorage.snapshot(); await Promise.resolve(); events.push(storage.getStore()); var nested = storage.run('inner', function() { return storage.getStore(); }); events.push(nested + ':' + storage.getStore()); var exited = storage.exit(function() { return storage.getStore(); }); events.push(String(exited) + ':' + storage.getStore()); return 'done'; }, 4);\n\
+             \x20 storage.enterWith('changed'); var rebound = bound('!'); var snapped = snapshot(function() { return storage.getStore(); });\n\
+             \x20 var resource = new hooks.AsyncResource('work'); var outside = hooks.executionAsyncId(); var inside = resource.runInAsyncScope(function(left, right) { return [hooks.executionAsyncId(), hooks.triggerAsyncId(), hooks.executionAsyncResource() === resource, left + right]; }, null, 2, 3); var reboundResource = resource.bind(function() { return hooks.executionAsyncId(); })(); resource.emitDestroy();\n\
+             \x20 storage.disable(); return [events, result, rebound, snapped, storage.getStore() === undefined, outside, inside, reboundResource, resource.asyncId(), resource.triggerAsyncId(), resource._destroyed, hooks.createHook({}).enable().disable().callbacks];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_async_hooks_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseAsyncHooks = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseAsyncHooks").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["default","outer:4","outer","inner:outer","undefined:outer"],"done","outer!","outer",true,1,[2,1,true,5],2,2,1,true,{}]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

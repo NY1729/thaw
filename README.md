@@ -315,6 +315,8 @@ The workspace crates have narrow responsibilities:
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
+- `node:async_hooks` provides Promise-aware `AsyncLocalStorage` context
+  nesting, bind/snapshot capture, `AsyncResource` scope IDs and hook handles
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
