@@ -97,7 +97,7 @@ const ASYNC_SLOT_BYTES: u64 = 16;
 fn object_field_storage_bytes(ty: &HirType) -> u64 {
     if matches!(
         ty,
-        HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
+        HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_)
     ) {
         ASYNC_SLOT_BYTES
     } else {
@@ -1261,6 +1261,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(self
                     .context
                     .struct_type(&[self.context.i8_type().into(), payload], false)
+                    .into())
+            }
+            HirType::Union(elements) => {
+                if elements.is_empty() {
+                    return Err("empty union type is not supported".into());
+                }
+                for element in elements {
+                    self.basic_type(element)?;
+                }
+                Ok(self
+                    .context
+                    .struct_type(
+                        &[
+                            self.context.i8_type().into(),
+                            self.context.i64_type().into(),
+                        ],
+                        false,
+                    )
                     .into())
             }
             other => Err(format!(
@@ -4779,6 +4797,34 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string())
             }
+            HirExpr::UnionInject(value, index, elements) => {
+                let value = self.compile_expr(value)?;
+                self.build_union_value(value, *index, elements)
+            }
+            HirExpr::UnionTag(value, _) => {
+                let union = self.compile_expr(value)?.into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(union, 0, "union_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                self.builder
+                    .build_unsigned_int_to_float(tag, self.context.f64_type(), "union_tag_number")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string())
+            }
+            HirExpr::UnionValue(value, index, elements) => {
+                let member = elements
+                    .get(*index)
+                    .ok_or_else(|| format!("union member index {index} is out of bounds"))?;
+                let union = self.compile_expr(value)?.into_struct_value();
+                let payload = self
+                    .builder
+                    .build_extract_value(union, 1, "union_payload")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                self.unpack_union_payload(payload, member)
+            }
             HirExpr::NullishValue(value, _) => {
                 let nullish = self.compile_expr(value)?.into_struct_value();
                 self.builder
@@ -5148,6 +5194,79 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let value = self.compile_expr(value)?;
         self.build_optional_value(value, payload, present)
+    }
+
+    fn build_union_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        index: usize,
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let member = elements
+            .get(index)
+            .ok_or_else(|| format!("union member index {index} is out of bounds"))?;
+        let payload = match (member, value) {
+            (HirType::F64, BasicValueEnum::FloatValue(value)) => self
+                .builder
+                .build_bit_cast(value, self.context.i64_type(), "union_float_bits")
+                .map_err(|error| error.to_string())?
+                .into_int_value(),
+            (HirType::Bool, BasicValueEnum::IntValue(value)) => self
+                .builder
+                .build_int_z_extend(value, self.context.i64_type(), "union_bool_bits")
+                .map_err(|error| error.to_string())?,
+            (HirType::I64 | HirType::JsValue, BasicValueEnum::IntValue(value)) => value,
+            (_, BasicValueEnum::PointerValue(value)) => self
+                .builder
+                .build_ptr_to_int(value, self.context.i64_type(), "union_pointer_bits")
+                .map_err(|error| error.to_string())?,
+            _ => return Err(format!("cannot pack {member:?} into a union payload")),
+        };
+        let union_type = self
+            .basic_type(&HirType::Union(elements.to_vec()))?
+            .into_struct_type();
+        let tagged = self
+            .builder
+            .build_insert_value(
+                union_type.get_undef(),
+                self.context.i8_type().const_int(index as u64, false),
+                0,
+                "union_with_tag",
+            )
+            .map_err(|error| error.to_string())?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(tagged, payload, 1, "union_with_payload")
+            .map(|value| value.into_struct_value().into())
+            .map_err(|error| error.to_string())
+    }
+
+    fn unpack_union_payload(
+        &mut self,
+        payload: IntValue<'ctx>,
+        member: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match member {
+            HirType::F64 => self
+                .builder
+                .build_bit_cast(payload, self.context.f64_type(), "union_float")
+                .map_err(|error| error.to_string()),
+            HirType::Bool => self
+                .builder
+                .build_int_truncate(payload, self.context.bool_type(), "union_bool")
+                .map(Into::into)
+                .map_err(|error| error.to_string()),
+            HirType::I64 | HirType::JsValue => Ok(payload.into()),
+            _ => self
+                .builder
+                .build_int_to_ptr(
+                    payload,
+                    self.context.ptr_type(AddressSpace::default()),
+                    "union_pointer",
+                )
+                .map(Into::into)
+                .map_err(|error| error.to_string()),
+        }
     }
 
     fn compile_optional_none(&mut self, payload: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
@@ -13357,6 +13476,51 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "same_layout_literal_unions"),
             "start\nstop\n2\ntrue\nfixed\nwaiting\na,b\nlater\n"
+        );
+    }
+
+    #[test]
+    fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
+        let source = r#"
+            function identity(value: string | number): string | number { return value; }
+            function kind(value: string | number): string { return typeof value; }
+            function describe(value: string | number): string {
+                if (typeof value === "string") {
+                    return value + "!";
+                } else {
+                    return String(value + 1);
+                }
+            }
+            function describeReverse(value: string | number): string {
+                if ("number" !== typeof value) {
+                    return value + "?";
+                } else {
+                    return String(value * 2);
+                }
+            }
+            function fieldKind(value: { data: string | number }): string {
+                return typeof value.data;
+            }
+            async function delayed(value: string | number): Promise<string | number> {
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(kind(identity("hello")));
+                console.log(kind(identity(42)));
+                console.log(describe("hello"));
+                console.log(describe(42));
+                console.log(describeReverse("ok"));
+                console.log(describeReverse(5));
+                console.log(fieldKind({ data: "field" }));
+                console.log(fieldKind({ data: 7 }));
+                console.log(kind(await delayed("later")));
+                console.log(kind(await delayed(9)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "tagged_heterogeneous_unions"),
+            "string\nnumber\nhello!\n43\nok?\n10\nstring\nnumber\nstring\nnumber\n"
         );
     }
 
