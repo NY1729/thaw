@@ -699,7 +699,9 @@ The workspace crates have narrow responsibilities:
   is exhausted, resume after a read, and reject with the same reason when the
   readable side is cancelled
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
-  native gzip, deflate and raw-deflate implementation
+  native gzip, deflate and raw-deflate implementation. Stateful native handles
+  flush output after each input chunk, allow decompression results before close,
+  finalize trailers exactly once and release unfinished state on cancellation
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots
   or custom PEM/DER certificates and PEM PKCS#8/RSA keys, then exposes verified
   TLSSocket and createServer write/end/data/secureConnection lifecycles;
