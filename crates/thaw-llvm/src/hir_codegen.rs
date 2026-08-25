@@ -14220,6 +14220,8 @@ mod tests {
     fn compiles_generic_function_type_alias_arrows() {
         let source = r#"
             type Identity = <T>(value: T) => T;
+            type ForwardIdentity = IdentityChain;
+            type IdentityChain = Identity;
             type Choose = <T, U>(left: T, right: U) => T;
             type Numeric = <T extends number>(value: T) => T;
             function namedIdentity<T>(value: T): T { return value; }
@@ -14230,6 +14232,7 @@ mod tests {
                 const forwarded: Identity = namedIdentity;
                 const chained: Identity = identity;
                 const namedChain: Identity = forwarded;
+                const aliasChain: ForwardIdentity = identity;
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14240,11 +14243,12 @@ mod tests {
                 console.log([27, 28].map(forwarded)[0]);
                 console.log(chained<string>("arrow-chain"));
                 console.log(namedChain(29));
+                console.log(aliasChain<string>("type-alias-chain"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n"
         );
     }
 
@@ -14252,6 +14256,8 @@ mod tests {
     fn compiles_generic_callable_interfaces() {
         let source = r#"
             interface Identity { <T>(value: T): T; }
+            type ForwardIdentity = IdentityChain;
+            type IdentityChain = Identity;
             interface Numeric { <T extends number>(value: T): T; }
             function named<T>(value: T): T { return value; }
             function main(): void {
@@ -14259,6 +14265,7 @@ mod tests {
                 const forwarded: Identity = named;
                 const arrowChain: Identity = local;
                 const namedChain: Identity = forwarded;
+                const interfaceAliasChain: ForwardIdentity = local;
                 const numeric: Numeric = <Value extends number>(value: Value): Value => value;
                 console.log(local(29));
                 console.log(local("interface"));
@@ -14268,11 +14275,12 @@ mod tests {
                 console.log([32, 33].map(forwarded)[1]);
                 console.log(arrowChain<string>("interface-chain"));
                 console.log(namedChain(34));
+                console.log(interfaceAliasChain<string>("interface-alias-chain"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_callable_interfaces"),
-            "29\ninterface\n30\nnamed-interface\n31\n33\ninterface-chain\n34\n"
+            "29\ninterface\n30\nnamed-interface\n31\n33\ninterface-chain\n34\ninterface-alias-chain\n"
         );
     }
 

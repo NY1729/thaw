@@ -1428,6 +1428,7 @@ struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     function_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
+    function_alias_chains: HashMap<Symbol, Symbol>,
     function_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
 }
 
@@ -1492,6 +1493,40 @@ fn resolve_interfaces(
         }
     }
 
+    loop {
+        let callable_aliases = aliases
+            .iter()
+            .filter_map(|(name, alias)| {
+                let TsType::TsTypeRef(reference) = alias.type_ann.as_ref() else {
+                    return None;
+                };
+                let swc_ecma_ast::TsEntityName::Ident(target) = &reference.type_name else {
+                    return None;
+                };
+                if reference.type_params.is_none()
+                    && (generic.function_aliases.contains_key(target.sym.as_ref())
+                        || generic
+                            .function_interfaces
+                            .contains_key(target.sym.as_ref())
+                        || generic
+                            .function_alias_chains
+                            .contains_key(target.sym.as_ref()))
+                {
+                    Some((name.clone(), target.sym.to_string()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if callable_aliases.is_empty() {
+            break;
+        }
+        for (name, target) in callable_aliases {
+            aliases.remove(&name);
+            generic.function_alias_chains.insert(name, target);
+        }
+    }
+
     if let Some(name) = raw.keys().find(|name| aliases.contains_key(*name)) {
         return Err(format!(
             "type alias `{name}` conflicts with an interface declaration"
@@ -1519,6 +1554,7 @@ fn resolve_interfaces(
             || aliases.contains_key(*name)
             || generic.interfaces.contains_key(*name)
             || generic.aliases.contains_key(*name)
+            || generic.function_alias_chains.contains_key(*name)
     }) {
         return Err(format!(
             "generic function type alias `{name}` conflicts with another type declaration"
@@ -1530,6 +1566,7 @@ fn resolve_interfaces(
             || generic.interfaces.contains_key(*name)
             || generic.aliases.contains_key(*name)
             || generic.function_aliases.contains_key(*name)
+            || generic.function_alias_chains.contains_key(*name)
     }) {
         return Err(format!(
             "generic callable interface `{name}` conflicts with another type declaration"
@@ -4610,29 +4647,14 @@ impl<'a> FnLowerer<'a> {
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
                 if let (Expr::Arrow(arrow), Some(annotation)) = (init, binding.type_ann.as_ref()) {
                     if arrow.type_params.is_some() {
-                        if let Some(alias) =
-                            self.generic_function_alias_from_type(&annotation.type_ann)
+                        if let Some((expected, callable_name)) =
+                            self.generic_callable_annotation_signature(&annotation.type_ann)?
                         {
-                            let expected = self.generic_function_alias_signature(alias)?;
                             let actual = self.generic_arrow_signature(arrow)?;
                             self.validate_generic_callable_shape(
                                 &expected,
                                 &actual,
-                                alias.id.sym.as_ref(),
-                            )?;
-                            let hir_name = self.bind_local(&name, HirType::Dynamic);
-                            self.generic_arrows.insert(hir_name, arrow.clone());
-                            continue;
-                        }
-                        if let Some(interface) =
-                            self.generic_function_interface_from_type(&annotation.type_ann)
-                        {
-                            let expected = self.generic_function_interface_signature(interface)?;
-                            let actual = self.generic_arrow_signature(arrow)?;
-                            self.validate_generic_callable_shape(
-                                &expected,
-                                &actual,
-                                interface.id.sym.as_ref(),
+                                &callable_name,
                             )?;
                             let hir_name = self.bind_local(&name, HirType::Dynamic);
                             self.generic_arrows.insert(hir_name, arrow.clone());
@@ -4643,34 +4665,15 @@ impl<'a> FnLowerer<'a> {
                 if let (Expr::Ident(identifier), Some(annotation)) =
                     (init, binding.type_ann.as_ref())
                 {
-                    if let Some(alias) = self.generic_function_alias_from_type(&annotation.type_ann)
+                    if let Some((expected, callable_name)) =
+                        self.generic_callable_annotation_signature(&annotation.type_ann)?
                     {
                         if let Some(actual) = self.signatures.get(identifier.sym.as_ref()) {
                             if !actual.generic_type_params.is_empty() {
-                                let expected = self.generic_function_alias_signature(alias)?;
                                 self.validate_generic_callable_shape(
                                     &expected,
                                     actual,
-                                    alias.id.sym.as_ref(),
-                                )?;
-                                let hir_name = self.bind_local(&name, HirType::Dynamic);
-                                self.generic_named_templates
-                                    .insert(hir_name, identifier.sym.to_string());
-                                continue;
-                            }
-                        }
-                    }
-                    if let Some(interface) =
-                        self.generic_function_interface_from_type(&annotation.type_ann)
-                    {
-                        if let Some(actual) = self.signatures.get(identifier.sym.as_ref()) {
-                            if !actual.generic_type_params.is_empty() {
-                                let expected =
-                                    self.generic_function_interface_signature(interface)?;
-                                self.validate_generic_callable_shape(
-                                    &expected,
-                                    actual,
-                                    interface.id.sym.as_ref(),
+                                    &callable_name,
                                 )?;
                                 let hir_name = self.bind_local(&name, HirType::Dynamic);
                                 self.generic_named_templates
@@ -13077,64 +13080,50 @@ impl<'a> FnLowerer<'a> {
         })
     }
 
-    fn generic_function_alias_from_type(
-        &self,
-        ty: &TsType,
-    ) -> Option<&swc_ecma_ast::TsTypeAliasDecl> {
-        let TsType::TsTypeRef(reference) = ty else {
-            return None;
-        };
-        let swc_ecma_ast::TsEntityName::Ident(identifier) = &reference.type_name else {
-            return None;
-        };
-        reference
-            .type_params
-            .is_none()
-            .then(|| {
-                self.generic_interfaces
-                    .function_aliases
-                    .get(identifier.sym.as_ref())
-                    .copied()
-            })
-            .flatten()
-    }
-
-    fn generic_function_interface_from_type(&self, ty: &TsType) -> Option<&TsInterfaceDecl> {
-        let TsType::TsTypeRef(reference) = ty else {
-            return None;
-        };
-        let swc_ecma_ast::TsEntityName::Ident(identifier) = &reference.type_name else {
-            return None;
-        };
-        reference
-            .type_params
-            .is_none()
-            .then(|| {
-                self.generic_interfaces
-                    .function_interfaces
-                    .get(identifier.sym.as_ref())
-                    .copied()
-            })
-            .flatten()
-    }
-
     fn generic_callable_annotation_signature(
         &self,
         ty: &TsType,
     ) -> Result<Option<(FnSignature, Symbol)>, String> {
-        if let Some(alias) = self.generic_function_alias_from_type(ty) {
-            return Ok(Some((
-                self.generic_function_alias_signature(alias)?,
-                alias.id.sym.to_string(),
-            )));
+        let TsType::TsTypeRef(reference) = ty else {
+            return Ok(None);
+        };
+        let swc_ecma_ast::TsEntityName::Ident(identifier) = &reference.type_name else {
+            return Ok(None);
+        };
+        if reference.type_params.is_some() {
+            return Ok(None);
         }
-        if let Some(interface) = self.generic_function_interface_from_type(ty) {
-            return Ok(Some((
-                self.generic_function_interface_signature(interface)?,
-                interface.id.sym.to_string(),
-            )));
+        let callable_name = identifier.sym.to_string();
+        let mut target = callable_name.clone();
+        let mut seen = BTreeSet::new();
+        loop {
+            if let Some(alias) = self.generic_interfaces.function_aliases.get(&target) {
+                return Ok(Some((
+                    self.generic_function_alias_signature(alias)?,
+                    callable_name,
+                )));
+            }
+            if let Some(interface) = self.generic_interfaces.function_interfaces.get(&target) {
+                return Ok(Some((
+                    self.generic_function_interface_signature(interface)?,
+                    callable_name,
+                )));
+            }
+            let Some(next) = self
+                .generic_interfaces
+                .function_alias_chains
+                .get(&target)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            if !seen.insert(target.clone()) {
+                return Err(format!(
+                    "cyclic generic callable type alias `{callable_name}`"
+                ));
+            }
+            target = next;
         }
-        Ok(None)
     }
 
     fn generic_function_interface_signature(
@@ -14027,6 +14016,10 @@ mod tests {
             (
                 "type Identity = <T>(value: T) => T; type Stringify = <T>(value: T) => string; function main(): void { const identity: Identity = <T>(value: T): T => value; const invalid: Stringify = identity; }",
                 "incompatible with function type alias `Stringify`",
+            ),
+            (
+                "type Forward = Stringify; type Stringify = <T>(value: T) => string; function main(): void { const invalid: Forward = <T>(value: T): T => value; }",
+                "incompatible with function type alias `Forward`",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
