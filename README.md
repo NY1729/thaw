@@ -382,6 +382,8 @@ The workspace crates have narrow responsibilities:
   constructor defaults, with missing write/transform hooks diagnosed;
   prototype `_construct` hooks also gate pulls, writes and finalization, and
   enter normal error destruction when initialization fails;
+  normal readable/writable completion auto-destroys after `end`/`finish`,
+  waits for both Duplex sides, and honors `autoDestroy` and `emitClose`;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
