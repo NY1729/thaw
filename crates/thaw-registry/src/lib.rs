@@ -170,6 +170,12 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "timers/promises" => {
             "export declare function setTimeout(argsArray: any): any;\nexport declare function setImmediate(argsArray: any): any;\nexport declare function setInterval(argsArray: any): any;\n"
         }
+        "stream" => {
+            "export declare function Stream(argsArray: any): any;\nexport declare function Readable(argsArray: any): any;\nexport declare function Writable(argsArray: any): any;\nexport declare function Duplex(argsArray: any): any;\nexport declare function Transform(argsArray: any): any;\nexport declare function PassThrough(argsArray: any): any;\nexport declare function pipeline(argsArray: any): any;\nexport declare function finished(argsArray: any): any;\nexport declare function addAbortSignal(argsArray: any): any;\n"
+        }
+        "stream/promises" => {
+            "export declare function pipeline(argsArray: any): any;\nexport declare function finished(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2867,6 +2873,44 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { setTimeout: setTimeoutPromise, setImmediate: setImmediatePromise, setInterval: setIntervalPromise, scheduler: scheduler };\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "stream" => Some(
+            "function Stream() { this._events = Object.create(null); this.destroyed = false; }\n\
+             Stream.prototype.on = function(event, listener) { var name = String(event); (this._events[name] || (this._events[name] = [])).push({ listener: listener, once: false }); if (name === 'data' && this._drainReadable) this._drainReadable(); if (name === 'end' && this.readableEnded) queueMicrotask(function() { listener(); }); return this; };\n\
+             Stream.prototype.once = function(event, listener) { var name = String(event); (this._events[name] || (this._events[name] = [])).push({ listener: listener, once: true }); return this; };\n\
+             Stream.prototype.off = Stream.prototype.removeListener = function(event, listener) { var name = String(event); this._events[name] = (this._events[name] || []).filter(function(entry) { return entry.listener !== listener; }); return this; };\n\
+             Stream.prototype.emit = function(event) { var name = String(event); var entries = (this._events[name] || []).slice(); var args = Array.prototype.slice.call(arguments, 1); entries.forEach(function(entry) { if (entry.once) this.off(name, entry.listener); entry.listener.apply(this, args); }, this); return entries.length > 0; };\n\
+             Stream.prototype.destroy = function(error) { if (this.destroyed) return this; this.destroyed = true; if (error) this.emit('error', error); this.emit('close'); return this; };\n\
+             function inherit(child, parent) { child.prototype = Object.create(parent.prototype); child.prototype.constructor = child; }\n\
+             function Readable(options) { Stream.call(this); options = options || {}; this.readable = true; this.readableEnded = false; this.readableEncoding = null; this._chunks = []; this._read = typeof options.read === 'function' ? options.read : function() {}; }\n\
+             inherit(Readable, Stream);\n\
+             Readable.prototype.setEncoding = function(encoding) { this.readableEncoding = encoding; return this; };\n\
+             Readable.prototype.push = function(chunk, encoding) { if (chunk === null) { this.readableEnded = true; this.readable = false; if (this._chunks.length === 0) this.emit('end'); return false; } var value = typeof chunk === 'string' ? globalThis.Buffer.from(chunk, encoding) : globalThis.Buffer.from(chunk); if (this.readableEncoding) value = value.toString(this.readableEncoding); if ((this._events.data || []).length) this.emit('data', value); else this._chunks.push(value); return true; };\n\
+             Readable.prototype._drainReadable = function() { while (this._chunks.length && (this._events.data || []).length) this.emit('data', this._chunks.shift()); if (this.readableEnded && this._chunks.length === 0) this.emit('end'); };\n\
+             Readable.prototype.read = function(size) { if (this._chunks.length === 0) { if (!this.readableEnded) this._read(size); return this._chunks.shift() || null; } if (size === undefined) { if (this._chunks.length === 1) return this._chunks.shift(); var joined = globalThis.Buffer.concat(this._chunks.map(function(chunk) { return typeof chunk === 'string' ? globalThis.Buffer.from(chunk) : chunk; })); this._chunks = []; return this.readableEncoding ? joined.toString(this.readableEncoding) : joined; } var first = this._chunks[0]; if (typeof first === 'string') { var text = first.substring(0, size); this._chunks[0] = first.substring(size); if (!this._chunks[0]) this._chunks.shift(); return text; } var result = first.subarray(0, size); this._chunks[0] = first.subarray(size); if (!this._chunks[0].length) this._chunks.shift(); return result; };\n\
+             Readable.prototype.pipe = function(destination, options) { this.on('data', function(chunk) { destination.write(chunk); }); if (!options || options.end !== false) this.once('end', function() { destination.end(); }); this.once('error', function(error) { destination.destroy(error); }); destination.emit('pipe', this); return destination; };\n\
+             Readable.prototype.unpipe = function(destination) { if (destination) destination.emit('unpipe', this); return this; };\n\
+             Readable.from = function(iterable) { var stream = new Readable(); queueMicrotask(async function() { try { for await (var value of iterable) stream.push(value); stream.push(null); } catch (error) { stream.destroy(error); } }); return stream; };\n\
+             function Writable(options) { Stream.call(this); options = options || {}; this.writable = true; this.writableEnded = false; this.writableFinished = false; this._write = typeof options.write === 'function' ? options.write : function(chunk, encoding, callback) { callback(); }; this._final = typeof options.final === 'function' ? options.final : null; }\n\
+             inherit(Writable, Stream);\n\
+             Writable.prototype.write = function(chunk, encoding, callback) { if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (this.writableEnded) throw new Error('write after end'); var value = typeof chunk === 'string' ? globalThis.Buffer.from(chunk, encoding) : globalThis.Buffer.from(chunk); var self = this; this._write(value, encoding || 'buffer', function(error) { if (error) self.destroy(error); if (callback) callback(error); }); return true; };\n\
+             Writable.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); this.writableEnded = true; var self = this; function finish(error) { if (error) { self.destroy(error); return; } self.writable = false; self.writableFinished = true; self.emit('finish'); if (callback) callback(); } if (this._final) this._final(finish); else finish(); return this; };\
+             function Duplex(options) { Readable.call(this, options); options = options || {}; this.writable = true; this.writableEnded = false; this.writableFinished = false; this._write = typeof options.write === 'function' ? options.write : function(chunk, encoding, callback) { callback(); }; this._final = typeof options.final === 'function' ? options.final : null; }\n\
+             inherit(Duplex, Readable); Duplex.prototype.write = Writable.prototype.write; Duplex.prototype.end = Writable.prototype.end;\n\
+             function Transform(options) { options = options || {}; Duplex.call(this, options); this._transform = typeof options.transform === 'function' ? options.transform : function(chunk, encoding, callback) { callback(null, chunk); }; this._flush = typeof options.flush === 'function' ? options.flush : null; }\n\
+             inherit(Transform, Duplex); Transform.prototype.write = function(chunk, encoding, callback) { if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } var value = typeof chunk === 'string' ? globalThis.Buffer.from(chunk, encoding) : globalThis.Buffer.from(chunk); var self = this; this._transform(value, encoding || 'buffer', function(error, output) { if (error) self.destroy(error); else if (output !== undefined && output !== null) self.push(output); if (callback) callback(error); }); return true; };\n\
+             Transform.prototype.end = function(chunk, encoding, callback) { if (chunk !== undefined && typeof chunk !== 'function') this.write(chunk, encoding); else if (typeof chunk === 'function') callback = chunk; this.writableEnded = true; var self = this; function finish(error, output) { if (error) { self.destroy(error); return; } if (output !== undefined && output !== null) self.push(output); self.writableFinished = true; self.emit('finish'); self.push(null); if (callback) callback(); } if (this._flush) this._flush(finish); else finish(); return this; };\
+             function PassThrough(options) { Transform.call(this, options); } inherit(PassThrough, Transform); PassThrough.prototype._transform = function(chunk, encoding, callback) { callback(null, chunk); };\n\
+             function finished(stream, options, callback) { if (typeof options === 'function') { callback = options; options = {}; } var done = false; function finish(error) { if (done) return; done = true; callback(error); } stream.once('error', finish); if (stream.writable !== undefined) stream.once('finish', function() { finish(); }); else stream.once('end', function() { finish(); }); return function() { done = true; }; }\n\
+             function pipeline() { var streams = Array.prototype.slice.call(arguments); var callback = typeof streams[streams.length - 1] === 'function' ? streams.pop() : function(error) { if (error) throw error; }; for (var index = 0; index + 1 < streams.length; index++) streams[index].pipe(streams[index + 1]); var settled = false; streams.forEach(function(stream) { stream.once('error', function(error) { if (!settled) { settled = true; streams.forEach(function(item) { item.destroy(); }); callback(error); } }); }); streams[streams.length - 1].once('finish', function() { if (!settled) { settled = true; callback(); } }); return streams[streams.length - 1]; }\n\
+             function addAbortSignal(signal, stream) { if (signal.aborted) stream.destroy(signal.reason); else signal.addEventListener('abort', function() { stream.destroy(signal.reason); }, { once: true }); return stream; }\n\
+             module.exports = Stream; Object.assign(module.exports, { Stream: Stream, Readable: Readable, Writable: Writable, Duplex: Duplex, Transform: Transform, PassThrough: PassThrough, pipeline: pipeline, finished: finished, addAbortSignal: addAbortSignal });\n\
+             module.exports.default = Stream; module.exports.__esModule = true;\n",
+        ),
+        "stream/promises" => Some(
+            "function finished(stream, options) { return new Promise(function(resolve, reject) { var settled = false; function done(error) { if (settled) return; settled = true; if (error) reject(error); else resolve(); } stream.once('error', done); if (stream.writable !== undefined) stream.once('finish', function() { done(); }); else stream.once('end', function() { done(); }); if (options && options.signal) { if (options.signal.aborted) done(options.signal.reason); else options.signal.addEventListener('abort', function() { done(options.signal.reason); }, { once: true }); } }); }\n\
+             function pipeline() { var streams = Array.prototype.slice.call(arguments); var options = streams.length && streams[streams.length - 1] && streams[streams.length - 1].signal && typeof streams[streams.length - 1].pipe !== 'function' ? streams.pop() : {}; return new Promise(function(resolve, reject) { var settled = false; function fail(error) { if (settled) return; settled = true; streams.forEach(function(stream) { if (stream.destroy) stream.destroy(); }); reject(error); } streams.forEach(function(stream) { stream.once('error', fail); }); for (var index = 0; index + 1 < streams.length; index++) streams[index].pipe(streams[index + 1]); var last = streams[streams.length - 1]; last.once('finish', function() { if (!settled) { settled = true; resolve(last); } }); if (options.signal) { if (options.signal.aborted) fail(options.signal.reason); else options.signal.addEventListener('abort', function() { fail(options.signal.reason); }, { once: true }); } }); }\n\
+             module.exports = { pipeline: pipeline, finished: finished }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -4670,6 +4714,52 @@ mod tests {
         assert_eq!(
             result,
             r#"["immediate","delayed","cancelled","tick",false,"tick",true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn stream_builtin_pipes_transforms_and_finishes() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_stream");
+        fs::write(
+            dir.join("index.js"),
+            "var stream = require('node:stream'); var streamPromises = require('node:stream/promises');\n\
+             module.exports = async function () {\n\
+             \x20 var output = []; var source = stream.Readable.from(['a', Buffer.from('b')]);\n\
+             \x20 var upper = new stream.Transform({ transform: function(chunk, encoding, callback) { callback(null, chunk.toString().toUpperCase()); } });\n\
+             \x20 var sink = new stream.Writable({ write: function(chunk, encoding, callback) { output.push(chunk.toString()); callback(); } });\n\
+             \x20 await new Promise(function(resolve, reject) { stream.pipeline(source, upper, sink, function(error) { if (error) reject(error); else resolve(); }); });\n\
+             \x20 var queued = new stream.Readable(); queued.push('left'); queued.push('right'); queued.push(null); var combined = queued.read().toString();\n\
+             \x20 var pass = new stream.PassThrough(); var passed = []; pass.on('data', function(chunk) { passed.push(chunk.toString()); }); var completion = streamPromises.finished(pass); pass.end('pass'); await completion;\n\
+             \x20 var promiseOutput = []; await streamPromises.pipeline(stream.Readable.from(['promise']), new stream.Writable({ write: function(chunk, encoding, callback) { promiseOutput.push(chunk.toString()); callback(); } }));\n\
+             \x20 var controller = new AbortController(); var aborted = new stream.Readable(); var reason; aborted.on('error', function(error) { reason = error; }); stream.addAbortSignal(controller.signal, aborted); controller.abort('stop');\n\
+             \x20 return [output.join(''), sink.writableFinished, source.readableEnded, combined, passed.join(''), pass.readableEnded, promiseOutput.join(''), aborted.destroyed, reason];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_stream_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseStream = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseStream").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["AB",true,true,"leftright","pass",true,"promise",true,"stop"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
