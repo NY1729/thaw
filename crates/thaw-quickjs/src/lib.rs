@@ -2302,6 +2302,7 @@ const PLATFORM_GLOBALS: &str = r#"
         this.__thawClosed = false;
         this.__thawOnMessage = null;
         this.__thawOnMessageError = null;
+        this.__thawQueue = [];
         const channels = broadcastChannels.get(this.name) || new Set();
         channels.add(this);
         broadcastChannels.set(this.name, channels);
@@ -2317,9 +2318,12 @@ const PLATFORM_GLOBALS: &str = r#"
             queueMicrotask(() => channel.__thawDispatchError(error));
             continue;
           }
+          channel.__thawQueue.push({ data: copy });
           queueMicrotask(() => {
             if (channel.__thawClosed) return;
-            const event = new MessageEvent('message', { data: copy });
+            const record = channel.__thawQueue.shift();
+            if (!record) return;
+            const event = new MessageEvent('message', { data: record.data });
             channel.dispatchEvent(event);
             if (typeof channel.__thawOnMessage === 'function') channel.__thawOnMessage.call(channel, event);
           });
