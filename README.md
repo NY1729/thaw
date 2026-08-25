@@ -376,7 +376,9 @@ The workspace crates have narrow responsibilities:
   requests search ancestor `node_modules` directories from the Worker file and
   honor exact and single-wildcard root/subpath `exports` with
   `require`/`node`/`default` conditions; the nearest package scope also resolves
-  exact and single-wildcard `imports` aliases with the same conditions
+  exact and single-wildcard `imports` aliases with the same conditions, while
+  invalid absolute, parent-traversing and `node_modules` package targets are
+  rejected with `ERR_INVALID_PACKAGE_TARGET`
   (embedding arbitrary runtime-selected files into one binary remains
   impossible without declaring their candidate set); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
