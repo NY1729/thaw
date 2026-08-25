@@ -303,6 +303,9 @@ The workspace crates have narrow responsibilities:
   removal, and fatal decoding errors
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
+- QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
+  `node:buffer`, with UTF-8/hex/Base64/Latin-1/UTF-16 conversion, allocation,
+  concatenation, shared slices, copying, filling, search and integer access
 - QuickJS bundles expose `performance.timeOrigin` and elapsed-millisecond
   `performance.now()` values scoped to the shared JavaScript context
 - The shared `process` global and `node:process` module provide asynchronous
