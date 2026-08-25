@@ -138,7 +138,8 @@ The workspace crates have narrow responsibilities:
   locals, function parameters/returns, fixed-shape object fields, nested calls,
   async frames, and homogeneous arrays (including index updates and spread
   concatenation). `typeof` observes the runtime member and narrows two-member
-  unions in both equality and inequality branches
+  unions in both equality and inequality branches, after terminating guard
+  clauses, and after assignment to a known member
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary

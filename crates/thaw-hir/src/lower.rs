@@ -2492,6 +2492,18 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                     }
+                    if let Some((name, index, elements, equal_when_true)) =
+                        self.union_typeof_narrowing(&if_stmt.test)
+                    {
+                        let continuing_index = if equal_when_true {
+                            (elements.len() == 2).then_some(1 - index)
+                        } else {
+                            Some(index)
+                        };
+                        if let Some(index) = continuing_index {
+                            self.union_narrowings.insert(name, (index, elements));
+                        }
+                    }
                 }
             }
         }
@@ -6925,6 +6937,13 @@ impl<'a> FnLowerer<'a> {
                         .insert(name, payload.as_ref().clone());
                 } else {
                     self.nullish_narrowings.remove(&name);
+                }
+            } else if let Some(HirType::Union(elements)) = self.scope.get(&name) {
+                if let Some(index) = elements.iter().position(|member| member == &rhs_type) {
+                    self.union_narrowings
+                        .insert(name, (index, elements.clone()));
+                } else {
+                    self.union_narrowings.remove(&name);
                 }
             }
         }

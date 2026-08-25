@@ -13524,9 +13524,13 @@ mod tests {
             function describeReverse(value: string | number): string {
                 if ("number" !== typeof value) {
                     return value + "?";
-                } else {
-                    return String(value * 2);
                 }
+                return String(value * 2);
+            }
+            function reassigned(): number {
+                let value: string | number = "initial";
+                value = 4;
+                return value + 1;
             }
             function fieldKind(value: { data: string | number }): string {
                 return typeof value.data;
@@ -13542,6 +13546,7 @@ mod tests {
                 console.log(describe(42));
                 console.log(describeReverse("ok"));
                 console.log(describeReverse(5));
+                console.log(reassigned());
                 console.log(fieldKind({ data: "field" }));
                 console.log(fieldKind({ data: 7 }));
                 console.log(kind(await delayed("later")));
@@ -13550,7 +13555,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
-            "string\nnumber\nhello!\n43\nok?\n10\nstring\nnumber\nstring\nnumber\n"
+            "string\nnumber\nhello!\n43\nok?\n10\n5\nstring\nnumber\nstring\nnumber\n"
         );
     }
 
