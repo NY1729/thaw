@@ -457,6 +457,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "httlib-huffman"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a9fcbcc408c5526c3ab80d534e5c86e7967c1fb7aa0a8c76abd1edc27deb877"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1412,6 +1418,7 @@ dependencies = [
  "brotli",
  "flate2",
  "getrandom 0.2.17",
+ "httlib-huffman",
  "libc",
  "rquickjs",
  "rustls",
