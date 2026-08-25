@@ -6223,6 +6223,37 @@ mod tests {
     }
 
     #[test]
+    fn transform_stream_applies_readable_backpressure_and_strategies() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_transform_stream_backpressure");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var events = [], transform = new TransformStream({ transform: function(value, controller) { events.push('transform' + value); controller.enqueue(value); } }, { highWaterMark: 3 }, { highWaterMark: 1 }), writer = transform.writable.getWriter(), reader = transform.readable.getReader(), firstWrite = writer.write(1).then(function() { events.push('write1'); }); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var afterFirst = events.slice(), secondWrite = writer.write(2).then(function() { events.push('write2'); }); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var whileFull = events.slice(), first = await reader.read(); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var afterRead = events.slice(), second = await reader.read(); await Promise.all([firstWrite, secondWrite]); var defaultEvents = [], defaults = new TransformStream({ transform: function(value, controller) { defaultEvents.push('transform'); controller.enqueue(value); } }), defaultWriter = defaults.writable.getWriter(), defaultReader = defaults.readable.getReader(), defaultWrite = defaultWriter.write(3).then(function() { defaultEvents.push('write'); }); await new Promise(function(resolve) { setTimeout(resolve, 0); }); var defaultBlocked = defaultEvents.slice(), defaultRead = defaultReader.read(); await Promise.all([defaultWrite, defaultRead]); var sizes = [], desired = [], strategic = new TransformStream({ transform: function(value, controller) { desired.push(controller.desiredSize); controller.enqueue(value); desired.push(controller.desiredSize); } }, { highWaterMark: 5, size: function(value) { sizes.push(['w', value]); return 2; } }, { highWaterMark: 4, size: function(value) { sizes.push(['r', value]); return 3; } }), strategicWriter = strategic.writable.getWriter(), strategicReader = strategic.readable.getReader(), strategicWrite = strategicWriter.write('x'); await strategicWrite; var strategicValue = await strategicReader.read(), reason = new Error('stop'), cancelled = new TransformStream(), cancelledWriter = cancelled.writable.getWriter(), cancelledReader = cancelled.readable.getReader(), blockedWrite = cancelledWriter.write(1).catch(function(error) { return error; }); await new Promise(function(resolve) { setTimeout(resolve, 0); }); await cancelledReader.cancel(reason); var writeError = await blockedWrite, closedError = await cancelledWriter.closed.catch(function(error) { return error; }); return [afterFirst, whileFull, first.value, afterRead, second.value, writer.desiredSize, defaultBlocked, defaultEvents, sizes, desired, strategicValue.value, strategicWriter.desiredSize, writeError === reason, closedError === reason]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_transform_stream_backpressure_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTransformStreamBackpressure = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseTransformStreamBackpressure")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["transform1","write1"],["transform1","write1"],1,["transform1","write1","transform2","write2"],2,3,[],["transform","write"],[["w","x"],["r","x"]],[4,1],"x",5,true,true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn readable_stream_from_adapts_sync_and_async_iterables() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_readable_stream_from");
