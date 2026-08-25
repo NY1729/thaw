@@ -35,7 +35,13 @@ use std::time::Duration;
 
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use sha2::{Digest, Sha256, Sha512};
+use std::sync::Arc;
+
+type TlsStream = StreamOwned<ClientConnection, TcpStream>;
+type TlsStreamTable = (u32, HashMap<u32, TlsStream>);
 
 fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
@@ -76,6 +82,7 @@ thread_local! {
     static NET_STREAMS: RefCell<(u32, HashMap<u32, TcpStream>)> = RefCell::new((1, HashMap::new()));
     static NET_LISTENERS: RefCell<(u32, HashMap<u32, TcpListener>)> = RefCell::new((1, HashMap::new()));
     static UDP_SOCKETS: RefCell<(u32, HashMap<u32, UdpSocket>)> = RefCell::new((1, HashMap::new()));
+    static TLS_STREAMS: RefCell<TlsStreamTable> = RefCell::new((1, HashMap::new()));
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -252,6 +259,84 @@ fn udp_close(handle: u32) {
     });
 }
 
+fn tls_connect(host: &str, port: u16, server_name: &str, ca_der: &[u8]) -> String {
+    let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if !ca_der.is_empty() {
+        if let Err(error) = roots.add(CertificateDer::from(ca_der.to_vec())) {
+            return format!("err:{error}");
+        }
+    }
+    let config = Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let name = match ServerName::try_from(server_name.to_string()) {
+        Ok(name) => name,
+        Err(error) => return format!("err:{error}"),
+    };
+    let mut socket = match TcpStream::connect((host, port)) {
+        Ok(socket) => socket,
+        Err(error) => return format!("err:{error}"),
+    };
+    let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut connection = match ClientConnection::new(config, name) {
+        Ok(connection) => connection,
+        Err(error) => return format!("err:{error}"),
+    };
+    while connection.is_handshaking() {
+        if let Err(error) = connection.complete_io(&mut socket) {
+            return format!("err:{error}");
+        }
+    }
+    TLS_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let handle = streams.0;
+        streams.0 = streams.0.wrapping_add(1).max(1);
+        streams
+            .1
+            .insert(handle, StreamOwned::new(connection, socket));
+        format!("ok:{handle}")
+    })
+}
+
+fn tls_write(handle: u32, value: &[u8]) -> String {
+    TLS_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let Some(stream) = streams.1.get_mut(&handle) else {
+            return "err:socket is closed".to_string();
+        };
+        stream
+            .write_all(value)
+            .and_then(|_| stream.flush())
+            .map(|_| "ok".to_string())
+            .unwrap_or_else(|error| format!("err:{error}"))
+    })
+}
+
+fn tls_finish(handle: u32) -> String {
+    TLS_STREAMS.with(|streams| {
+        let Some(mut stream) = streams.borrow_mut().1.remove(&handle) else {
+            return "err:socket is closed".to_string();
+        };
+        stream.conn.send_close_notify();
+        if let Err(error) = stream.flush() {
+            return format!("err:{error}");
+        }
+        let mut value = Vec::new();
+        match stream.read_to_end(&mut value) {
+            Ok(_) => format!("ok:{}", hex_encode(&value)),
+            Err(error) => format!("err:{error}"),
+        }
+    })
+}
+
+fn tls_destroy(handle: u32) {
+    TLS_STREAMS.with(|streams| {
+        streams.borrow_mut().1.remove(&handle);
+    });
+}
+
 fn to_str(ptr: *const c_char) -> String {
     unsafe { CStr::from_ptr(ptr) }
         .to_string_lossy()
@@ -415,6 +500,24 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let udp_close_function =
                     Function::new(ctx.clone(), |handle: u32| udp_close(handle))
                         .expect("failed to create JavaScript UDP closer");
+                let tls_connect_function = Function::new(
+                    ctx.clone(),
+                    |host: String, port: u32, server_name: String, ca: String| {
+                        tls_connect(&host, port as u16, &server_name, &hex_decode(&ca))
+                    },
+                )
+                .expect("failed to create JavaScript TLS connector");
+                let tls_write_function =
+                    Function::new(ctx.clone(), |handle: u32, value: String| {
+                        tls_write(handle, &hex_decode(&value))
+                    })
+                    .expect("failed to create JavaScript TLS writer");
+                let tls_finish_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_finish(handle))
+                        .expect("failed to create JavaScript TLS finisher");
+                let tls_destroy_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_destroy(handle))
+                        .expect("failed to create JavaScript TLS closer");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -463,6 +566,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_udp_close", udp_close_function)
                     .expect("failed to install JavaScript UDP closer");
+                ctx.globals()
+                    .set("__thaw_tls_connect", tls_connect_function)
+                    .expect("failed to install JavaScript TLS connector");
+                ctx.globals()
+                    .set("__thaw_tls_write", tls_write_function)
+                    .expect("failed to install JavaScript TLS writer");
+                ctx.globals()
+                    .set("__thaw_tls_finish", tls_finish_function)
+                    .expect("failed to install JavaScript TLS finisher");
+                ctx.globals()
+                    .set("__thaw_tls_destroy", tls_destroy_function)
+                    .expect("failed to install JavaScript TLS closer");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
