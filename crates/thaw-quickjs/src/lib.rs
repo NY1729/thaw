@@ -37,11 +37,12 @@ use base64::Engine as _;
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
 use rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName,
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
 use rustls::server::WebPkiClientVerifier;
 use rustls::{
-    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+    ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, RootCertStore,
+    ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
 };
 use sha2::{Digest, Sha256, Sha512};
 use std::sync::Arc;
@@ -61,6 +62,46 @@ struct TlsListener {
 struct TlsCertificates {
     peer: Option<Vec<u8>>,
     local: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct InsecureServerVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for InsecureServerVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, RustlsError> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, RustlsError> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, RustlsError> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
@@ -353,6 +394,7 @@ struct TlsClientOptions<'a> {
     key_spec: &'a str,
     alpn_spec: &'a str,
     report_alpn: bool,
+    reject_unauthorized: bool,
 }
 
 fn tls_connect(options: TlsClientOptions<'_>) -> String {
@@ -365,6 +407,7 @@ fn tls_connect(options: TlsClientOptions<'_>) -> String {
         key_spec,
         alpn_spec,
         report_alpn,
+        reject_unauthorized,
     } = options;
     let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
@@ -403,6 +446,11 @@ fn tls_connect(options: TlsClientOptions<'_>) -> String {
     };
     let mut config = config;
     config.alpn_protocols = decode_alpn_protocols(alpn_spec);
+    if !reject_unauthorized {
+        config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(InsecureServerVerifier));
+    }
     let config = Arc::new(config);
     let name = match ServerName::try_from(server_name.to_string()) {
         Ok(name) => name,
@@ -1048,6 +1096,7 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                             key_spec: "",
                             alpn_spec: "",
                             report_alpn: false,
+                            reject_unauthorized: true,
                         })
                     },
                 )
@@ -1069,6 +1118,7 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                             key_spec: &key,
                             alpn_spec: "",
                             report_alpn: false,
+                            reject_unauthorized: true,
                         })
                     },
                 )
@@ -1081,7 +1131,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                      ca: String,
                      cert: String,
                      key: String,
-                     alpn: String| {
+                     options: String| {
+                        let (verification, alpn) =
+                            options.split_once('|').unwrap_or(("1", options.as_str()));
                         tls_connect(TlsClientOptions {
                             host: &host,
                             port: port as u16,
@@ -1089,8 +1141,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                             ca_spec: &ca,
                             cert_spec: &cert,
                             key_spec: &key,
-                            alpn_spec: &alpn,
+                            alpn_spec: alpn,
                             report_alpn: true,
+                            reject_unauthorized: verification != "0",
                         })
                     },
                 )
