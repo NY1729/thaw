@@ -1531,6 +1531,24 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
         {
             Some(TsKeywordTypeKind::TsBooleanKeyword)
         }
+        Expr::Bin(binary)
+            if matches!(
+                binary.op,
+                BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Exp
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitAnd
+                    | BinaryOp::LShift
+                    | BinaryOp::RShift
+                    | BinaryOp::ZeroFillRShift
+            ) =>
+        {
+            Some(TsKeywordTypeKind::TsNumberKeyword)
+        }
         Expr::Call(call) => match &call.callee {
             Callee::Expr(callee) => match callee.as_ref() {
                 Expr::Ident(identifier) if identifier.sym == *"String" => {
