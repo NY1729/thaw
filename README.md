@@ -386,7 +386,9 @@ The workspace crates have narrow responsibilities:
   generic pattern for arrow and function expressions, including conditional
   expressions and `if`/block paths whose every return selects the same
   parameter. Primitive number, string, boolean, `null` and `undefined` returns
-  infer their distinct concrete type through the same control-flow check. The equivalent
+  infer their distinct concrete type through the same control-flow check.
+  Comparisons, supported unary operators, templates and primitive conversion
+  calls also contribute their statically fixed result type. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Callable assignment compares the effective Promise-wrapped return of named
