@@ -362,7 +362,9 @@ The workspace crates have narrow responsibilities:
   `construct(callback)` hooks gate readable pulls, queued writes and finalization;
   construction failures run normal destruction and reject queued callbacks.
   Streams expose EventEmitter-compatible add/prepend/remove/list/enumerate APIs,
-  including Symbol event names, once-listener ordering and max-listener state;
+  including Symbol event names, once-listener ordering and max-listener state.
+  `newListener`/`removeListener` meta-events observe single and bulk changes;
+  duplicate removal is one-at-a-time and raw once wrappers expose `.listener`;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
