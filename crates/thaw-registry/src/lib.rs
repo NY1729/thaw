@@ -10230,7 +10230,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            for expected in ["GET /redirect ", "GET /final ", "POST /echo "] {
+            for expected in [
+                "GET /redirect ",
+                "GET /final ",
+                "POST /echo ",
+                "POST /multipart ",
+            ] {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 stream.read_to_end(&mut request).unwrap();
@@ -10244,11 +10249,22 @@ mod tests {
                     stream
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}")
                         .unwrap();
-                } else {
+                } else if expected.contains("echo") {
                     assert!(request.to_ascii_lowercase().contains("x-thaw: enabled\r\n"));
                     assert!(request.ends_with("payload"));
                     stream
                         .write_all(b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload")
+                        .unwrap();
+                } else {
+                    let lower = request.to_ascii_lowercase();
+                    assert!(lower.contains(
+                        "content-type: multipart/form-data; boundary=----thaw-formdata-"
+                    ));
+                    assert!(request.contains("name=\"title\"\r\n\r\nthaw"));
+                    assert!(request.contains("name=\"asset\"; filename=\"note.txt\""));
+                    assert!(request.ends_with("file-body\r\n------thaw-formdata-1--\r\n"));
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/form-data; boundary=reply-boundary\r\nConnection: close\r\n\r\n--reply-boundary\r\nContent-Disposition: form-data; name=\"answer\"\r\n\r\n42\r\n--reply-boundary\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"reply.txt\"\r\nContent-Type: text/plain\r\n\r\nreply-body\r\n--reply-boundary--\r\n")
                         .unwrap();
                 }
             }
@@ -10257,7 +10273,7 @@ mod tests {
         let dir = temp_registry("global_fetch");
         fs::write(
             dir.join("index.js"),
-            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError]; };",
+            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text()]; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("global_fetch_node_modules");
@@ -10274,7 +10290,7 @@ mod tests {
         assert_eq!(
             result,
             format!(
-                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true]"#
+                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body"]"#
             )
         );
         server.join().unwrap();

@@ -4348,14 +4348,41 @@ const PLATFORM_GLOBALS: &str = r#"
       get [Symbol.toStringTag]() { return 'FormData'; }
     }
     globalThis.FormData = FormData;
+    Object.defineProperty(globalThis, '__thaw_form_data_entries', {
+      configurable: true,
+      value(value) { const entries = formDataEntries.get(value); if (!entries) throw new TypeError('invalid FormData receiver'); return entries.slice(); }
+    });
   }
   if (typeof globalThis.Response !== 'function') {
     const responseData = new WeakMap();
     const bytesBodyStream = bytes => new ReadableStream({ start(controller) { if (bytes.byteLength) controller.enqueue(bytes); controller.close(); } });
+    let multipartSequence = 0;
+    const multipartEscape = value => String(value).replace(/\r/g, '%0D').replace(/\n/g, '%0A').replace(/"/g, '%22');
+    const multipartBody = value => {
+      const boundary = `----thaw-formdata-${++multipartSequence}`;
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            for (const entry of globalThis.__thaw_form_data_entries(value)) {
+              const name = multipartEscape(entry[0]), field = entry[1];
+              if (field instanceof Blob) {
+                const filename = multipartEscape(entry[2] === undefined ? field.name === undefined ? 'blob' : field.name : entry[2]);
+                controller.enqueue(Uint8Array.from(encodeUtf8(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: ${field.type || 'application/octet-stream'}\r\n\r\n`)));
+                const bytes = await field.bytes(); if (bytes.byteLength) controller.enqueue(bytes);
+                controller.enqueue(Uint8Array.from(encodeUtf8('\r\n')));
+              } else controller.enqueue(Uint8Array.from(encodeUtf8(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${field}\r\n`)));
+            }
+            controller.enqueue(Uint8Array.from(encodeUtf8(`--${boundary}--\r\n`))); controller.close();
+          } catch (error) { controller.error(error); }
+        }
+      });
+      return { stream, type: `multipart/form-data; boundary=${boundary}` };
+    };
     const responseBody = value => {
       if (value === null || value === undefined) return { stream: null, type: null };
       if (value instanceof ReadableStream) { if (value.locked || value._disturbed) throw new TypeError('Body is unusable'); return { stream: value, type: null }; }
       if (value instanceof Blob) return { stream: new ReadableStream({ async start(controller) { const bytes = await value.bytes(); if (bytes.byteLength) controller.enqueue(bytes); controller.close(); } }), type: value.type || null };
+      if (value instanceof FormData) return multipartBody(value);
       if (value instanceof URLSearchParams) { const bytes = Uint8Array.from(encodeUtf8(value.toString())); return { stream: bytesBodyStream(bytes), type: 'application/x-www-form-urlencoded;charset=UTF-8' }; }
       if (value instanceof ArrayBuffer) return { stream: bytesBodyStream(new Uint8Array(value.slice(0))), type: null };
       if (ArrayBuffer.isView(value)) return { stream: bytesBodyStream(new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))), type: null };
@@ -4368,6 +4395,30 @@ const PLATFORM_GLOBALS: &str = r#"
       const reader = record.body.getReader(), chunks = []; let length = 0;
       while (true) { const result = await reader.read(); if (result.done) break; const chunk = result.value instanceof ArrayBuffer ? new Uint8Array(result.value) : ArrayBuffer.isView(result.value) ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength) : Uint8Array.from(encodeUtf8(String(result.value))); chunks.push(chunk); length += chunk.byteLength; }
       const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; } return output;
+    };
+    const parseFormDataBody = (type, bytes) => {
+      const data = new FormData(), lower = type.toLowerCase();
+      if (lower.startsWith('application/x-www-form-urlencoded')) { const params = new URLSearchParams(new TextDecoder().decode(bytes)); for (const [name, value] of params) data.append(name, value); return data; }
+      if (!lower.startsWith('multipart/form-data')) throw new TypeError('unsupported form data content type');
+      const boundaryMatch = /(?:^|;)\s*boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(type);
+      if (!boundaryMatch) throw new TypeError('multipart boundary is missing');
+      const boundary = boundaryMatch[1] || boundaryMatch[2]; let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+      const delimiter = `--${boundary}`, sections = binary.split(delimiter);
+      for (let section of sections.slice(1)) {
+        if (section.startsWith('--')) break;
+        if (section.startsWith('\r\n')) section = section.slice(2);
+        if (section.endsWith('\r\n')) section = section.slice(0, -2);
+        const marker = section.indexOf('\r\n\r\n'); if (marker < 0) continue;
+        const rawHeaders = section.slice(0, marker), content = section.slice(marker + 4), headers = Object.create(null);
+        for (const line of rawHeaders.split('\r\n')) { const colon = line.indexOf(':'); if (colon >= 0) headers[line.slice(0, colon).toLowerCase()] = line.slice(colon + 1).trim(); }
+        const disposition = headers['content-disposition'] || '', nameMatch = /(?:^|;)\s*name="([^"]*)"/i.exec(disposition); if (!nameMatch) continue;
+        const decodeParameter = value => value.replace(/%22/gi, '"').replace(/%0D/gi, '\r').replace(/%0A/gi, '\n');
+        const name = decodeParameter(nameMatch[1]), filenameMatch = /(?:^|;)\s*filename="([^"]*)"/i.exec(disposition), partBytes = Uint8Array.from(content, character => character.charCodeAt(0));
+        if (filenameMatch) data.append(name, new File([partBytes], decodeParameter(filenameMatch[1]), { type: headers['content-type'] || 'application/octet-stream' }));
+        else data.append(name, new TextDecoder().decode(partBytes));
+      }
+      return data;
     };
     class Response {
       constructor(body = null, init = {}) {
@@ -4394,7 +4445,7 @@ const PLATFORM_GLOBALS: &str = r#"
       async bytes() { return consumeResponseBody(this); }
       async json() { return JSON.parse(await this.text()); }
       async text() { return new TextDecoder().decode(await consumeResponseBody(this)); }
-      async formData() { const type = this.headers.get('content-type') || ''; if (!type.toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new TypeError('unsupported form data content type'); const params = new URLSearchParams(await this.text()), data = new FormData(); for (const [name, value] of params) data.append(name, value); return data; }
+      async formData() { const type = this.headers.get('content-type') || ''; return parseFormDataBody(type, await consumeResponseBody(this)); }
       clone() { const record = responseData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Response(body, { status: record.status, statusText: record.statusText, headers: record.headers }); const cloneRecord = responseData.get(clone); cloneRecord.type = record.type; cloneRecord.url = record.url; cloneRecord.redirected = record.redirected; return clone; }
       static error() { const response = new Response(); const record = responseData.get(response); record.status = 0; record.type = 'error'; return response; }
       static json(value, init = {}) { const body = JSON.stringify(value); if (body === undefined) throw new TypeError('value is not JSON serializable'); const headers = new Headers(init.headers); if (!headers.has('content-type')) headers.set('content-type', 'application/json'); return new Response(body, { ...init, headers }); }
@@ -4478,7 +4529,7 @@ const PLATFORM_GLOBALS: &str = r#"
       async bytes() { return consumeRequestBody(this); }
       async json() { return JSON.parse(await this.text()); }
       async text() { return new TextDecoder().decode(await consumeRequestBody(this)); }
-      async formData() { const type = this.headers.get('content-type') || ''; if (!type.toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new TypeError('unsupported form data content type'); const params = new URLSearchParams(await this.text()), data = new FormData(); for (const [name, value] of params) data.append(name, value); return data; }
+      async formData() { const type = this.headers.get('content-type') || ''; return parseFormDataBody(type, await consumeRequestBody(this)); }
       clone() { const record = requestData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } return new Request(record.url, { method: record.method, headers: record.headers, body, signal: record.signal, cache: record.cache, credentials: record.credentials, integrity: record.integrity, keepalive: record.keepalive, mode: record.mode, redirect: record.redirect, referrer: record.referrer, referrerPolicy: record.referrerPolicy, duplex: 'half' }); }
       get [Symbol.toStringTag]() { return 'Request'; }
     }
