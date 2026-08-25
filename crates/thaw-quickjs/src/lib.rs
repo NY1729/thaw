@@ -292,6 +292,47 @@ fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) ->
     }
 }
 
+#[cfg(unix)]
+fn fs_write_with_mode(path: &str, value: &str, append: bool) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (mode, encoded) = value.split_once(',').unwrap_or(("438", value));
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .mode(mode.parse::<u32>().unwrap_or(0o666));
+    options.open(path)?.write_all(&hex_decode(encoded))
+}
+
+#[cfg(not(unix))]
+fn fs_write_with_mode(path: &str, value: &str, append: bool) -> io::Result<()> {
+    let (_, encoded) = value.split_once(',').unwrap_or(("438", value));
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append);
+    options.open(path)?.write_all(&hex_decode(encoded))
+}
+
+#[cfg(unix)]
+fn fs_mkdir_with_mode(path: &str, value: &str, recursive: bool) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder
+        .recursive(recursive)
+        .mode(value.parse::<u32>().unwrap_or(0o777))
+        .create(path)
+}
+
+#[cfg(not(unix))]
+fn fs_mkdir_with_mode(path: &str, _value: &str, recursive: bool) -> io::Result<()> {
+    std::fs::DirBuilder::new().recursive(recursive).create(path)
+}
+
 fn system_time_millis(time: io::Result<std::time::SystemTime>) -> f64 {
     time.ok()
         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
@@ -378,6 +419,8 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
             Ok(serde_json::json!({ "ok": true, "data": hex_encode(&bytes), "length": count }))
         })(),
         "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
+        "write_mode" => fs_write_with_mode(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
+        "append_mode" => fs_write_with_mode(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
         "write_range" => (|| -> io::Result<serde_json::Value> {
             let (position, encoded) = value.split_once(':').unwrap_or(("0", ""));
             let bytes = hex_decode(encoded);
@@ -392,6 +435,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         })(),
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
         "mkdir" => if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
+        "mkdir_mode" => fs_mkdir_with_mode(&path, &value, recursive).map(|_| serde_json::json!({ "ok": true })),
         "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
         "stat" => std::fs::metadata(&path).map(fs_metadata_record),
         "lstat" => std::fs::symlink_metadata(&path).map(fs_metadata_record),
