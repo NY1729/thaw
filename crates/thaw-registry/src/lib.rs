@@ -6314,6 +6314,37 @@ mod tests {
     }
 
     #[test]
+    fn web_queuing_strategies_validate_and_feed_stream_sizes() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_queuing_strategies");
+        fs::write(
+            dir.join("index.js"),
+            "var web = require('node:stream/web'); module.exports = function () { function capture(action) { try { action(); } catch (error) { return [error.name, error.code]; } } var byte = new web.ByteLengthQueuingStrategy({ highWaterMark: '4' }), count = new web.CountQueuingStrategy({ highWaterMark: 2 }), byteDesired, byteStream = new ReadableStream({ start: function(controller) { controller.enqueue(new Uint8Array(3)); byteDesired = controller.desiredSize; controller.close(); } }, byte), countDesired, countStream = new ReadableStream({ start: function(controller) { controller.enqueue('a'); controller.enqueue('b'); countDesired = controller.desiredSize; controller.close(); } }, count), negative = new CountQueuingStrategy({ highWaterMark: -1 }); return [byte.highWaterMark, count.highWaterMark, byte.size(new Uint8Array(3)), byte.size({ byteLength: 5 }), count.size(null), Object.keys(byte), Object.keys(ByteLengthQueuingStrategy.prototype), byteDesired, countDesired, byteStream.locked, countStream.locked, capture(function() { new ByteLengthQueuingStrategy(); }), capture(function() { new CountQueuingStrategy({}); }), capture(function() { new ReadableStream({}, negative); }), capture(function() { Object.getOwnPropertyDescriptor(CountQueuingStrategy.prototype, 'highWaterMark').get.call({}); }), web.ByteLengthQueuingStrategy === globalThis.ByteLengthQueuingStrategy]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_queuing_strategies_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebQueuingStrategies = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebQueuingStrategies")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[4,2,3,5,1,[],["highWaterMark","size"],1,0,false,false,["TypeError","ERR_INVALID_ARG_TYPE"],["TypeError","ERR_MISSING_OPTION"],["RangeError","ERR_INVALID_ARG_VALUE"],["TypeError",null],true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_pipe_to_propagates_completion_errors_and_abort() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_pipe_to_options");

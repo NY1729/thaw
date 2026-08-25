@@ -412,6 +412,10 @@ The workspace crates have narrow responsibilities:
   pulls are automatically scheduled and serialized until capacity is filled,
   while close remains pending until queued chunks have been consumed. Byte and
   BYOB queues use the same byte-accurate desired-size accounting.
+  `ByteLengthQueuingStrategy` and `CountQueuingStrategy` expose Web-IDL-style
+  enumerable prototype getters/callbacks, validate required constructor options
+  with Node error codes, and feed their converted marks and sizes directly into
+  stream capacity accounting.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
