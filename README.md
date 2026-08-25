@@ -429,6 +429,9 @@ The workspace crates have narrow responsibilities:
   Node-shaped host errors
 - Copying, canonical path resolution and unique temporary-directory creation
   are available through synchronous, callback and Promise APIs
+- `fs/promises.open()` returns FileHandle objects with repeated read/write/
+  append/stat/truncate operations, stream creation, close-state errors and
+  async-dispose support
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
   classes with ranged/chunked reads, append mode, byte counters and
   open/ready/finish/end/close lifecycle events
