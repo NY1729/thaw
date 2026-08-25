@@ -300,6 +300,9 @@ The workspace crates have narrow responsibilities:
   `performance.now()` values scoped to the shared JavaScript context
 - QuickJS bundles provide cycle-preserving `structuredClone` support for
   objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views
+- QuickJS bundles provide `AbortController`/`AbortSignal` with reasons,
+  `onabort`, listener registration, `throwIfAborted`, and static abort/timeout
+  signals integrated with the timer queue
 - The ambient `process` global and importable `node:process`/`process` module
   share a microtask-backed `nextTick` that is asynchronous and forwards
   callback arguments

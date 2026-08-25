@@ -222,6 +222,67 @@ const PLATFORM_GLOBALS: &str = r#"
       return clone(value);
     };
   }
+  if (typeof globalThis.AbortController !== 'function') {
+    const abortError = message => {
+      const error = new Error(message || 'This operation was aborted');
+      error.name = 'AbortError';
+      return error;
+    };
+    class AbortSignal {
+      constructor() {
+        this.aborted = false;
+        this.reason = undefined;
+        this.onabort = null;
+        this.listeners = [];
+      }
+      addEventListener(type, callback, options = {}) {
+        if (type !== 'abort' || callback == null) return;
+        if (typeof callback !== 'function'
+            && typeof callback.handleEvent !== 'function') {
+          throw new TypeError('abort listener must be callable');
+        }
+        this.listeners.push({ callback, once: Boolean(options && options.once) });
+      }
+      removeEventListener(type, callback) {
+        if (type === 'abort') {
+          this.listeners = this.listeners.filter(entry => entry.callback !== callback);
+        }
+      }
+      throwIfAborted() {
+        if (this.aborted) throw this.reason;
+      }
+      __thawAbort(reason) {
+        if (this.aborted) return;
+        this.aborted = true;
+        this.reason = reason === undefined ? abortError() : reason;
+        const event = { type: 'abort', target: this, currentTarget: this };
+        if (typeof this.onabort === 'function') this.onabort.call(this, event);
+        const listeners = this.listeners.slice();
+        this.listeners = this.listeners.filter(entry => !entry.once);
+        for (const entry of listeners) {
+          if (typeof entry.callback === 'function') entry.callback.call(this, event);
+          else entry.callback.handleEvent(event);
+        }
+      }
+      static abort(reason) {
+        const signal = new AbortSignal();
+        signal.__thawAbort(reason);
+        return signal;
+      }
+      static timeout(milliseconds) {
+        const signal = new AbortSignal();
+        setTimeout(() => signal.__thawAbort(abortError('The operation timed out')),
+                   milliseconds);
+        return signal;
+      }
+    }
+    class AbortController {
+      constructor() { this.signal = new AbortSignal(); }
+      abort(reason) { this.signal.__thawAbort(reason); }
+    }
+    globalThis.AbortSignal = AbortSignal;
+    globalThis.AbortController = AbortController;
+  }
   globalThis.__thaw_next_timer_delay = () => {
     let due = Infinity;
     for (const timer of timers.values()) due = Math.min(due, timer.due);
@@ -1218,6 +1279,31 @@ mod tests {
             1
         );
         assert_eq!(call("cloneValues", "[]"), "[true,true,1,2,4,true,6,true]");
+    }
+
+    #[test]
+    fn abort_controller_dispatches_once_and_timeout_aborts() {
+        assert_eq!(
+            load(
+                "async function abortSignals() {\n\
+                   const controller = new AbortController();\n\
+                   const events = [];\n\
+                   controller.signal.onabort = () => events.push('property');\n\
+                   controller.signal.addEventListener('abort', () => events.push('once'), { once: true });\n\
+                   controller.abort('reason'); controller.abort('ignored');\n\
+                   let thrown = '';\n\
+                   try { controller.signal.throwIfAborted(); } catch (error) { thrown = error; }\n\
+                   const timed = AbortSignal.timeout(0);\n\
+                   await new Promise(resolve => timed.addEventListener('abort', resolve));\n\
+                   return [events.join(','), controller.signal.reason, thrown, timed.aborted, timed.reason.name];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("abortSignals", "[]"),
+            r#"["property,once","reason","reason",true,"AbortError"]"#
+        );
     }
 
     #[test]
