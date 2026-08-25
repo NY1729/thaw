@@ -238,6 +238,29 @@ fn fs_access(path: &str, mode: i32) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn fs_statfs(path: &str) -> io::Result<serde_json::Value> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok(
+        serde_json::json!({ "ok": true, "type": 0, "bsize": stats.f_bsize, "blocks": stats.f_blocks, "bfree": stats.f_bfree, "bavail": stats.f_bavail, "files": stats.f_files, "ffree": stats.f_ffree }),
+    )
+}
+
+#[cfg(not(unix))]
+fn fs_statfs(_path: &str) -> io::Result<serde_json::Value> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem statistics are unsupported",
+    ))
+}
+
 #[cfg(not(unix))]
 fn fs_access(path: &str, mode: i32) -> io::Result<()> {
     let metadata = std::fs::metadata(path)?;
@@ -306,6 +329,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
         "access" => fs_access(&path, value.parse::<i32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
+        "statfs" => fs_statfs(&path),
         "read" => std::fs::read(&path).map(|bytes| serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })),
         "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
