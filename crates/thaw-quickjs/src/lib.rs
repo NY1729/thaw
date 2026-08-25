@@ -3745,7 +3745,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (stream._state !== 'readable' || stream._closeRequested) throw new TypeError('stream is not readable');
         if (stream._reads.length) stream._reads.shift().resolve({ value: chunk, done: false });
         else { let size; try { size = stream._chunkSize(chunk); } catch (error) { this.error(error); throw error; } stream._queue.push(chunk); stream._queueSizes.push(size); stream._queueTotalSize += size; }
-        stream._callPullIfNeeded();
+        stream._notifyCapacity(); stream._callPullIfNeeded();
       }
       close() {
         const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) return;
@@ -3753,7 +3753,7 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       error(error) {
         const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; while (stream._reads.length) stream._reads.shift().reject(error); stream._rejectClosed(error);
+        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; stream._rejectCapacity(error); while (stream._reads.length) stream._reads.shift().reject(error); stream._rejectClosed(error);
       }
       get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
     }
@@ -3789,7 +3789,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (!ArrayBuffer.isView(chunk) || chunk.byteLength === 0) throw new TypeError('byte stream chunks must be non-empty ArrayBuffer views');
         stream._queue.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); stream._queueSizes.push(chunk.byteLength); stream._queueTotalSize += chunk.byteLength; stream._drainByob();
         if (stream._reads.length && stream._queue.length) stream._reads.shift().resolve({ value: stream._dequeue(), done: false });
-        stream._callPullIfNeeded();
+        stream._notifyCapacity(); stream._callPullIfNeeded();
       }
       close() {
         const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) return;
@@ -3797,7 +3797,7 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       error(error) {
         const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; stream._byobRequest = null; while (stream._reads.length) stream._reads.shift().reject(error); while (stream._byobReads.length) stream._byobReads.shift().reject(error); stream._rejectClosed(error);
+        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; stream._byobRequest = null; stream._rejectCapacity(error); while (stream._reads.length) stream._reads.shift().reject(error); while (stream._byobReads.length) stream._byobReads.shift().reject(error); stream._rejectClosed(error);
       }
       get byobRequest() { return this._stream._byobRequest; }
       get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
@@ -3811,7 +3811,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
         if (stream._state === 'errored') return Promise.reject(stream._error);
         const result = new Promise((resolve, reject) => stream._reads.push({ reader: this, resolve, reject }));
-        stream._callPullIfNeeded();
+        stream._notifyCapacity(); stream._callPullIfNeeded();
         return result;
       }
       cancel(reason) { return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
@@ -3864,7 +3864,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (source.type === 'bytes' && strategy.size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         const defaultHighWaterMark = source.type === 'bytes' ? 0 : 1, highWaterMark = strategy.highWaterMark === undefined ? defaultHighWaterMark : Number(strategy.highWaterMark);
         if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        this._source = source; this._byteStream = source.type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = typeof strategy.size === 'function' ? strategy.size : () => 1; this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._state = 'readable'; this._closeRequested = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
+        this._source = source; this._byteStream = source.type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = typeof strategy.size === 'function' ? strategy.size : () => 1; this._autoAllocateChunkSize = this._byteStream && source.autoAllocateChunkSize !== undefined ? Number(source.autoAllocateChunkSize) : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
         this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; });
         this._closed.catch(() => {}); this._controller = this._byteStream ? new ReadableByteStreamController(this) : new ReadableStreamDefaultController(this);
         try { Promise.resolve(typeof source.start === 'function' ? source.start(this._controller) : undefined).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error)); } catch (error) { this._controller.error(error); }
@@ -3872,8 +3872,12 @@ const PLATFORM_GLOBALS: &str = r#"
       get locked() { return this._reader !== null; }
       getReader(options = {}) { if (options.mode === undefined) return new ReadableStreamDefaultReader(this); if (options.mode === 'byob') return new ReadableStreamBYOBReader(this); const error = new TypeError('invalid reader mode'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
       _chunkSize(chunk) { const size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } return size; }
-      _dequeue() { const value = this._queue.shift(), size = this._queueSizes.shift() || 0; this._queueTotalSize = Math.max(0, this._queueTotalSize - size); return value; }
-      _finishCloseIfReady() { if (!this._closeRequested || this._queue.length || this._state !== 'readable') return; this._state = 'closed'; this._byobRequest = null; while (this._reads.length) this._reads.shift().resolve({ value: undefined, done: true }); while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, read.filled), done: read.filled === 0 }); } this._resolveClosed(); }
+      _dequeue() { const value = this._queue.shift(), size = this._queueSizes.shift() || 0; this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._notifyCapacity(); return value; }
+      _hasCapacity() { return this._state === 'readable' && !this._closeRequested && (this._reads.length > 0 || this._byobReads.length > 0 || this._highWaterMark - this._queueTotalSize > 0); }
+      _waitForCapacity() { if (this._hasCapacity()) return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'readable' || this._closeRequested) return Promise.reject(webInvalidState('ReadableStream is closed')); return new Promise((resolve, reject) => this._capacityWaiters.push({ resolve, reject })); }
+      _notifyCapacity() { if (!this._hasCapacity() || !this._capacityWaiters.length) return; const waiters = this._capacityWaiters.splice(0); for (const waiter of waiters) waiter.resolve(); }
+      _rejectCapacity(error) { const waiters = this._capacityWaiters.splice(0); for (const waiter of waiters) waiter.reject(error); }
+      _finishCloseIfReady() { if (!this._closeRequested || this._queue.length || this._state !== 'readable') return; this._state = 'closed'; this._byobRequest = null; this._rejectCapacity(webInvalidState('ReadableStream is closed')); while (this._reads.length) this._reads.shift().resolve({ value: undefined, done: true }); while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, read.filled), done: read.filled === 0 }); } this._resolveClosed(); }
       _callPullIfNeeded() {
         if (!this._started || this._state !== 'readable' || this._closeRequested || typeof this._source.pull !== 'function') return;
         if (!this._reads.length && !this._byobReads.length && this._highWaterMark - this._queueTotalSize <= 0) return;
@@ -3896,7 +3900,7 @@ const PLATFORM_GLOBALS: &str = r#"
         if (this._state === 'closed' && !this._queue.length) {
           this._byobRequest = null; while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, 0), done: true }); }
         }
-        this._prepareByobRequest(); this._callPullIfNeeded();
+        this._notifyCapacity(); this._prepareByobRequest(); this._callPullIfNeeded();
       }
       _prepareByobRequest() {
         if (!this._byobReads.length || this._state !== 'readable' || this._byobRequest) return;
@@ -3907,10 +3911,10 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       _readInto(view, reader, min) {
         if (this._state === 'errored') return Promise.reject(this._error);
-        const result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, minBytes: min * view.BYTES_PER_ELEMENT, filled: 0, resolve, reject })); this._drainByob(); this._prepareByobRequest();
+        const result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, minBytes: min * view.BYTES_PER_ELEMENT, filled: 0, resolve, reject })); this._notifyCapacity(); this._drainByob(); this._prepareByobRequest();
         return result;
       }
-      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
+      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); const finish = () => this._finishCloseIfReady(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(finish); finish(); return Promise.resolve(); }
       cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); return this._cancel(reason); }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');
@@ -4040,10 +4044,10 @@ const PLATFORM_GLOBALS: &str = r#"
       get desiredSize() { return this._readableController.desiredSize; }
       enqueue(chunk) { this._readableController.enqueue(chunk); }
       error(reason) { this._readableController.error(reason); if (this._writable) this._writable._errorStream(reason); }
-      terminate() { this._readableController.close(); if (this._writable) { const error = webInvalidState('TransformStream has been terminated'); this._writable._errorStream(error); } }
+      terminate() { const error = webInvalidState('TransformStream has been terminated'); this._readableController._stream._rejectCapacity(error); this._readableController.close(); if (this._writable) this._writable._errorStream(error); }
     }
     globalThis.TransformStream = class TransformStream {
-      constructor(transformer = {}) { let readableController, writable; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); } }); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return Promise.resolve().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { readableController.error(error); } }); controller._writable = writable; }
+      constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) { let readableController, writable; const readableQueueStrategy = { ...readableStrategy, highWaterMark: readableStrategy.highWaterMark === undefined ? 0 : readableStrategy.highWaterMark }; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); } }, readableQueueStrategy); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return readableController._stream._waitForCapacity().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { readableController.error(error); } }, writableStrategy); controller._writable = writable; }
     };
     globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
     const hexFromBytes = value => Array.from(value, byte => byte.toString(16).padStart(2, '0')).join('');

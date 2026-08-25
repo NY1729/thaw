@@ -681,7 +681,10 @@ The workspace crates have narrow responsibilities:
   enqueue, error, desired-size inspection and termination with matching
   readable/writable state propagation. `ReadableStream.from()` adapts sync and
   async iterables, awaits promised values, locks source streams immediately and
-  closes iterators with the cancellation reason
+  closes iterators with the cancellation reason. Transform streams apply both
+  writable and readable queuing strategies; writes wait while readable capacity
+  is exhausted, resume after a read, and reject with the same reason when the
+  readable side is cancelled
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
   native gzip, deflate and raw-deflate implementation
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots
