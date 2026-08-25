@@ -286,8 +286,8 @@ The workspace crates have narrow responsibilities:
   entries and can be imported alongside the root; export arrays and repeated
   wildcard substitutions in their targets are resolved in declaration order
 - Minimal importable `node:path`, `node:util`, `node:process`, `node:buffer`,
-  `node:os`, `node:querystring`, `node:events`, and `node:url` modules backed by
-  the same QuickJS polyfills used by npm dependencies. The CommonJS
+  `node:os`, `node:querystring`, `node:events`, `node:assert`, and `node:url`
+  modules backed by the same QuickJS polyfills used by npm dependencies. The CommonJS
   `EventEmitter` supports ordered, one-shot and prepended listeners, removal
   and introspection; native `new EventEmitter()` class bridging remains outside
   this import surface. The
