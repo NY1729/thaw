@@ -318,6 +318,8 @@ The workspace crates have narrow responsibilities:
   completion, iterable sources and AbortSignal destruction. Writable and
   Transform work is serialized across asynchronous callbacks, with
   high-water-mark return values, queued length and `drain` notification.
+  Nested `cork()`/`uncork()` defers writes and uses `_writev` batches when
+  available; `end()` safely releases any remaining cork level.
   Readables track buffered length, support object mode and pause/resume their
   pipes until a backpressured destination drains;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
