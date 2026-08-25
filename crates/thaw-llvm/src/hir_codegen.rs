@@ -13329,6 +13329,38 @@ mod tests {
     }
 
     #[test]
+    fn compiles_same_layout_literal_unions_across_native_layouts() {
+        let source = r#"
+            function command(value: "start" | "stop"): string { return value; }
+            function numberValue(value: 1 | 2 | number): number { return value; }
+            function flag(value: true | false): boolean { return value; }
+            function fixed(value: string & "fixed"): string { return value; }
+            function state(value: { kind: "ready" | "waiting" }): string {
+                return value.kind;
+            }
+            async function delayed(value: "later" | "now"): Promise<string> {
+                await sleep(1);
+                return value;
+            }
+            async function main(): Promise<void> {
+                console.log(command("start"));
+                console.log(command("stop"));
+                console.log(numberValue(2));
+                console.log(flag(true));
+                console.log(fixed("fixed"));
+                console.log(state({ kind: "waiting" }));
+                const values: ("a" | "b")[] = ["a", "b"];
+                console.log(values.join(","));
+                console.log(await delayed("later"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "same_layout_literal_unions"),
+            "start\nstop\n2\ntrue\nfixed\nwaiting\na,b\nlater\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{

@@ -750,6 +750,34 @@ fn classify_ts_type(
             other => DtsType::Unsupported(format!("`{}` is not supported", keyword_name(other))),
         },
 
+        TsType::TsLitType(literal) => match &literal.lit {
+            TsLit::Number(_) => DtsType::Native(HirType::F64),
+            TsLit::Str(_) => DtsType::Native(HirType::Str),
+            TsLit::Bool(_) => DtsType::Native(HirType::Bool),
+            _ => DtsType::Unsupported("unsupported literal type".into()),
+        },
+
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            let mut native = None;
+            for element in &union.types {
+                match classify_ts_type(element, interfaces, generic_interfaces) {
+                    DtsType::Native(ty) if native.as_ref().is_none_or(|current| current == &ty) => {
+                        native = Some(ty);
+                    }
+                    DtsType::Native(_) => {
+                        return DtsType::Unsupported(format!(
+                            "unsupported type `{}`",
+                            describe_ts_type(ty)
+                        ))
+                    }
+                    unsupported => return unsupported,
+                }
+            }
+            native
+                .map(DtsType::Native)
+                .unwrap_or_else(|| DtsType::Unsupported("empty union type is not supported".into()))
+        }
+
         TsType::TsArrayType(arr) => {
             match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
                 DtsType::Native(HirType::F64) => {
@@ -2078,6 +2106,26 @@ mod tests {
             classify(&funcs[0]),
             Classification::Fallback { .. }
         ));
+    }
+
+    #[test]
+    fn classifies_same_layout_literal_unions_as_fast_path() {
+        let functions = parse_dts(
+            r#"export declare function mode(
+                value: "read" | "write",
+                count: 1 | 2 | number,
+                enabled: true | false
+            ): "ok" | "done";"#,
+        )
+        .unwrap();
+        let Classification::FastPath(signature) = classify(&functions[0]) else {
+            panic!("same-layout literal union should use FastPath");
+        };
+        assert_eq!(
+            signature.params,
+            vec![HirType::Str, HirType::F64, HirType::Bool]
+        );
+        assert_eq!(signature.ret, HirType::Str);
     }
 
     #[test]

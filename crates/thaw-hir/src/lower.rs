@@ -1422,12 +1422,23 @@ fn lower_ts_type(
                 "unsupported type keyword {other:?} (supports number/string/boolean/void)"
             )),
         },
+        TsType::TsLitType(literal) => match &literal.lit {
+            swc_ecma_ast::TsLit::Number(_) => Ok(HirType::F64),
+            swc_ecma_ast::TsLit::Str(_) => Ok(HirType::Str),
+            swc_ecma_ast::TsLit::Bool(_) => Ok(HirType::Bool),
+            other => Err(format!("unsupported literal type {other:?}")),
+        },
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
-            let elements = union
-                .types
-                .iter()
-                .map(|element| lower_ts_type(element, interfaces, generic_interfaces))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut elements = Vec::new();
+            for element in &union.types {
+                let element = lower_ts_type(element, interfaces, generic_interfaces)?;
+                if !elements.contains(&element) {
+                    elements.push(element);
+                }
+            }
+            if let [element] = elements.as_slice() {
+                return Ok(element.clone());
+            }
             if elements.len() == 3
                 && elements.contains(&HirType::Null)
                 && elements.contains(&HirType::Undefined)
@@ -1461,9 +1472,23 @@ fn lower_ts_type(
                 "unsupported union type {elements:?}"
             ))
         }
-        TsType::TsUnionOrIntersectionType(
-            TsUnionOrIntersectionType::TsIntersectionType(_),
-        ) => Err("intersection types are not supported yet".into()),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
+            intersection,
+        )) => {
+            let elements = intersection
+                .types
+                .iter()
+                .map(|element| lower_ts_type(element, interfaces, generic_interfaces))
+                .collect::<Result<Vec<_>, _>>()?;
+            let Some(first) = elements.first() else {
+                return Err("empty intersection type is not supported".into());
+            };
+            if elements.iter().all(|element| element == first) {
+                Ok(first.clone())
+            } else {
+                Err(format!("unsupported intersection type {elements:?}"))
+            }
+        }
         TsType::TsArrayType(arr) => Ok(HirType::Array(Box::new(lower_ts_type(
             &arr.elem_type,
             interfaces,
@@ -11990,6 +12015,39 @@ mod tests {
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn normalizes_same_layout_literal_unions_and_intersections() {
+        let program = lower(
+            r#"function text(value: "start" | "stop"): string { return value; }
+               function numberValue(value: 1 | 2 | number): number { return value; }
+               function flag(value: true | false): boolean { return value; }
+               function intersection(value: string & "fixed"): string { return value; }
+               function objectValue(value: { kind: "ready" | "waiting" }): string {
+                   return value.kind;
+               }
+               function values(input: ("a" | "b")[]): string[] { return input; }"#,
+        );
+        assert_eq!(program.functions[0].params[0].ty, HirType::Str);
+        assert_eq!(program.functions[1].params[0].ty, HirType::F64);
+        assert_eq!(program.functions[2].params[0].ty, HirType::Bool);
+        assert_eq!(program.functions[3].params[0].ty, HirType::Str);
+        assert!(matches!(
+            &program.functions[4].params[0].ty,
+            HirType::Object(fields) if fields == &vec![("kind".into(), HirType::Str)]
+        ));
+        assert_eq!(
+            program.functions[5].params[0].ty,
+            HirType::Array(Box::new(HirType::Str))
+        );
+
+        let module =
+            thaw_parser::parse_typescript(r#"function mixed(value: string | number): void {}"#)
+                .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("unsupported union type"));
     }
 
     #[test]

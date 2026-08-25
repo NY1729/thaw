@@ -130,6 +130,10 @@ The workspace crates have narrow responsibilities:
   including implicit numeric numbering, preceding-member constant expressions,
   bracketed string member reads, runtime numeric reverse lookup (unknown values
   produce `undefined`), and use before the declaration
+- Same-layout literal unions and intersections normalize to their native
+  primitive representation (`"a" | "b"` to string, numeric literals to
+  number, and boolean literals to boolean), including `.d.ts` Fast-path
+  signatures, nested object/array positions, and async frames
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
@@ -654,7 +658,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes,
-  tuples, broad union/intersection support, multi-capture export keys and the
+  tuples, heterogeneous union/intersection support, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant
