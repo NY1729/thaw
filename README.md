@@ -436,6 +436,9 @@ The workspace crates have narrow responsibilities:
 - `fs/promises.open()` returns FileHandle objects with whole-file and
   position-aware buffer/string read/write operations, append/stat/truncate,
   stream creation, close-state errors and async-dispose support
+- Numeric descriptors support sync and callback open/close/read/write,
+  fstat/truncate/metadata updates and sync/data-sync operations, sharing the
+  same lifecycle table as Promise FileHandles
 - Hard links, symbolic links, link-target reads and Unix permission changes
   are exposed through synchronous, callback and Promise APIs
 - Stats timestamps come from host metadata, and `utimes` updates access and
