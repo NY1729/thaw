@@ -356,6 +356,9 @@ The workspace crates have narrow responsibilities:
   inferred parameter. Calls may provide explicit type arguments, with arity,
   argument compatibility, defaults and constraints validated before emitting
   distinct specializations (including zero-parameter generic functions)
+- Named generic functions used as array or Promise callbacks specialize from
+  the contextual callback parameter types, with the same constraint checks and
+  per-type deduplication as direct calls
 - Generic variables nested in number arrays and fixed-layout numeric objects
   are inferred recursively and encoded into specialization symbols
 - Function type variables used as arguments to named generic interfaces such

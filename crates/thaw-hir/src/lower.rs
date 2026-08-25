@@ -7006,7 +7006,57 @@ impl<'a> FnLowerer<'a> {
                         .get(&name)
                         .ok_or_else(|| format!("unknown Promise callback `{name}`"))?;
                     if !signature.generic_type_params.is_empty() {
-                        return Err("generic Promise callbacks are not supported".into());
+                        if signature.params.len() != parameter_types.len() {
+                            return Err(format!(
+                                "generic callback `{name}` expects {} argument(s), contextual call provides {}",
+                                signature.params.len(),
+                                parameter_types.len()
+                            ));
+                        }
+                        let types = infer_generic_type_tuple(
+                            signature,
+                            parameter_types,
+                            self.interfaces,
+                            self.generic_interfaces,
+                        )
+                        .map_err(|error| {
+                            format!("cannot specialize generic callback `{name}`: {error}")
+                        })?;
+                        if let Some(constraints) = self.call_constraints {
+                            constraints
+                                .borrow_mut()
+                                .push(CallConstraint::Generic(name.clone(), types.clone()));
+                        }
+                        let substitution = signature
+                            .generic_type_params
+                            .iter()
+                            .cloned()
+                            .zip(types.iter().cloned())
+                            .collect::<HashMap<_, _>>();
+                        let mut ret = resolve_ts_type_with_substitution(
+                            signature
+                                .generic_return_type
+                                .as_ref()
+                                .expect("generic callback return type"),
+                            &substitution,
+                            self.interfaces,
+                            self.generic_interfaces,
+                            &mut Vec::new(),
+                        )?;
+                        if signature.is_async {
+                            ret = HirType::Promise(Box::new(ret));
+                        }
+                        let specialized = specialized_generic_function_name(
+                            &name,
+                            parameter_types,
+                            signature,
+                            &types,
+                        );
+                        return Ok(HirExpr::FunctionRef(
+                            specialized,
+                            parameter_types.to_vec(),
+                            ret,
+                        ));
                     }
                     let ret = if signature.is_async {
                         HirType::Promise(Box::new(signature.ret.clone()))
@@ -12897,6 +12947,23 @@ mod tests {
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn validates_contextually_specialized_generic_callbacks() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            function numeric<T extends number>(value: T): T { return value; }
+            function main(): void { ["wrong"].map(numeric); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("cannot specialize generic callback `numeric`"),
+            "{error}"
+        );
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
     }
 
     #[test]
