@@ -667,7 +667,11 @@ The workspace crates have narrow responsibilities:
   readers, writers, piping, async iteration, queuing strategies and text codecs.
   Readable byte streams expose byte controllers, BYOB readers/requests,
   minimum-fill reads and default-reader auto-allocation; queued bytes split
-  across supplied views, and byte-stream `tee()` retains BYOB-capable branches
+  across supplied views, and byte-stream `tee()` retains BYOB-capable branches.
+  Writable and Transform default controllers are exported; writable controllers
+  expose abort signals and explicit errors, while transform controllers support
+  enqueue, error, desired-size inspection and termination with matching
+  readable/writable state propagation
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
   native gzip, deflate and raw-deflate implementation
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots
