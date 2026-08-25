@@ -817,6 +817,33 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
     }
 }
 
+fn instantiate_generic_pattern(
+    pattern: &GenericTypePattern,
+    substitution: &HashMap<Symbol, HirType>,
+) -> Result<HirType, String> {
+    match pattern {
+        GenericTypePattern::Variable(name) => substitution
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("missing concrete type for `{name}`")),
+        GenericTypePattern::Concrete(ty) => Ok(ty.clone()),
+        GenericTypePattern::Array(inner) => Ok(HirType::Array(Box::new(
+            instantiate_generic_pattern(inner, substitution)?,
+        ))),
+        GenericTypePattern::Promise(inner) => Ok(HirType::Promise(Box::new(
+            instantiate_generic_pattern(inner, substitution)?,
+        ))),
+        GenericTypePattern::Object(fields) => Ok(HirType::Object(
+            fields
+                .iter()
+                .map(|(name, ty)| {
+                    Ok((name.clone(), instantiate_generic_pattern(ty, substitution)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+    }
+}
+
 fn specialized_generic_function_name(
     name: &str,
     concrete_params: &[HirType],
@@ -6174,6 +6201,9 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
+            Expr::TsInstantiation(instantiation) => {
+                self.lower_generic_instantiation_expression(instantiation)
+            }
 
             Expr::Seq(sequence) => {
                 let mut values = sequence
@@ -6892,6 +6922,72 @@ impl<'a> FnLowerer<'a> {
         self.bindings = saved_bindings;
         self.ret_type = saved_return;
         result
+    }
+
+    fn lower_generic_instantiation_expression(
+        &mut self,
+        instantiation: &swc_ecma_ast::TsInstantiation,
+    ) -> Result<HirExpr, String> {
+        let Expr::Ident(identifier) = instantiation.expr.as_ref() else {
+            return Err(
+                "generic instantiation expressions require a named top-level function".into(),
+            );
+        };
+        let name = identifier.sym.to_string();
+        let signature = self
+            .signatures
+            .get(&name)
+            .ok_or_else(|| format!("unknown function `{name}` in instantiation expression"))?;
+        if signature.generic_type_params.is_empty() {
+            return Err(format!(
+                "non-generic function `{name}` cannot be used in an instantiation expression"
+            ));
+        }
+        let types = resolve_explicit_generic_type_tuple(
+            signature,
+            &instantiation.type_args.params,
+            &[],
+            self.interfaces,
+            self.generic_interfaces,
+        )?;
+        for ty in &types {
+            if !supports_generic_native_layout(ty) {
+                return Err(format!(
+                    "generic function `{name}` cannot specialize for native layout {ty:?}"
+                ));
+            }
+        }
+        let substitution = signature
+            .generic_type_params
+            .iter()
+            .cloned()
+            .zip(types.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let params = signature
+            .generic_param_patterns
+            .iter()
+            .map(|pattern| instantiate_generic_pattern(pattern, &substitution))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut ret = resolve_ts_type_with_substitution(
+            signature
+                .generic_return_type
+                .as_ref()
+                .expect("generic instantiation return type"),
+            &substitution,
+            self.interfaces,
+            self.generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        if signature.is_async {
+            ret = HirType::Promise(Box::new(ret));
+        }
+        if let Some(constraints) = self.call_constraints {
+            constraints
+                .borrow_mut()
+                .push(CallConstraint::Generic(name.clone(), types.clone()));
+        }
+        let specialized = specialized_generic_function_name(&name, &params, signature, &types);
+        Ok(HirExpr::FunctionRef(specialized, params, ret))
     }
 
     fn lower_contextual_arrow(
@@ -13075,6 +13171,24 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("does not satisfy constraint F64"), "{error}");
+    }
+
+    #[test]
+    fn validates_generic_instantiation_expressions() {
+        for (source, expected) in [
+            (
+                "function numeric<T extends number>(value: T): T { return value; } function main(): void { const bad = numeric<string>; }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "function plain(value: number): number { return value; } function main(): void { const bad = plain<number>; }",
+                "non-generic function `plain`",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

@@ -362,6 +362,9 @@ The workspace crates have narrow responsibilities:
 - Inline generic arrow callbacks in array and Promise APIs infer their concrete
   type tuple from the callback context, validate defaults/constraints and lower
   the body with concrete parameter and return layouts
+- Generic instantiation expressions such as `identity<number>` produce ordinary
+  monomorphic function values that can be stored, called and passed to array or
+  Promise APIs; explicit arity, defaults and constraints are validated
 - Generic variables nested in number arrays and fixed-layout numeric objects
   are inferred recursively and encoded into specialization symbols
 - Function type variables used as arguments to named generic interfaces such
