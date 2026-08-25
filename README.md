@@ -357,8 +357,9 @@ The workspace crates have narrow responsibilities:
   per-worker `argv`/`execArgv` and thread names, copied or `SHARE_ENV` process
   environments, reported resource limits, protected transfer/clone markers,
   lifecycle events and
-  EventEmitter-style listener management and termination (runtime-computed
-  worker paths and parallel OS threads remain later); `stdin`/`stdout`/`stderr`
+  EventEmitter-style listener management, shared exit-code termination Promises
+  and async disposal (runtime-computed worker paths and parallel OS threads
+  remain later); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
   streams, including redirected console output
 - The shared `process` global and `node:process` module provide asynchronous
