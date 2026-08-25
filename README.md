@@ -317,6 +317,9 @@ The workspace crates have narrow responsibilities:
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
 - `node:async_hooks` provides Promise-aware `AsyncLocalStorage` context
   nesting, bind/snapshot capture, `AsyncResource` scope IDs and hook handles
+- `node:tty` reports the non-interactive host accurately while exposing
+  Read/WriteStream raw mode, dimensions, color-depth checks and ANSI cursor /
+  screen operations for terminal-aware packages
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
