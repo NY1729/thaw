@@ -1487,6 +1487,21 @@ enum InferredGenericReturn {
     Keyword(TsKeywordTypeKind),
 }
 
+fn expression_is_definitely_string(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(Lit::Str(_)) | Expr::Tpl(_) => true,
+        Expr::Paren(parenthesized) => expression_is_definitely_string(&parenthesized.expr),
+        Expr::TsAs(assertion) => expression_is_definitely_string(&assertion.expr),
+        Expr::TsTypeAssertion(assertion) => expression_is_definitely_string(&assertion.expr),
+        Expr::Call(call) => matches!(
+            &call.callee,
+            Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Ident(identifier) if identifier.sym == *"String")
+        ),
+        _ => false,
+    }
+}
+
 fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGenericReturn> {
     let returned = match expr {
         Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
@@ -1548,6 +1563,13 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
             ) =>
         {
             Some(TsKeywordTypeKind::TsNumberKeyword)
+        }
+        Expr::Bin(binary)
+            if binary.op == BinaryOp::Add
+                && (expression_is_definitely_string(&binary.left)
+                    || expression_is_definitely_string(&binary.right)) =>
+        {
+            Some(TsKeywordTypeKind::TsStringKeyword)
         }
         Expr::Call(call) => match &call.callee {
             Callee::Expr(callee) => match callee.as_ref() {
@@ -14447,6 +14469,10 @@ mod tests {
             (
                 "type Nullify = <T>(value: T) => null; function main(): void { const invalid: Nullify = <T>(value: T) => undefined; }",
                 "incompatible with function type alias `Nullify`",
+            ),
+            (
+                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"value=\" + String(value); }",
+                "incompatible with function type alias `Identity`",
             ),
             (
                 "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",
