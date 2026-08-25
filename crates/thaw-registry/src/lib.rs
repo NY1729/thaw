@@ -186,7 +186,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function arrayBuffer(argsArray: any): any;\nexport declare function blob(argsArray: any): any;\nexport declare function buffer(argsArray: any): any;\nexport declare function json(argsArray: any): any;\nexport declare function text(argsArray: any): any;\n"
         }
         "stream/web" => {
-            "export declare const ReadableStream: any;\nexport declare const WritableStream: any;\nexport declare const TransformStream: any;\nexport declare const TextEncoderStream: any;\nexport declare const TextDecoderStream: any;\n"
+            "export declare const ReadableStream: any;\nexport declare const WritableStream: any;\nexport declare const TransformStream: any;\nexport declare const TextEncoderStream: any;\nexport declare const TextDecoderStream: any;\nexport declare const CompressionStream: any;\nexport declare const DecompressionStream: any;\n"
         }
         "readline" => {
             "export declare function createInterface(argsArray: any): any;\nexport declare function Interface(argsArray: any): any;\nexport declare function clearLine(argsArray: any): boolean;\nexport declare function clearScreenDown(argsArray: any): boolean;\nexport declare function cursorTo(argsArray: any): boolean;\nexport declare function moveCursor(argsArray: any): boolean;\n"
@@ -3087,7 +3087,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
             "function collect(stream) { if (stream && typeof stream[Symbol.asyncIterator] === 'function') return (async function() { var chunks = []; for await (var chunk of stream) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks); })(); return new Promise(function(resolve, reject) { var chunks = []; function cleanup() { if (stream.off) { stream.off('data', data); stream.off('end', end); stream.off('error', reject); } } function data(chunk) { chunks.push(Buffer.from(chunk)); } function end() { cleanup(); resolve(Buffer.concat(chunks)); } if (!stream || typeof stream.on !== 'function') { reject(new TypeError('stream must be readable')); return; } stream.on('data', data); stream.once('end', end); stream.once('error', reject); }); } function buffer(stream) { return collect(stream); } function text(stream) { return collect(stream).then(function(value) { return value.toString('utf8'); }); } function json(stream) { return text(stream).then(JSON.parse); } function arrayBuffer(stream) { return collect(stream).then(function(value) { var copy = Uint8Array.from(value); return copy.buffer; }); } function blob(stream) { return collect(stream).then(function(value) { return new Blob([value]); }); } module.exports = { arrayBuffer: arrayBuffer, blob: blob, buffer: buffer, json: json, text: text }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "stream/web" => Some(
-            "module.exports = { ReadableStream: globalThis.ReadableStream, ReadableStreamDefaultReader: globalThis.ReadableStreamDefaultReader, ReadableStreamDefaultController: globalThis.ReadableStreamDefaultController, WritableStream: globalThis.WritableStream, WritableStreamDefaultWriter: globalThis.WritableStreamDefaultWriter, TransformStream: globalThis.TransformStream, ByteLengthQueuingStrategy: globalThis.ByteLengthQueuingStrategy, CountQueuingStrategy: globalThis.CountQueuingStrategy, TextEncoderStream: globalThis.TextEncoderStream, TextDecoderStream: globalThis.TextDecoderStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+            "module.exports = { ReadableStream: globalThis.ReadableStream, ReadableStreamDefaultReader: globalThis.ReadableStreamDefaultReader, ReadableStreamDefaultController: globalThis.ReadableStreamDefaultController, WritableStream: globalThis.WritableStream, WritableStreamDefaultWriter: globalThis.WritableStreamDefaultWriter, TransformStream: globalThis.TransformStream, ByteLengthQueuingStrategy: globalThis.ByteLengthQueuingStrategy, CountQueuingStrategy: globalThis.CountQueuingStrategy, TextEncoderStream: globalThis.TextEncoderStream, TextDecoderStream: globalThis.TextDecoderStream, CompressionStream: globalThis.CompressionStream, DecompressionStream: globalThis.DecompressionStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "diagnostics_channel" => Some(
             "var registry = globalThis.__thawDiagnosticChannels || (globalThis.__thawDiagnosticChannels = new Map());\n\
@@ -5867,6 +5867,30 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,"ONETWO",["value","closed"],"hé",{"value":7,"done":false},true,false,8,4,3,1]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn web_compression_streams_round_trip_supported_formats() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_compression");
+        fs::write(dir.join("index.js"), "var web = require('node:stream/web'); var consumers = require('node:stream/consumers'); async function roundTrip(format) { var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('thaw ')); controller.enqueue(new TextEncoder().encode('compression')); controller.close(); } }); return consumers.text(source.pipeThrough(new web.CompressionStream(format)).pipeThrough(new web.DecompressionStream(format)).pipeThrough(new web.TextDecoderStream())); } module.exports = async function () { var gzipSource = new web.ReadableStream({ start: function(controller) { controller.enqueue(new TextEncoder().encode('header')); controller.close(); } }); var gzip = await consumers.buffer(gzipSource.pipeThrough(new CompressionStream('gzip'))); var unsupported = false; try { new CompressionStream('brotli'); } catch (error) { unsupported = error instanceof TypeError; } return [await roundTrip('gzip'), await roundTrip('deflate'), await roundTrip('deflate-raw'), gzip[0], gzip[1], web.CompressionStream === globalThis.CompressionStream, unsupported]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_web_compression_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCompressionStreams = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseCompressionStreams").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["thaw compression","thaw compression","thaw compression",31,139,true,true]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

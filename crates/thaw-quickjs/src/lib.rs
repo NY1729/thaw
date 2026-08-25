@@ -1253,6 +1253,24 @@ const PLATFORM_GLOBALS: &str = r#"
     globalThis.TransformStream = class TransformStream {
       constructor(transformer = {}) { let controller; this.readable = new ReadableStream({ start(value) { controller = value; } }); this.writable = new WritableStream({ write(chunk) { return typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk); }, close() { return Promise.resolve(typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => controller.close()); }, abort(error) { controller.error(error); } }); }
     };
+    const hexFromBytes = value => Array.from(value, byte => byte.toString(16).padStart(2, '0')).join('');
+    const bytesFromHex = value => new Uint8Array(String(value).match(/../g)?.map(pair => parseInt(pair, 16)) || []);
+    const compressionTransform = (operation, format) => {
+      const normalized = String(format);
+      if (normalized !== 'gzip' && normalized !== 'deflate' && normalized !== 'deflate-raw') throw new TypeError('Unsupported compression format');
+      const chunks = [];
+      return new TransformStream({
+        transform(chunk) { chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); },
+        flush(controller) {
+          const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0), input = new Uint8Array(length); let offset = 0;
+          for (const chunk of chunks) { input.set(chunk, offset); offset += chunk.byteLength; }
+          const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized;
+          controller.enqueue(bytesFromHex(__thaw_zlib_hex(operation, nativeFormat, hexFromBytes(input))));
+        }
+      });
+    };
+    globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this.readable = stream.readable; this.writable = stream.writable; } };
+    globalThis.DecompressionStream = class DecompressionStream { constructor(format) { const stream = compressionTransform('decompress', format); this.readable = stream.readable; this.writable = stream.writable; } };
     globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size(chunk) { return chunk.byteLength; } };
     globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size() { return 1; } };
     globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); const transform = new TransformStream({ transform(chunk, controller) { controller.enqueue(encoder.encode(String(chunk))); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
