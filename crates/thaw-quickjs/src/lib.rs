@@ -3828,6 +3828,34 @@ const PLATFORM_GLOBALS: &str = r#"
       releaseLock() { if (!this._stream) return; const stream = this._stream, error = webInvalidState('Reader was released'); stream._byobReads = stream._byobReads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); if (stream._byobRequest && stream._byobRequest._read.reader === this) stream._byobRequest = null; stream._reader = null; this._stream = null; this.closed = Promise.reject(error); this.closed.catch(() => {}); }
     }
     globalThis.ReadableStream = class ReadableStream {
+      static from(iterable) {
+        if (iterable === null || iterable === undefined) { const error = new TypeError('value is not iterable'); error.code = 'ERR_ARG_NOT_ITERABLE'; throw error; }
+        const method = iterable[Symbol.asyncIterator] || iterable[Symbol.iterator];
+        if (typeof method !== 'function') { const error = new TypeError('value is not iterable'); error.code = 'ERR_ARG_NOT_ITERABLE'; throw error; }
+        const iterator = method.call(iterable);
+        if (!iterator || typeof iterator.next !== 'function') throw new TypeError('iterator must provide next()');
+        let chain = Promise.resolve(), done = false;
+        return new ReadableStream({
+          pull(controller) {
+            chain = chain.then(async () => {
+              if (done) return;
+              const result = await iterator.next();
+              if (!result || typeof result !== 'object') throw new TypeError('iterator result must be an object');
+              if (result.done) { done = true; controller.close(); }
+              else controller.enqueue(await result.value);
+            }).catch(error => { done = true; controller.error(error); });
+            return chain;
+          },
+          async cancel(reason) {
+            if (done) return;
+            done = true;
+            if (typeof iterator.return === 'function') {
+              const result = await iterator.return(reason);
+              if (!result || typeof result !== 'object') throw new TypeError('iterator return result must be an object');
+            }
+          }
+        });
+      }
       constructor(source = {}) {
         if (source.type !== undefined && source.type !== 'bytes') { const error = new TypeError('invalid source.type'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         if (source.autoAllocateChunkSize !== undefined && (source.type !== 'bytes' || !Number.isInteger(Number(source.autoAllocateChunkSize)) || Number(source.autoAllocateChunkSize) <= 0)) throw new RangeError('invalid autoAllocateChunkSize');

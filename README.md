@@ -671,7 +671,9 @@ The workspace crates have narrow responsibilities:
   Writable and Transform default controllers are exported; writable controllers
   expose abort signals and explicit errors, while transform controllers support
   enqueue, error, desired-size inspection and termination with matching
-  readable/writable state propagation
+  readable/writable state propagation. `ReadableStream.from()` adapts sync and
+  async iterables, awaits promised values, locks source streams immediately and
+  closes iterators with the cancellation reason
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
   native gzip, deflate and raw-deflate implementation
 - `node:tls` performs real rustls client and server handshakes with WebPKI roots
