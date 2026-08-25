@@ -368,6 +368,8 @@ The workspace crates have narrow responsibilities:
 - Unannotated local generic arrow variables specialize independently at each
   inferred or explicit call, including captured locals, tuple/array-literal
   spread arguments, array/Promise callback use and `typeof` observation
+- Anonymous generic function expressions use the same local polymorphic
+  template, callable-assignment validation and contextual callback paths
 - User-defined function parameters with a monomorphic function type provide
   the same contextual specialization for named generic functions, local
   generic arrows and inline generic arrows
