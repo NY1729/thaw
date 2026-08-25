@@ -1873,6 +1873,7 @@ fn bundle_commonjs_package(
         root_package_dir.to_path_buf(),
     )];
     let mut dependency_versions: BTreeMap<String, String> = BTreeMap::new();
+    let mut uses_global_fetch = false;
     record_package_version(&mut dependency_versions, root_package, root_package_dir);
 
     while let Some((key, abs_path, pkg_name, pkg_dir)) = worklist.pop() {
@@ -1887,6 +1888,7 @@ fn bundle_commonjs_package(
         };
         let source = rewrite_static_worker_urls(&source, &abs_path, &pkg_name, &pkg_dir)?;
         let analysis = analyze_module(&source);
+        uses_global_fetch |= analysis.uses_global_fetch;
         if let Some(error) = &analysis.attribute_error {
             return Err(format!("invalid import attributes in `{key}`: {error}"));
         }
@@ -2073,6 +2075,15 @@ fn bundle_commonjs_package(
         });
     }
 
+    if uses_global_fetch {
+        add_builtin_module(
+            "https",
+            "node:https".to_string(),
+            &mut visited,
+            &mut modules,
+        );
+    }
+
     prepare_async_modules(&mut modules)?;
 
     let file_count = modules.len();
@@ -2113,13 +2124,14 @@ struct ModuleAnalysis {
     has_top_level_await: bool,
     attribute_error: Option<String>,
     has_nonliteral_dynamic_import: bool,
+    uses_global_fetch: bool,
     _commonjs_exports: Vec<String>,
 }
 
 fn analyze_module(source: &str) -> ModuleAnalysis {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, Function,
+        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, Function, Ident,
         ImportSpecifier, Lit, MemberExpr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem,
         ObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, VarDeclarator,
     };
@@ -2169,6 +2181,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         require_functions: Vec<String>,
         create_require_functions: Vec<String>,
         module_namespaces: Vec<String>,
+        uses_global_fetch: bool,
     }
 
     struct TopLevelAwait {
@@ -2285,7 +2298,20 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
     }
     impl Visit for Calls {
+        fn visit_ident(&mut self, identifier: &Ident) {
+            if identifier.sym == "fetch" {
+                self.uses_global_fetch = true;
+            }
+        }
+
         fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(
+                &call.callee,
+                Callee::Expr(callee)
+                    if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == "fetch")
+            ) {
+                self.uses_global_fetch = true;
+            }
             let is_require = matches!(
                 &call.callee,
                 Callee::Expr(callee)
@@ -2441,6 +2467,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         require_functions: vec!["require".to_string()],
         create_require_functions,
         module_namespaces,
+        uses_global_fetch: false,
     };
     module.visit_with(&mut calls);
     let mut top_level_await = TopLevelAwait { found: false };
@@ -2487,6 +2514,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         has_top_level_await: top_level_await.found,
         attribute_error,
         has_nonliteral_dynamic_import: calls.has_nonliteral_dynamic_import,
+        uses_global_fetch: calls.uses_global_fetch,
         _commonjs_exports: calls.commonjs_exports,
     }
 }
@@ -3480,7 +3508,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function normalizeOptions(input, options) { var result = {}; if (typeof input === 'string' || input instanceof URL) { var url = input instanceof URL ? input : new URL(String(input)); result.protocol = url.protocol; result.hostname = url.hostname; if (url.port) result.port = Number(url.port); result.path = url.pathname + url.search; result.auth = url.username ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : undefined; } else if (input) Object.assign(result, input); if (options) Object.assign(result, options); var expectedProtocol = result._defaultProtocol || 'http:'; result.protocol = result.protocol || expectedProtocol; if (result.protocol !== expectedProtocol) throw new Error('Protocol "' + result.protocol + '" not supported. Expected "' + expectedProtocol + '"'); result.hostname = result.hostname || result.host || 'localhost'; result.port = result.port === undefined ? (expectedProtocol === 'https:' ? 443 : 80) : Number(result.port); result.path = result.path || '/'; result.method = String(result.method || 'GET').toUpperCase(); return result; }
              function ClientRequest(input, options, callback) { if (!(this instanceof ClientRequest)) return new ClientRequest(input, options, callback); EventEmitter.call(this); if (typeof options === 'function') { callback = options; options = undefined; } this._options = normalizeOptions(input, options); this.method = this._options.method; this.path = this._options.path; this.host = this._options.hostname; this.protocol = this._options.protocol; this.agent = this._options.agent === false ? undefined : (this._options.agent || this._options._globalAgent || globalAgent); this.socket = this.connection = null; this.aborted = false; this.destroyed = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; if (this._options.headers) for (var name of Object.keys(this._options.headers)) this.setHeader(name, this._options.headers[name]); var defaultPort = this.protocol === 'https:' ? 443 : 80; if (!this.hasHeader('host')) this.setHeader('Host', this.host + (this._options.port === defaultPort ? '' : ':' + this._options.port)); if (this._options.auth && !this.hasHeader('authorization')) this.setHeader('Authorization', 'Basic ' + Buffer.from(this._options.auth).toString('base64')); if (typeof callback === 'function') this.once('response', callback); }
              function validateHeaderName(name, label) { var value = String(name); if (!value || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value)) { var error = new TypeError((label || 'Header name') + ' must be a valid HTTP token ["' + value + '"]'); error.code = 'ERR_INVALID_HTTP_TOKEN'; throw error; } return value; } function validateHeaderValue(name, value) { if (value === undefined) { var missing = new TypeError('Invalid value "undefined" for header "' + name + '"'); missing.code = 'ERR_HTTP_INVALID_HEADER_VALUE'; throw missing; } var values = Array.isArray(value) ? value : [value]; for (var item of values) if (/[^\t\x20-\x7e\x80-\xff]/.test(String(item))) { var error = new TypeError('Invalid character in header content ["' + name + '"]'); error.code = 'ERR_INVALID_CHAR'; throw error; } return value; }
-             ClientRequest.prototype = Object.create(EventEmitter.prototype); ClientRequest.prototype.constructor = ClientRequest; ClientRequest.prototype.setHeader = function(name, value) { name = validateHeaderName(name); validateHeaderValue(name, value); var key = name.toLowerCase(); this._headers[key] = value; this._headerNames[key] = name; return this; }; ClientRequest.prototype.getHeader = function(name) { return this._headers[String(name).toLowerCase()]; }; ClientRequest.prototype.getHeaders = function() { return Object.assign({}, this._headers); }; ClientRequest.prototype.getHeaderNames = function() { return Object.keys(this._headers); }; ClientRequest.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, String(name).toLowerCase()); }; ClientRequest.prototype.removeHeader = function(name) { var key = String(name).toLowerCase(); delete this._headers[key]; delete this._headerNames[key]; }; ClientRequest.prototype.flushHeaders = function() { return this; }; ClientRequest.prototype.write = function(chunk, encoding, callback) { if (this.writableEnded) throw new Error('write after end'); var value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding); this._chunks.push(value); if (typeof callback === 'function') queueMicrotask(callback); return true; };
+             ClientRequest.prototype = Object.create(EventEmitter.prototype); ClientRequest.prototype.constructor = ClientRequest; ClientRequest.prototype.setHeader = function(name, value) { name = validateHeaderName(name); validateHeaderValue(name, value); var key = name.toLowerCase(); this._headers[key] = value; this._headerNames[key] = name; return this; }; ClientRequest.prototype.getHeader = function(name) { return this._headers[String(name).toLowerCase()]; }; ClientRequest.prototype.getHeaders = function() { return Object.assign({}, this._headers); }; ClientRequest.prototype.getHeaderNames = function() { return Object.keys(this._headers); }; ClientRequest.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, String(name).toLowerCase()); }; ClientRequest.prototype.removeHeader = function(name) { var key = String(name).toLowerCase(); delete this._headers[key]; delete this._headerNames[key]; }; ClientRequest.prototype.flushHeaders = function() { return this; }; ClientRequest.prototype.write = function(chunk, encoding, callback) { if (this.writableEnded) throw new Error('write after end'); var value = Buffer.isBuffer(chunk) ? chunk : ArrayBuffer.isView(chunk) ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk instanceof ArrayBuffer ? Buffer.from(chunk) : Buffer.from(String(chunk), encoding); this._chunks.push(value); if (typeof callback === 'function') queueMicrotask(callback); return true; };
              function decodeChunked(body) { var offset = 0, output = []; while (offset < body.length) { var line = body.indexOf('\r\n', offset); if (line < 0) throw new Error('Parse Error: Invalid chunk size'); var size = parseInt(body.slice(offset, line).toString(), 16); if (!Number.isFinite(size)) throw new Error('Parse Error: Invalid chunk size'); offset = line + 2; if (size === 0) break; output.push(body.slice(offset, offset + size)); offset += size + 2; } return Buffer.concat(output); }
              function parseResponse(buffer, socket) { var marker = buffer.indexOf(Buffer.from('\r\n\r\n')), head = marker < 0 ? '' : buffer.slice(0, marker).toString(), body = marker < 0 ? buffer : buffer.slice(marker + 4), lines = head.split('\r\n'), status = (lines.shift() || '').match(/^HTTP\/(\d+\.\d+)\s+(\d+)(?:\s+(.*))?$/); if (!status) throw new Error('Parse Error: Invalid HTTP response'); var response = new IncomingMessage(socket); response.httpVersion = status[1]; response.statusCode = Number(status[2]); response.statusMessage = status[3] || ''; lines.forEach(function(line) { var colon = line.indexOf(':'); if (colon < 0) return; var name = line.slice(0, colon), key = name.toLowerCase(), value = line.slice(colon + 1).trim(); response.rawHeaders.push(name, value); (response.headersDistinct[key] || (response.headersDistinct[key] = [])).push(value); if (key === 'set-cookie') response.headers[key] = response.headersDistinct[key].slice(); else response.headers[key] = response.headersDistinct[key].join(', '); }); if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) body = decodeChunked(body); response.complete = true; return { response: response, body: body }; }
              ClientRequest.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var request = this, body = Buffer.concat(this._chunks); if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n'; var received = [], transport = this._options._transport || net, connectOptions = Object.assign({}, this._options, { host: this._options.hostname, port: this._options.port }); var socket = this.socket = this.connection = transport.createConnection ? transport.createConnection(connectOptions) : transport.connect(connectOptions); this.emit('socket', socket); socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); }); socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); }); socket.on('data', function(data) { received.push(Buffer.from(data)); }); socket.on('end', function() { try { var parsed = parseResponse(Buffer.concat(received), socket), response = parsed.response; request.emit('response', response); var value = response._encoding ? parsed.body.toString(response._encoding) : parsed.body; if (parsed.body.length) response.emit('data', value); response.readable = false; response.emit('end'); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } }); return this; }; ClientRequest.prototype.abort = function() { this.aborted = true; this.emit('abort'); return this.destroy(); }; ClientRequest.prototype.destroy = function(error) { this.destroyed = true; if (this.socket) this.socket.destroy(error); return this; }; ClientRequest.prototype.setTimeout = function(timeout, callback) { if (typeof callback === 'function') this.once('timeout', callback); return this; }; ClientRequest.prototype.setNoDelay = ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
@@ -4120,6 +4148,77 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20__thaw_bundle_target.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' +\n\
          \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\n';\n",
     );
+
+    if modules.iter().any(|module| module.key == "node:http") {
+        out.push_str(
+            r#"if (typeof globalThis.fetch !== 'function') {
+  globalThis.fetch = function(input, init) {
+    var request;
+    try { request = new Request(input, init); } catch (error) { return Promise.reject(error); }
+    return Promise.resolve().then(async function() {
+      var body = request.body ? await request.bytes() : new Uint8Array(), redirects = 0;
+      function aborted() {
+        var reason = request.signal && request.signal.reason;
+        if (reason !== undefined) return reason;
+        var error = new Error('This operation was aborted'); error.name = 'AbortError'; return error;
+      }
+      if (request.signal && request.signal.aborted) throw aborted();
+      return new Promise(function(resolve, reject) {
+        var active = null, settled = false;
+        function finishReject(error) { if (settled) return; settled = true; cleanup(); reject(error); }
+        function cleanup() { if (request.signal) request.signal.removeEventListener('abort', onAbort); }
+        function onAbort() { if (active && typeof active.destroy === 'function') active.destroy(); finishReject(aborted()); }
+        if (request.signal) request.signal.addEventListener('abort', onAbort, { once: true });
+        function dispatch(url, method, bytes, redirected) {
+          var parsed;
+          try { parsed = new URL(url); } catch (error) { finishReject(error); return; }
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') { finishReject(new TypeError('fetch only supports http: and https: URLs')); return; }
+          var transport = __thaw_bundle_require(parsed.protocol === 'https:' ? 'node:https' : 'node:http');
+          var headers = {}; request.headers.forEach(function(value, name) { headers[name] = value; });
+          if ((method === 'GET' || method === 'HEAD') && bytes.length) { bytes = new Uint8Array(); delete headers['content-length']; }
+          var options = { method: method, headers: headers, signal: request.signal };
+          try {
+            active = transport.request(parsed.href, options, function(incoming) {
+              var status = Number(incoming.statusCode), location = incoming.headers && incoming.headers.location;
+              if (location && [301, 302, 303, 307, 308].indexOf(status) >= 0) {
+                if (request.redirect === 'error') { finishReject(new TypeError('fetch redirect mode is set to error')); return; }
+                if (request.redirect === 'follow') {
+                  if (++redirects > 20) { finishReject(new TypeError('fetch redirect count exceeded')); return; }
+                  var nextMethod = method, nextBody = bytes;
+                  if (status === 303 && method !== 'HEAD' || (status === 301 || status === 302) && method === 'POST') { nextMethod = 'GET'; nextBody = new Uint8Array(); }
+                  dispatch(new URL(String(location), parsed).href, nextMethod, nextBody, true); return;
+                }
+              }
+              var responseHeaders = new Headers();
+              if (Array.isArray(incoming.rawHeaders)) for (var index = 0; index + 1 < incoming.rawHeaders.length; index += 2) responseHeaders.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
+              else if (incoming.headers) Object.keys(incoming.headers).forEach(function(name) { var value = incoming.headers[name]; if (Array.isArray(value)) value.forEach(function(item) { responseHeaders.append(name, item); }); else if (value !== undefined) responseHeaders.append(name, value); });
+              var noBody = method === 'HEAD' || status === 101 || status === 204 || status === 205 || status === 304, controller;
+              var stream = noBody ? null : new ReadableStream({ start: function(value) { controller = value; }, cancel: function(reason) { if (incoming.destroy) incoming.destroy(reason); } });
+              if (stream) {
+                incoming.on('data', function(chunk) { if (controller) controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); });
+                incoming.on('end', function() { if (controller) controller.close(); });
+                incoming.on('error', function(error) { if (controller) controller.error(error); });
+                incoming.on('aborted', function() { if (controller) controller.error(new TypeError('terminated')); });
+              }
+              var response;
+              try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }
+              catch (error) { finishReject(error); return; }
+              if (globalThis.__thaw_set_response_metadata) globalThis.__thaw_set_response_metadata(response, parsed.href, redirected);
+              if (!settled) { settled = true; cleanup(); resolve(response); }
+            });
+            active.once('error', function(error) { var failure = new TypeError('fetch failed'); failure.cause = error; finishReject(failure); });
+            if (bytes.length) active.write(bytes);
+            active.end();
+          } catch (error) { finishReject(error); }
+        }
+        dispatch(request.url, request.method, body, false);
+      });
+    });
+  };
+}
+"#,
+        );
+    }
 
     out.push_str(&format!(
         "var __thaw_bundle_entry_key = {};\n\
@@ -10116,6 +10215,67 @@ mod tests {
         assert_eq!(
             result,
             r#"[200,"OK","1.1","yes",["a=1","b=2"],10,"thaw-ok",true,true,false,true,"OK"]"#
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for expected in ["GET /redirect ", "GET /final ", "POST /echo "] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).unwrap();
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with(expected), "{request}");
+                if expected.contains("redirect") {
+                    stream
+                        .write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                } else if expected.contains("final") {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}")
+                        .unwrap();
+                } else {
+                    assert!(request.to_ascii_lowercase().contains("x-thaw: enabled\r\n"));
+                    assert!(request.ends_with("payload"));
+                    stream
+                        .write_all(b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload")
+                        .unwrap();
+                }
+            }
+        });
+
+        let dir = temp_registry("global_fetch");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("global_fetch_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 6);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFetch = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseFetch").unwrap();
+        let arguments = CString::new(format!("[{port}]")).unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            format!(
+                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true]"#
+            )
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
