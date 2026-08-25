@@ -1804,6 +1804,44 @@ fn rewrite_static_worker_urls(
 /// bare-specifier dependency actually resolved under `node_modules_dir`,
 /// Node builtin polyfills excluded) mapped to its own resolved version --
 /// see `AddedPackage::dependency_versions`.
+fn add_builtin_module(
+    name: &str,
+    key: String,
+    visited: &mut Vec<String>,
+    modules: &mut Vec<BundledModule>,
+) {
+    if visited.contains(&key) {
+        return;
+    }
+    let Some(source) = builtin_module_source(name) else {
+        return;
+    };
+    visited.push(key.clone());
+    let mut requires = Vec::new();
+    for specifier in analyze_module(source).specs {
+        let (resolution, suffix) = split_module_suffix(&specifier);
+        let dependency_name = resolution
+            .strip_prefix("node:")
+            .unwrap_or(resolution)
+            .to_string();
+        if builtin_module_source(&dependency_name).is_none() {
+            continue;
+        }
+        let dependency_key = format!("node:{dependency_name}{suffix}");
+        requires.push((specifier, dependency_key.clone()));
+        add_builtin_module(&dependency_name, dependency_key, visited, modules);
+    }
+    modules.push(BundledModule {
+        key,
+        source: source.to_string(),
+        requires,
+        static_esm_specs: Vec::new(),
+        has_esm: false,
+        has_top_level_await: false,
+        async_module: false,
+    });
+}
+
 fn bundle_commonjs_package(
     node_modules_dir: &Path,
     root_package: &str,
@@ -2000,39 +2038,11 @@ fn bundle_commonjs_package(
             let builtin_name = resolution_spec
                 .strip_prefix("node:")
                 .unwrap_or(resolution_spec);
-            if let Some(builtin_source) = builtin_module_source(builtin_name) {
+            if builtin_module_source(builtin_name).is_some() {
                 let builtin_key = format!("node:{builtin_name}{suffix}");
                 requires.push((spec.clone(), builtin_key.clone()));
                 if !visited.contains(&builtin_key) {
-                    visited.push(builtin_key.clone());
-                    let mut builtin_requires = Vec::new();
-                    if builtin_name == "worker_threads" {
-                        let stream_key = "node:stream".to_string();
-                        builtin_requires.push(("node:stream".to_string(), stream_key.clone()));
-                        if !visited.contains(&stream_key) {
-                            visited.push(stream_key.clone());
-                            modules.push(BundledModule {
-                                key: stream_key,
-                                source: builtin_module_source("stream")
-                                    .expect("stream builtin exists")
-                                    .to_string(),
-                                requires: Vec::new(),
-                                static_esm_specs: Vec::new(),
-                                has_esm: false,
-                                has_top_level_await: false,
-                                async_module: false,
-                            });
-                        }
-                    }
-                    modules.push(BundledModule {
-                        key: builtin_key,
-                        source: builtin_source.to_string(),
-                        requires: builtin_requires,
-                        static_esm_specs: Vec::new(),
-                        has_esm: false,
-                        has_top_level_await: false,
-                        async_module: false,
-                    });
+                    add_builtin_module(builtin_name, builtin_key, &mut visited, &mut modules);
                 }
             }
             // Otherwise left unresolved -- falls through to the runtime
@@ -3424,10 +3434,21 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              var promises = { access: function(path) { return failure('ENOENT', 'access', path); }, readFile: function(path) { return failure('ENOENT', 'open', path); }, readdir: function(path) { return failure('ENOENT', 'scandir', path); }, stat: function(path) { return failure('ENOENT', 'stat', path); }, writeFile: function(path) { return failure('EROFS', 'open', path); }, mkdir: function(path) { return failure('EROFS', 'mkdir', path); } };\n\
              module.exports = promises; module.exports.default = promises; module.exports.__esModule = true;\n",
         ),
-        // Native compilation resolves the typed `node:http` surface through
-        // thaw-std. Keep an empty CommonJS module here so dependency discovery
-        // can still complete before the native Fast Path is selected.
-        "http" => Some("module.exports = {};\n"),
+        "http" => Some(
+            r#"var net = require('node:net'), EventEmitter = require('node:events');
+             function IncomingMessage(socket) { EventEmitter.call(this); this.socket = this.connection = socket; this.statusCode = null; this.statusMessage = null; this.headers = {}; this.headersDistinct = {}; this.rawHeaders = []; this.trailers = {}; this.rawTrailers = []; this.complete = false; this.aborted = false; this.readable = true; this.method = null; this.url = ''; this.httpVersion = '1.1'; }
+             IncomingMessage.prototype = Object.create(EventEmitter.prototype); IncomingMessage.prototype.constructor = IncomingMessage; IncomingMessage.prototype.setEncoding = function(encoding) { this._encoding = encoding; return this; }; IncomingMessage.prototype.destroy = function(error) { this.aborted = true; this.readable = false; if (this.socket) this.socket.destroy(error); return this; }; IncomingMessage.prototype.resume = function() { return this; };
+             function normalizeOptions(input, options) { var result = {}; if (typeof input === 'string' || input instanceof URL) { var url = input instanceof URL ? input : new URL(String(input)); result.protocol = url.protocol; result.hostname = url.hostname; result.port = url.port ? Number(url.port) : 80; result.path = url.pathname + url.search; result.auth = url.username ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : undefined; } else if (input) Object.assign(result, input); if (options) Object.assign(result, options); result.protocol = result.protocol || 'http:'; if (result.protocol !== 'http:') throw new Error('Protocol "' + result.protocol + '" not supported. Expected "http:"'); result.hostname = result.hostname || result.host || 'localhost'; result.port = result.port === undefined ? 80 : Number(result.port); result.path = result.path || '/'; result.method = String(result.method || 'GET').toUpperCase(); return result; }
+             function ClientRequest(input, options, callback) { if (!(this instanceof ClientRequest)) return new ClientRequest(input, options, callback); EventEmitter.call(this); if (typeof options === 'function') { callback = options; options = undefined; } this._options = normalizeOptions(input, options); this.method = this._options.method; this.path = this._options.path; this.host = this._options.hostname; this.protocol = 'http:'; this.socket = this.connection = null; this.aborted = false; this.destroyed = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; if (this._options.headers) for (var name of Object.keys(this._options.headers)) this.setHeader(name, this._options.headers[name]); if (!this.hasHeader('host')) this.setHeader('Host', this.host + (this._options.port === 80 ? '' : ':' + this._options.port)); if (this._options.auth && !this.hasHeader('authorization')) this.setHeader('Authorization', 'Basic ' + Buffer.from(this._options.auth).toString('base64')); if (typeof callback === 'function') this.once('response', callback); }
+             ClientRequest.prototype = Object.create(EventEmitter.prototype); ClientRequest.prototype.constructor = ClientRequest; ClientRequest.prototype.setHeader = function(name, value) { var key = String(name).toLowerCase(); this._headers[key] = value; this._headerNames[key] = String(name); return this; }; ClientRequest.prototype.getHeader = function(name) { return this._headers[String(name).toLowerCase()]; }; ClientRequest.prototype.getHeaders = function() { return Object.assign({}, this._headers); }; ClientRequest.prototype.getHeaderNames = function() { return Object.keys(this._headers); }; ClientRequest.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, String(name).toLowerCase()); }; ClientRequest.prototype.removeHeader = function(name) { var key = String(name).toLowerCase(); delete this._headers[key]; delete this._headerNames[key]; }; ClientRequest.prototype.flushHeaders = function() { return this; }; ClientRequest.prototype.write = function(chunk, encoding, callback) { if (this.writableEnded) throw new Error('write after end'); var value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding); this._chunks.push(value); if (typeof callback === 'function') queueMicrotask(callback); return true; };
+             function decodeChunked(body) { var offset = 0, output = []; while (offset < body.length) { var line = body.indexOf('\r\n', offset); if (line < 0) throw new Error('Parse Error: Invalid chunk size'); var size = parseInt(body.slice(offset, line).toString(), 16); if (!Number.isFinite(size)) throw new Error('Parse Error: Invalid chunk size'); offset = line + 2; if (size === 0) break; output.push(body.slice(offset, offset + size)); offset += size + 2; } return Buffer.concat(output); }
+             function parseResponse(buffer, socket) { var marker = buffer.indexOf(Buffer.from('\r\n\r\n')), head = marker < 0 ? '' : buffer.slice(0, marker).toString(), body = marker < 0 ? buffer : buffer.slice(marker + 4), lines = head.split('\r\n'), status = (lines.shift() || '').match(/^HTTP\/(\d+\.\d+)\s+(\d+)(?:\s+(.*))?$/); if (!status) throw new Error('Parse Error: Invalid HTTP response'); var response = new IncomingMessage(socket); response.httpVersion = status[1]; response.statusCode = Number(status[2]); response.statusMessage = status[3] || ''; lines.forEach(function(line) { var colon = line.indexOf(':'); if (colon < 0) return; var name = line.slice(0, colon), key = name.toLowerCase(), value = line.slice(colon + 1).trim(); response.rawHeaders.push(name, value); (response.headersDistinct[key] || (response.headersDistinct[key] = [])).push(value); if (key === 'set-cookie') response.headers[key] = response.headersDistinct[key].slice(); else response.headers[key] = response.headersDistinct[key].join(', '); }); if (String(response.headers['transfer-encoding'] || '').toLowerCase().indexOf('chunked') >= 0) body = decodeChunked(body); response.complete = true; return { response: response, body: body }; }
+             ClientRequest.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (chunk !== undefined) this.write(chunk, encoding); if (this.writableEnded) return this; this.finished = this.writableEnded = true; var request = this, body = Buffer.concat(this._chunks); if (body.length && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) this.setHeader('Content-Length', String(body.length)); if (!this.hasHeader('connection')) this.setHeader('Connection', 'close'); var head = this.method + ' ' + this.path + ' HTTP/1.1\r\n' + Object.keys(this._headers).map(function(key) { return request._headerNames[key] + ': ' + request._headers[key]; }).join('\r\n') + '\r\n\r\n'; var received = []; var socket = this.socket = this.connection = net.createConnection({ host: this._options.hostname, port: this._options.port }); this.emit('socket', socket); socket.on('error', function(error) { request.destroyed = true; request.emit('error', error); }); socket.on('connect', function() { socket.end(Buffer.concat([Buffer.from(head), body])); request.emit('finish'); if (typeof callback === 'function') callback(); }); socket.on('data', function(data) { received.push(Buffer.from(data)); }); socket.on('end', function() { try { var parsed = parseResponse(Buffer.concat(received), socket), response = parsed.response; request.emit('response', response); var value = response._encoding ? parsed.body.toString(response._encoding) : parsed.body; if (parsed.body.length) response.emit('data', value); response.readable = false; response.emit('end'); request.destroyed = true; request.emit('close'); } catch (error) { request.emit('error', error); } }); return this; }; ClientRequest.prototype.abort = function() { this.aborted = true; this.emit('abort'); return this.destroy(); }; ClientRequest.prototype.destroy = function(error) { this.destroyed = true; if (this.socket) this.socket.destroy(error); return this; }; ClientRequest.prototype.setTimeout = function(timeout, callback) { if (typeof callback === 'function') this.once('timeout', callback); return this; }; ClientRequest.prototype.setNoDelay = ClientRequest.prototype.setSocketKeepAlive = function() { return this; };
+             function request(input, options, callback) { return new ClientRequest(input, options, callback); } function get(input, options, callback) { var result = request(input, options, callback); result.end(); return result; }
+             var METHODS = ['ACL','BIND','CHECKOUT','CONNECT','COPY','DELETE','GET','HEAD','LINK','LOCK','M-SEARCH','MERGE','MKACTIVITY','MKCALENDAR','MKCOL','MOVE','NOTIFY','OPTIONS','PATCH','POST','PROPFIND','PROPPATCH','PURGE','PUT','REBIND','REPORT','SEARCH','SOURCE','SUBSCRIBE','TRACE','UNBIND','UNLINK','UNLOCK','UNSUBSCRIBE']; var STATUS_CODES = { 200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved Permanently', 302: 'Found', 304: 'Not Modified', 400: 'Bad Request', 401: 'Unauthorized', 403: 'Forbidden', 404: 'Not Found', 500: 'Internal Server Error', 502: 'Bad Gateway', 503: 'Service Unavailable' };
+             module.exports = { request: request, get: get, ClientRequest: ClientRequest, IncomingMessage: IncomingMessage, METHODS: METHODS, STATUS_CODES: STATUS_CODES, maxHeaderSize: 16384, globalAgent: { protocol: 'http:' } }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
+        ),
         "buffer" => Some(
             "function byteLength(value, encoding) { return globalThis.Buffer.byteLength(value, encoding); }\n\
              function isUtf8(value) { try { new TextDecoder('utf-8', { fatal: true }).decode(value); return true; } catch (_) { return false; } }\n\
@@ -6752,6 +6773,54 @@ mod tests {
         assert_eq!(
             result,
             format!(r#"[["connect","data:pong","end","close:false"],4,4,true,{port},"IPv4"]"#)
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn http_client_requests_and_parses_a_real_chunked_response() {
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /items?q=thaw HTTP/1.1\r\n"));
+            assert!(request.to_ascii_lowercase().contains("x-thaw: enabled\r\n"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-Reply: yes\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nConnection: close\r\n\r\n4\r\nthaw\r\n3\r\n-ok\r\n0\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let dir = temp_registry("builtin_http_client");
+        fs::write(
+            dir.join("index.js"),
+            "var http = require('node:http'); module.exports = async function (port) { return await new Promise(function(resolve, reject) { var request = http.get({ hostname: '127.0.0.1', port: port, path: '/items?q=thaw', headers: { 'X-Thaw': 'enabled' } }, function(response) { var chunks = []; response.setEncoding('utf8'); response.on('data', function(chunk) { chunks.push(chunk); }); response.on('end', function() { resolve([response.statusCode, response.statusMessage, response.httpVersion, response.headers['x-reply'], response.headers['set-cookie'], response.rawHeaders.length, chunks.join(''), response.complete, request.finished, request.destroyed, http.METHODS.indexOf('GET') >= 0, http.STATUS_CODES[200]]); }); }); request.on('error', reject); }); };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_http_client_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpClient = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseHttpClient").unwrap();
+        let arguments = CString::new(format!("[{port}]")).unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[200,"OK","1.1","yes",["a=1","b=2"],10,"thaw-ok",true,true,false,true,"OK"]"#
         );
         server.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
