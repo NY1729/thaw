@@ -427,6 +427,9 @@ The workspace crates have narrow responsibilities:
   Buffer/string reads and writes, append, directory creation/enumeration,
   Stats/Dirent predicates, rename, unlink and recursive removal with
   Node-shaped host errors
+- `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
+  classes with ranged/chunked reads, append mode, byte counters and
+  open/ready/finish/end/close lifecycle events
 - `node:util/types` identifies standard collections, boxed primitives,
   promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:constants` and `fs.constants` share Linux-compatible access, open,
