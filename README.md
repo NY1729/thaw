@@ -474,6 +474,10 @@ The workspace crates have narrow responsibilities:
 - `node:https` reuses that HTTP message and lifecycle layer over `node:tls`:
   `request()`/`get()` validate custom CAs and `createServer()` accepts PEM
   certificates and keys, with both directions verified against rustls peers
+- HTTP and HTTPS expose protocol-specific `Agent`/`globalAgent` instances with
+  connection naming, socket accounting and lifecycle helpers. Public
+  `validateHeaderName()`/`validateHeaderValue()` and every `setHeader()` reject
+  invalid tokens, control characters and undefined values with Node error codes
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
