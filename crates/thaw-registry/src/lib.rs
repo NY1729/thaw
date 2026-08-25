@@ -164,6 +164,13 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "domain" => {
             "export declare const active: any;\nexport declare const Domain: any;\nexport declare function create(argsArray: any): any;\nexport declare function createDomain(argsArray: any): any;\n"
         }
+        "trace_events" => {
+            "export declare const Tracing: any;\nexport declare function createTracing(argsArray: any): any;\nexport declare function getEnabledCategories(argsArray: any): string;\n"
+        }
+        "_stream_readable" | "_stream_writable" | "_stream_duplex" | "_stream_transform"
+        | "_stream_passthrough" | "_stream_wrap" => {
+            "export declare const Stream: any;\nexport declare const Readable: any;\nexport declare const Writable: any;\nexport declare const Duplex: any;\nexport declare const Transform: any;\nexport declare const PassThrough: any;\n"
+        }
         "child_process" => {
             "export declare const ChildProcess: any;\nexport declare function spawn(argsArray: any): any;\nexport declare function exec(argsArray: any): any;\nexport declare function execFile(argsArray: any): any;\nexport declare function spawnSync(argsArray: any): any;\nexport declare function execFileSync(argsArray: any): any;\nexport declare function execSync(argsArray: any): any;\n"
         }
@@ -3764,6 +3771,12 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              var duplexFromImplementation = Duplex.from; Duplex.from = function(source) { var valid = source instanceof Duplex || typeof source === 'function' || typeof source === 'string' || globalThis.ArrayBuffer.isView(source) || Boolean(source && (typeof source.then === 'function' || typeof source[Symbol.iterator] === 'function' || typeof source[Symbol.asyncIterator] === 'function' || source.readable === true || source.writable === true || (source.readable && source.writable))); if (!valid) { var invalid = new TypeError('The body argument must be a supported stream source'); invalid.code = 'ERR_INVALID_ARG_TYPE'; throw invalid; } return duplexFromImplementation.call(this, source); };\n\
              module.exports.default = Stream; module.exports.__esModule = true;\n",
         ),
+        "_stream_readable" => Some("module.exports = require('node:stream').Readable;\n"),
+        "_stream_writable" => Some("module.exports = require('node:stream').Writable;\n"),
+        "_stream_duplex" => Some("module.exports = require('node:stream').Duplex;\n"),
+        "_stream_transform" => Some("module.exports = require('node:stream').Transform;\n"),
+        "_stream_passthrough" => Some("module.exports = require('node:stream').PassThrough;\n"),
+        "_stream_wrap" => Some("module.exports = require('node:stream').Duplex;\n"),
         "stream/promises" => Some(
             "var callbackStream = require('node:stream'); function finished(stream, options) { return new Promise(function(resolve, reject) { callbackStream.finished(stream, Object.assign({}, options || {}, { cleanup: true }), function(error) { if (error) reject(error); else resolve(); }); }); }\
             function pipeline() { var stages = Array.prototype.slice.call(arguments); return new Promise(function(resolve, reject) { stages.push(function(error, value) { if (error) reject(error); else resolve(value); }); callbackStream.pipeline.apply(callbackStream, stages); }); }\
@@ -3794,6 +3807,17 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20return { start: channels.start, end: channels.end, asyncStart: channels.asyncStart, asyncEnd: channels.asyncEnd, error: channels.error, traceSync: function(callback, context, thisArg) { var args = Array.prototype.slice.call(arguments, 3); context = context || {}; channels.start.publish(context); try { var result = channels.start.runStores(context, callback, thisArg, ...args); context.result = result; channels.end.publish(context); return result; } catch (error) { context.error = error; channels.error.publish(context); channels.end.publish(context); throw error; } }, tracePromise: function(callback, context, thisArg) { var args = Array.prototype.slice.call(arguments, 3); context = context || {}; channels.start.publish(context); return Promise.resolve().then(function() { return channels.start.runStores(context, callback, thisArg, ...args); }).then(function(result) { context.result = result; channels.asyncStart.publish(context); channels.asyncEnd.publish(context); channels.end.publish(context); return result; }, function(error) { context.error = error; channels.error.publish(context); channels.asyncStart.publish(context); channels.asyncEnd.publish(context); channels.end.publish(context); throw error; }); }, traceCallback: function(callback, position, context, thisArg) { var args = Array.prototype.slice.call(arguments, 4); context = context || {}; channels.start.publish(context); var original = args[position]; args[position] = function(error, result) { if (error) { context.error = error; channels.error.publish(context); } else context.result = result; channels.asyncStart.publish(context); try { return original.apply(this, arguments); } finally { channels.asyncEnd.publish(context); channels.end.publish(context); } }; return channels.start.runStores(context, callback, thisArg, ...args); } };\n\
              }\n\
              module.exports = { channel: channel, hasSubscribers: hasSubscribers, subscribe: subscribe, unsubscribe: unsubscribe, tracingChannel: tracingChannel, Channel: Channel }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "trace_events" => Some(
+            r#"var categoryCounts = new Map();
+             function normalizeCategories(categories) { if (!Array.isArray(categories) || !categories.length) throw new TypeError('options.categories must be a non-empty array'); return Array.from(new Set(categories.map(String))); }
+             function Tracing(options) { if (!(this instanceof Tracing)) return new Tracing(options); if (!options || typeof options !== 'object') throw new TypeError('options must be an object'); this.categories = normalizeCategories(options.categories); this.enabled = false; }
+             Tracing.prototype.enable = function() { if (this.enabled) return; this.enabled = true; this.categories.forEach(function(category) { categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1); }); };
+             Tracing.prototype.disable = function() { if (!this.enabled) return; this.enabled = false; this.categories.forEach(function(category) { var count = (categoryCounts.get(category) || 0) - 1; if (count > 0) categoryCounts.set(category, count); else categoryCounts.delete(category); }); };
+             function createTracing(options) { return new Tracing(options); }
+             function getEnabledCategories() { return Array.from(categoryCounts.keys()).sort().join(','); }
+             module.exports = { Tracing: Tracing, createTracing: createTracing, getEnabledCategories: getEnabledCategories }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
         ),
         "dgram" => Some(
             "function Socket(type, listener) { if (!(this instanceof Socket)) return new Socket(type, listener); var options = typeof type === 'object' ? type : { type: type }; this.type = options.type || 'udp4'; if (this.type !== 'udp4' && this.type !== 'udp6') throw new TypeError('Bad socket type'); this._events = Object.create(null); this._handle = 0; this._address = null; this._remote = null; this._refed = true; if (typeof listener === 'function') this.on('message', listener); } Socket.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; }; Socket.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; }; Socket.prototype.off = Socket.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; }; Socket.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; };\n\
@@ -3845,7 +3869,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','timers','timers/promises','tls','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['_stream_duplex','_stream_passthrough','_stream_readable','_stream_transform','_stream_wrap','_stream_writable','assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','timers','timers/promises','tls','trace_events','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -5939,6 +5963,35 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,true,true,"a/b","C:\\a\\b",true,null,null,[["run",true,true],["bound",true,true],["intercepted",true,true]],[7,9],true,null,0]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn internal_stream_aliases_and_trace_categories_share_state() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_stream_aliases_trace");
+        fs::write(
+            dir.join("index.js"),
+            "var stream = require('node:stream'), Readable = require('_stream_readable'), Writable = require('node:_stream_writable'), Duplex = require('_stream_duplex'), Transform = require('_stream_transform'), PassThrough = require('_stream_passthrough'), StreamWrap = require('_stream_wrap'), trace = require('node:trace_events'); module.exports = function () { var first = trace.createTracing({ categories: ['node', 'v8', 'v8'] }), second = new trace.Tracing({ categories: ['v8', 'custom'] }), states = [first.enabled, trace.getEnabledCategories()]; first.enable(); first.enable(); states.push(first.enabled, trace.getEnabledCategories()); second.enable(); states.push(trace.getEnabledCategories()); first.disable(); states.push(first.enabled, trace.getEnabledCategories()); second.disable(); states.push(trace.getEnabledCategories()); return [Readable === stream.Readable, Writable === stream.Writable, Duplex === stream.Duplex, Transform === stream.Transform, PassThrough === stream.PassThrough, StreamWrap === stream.Duplex, first.categories, second.categories, states]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_stream_aliases_trace_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 9);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTraceAliases = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseTraceAliases").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,true,true,true,true,true,["node","v8"],["v8","custom"],[false,"",true,"node,v8","custom,node,v8",false,"custom,v8",""]]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
