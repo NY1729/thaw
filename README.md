@@ -323,7 +323,8 @@ The workspace crates have narrow responsibilities:
   Destroying a writable rejects queued and in-flight callbacks exactly once,
   clears buffered length and prevents a later `finish` event.
   Readables track buffered length, support object mode and pause/resume their
-  pipes until a backpressured destination drains;
+  pipes until a backpressured destination drains. Their async iterators yield
+  buffered and future chunks, reject stream errors and destroy on early return;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
