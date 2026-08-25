@@ -404,7 +404,8 @@ The workspace crates have narrow responsibilities:
   TLSSocket and createServer write/end/data/secureConnection lifecycles;
   client certificates and server-side `requestCert`/custom-CA verification are
   supported, and a listening server continues accepting clients while tracking
-  active connections; unrestricted certificate bypass remains a later step
+  active connections; `ALPNProtocols` performs real negotiation and exposes the
+  selected `alpnProtocol`; unrestricted certificate bypass remains a later step
 - `node:os` reads host CPU, memory, uptime, load, hostname, release, home/tmp and
   user information while exposing Node-shaped loopback interfaces and constants
 - `node:http` exposes native `serveOnce(port, body)` and
