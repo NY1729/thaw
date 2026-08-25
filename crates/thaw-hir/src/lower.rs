@@ -804,6 +804,45 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     )
 }
 
+fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &str) -> bool {
+    match pattern {
+        GenericTypePattern::Variable(name) => name == variable,
+        GenericTypePattern::Array(inner) | GenericTypePattern::Promise(inner) => {
+            generic_pattern_contains_variable(inner, variable)
+        }
+        GenericTypePattern::Object(fields) => fields
+            .iter()
+            .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
+        GenericTypePattern::Concrete(_) => false,
+    }
+}
+
+fn specialized_generic_function_name(
+    name: &str,
+    concrete_params: &[HirType],
+    signature: &FnSignature,
+    generic_types: &[HirType],
+) -> Symbol {
+    let base = specialized_generic_name(name, concrete_params);
+    let hidden = signature
+        .generic_type_params
+        .iter()
+        .zip(generic_types)
+        .filter_map(|(parameter, ty)| {
+            (!signature
+                .generic_param_patterns
+                .iter()
+                .any(|pattern| generic_pattern_contains_variable(pattern, parameter)))
+            .then_some(ty.clone())
+        })
+        .collect::<Vec<_>>();
+    if hidden.is_empty() {
+        base
+    } else {
+        format!("{base}__generic{}", specialized_generic_name("", &hidden))
+    }
+}
+
 fn generic_type_pattern(
     ty: &TsType,
     substitutions: &HashMap<Symbol, GenericTypePattern>,
@@ -1176,6 +1215,88 @@ fn infer_generic_type_tuple(
     Ok(types)
 }
 
+fn resolve_explicit_generic_type_tuple(
+    signature: &FnSignature,
+    arguments: &[Box<TsType>],
+    actual_params: &[HirType],
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Vec<HirType>, String> {
+    let required = signature
+        .generic_type_defaults
+        .iter()
+        .filter(|default| default.is_none())
+        .count();
+    if arguments.len() < required || arguments.len() > signature.generic_type_params.len() {
+        let expected = if required == signature.generic_type_params.len() {
+            required.to_string()
+        } else {
+            format!("{required}..={}", signature.generic_type_params.len())
+        };
+        return Err(format!(
+            "expects {expected} explicit type argument(s), got {}",
+            arguments.len()
+        ));
+    }
+
+    let mut types = Vec::with_capacity(signature.generic_type_params.len());
+    let mut substitution = HashMap::new();
+    for (index, name) in signature.generic_type_params.iter().enumerate() {
+        let concrete = if let Some(argument) = arguments.get(index) {
+            lower_ts_type(argument, interfaces, generic_interfaces)?
+        } else {
+            resolve_ts_type_with_substitution(
+                signature.generic_type_defaults[index]
+                    .as_ref()
+                    .expect("validated explicit generic arity requires a default"),
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )?
+        };
+        substitution.insert(name.clone(), concrete.clone());
+        types.push(concrete);
+    }
+
+    for ((name, actual), constraint) in signature
+        .generic_type_params
+        .iter()
+        .zip(&types)
+        .zip(&signature.generic_type_constraints)
+    {
+        let Some(constraint) = constraint else {
+            continue;
+        };
+        let constraint = resolve_ts_type_with_substitution(
+            constraint,
+            &substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        if !type_satisfies_constraint(actual, &constraint) {
+            return Err(format!(
+                "explicit type {actual:?} does not satisfy constraint {constraint:?} for `{name}`"
+            ));
+        }
+    }
+
+    let mut inferred = HashMap::new();
+    for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
+        match_generic_pattern(pattern, actual, &mut inferred)?;
+    }
+    for (name, inferred) in inferred {
+        let explicit = &substitution[&name];
+        if &inferred != explicit {
+            return Err(format!(
+                "argument infers {name} as {inferred:?}, but explicit type is {explicit:?}"
+            ));
+        }
+    }
+    Ok(types)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_generic_instance(
     fn_decl: &FnDecl,
@@ -1247,12 +1368,14 @@ fn lower_generic_instance(
             .stmts,
     )?;
     Ok(HirFunction {
-        name: specialized_generic_name(
+        name: specialized_generic_function_name(
             &base_name,
             &params
                 .iter()
                 .map(|param| param.ty.clone())
                 .collect::<Vec<_>>(),
+            signature,
+            types,
         ),
         params,
         ret,
@@ -3305,6 +3428,7 @@ struct FnLowerer<'a> {
     enum_reverse_values: &'a EnumReverseValues,
     ret_type: HirType,
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
+    generic_call_returns: HashMap<Symbol, HirType>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
 }
@@ -3346,6 +3470,7 @@ impl<'a> FnLowerer<'a> {
             enum_reverse_values,
             ret_type,
             call_constraints,
+            generic_call_returns: HashMap::new(),
             loop_depth: 0,
             labels: Vec::new(),
         }
@@ -5401,6 +5526,9 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     return Ok(ret.as_ref().clone());
+                }
+                if let Some(return_type) = self.generic_call_returns.get(name) {
+                    return Ok(return_type.clone());
                 }
                 let signature = self.signatures.get(name).or_else(|| {
                     name.split_once("__thaw_")
@@ -12142,12 +12270,22 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .map(|arg| self.infer_expr_type(arg))
                 .collect::<Result<Vec<_>, _>>()?;
-            let types = infer_generic_type_tuple(
-                signature,
-                &actual,
-                self.interfaces,
-                self.generic_interfaces,
-            )
+            let types = if let Some(type_args) = &call.type_args {
+                resolve_explicit_generic_type_tuple(
+                    signature,
+                    &type_args.params,
+                    &actual,
+                    self.interfaces,
+                    self.generic_interfaces,
+                )
+            } else {
+                infer_generic_type_tuple(
+                    signature,
+                    &actual,
+                    self.interfaces,
+                    self.generic_interfaces,
+                )
+            }
             .map_err(|error| format!("call to generic function `{callee_name}`: {error}"))?;
             if !types.contains(&HirType::Dynamic) {
                 for ty in &types {
@@ -12160,6 +12298,11 @@ impl<'a> FnLowerer<'a> {
             }
             Some(types)
         } else {
+            if call.type_args.is_some() {
+                return Err(format!(
+                    "non-generic function `{callee_name}` does not accept type arguments"
+                ));
+            }
             None
         };
 
@@ -12216,15 +12359,38 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &argument_bindings);
         }
 
-        let lowered_name = if generic_types
+        let lowered_name = if let Some(types) = generic_types
             .as_ref()
-            .is_some_and(|types| !types.contains(&HirType::Dynamic))
+            .filter(|types| !types.contains(&HirType::Dynamic))
         {
             let param_types = args
                 .iter()
                 .map(|arg| self.infer_expr_type(arg))
                 .collect::<Result<Vec<_>, _>>()?;
-            specialized_generic_name(&callee_name, &param_types)
+            let signature = signature
+                .as_ref()
+                .expect("generic types require a generic signature");
+            let lowered_name =
+                specialized_generic_function_name(&callee_name, &param_types, signature, types);
+            let substitution = signature
+                .generic_type_params
+                .iter()
+                .cloned()
+                .zip(types.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let return_type = resolve_ts_type_with_substitution(
+                signature
+                    .generic_return_type
+                    .as_ref()
+                    .expect("generic return type"),
+                &substitution,
+                self.interfaces,
+                self.generic_interfaces,
+                &mut Vec::new(),
+            )?;
+            self.generic_call_returns
+                .insert(lowered_name.clone(), return_type);
+            lowered_name
         } else {
             callee_name
         };
@@ -12704,6 +12870,32 @@ mod tests {
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(kind), "{error}");
             assert!(error.contains("required type parameter `U`"), "{error}");
+        }
+    }
+
+    #[test]
+    fn validates_explicit_generic_function_type_arguments() {
+        for (source, expected) in [
+            (
+                "function id<T>(value: T): T { return value; } function main(): void { id<string>(1); }",
+                "explicit type is Str",
+            ),
+            (
+                "function pair<T, U>(left: T, right: U): T { return left; } function main(): void { pair<number>(1, 2); }",
+                "expects 2 explicit type argument",
+            ),
+            (
+                "function numeric<T extends number>(value: T): T { return value; } function main(): void { numeric<string>(\"x\"); }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "function plain(value: number): number { return value; } function main(): void { plain<number>(1); }",
+                "non-generic function `plain`",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
         }
     }
 
