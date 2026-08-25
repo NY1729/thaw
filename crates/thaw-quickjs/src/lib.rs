@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
+use sha2::{Digest, Sha256, Sha512};
 
 thread_local! {
     static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
@@ -42,6 +43,57 @@ fn to_str(ptr: *const c_char) -> String {
     unsafe { CStr::from_ptr(ptr) }
         .to_string_lossy()
         .into_owned()
+}
+
+fn hex_decode(value: &str) -> Vec<u8> {
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).unwrap_or("00");
+            u8::from_str_radix(text, 16).unwrap_or(0)
+        })
+        .collect()
+}
+
+fn hex_encode(value: &[u8]) -> String {
+    value.iter().fold(String::new(), |mut output, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
+}
+
+fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {
+    match algorithm {
+        "sha256" => Sha256::digest(value).to_vec(),
+        "sha512" => Sha512::digest(value).to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+fn hmac_bytes(algorithm: &str, key: &[u8], value: &[u8]) -> Vec<u8> {
+    let block_size = if algorithm == "sha512" { 128 } else { 64 };
+    let mut normalized = if key.len() > block_size {
+        digest_bytes(algorithm, key)
+    } else {
+        key.to_vec()
+    };
+    normalized.resize(block_size, 0);
+    let inner_key = normalized
+        .iter()
+        .map(|byte| byte ^ 0x36)
+        .collect::<Vec<_>>();
+    let outer_key = normalized
+        .iter()
+        .map(|byte| byte ^ 0x5c)
+        .collect::<Vec<_>>();
+    let mut inner = inner_key;
+    inner.extend_from_slice(value);
+    let inner_digest = digest_bytes(algorithm, &inner);
+    let mut outer = outer_key;
+    outer.extend_from_slice(&inner_digest);
+    digest_bytes(algorithm, &outer)
 }
 
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
@@ -67,6 +119,36 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                let random_hex = Function::new(ctx.clone(), |size: u32| {
+                    let mut bytes = vec![0u8; size as usize];
+                    getrandom::getrandom(&mut bytes).expect("OS random source failed");
+                    hex_encode(&bytes)
+                })
+                .expect("failed to create JavaScript random source");
+                let hash_hex = Function::new(ctx.clone(), |algorithm: String, value: String| {
+                    hex_encode(&digest_bytes(&algorithm, &hex_decode(&value)))
+                })
+                .expect("failed to create JavaScript hash function");
+                let hmac_hex = Function::new(
+                    ctx.clone(),
+                    |algorithm: String, key: String, value: String| {
+                        hex_encode(&hmac_bytes(
+                            &algorithm,
+                            &hex_decode(&key),
+                            &hex_decode(&value),
+                        ))
+                    },
+                )
+                .expect("failed to create JavaScript HMAC function");
+                ctx.globals()
+                    .set("__thaw_crypto_random_hex", random_hex)
+                    .expect("failed to install JavaScript random source");
+                ctx.globals()
+                    .set("__thaw_crypto_hash_hex", hash_hex)
+                    .expect("failed to install JavaScript hash function");
+                ctx.globals()
+                    .set("__thaw_crypto_hmac_hex", hmac_hex)
+                    .expect("failed to install JavaScript HMAC function");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
@@ -958,6 +1040,97 @@ const PLATFORM_GLOBALS: &str = r#"
   };
   Buffer.poolSize = 8192;
   globalThis.SlowBuffer = size => Buffer.alloc(Number(size));
+  const normalizeHashAlgorithm = algorithm => {
+    const name = String(algorithm).toLowerCase().replace(/[-_]/g, '');
+    if (name !== 'sha256' && name !== 'sha512') throw new TypeError(`Unsupported digest: ${algorithm}`);
+    return name;
+  };
+  const randomBytesSync = size => Buffer.from(__thaw_crypto_random_hex(Number(size)), 'hex');
+  class Hash {
+    constructor(algorithm) { this.algorithm = normalizeHashAlgorithm(algorithm); this._chunks = []; this._digested = false; }
+    update(data, encoding) {
+      if (this._digested) throw new Error('Digest already called');
+      this._chunks.push(Buffer.from(data, encoding)); return this;
+    }
+    digest(encoding) {
+      if (this._digested) throw new Error('Digest already called');
+      this._digested = true;
+      const value = Buffer.from(__thaw_crypto_hash_hex(this.algorithm, Buffer.concat(this._chunks).toString('hex')), 'hex');
+      return encoding === undefined ? value : value.toString(encoding);
+    }
+    copy() { const copied = new Hash(this.algorithm); copied._chunks = this._chunks.map(chunk => Buffer.from(chunk)); return copied; }
+  }
+  class Hmac extends Hash {
+    constructor(algorithm, key) { super(algorithm); this._key = Buffer.from(key); }
+    digest(encoding) {
+      if (this._digested) throw new Error('Digest already called');
+      this._digested = true;
+      const value = Buffer.from(__thaw_crypto_hmac_hex(this.algorithm, this._key.toString('hex'), Buffer.concat(this._chunks).toString('hex')), 'hex');
+      return encoding === undefined ? value : value.toString(encoding);
+    }
+  }
+  const randomFillSync = (buffer, offset = 0, size = buffer.byteLength - Number(offset)) => {
+    if (!ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer view');
+    const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    bytes.set(randomBytesSync(Number(size)), Number(offset)); return buffer;
+  };
+  const randomFill = (buffer, offset, size, callback) => {
+    if (typeof offset === 'function') { callback = offset; offset = 0; size = buffer.byteLength; }
+    else if (typeof size === 'function') { callback = size; size = buffer.byteLength - Number(offset || 0); }
+    if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+    try { randomFillSync(buffer, offset || 0, size); queueMicrotask(() => callback(null, buffer)); }
+    catch (error) { queueMicrotask(() => callback(error)); }
+  };
+  const randomBytes = (size, callback) => {
+    const value = randomBytesSync(size);
+    if (callback === undefined) return value;
+    if (typeof callback !== 'function') throw new TypeError('callback must be a function');
+    queueMicrotask(() => callback(null, value));
+  };
+  const randomInt = (min, max, callback) => {
+    if (max === undefined || typeof max === 'function') { callback = typeof max === 'function' ? max : callback; max = min; min = 0; }
+    min = Math.ceil(Number(min)); max = Math.floor(Number(max));
+    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max) || max <= min) throw new RangeError('invalid random integer range');
+    const range = max - min; const bytes = randomBytesSync(4);
+    const value = min + ((bytes[0] * 0x1000000 + bytes[1] * 0x10000 + bytes[2] * 0x100 + bytes[3]) % range);
+    if (callback === undefined) return value;
+    queueMicrotask(() => callback(null, value));
+  };
+  const randomUUID = () => {
+    const bytes = randomBytesSync(16); bytes[6] = bytes[6] & 0x0f | 0x40; bytes[8] = bytes[8] & 0x3f | 0x80;
+    const hex = bytes.toString('hex');
+    return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
+  };
+  const timingSafeEqual = (left, right) => {
+    const a = Buffer.from(left), b = Buffer.from(right);
+    if (a.length !== b.length) throw new RangeError('input buffers must have the same length');
+    let difference = 0; for (let index = 0; index < a.length; index++) difference |= a[index] ^ b[index]; return difference === 0;
+  };
+  const cryptoModule = {
+    createHash: algorithm => new Hash(algorithm),
+    createHmac: (algorithm, key) => new Hmac(algorithm, key),
+    Hash, Hmac, randomBytes, randomFill, randomFillSync, randomInt, randomUUID,
+    timingSafeEqual, getHashes: () => ['sha256', 'sha512']
+  };
+  const subtle = {
+    digest(algorithm, data) {
+      const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+      const value = cryptoModule.createHash(name).update(Buffer.from(data.buffer || data,
+        data.byteOffset || 0, data.byteLength)).digest();
+      return Promise.resolve(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    }
+  };
+  const webCrypto = globalThis.crypto || {};
+  webCrypto.getRandomValues = value => {
+    if (!ArrayBuffer.isView(value) || value.byteLength > 65536) throw new DOMException('invalid random value target', 'QuotaExceededError');
+    return randomFillSync(value);
+  };
+  webCrypto.randomUUID = randomUUID;
+  webCrypto.subtle = webCrypto.subtle || subtle;
+  globalThis.crypto = webCrypto;
+  cryptoModule.webcrypto = webCrypto;
+  cryptoModule.subtle = webCrypto.subtle;
+  globalThis.__thaw_crypto_module = cryptoModule;
 })();
 "#;
 
@@ -2054,6 +2227,30 @@ mod tests {
         assert_eq!(
             call("buffers", "[]"),
             r#"[true,true,3,"雪Ab","AP8Q","hi!","xyZyx",1,4,true,4660,22136,-1,true,true]"#
+        );
+    }
+
+    #[test]
+    fn crypto_hash_hmac_random_and_webcrypto_are_available() {
+        assert_eq!(
+            load(
+                "async function cryptoHelpers() {\n\
+                   const sha256 = __thaw_crypto_module.createHash('sha-256').update('a').copy().update('bc').digest('hex');\n\
+                   const sha512 = __thaw_crypto_module.createHash('sha512').update('abc').digest('hex');\n\
+                   const hmac = __thaw_crypto_module.createHmac('sha256', 'key').update('The quick brown fox jumps over the lazy dog').digest('hex');\n\
+                   const random = __thaw_crypto_module.randomBytes(12); const filled = new Uint8Array(8); const same = crypto.getRandomValues(filled) === filled;\n\
+                   const callbackValue = await new Promise((resolve, reject) => __thaw_crypto_module.randomBytes(5, (error, value) => error ? reject(error) : resolve(value.length)));\n\
+                   const integer = await new Promise((resolve, reject) => __thaw_crypto_module.randomInt(10, 20, (error, value) => error ? reject(error) : resolve(value)));\n\
+                   const webDigest = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'))).toString('hex');\n\
+                   const uuid = crypto.randomUUID();\n\
+                   return [sha256, sha512, hmac, random.length, same, filled.length, callbackValue, integer >= 10 && integer < 20, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid), __thaw_crypto_module.timingSafeEqual(Buffer.from('same'), Buffer.from('same')), webDigest, __thaw_crypto_module.getHashes()];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("cryptoHelpers", "[]"),
+            r#"["ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f","f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",12,true,8,5,true,true,true,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",["sha256","sha512"]]"#
         );
     }
 
