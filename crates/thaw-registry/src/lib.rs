@@ -1451,6 +1451,35 @@ fn rewrite_static_worker_urls(
         true
     }
 
+    fn static_worker_path(expression: &Expr) -> Option<String> {
+        match expression {
+            Expr::Lit(Lit::Str(path)) => Some(path.value.to_string_lossy().into_owned()),
+            Expr::Tpl(template) if template.quasis.len() == template.exprs.len() + 1 => {
+                let mut path = String::new();
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    path.push_str(
+                        &quasi
+                            .cooked
+                            .as_ref()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| quasi.raw.to_string()),
+                    );
+                    if let Some(expression) = template.exprs.get(index) {
+                        path.push_str(&static_worker_path(expression)?);
+                    }
+                }
+                Some(path)
+            }
+            Expr::Paren(parenthesized) => static_worker_path(&parenthesized.expr),
+            Expr::Bin(binary) if binary.op == thaw_parser::ast::BinaryOp::Add => Some(format!(
+                "{}{}",
+                static_worker_path(&binary.left)?,
+                static_worker_path(&binary.right)?
+            )),
+            _ => None,
+        }
+    }
+
     struct WorkerUrls {
         constructors: BTreeSet<String>,
         namespaces: BTreeSet<String>,
@@ -1476,16 +1505,18 @@ fn rewrite_static_worker_urls(
             let Some(first) = arguments.first() else {
                 return;
             };
-            if let Expr::Lit(Lit::Str(path)) = first.expr.as_ref() {
-                if static_file_options(arguments) {
-                    let span = first.expr.span();
-                    self.spans.push(WorkerUrlSpan {
-                        lo: span.lo.0,
-                        hi: span.hi.0,
-                        import_meta_base: None,
-                        relative: path.value.to_string_lossy().into_owned(),
-                    });
+            if let Some(path) = static_worker_path(&first.expr) {
+                if !static_file_options(arguments) {
+                    expression.visit_children_with(self);
+                    return;
                 }
+                let span = first.expr.span();
+                self.spans.push(WorkerUrlSpan {
+                    lo: span.lo.0,
+                    hi: span.hi.0,
+                    import_meta_base: None,
+                    relative: path,
+                });
                 expression.visit_children_with(self);
                 return;
             }
@@ -5851,7 +5882,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.join("index.js"),
-            "var Worker = require('node:worker_threads').Worker; function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); return events; };",
+            "var Worker = require('node:worker_threads').Worker; function run(worker, events) { return new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); } module.exports = async function () { var events = []; await run(new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }), events); await run(new Worker('./worker.js', { workerData: 11 }), events); await run(new Worker(`./${'worker'}.js`, { workerData: 5 }), events); return events; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
@@ -5866,7 +5897,7 @@ mod tests {
         let arguments = CString::new("[]").unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-        assert_eq!(result, "[42,0,22,0]");
+        assert_eq!(result, "[42,0,22,0,10,0]");
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
 
