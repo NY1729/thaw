@@ -359,6 +359,9 @@ The workspace crates have narrow responsibilities:
 - Named generic functions used as array or Promise callbacks specialize from
   the contextual callback parameter types, with the same constraint checks and
   per-type deduplication as direct calls
+- Inline generic arrow callbacks in array and Promise APIs infer their concrete
+  type tuple from the callback context, validate defaults/constraints and lower
+  the body with concrete parameter and return layouts
 - Generic variables nested in number arrays and fixed-layout numeric objects
   are inferred recursively and encoded into specialization symbols
 - Function type variables used as arguments to named generic interfaces such
