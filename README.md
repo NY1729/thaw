@@ -482,7 +482,9 @@ The workspace crates have narrow responsibilities:
   support `*`, `?`, `**`, multiple patterns, exclusions, cwd and Dirent output
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
   classes with incremental host I/O, ranged/positioned reads and writes,
-  append mode, byte counters and open/ready/finish/end/close lifecycle events
+  append mode, byte counters and open/ready/finish/end/close lifecycle events;
+  writes are serialized and expose `highWaterMark`, `writableLength` and
+  `drain` backpressure instead of reporting every write as immediately ready
 - `node:util/types` identifies standard collections, boxed primitives,
   promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:constants` and `fs.constants` share Linux-compatible access, open,
