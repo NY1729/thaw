@@ -14267,6 +14267,8 @@ mod tests {
     fn compiles_generic_callable_interfaces() {
         let source = r#"
             interface Identity { <T>(value: T): T; }
+            interface DerivedIdentity extends MiddleIdentity {}
+            interface MiddleIdentity extends Identity {}
             type ForwardIdentity = IdentityChain;
             type IdentityChain = Identity;
             interface Numeric { <T extends number>(value: T): T; }
@@ -14277,6 +14279,7 @@ mod tests {
                 const arrowChain: Identity = local;
                 const namedChain: Identity = forwarded;
                 const interfaceAliasChain: ForwardIdentity = local;
+                const inherited: DerivedIdentity = forwarded;
                 const numeric: Numeric = <Value extends number>(value: Value): Value => value;
                 console.log(local(29));
                 console.log(local("interface"));
@@ -14287,11 +14290,12 @@ mod tests {
                 console.log(arrowChain<string>("interface-chain"));
                 console.log(namedChain(34));
                 console.log(interfaceAliasChain<string>("interface-alias-chain"));
+                console.log(inherited(35));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_callable_interfaces"),
-            "29\ninterface\n30\nnamed-interface\n31\n33\ninterface-chain\n34\ninterface-alias-chain\n"
+            "29\ninterface\n30\nnamed-interface\n31\n33\ninterface-chain\n34\ninterface-alias-chain\n35\n"
         );
     }
 

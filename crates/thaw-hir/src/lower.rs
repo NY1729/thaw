@@ -1430,6 +1430,7 @@ struct GenericInterfaces<'a> {
     function_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     function_alias_chains: HashMap<Symbol, Symbol>,
     function_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
+    function_interface_chains: HashMap<Symbol, Symbol>,
 }
 
 impl GenericInterfaces<'_> {
@@ -1524,6 +1525,9 @@ fn resolve_interfaces(
                             .contains_key(target.sym.as_ref())
                         || generic
                             .function_alias_chains
+                            .contains_key(target.sym.as_ref())
+                        || generic
+                            .function_interface_chains
                             .contains_key(target.sym.as_ref()))
                 {
                     Some((name.clone(), target.sym.to_string()))
@@ -1532,12 +1536,41 @@ fn resolve_interfaces(
                 }
             })
             .collect::<Vec<_>>();
-        if callable_aliases.is_empty() {
+        let callable_interfaces = raw
+            .iter()
+            .filter_map(|(name, interface)| {
+                let [base] = interface.extends.as_slice() else {
+                    return None;
+                };
+                if !interface.body.body.is_empty() || base.type_args.is_some() {
+                    return None;
+                }
+                let Expr::Ident(target) = base.expr.as_ref() else {
+                    return None;
+                };
+                (generic.function_aliases.contains_key(target.sym.as_ref())
+                    || generic
+                        .function_interfaces
+                        .contains_key(target.sym.as_ref())
+                    || generic
+                        .function_alias_chains
+                        .contains_key(target.sym.as_ref())
+                    || generic
+                        .function_interface_chains
+                        .contains_key(target.sym.as_ref()))
+                .then(|| (name.clone(), target.sym.to_string()))
+            })
+            .collect::<Vec<_>>();
+        if callable_aliases.is_empty() && callable_interfaces.is_empty() {
             break;
         }
         for (name, target) in callable_aliases {
             aliases.remove(&name);
             generic.function_alias_chains.insert(name, target);
+        }
+        for (name, target) in callable_interfaces {
+            raw.remove(&name);
+            generic.function_interface_chains.insert(name, target);
         }
     }
 
@@ -1569,6 +1602,7 @@ fn resolve_interfaces(
             || generic.interfaces.contains_key(*name)
             || generic.aliases.contains_key(*name)
             || generic.function_alias_chains.contains_key(*name)
+            || generic.function_interface_chains.contains_key(*name)
     }) {
         return Err(format!(
             "generic function type alias `{name}` conflicts with another type declaration"
@@ -1581,9 +1615,29 @@ fn resolve_interfaces(
             || generic.aliases.contains_key(*name)
             || generic.function_aliases.contains_key(*name)
             || generic.function_alias_chains.contains_key(*name)
+            || generic.function_interface_chains.contains_key(*name)
     }) {
         return Err(format!(
             "generic callable interface `{name}` conflicts with another type declaration"
+        ));
+    }
+    if let Some(name) = generic.function_alias_chains.keys().find(|name| {
+        raw.contains_key(*name)
+            || generic.interfaces.contains_key(*name)
+            || generic.aliases.contains_key(*name)
+            || generic.function_interface_chains.contains_key(*name)
+    }) {
+        return Err(format!(
+            "callable type alias `{name}` conflicts with another type declaration"
+        ));
+    }
+    if let Some(name) = generic.function_interface_chains.keys().find(|name| {
+        aliases.contains_key(*name)
+            || generic.interfaces.contains_key(*name)
+            || generic.aliases.contains_key(*name)
+    }) {
+        return Err(format!(
+            "callable interface `{name}` conflicts with another type declaration"
         ));
     }
 
@@ -13140,6 +13194,11 @@ impl<'a> FnLowerer<'a> {
                 .generic_interfaces
                 .function_alias_chains
                 .get(&target)
+                .or_else(|| {
+                    self.generic_interfaces
+                        .function_interface_chains
+                        .get(&target)
+                })
                 .cloned()
             else {
                 return Ok(None);
@@ -14089,20 +14148,25 @@ mod tests {
 
     #[test]
     fn validates_generic_callable_interface_assignments() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            interface Identity { <T>(value: T): T; }
-            function main(): void {
-                const invalid: Identity = <U>(value: U): string => "wrong";
-            }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("incompatible with function type alias `Identity`"),
-            "{error}"
-        );
+        for (source, name) in [
+            (
+                "interface Identity { <T>(value: T): T; } function main(): void { const invalid: Identity = <U>(value: U): string => \"wrong\"; }",
+                "Identity",
+            ),
+            (
+                "interface Derived extends Middle {} interface Middle extends Identity {} interface Identity { <T>(value: T): T; } function main(): void { const invalid: Derived = <U>(value: U): string => \"wrong\"; }",
+                "Derived",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "incompatible with function type alias `{name}`"
+                )),
+                "{error}"
+            );
+        }
     }
 
     #[test]
