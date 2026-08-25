@@ -126,6 +126,9 @@ The workspace crates have narrow responsibilities:
   objects; function types may be parenthesized where TypeScript grammar
   requires it (including `FunctionType | undefined`)
 - `interface`, interface inheritance and generic interface instantiation
+- Numeric and string `enum` declarations lower to typed native constants,
+  including implicit numeric numbering, preceding-member constant expressions,
+  bracketed string member reads, and use before the declaration
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
@@ -649,10 +652,12 @@ The workspace crates have narrow responsibilities:
 
 ### Not yet compatible
 
-- Contextual/generic TypeScript inference, overload resolution, classes, enums,
+- Contextual/generic TypeScript inference, overload resolution, classes,
   tuples, broad union/intersection support, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
-  are assigned stable bundle-local symbols
+  are assigned stable bundle-local symbols. Runtime enum objects, numeric
+  reverse lookup, declaration merging, and heterogeneous enums remain outside
+  the native constant subset
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel
   collisions. Nullish coalescing and `??=` unwrap or update the payload with
