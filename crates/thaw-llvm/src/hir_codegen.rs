@@ -14017,6 +14017,7 @@ mod tests {
             interface Outcome<T, E = string> { value: T; error: E }
             interface SamePair<T, U = T> { first: T; second: U }
             interface Numeric<T extends number> { value: T }
+            function outcomeValue<T>(result: Outcome<T>): T { return result.value; }
             function outcome(value: number): Outcome<number> {
                 return { error: "none", value };
             }
@@ -14026,7 +14027,7 @@ mod tests {
             function numeric(value: number): Numeric<number> { return { value }; }
             function main(): void {
                 const result: Outcome<number> = outcome(5);
-                console.log(result.value);
+                console.log(outcomeValue(result));
                 console.log(result.error);
                 const values: SamePair<string> = pair("pair");
                 console.log(values.first + values.second);
@@ -14036,6 +14037,32 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "generic_interface_defaults_constraints"),
             "5\nnone\npairpair\n8\n"
+        );
+    }
+
+    #[test]
+    fn compiles_generic_interface_inheritance() {
+        let source = r#"
+            interface Named { name: string }
+            interface Box<T> { value: T }
+            interface NamedBox<T> extends Named, Box<T> { count: number }
+            interface Wrapped<T> extends NamedBox<T[]> { active: boolean }
+            function first<T>(box: NamedBox<T>): T { return box.value; }
+            function main(): void {
+                const box: NamedBox<number> = { name: "items", value: 7, count: 1 };
+                console.log(box.name);
+                console.log(first(box));
+                const wrapped: Wrapped<string> = {
+                    name: "wrapped", value: ["a", "b"], count: 2, active: true
+                };
+                console.log(wrapped.value[1]);
+                console.log(wrapped.count);
+                console.log(wrapped.active);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_interface_inheritance"),
+            "items\n7\nb\n2\ntrue\n"
         );
     }
 
