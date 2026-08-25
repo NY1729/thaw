@@ -320,6 +320,8 @@ The workspace crates have narrow responsibilities:
   high-water-mark return values, queued length and `drain` notification.
   Nested `cork()`/`uncork()` defers writes and uses `_writev` batches when
   available; `end()` safely releases any remaining cork level.
+  Completion is deferred like Node: repeated `end()` callbacks settle exactly
+  once before `finish`, and `writableFinished` stays false until that turn.
   Destroying a writable rejects queued and in-flight callbacks exactly once,
   clears buffered length and prevents a later `finish` event.
   Readables and writables track buffered length and support object mode,
