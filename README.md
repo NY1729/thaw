@@ -423,9 +423,10 @@ The workspace crates have narrow responsibilities:
   callback arguments
 - `node:fs` exposes host-backed synchronous `existsSync`, `readFileSync`,
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
-- `node:fs` and `node:fs/promises` support Buffer/string reads and writes,
-  append, directory creation/enumeration, Stats/Dirent predicates, rename,
-  unlink and recursive removal with Node-shaped host errors
+- `node:fs` and `node:fs/promises` support synchronous, callback and Promise
+  Buffer/string reads and writes, append, directory creation/enumeration,
+  Stats/Dirent predicates, rename, unlink and recursive removal with
+  Node-shaped host errors
 - `node:util/types` identifies standard collections, boxed primitives,
   promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:constants` and `fs.constants` share Linux-compatible access, open,
