@@ -171,8 +171,188 @@ pub fn lower_module_with_source_map(
     })
 }
 
+type EnumValues = HashMap<(Symbol, Symbol), HirLit>;
+
+fn enum_member_name(id: &swc_ecma_ast::TsEnumMemberId) -> Symbol {
+    match id {
+        swc_ecma_ast::TsEnumMemberId::Ident(id) => id.sym.to_string(),
+        swc_ecma_ast::TsEnumMemberId::Str(value) => value.value.to_string_lossy().into_owned(),
+    }
+}
+
+fn eval_enum_initializer(
+    expr: &Expr,
+    enum_name: &str,
+    values: &EnumValues,
+) -> Result<HirLit, String> {
+    match expr {
+        Expr::Lit(Lit::Num(value)) => Ok(HirLit::F64(value.value)),
+        Expr::Lit(Lit::Str(value)) => Ok(HirLit::Str(value.value.to_string_lossy().into_owned())),
+        Expr::Paren(value) => eval_enum_initializer(&value.expr, enum_name, values),
+        Expr::Unary(unary) => {
+            let HirLit::F64(value) = eval_enum_initializer(&unary.arg, enum_name, values)? else {
+                return Err(format!(
+                    "enum `{enum_name}` unary initializer requires a numeric operand"
+                ));
+            };
+            match unary.op {
+                UnaryOp::Plus => Ok(HirLit::F64(value)),
+                UnaryOp::Minus => Ok(HirLit::F64(-value)),
+                UnaryOp::Tilde => Ok(HirLit::F64((!(value as i32)) as f64)),
+                other => Err(format!(
+                    "enum `{enum_name}` has unsupported unary initializer {other:?}"
+                )),
+            }
+        }
+        Expr::Ident(member) => values
+            .get(&(enum_name.to_string(), member.sym.to_string()))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "enum `{enum_name}` initializer references unknown preceding member `{}`",
+                    member.sym
+                )
+            }),
+        Expr::Member(member) => {
+            let Expr::Ident(target_enum) = member.obj.as_ref() else {
+                return Err(format!(
+                    "enum `{enum_name}` initializer has unsupported member reference"
+                ));
+            };
+            let member_name = match &member.prop {
+                MemberProp::Ident(member) => member.sym.to_string(),
+                MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                    Expr::Lit(Lit::Str(member)) => member.value.to_string_lossy().into_owned(),
+                    _ => {
+                        return Err(format!(
+                        "enum `{enum_name}` computed initializer member must be a string literal"
+                    ))
+                    }
+                },
+                _ => {
+                    return Err(format!(
+                        "enum `{enum_name}` has unsupported initializer member"
+                    ))
+                }
+            };
+            values
+                .get(&(target_enum.sym.to_string(), member_name.clone()))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "enum `{enum_name}` initializer references unknown member `{}.{member_name}`",
+                        target_enum.sym
+                    )
+                })
+        }
+        Expr::Bin(binary) => {
+            let HirLit::F64(left) = eval_enum_initializer(&binary.left, enum_name, values)? else {
+                return Err(format!(
+                    "enum `{enum_name}` binary initializer requires numeric operands"
+                ));
+            };
+            let HirLit::F64(right) = eval_enum_initializer(&binary.right, enum_name, values)?
+            else {
+                return Err(format!(
+                    "enum `{enum_name}` binary initializer requires numeric operands"
+                ));
+            };
+            let value = match binary.op {
+                BinaryOp::Add => left + right,
+                BinaryOp::Sub => left - right,
+                BinaryOp::Mul => left * right,
+                BinaryOp::Div => left / right,
+                BinaryOp::Mod => left % right,
+                BinaryOp::Exp => left.powf(right),
+                BinaryOp::BitOr => ((left as i32) | (right as i32)) as f64,
+                BinaryOp::BitXor => ((left as i32) ^ (right as i32)) as f64,
+                BinaryOp::BitAnd => ((left as i32) & (right as i32)) as f64,
+                BinaryOp::LShift => ((left as i32) << ((right as u32) & 31)) as f64,
+                BinaryOp::RShift => ((left as i32) >> ((right as u32) & 31)) as f64,
+                BinaryOp::ZeroFillRShift => ((left as u32) >> ((right as u32) & 31)) as f64,
+                other => {
+                    return Err(format!(
+                        "enum `{enum_name}` has unsupported binary initializer {other:?}"
+                    ))
+                }
+            };
+            Ok(HirLit::F64(value))
+        }
+        other => Err(format!(
+            "enum `{enum_name}` has unsupported initializer expression {other:?}"
+        )),
+    }
+}
+
+fn collect_enums(module: &Module) -> Result<(EnumValues, HashMap<Symbol, HirType>), String> {
+    let mut values = EnumValues::new();
+    let mut types = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(declaration))) = item else {
+            continue;
+        };
+        let name = declaration.id.sym.to_string();
+        if types.contains_key(&name) {
+            return Err(format!(
+                "duplicate enum declaration `{name}` is not supported"
+            ));
+        }
+        let mut enum_type = None;
+        let mut next_number = Some(0.0);
+        for member in &declaration.members {
+            let member_name = enum_member_name(&member.id);
+            let value = if let Some(initializer) = &member.init {
+                eval_enum_initializer(initializer, &name, &values)?
+            } else {
+                HirLit::F64(next_number.ok_or_else(|| {
+                    format!(
+                        "enum `{name}` member `{member_name}` needs an initializer after a string member"
+                    )
+                })?)
+            };
+            let ty = match &value {
+                HirLit::F64(number) => {
+                    next_number = Some(number + 1.0);
+                    HirType::F64
+                }
+                HirLit::Str(_) => {
+                    next_number = None;
+                    HirType::Str
+                }
+                _ => unreachable!("enum evaluator only produces number or string literals"),
+            };
+            if enum_type.as_ref().is_some_and(|existing| existing != &ty) {
+                return Err(format!(
+                    "enum `{name}` mixes numeric and string members, which has no single native layout"
+                ));
+            }
+            enum_type.get_or_insert(ty);
+            if values
+                .insert((name.clone(), member_name.clone()), value)
+                .is_some()
+            {
+                return Err(format!(
+                    "enum `{name}` contains duplicate member `{member_name}`"
+                ));
+            }
+        }
+        let ty =
+            enum_type.ok_or_else(|| format!("enum `{name}` must contain at least one member"))?;
+        types.insert(name, ty);
+    }
+    Ok((values, types))
+}
+
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
-    let (interfaces, generic_interfaces) = resolve_interfaces(module)?;
+    let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
+    let (enum_values, enum_types) = collect_enums(module)?;
+    for (name, ty) in enum_types {
+        if interfaces.insert(name.clone(), ty).is_some() {
+            return Err(format!(
+                "enum `{name}` conflicts with an interface declaration"
+            ));
+        }
+    }
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
@@ -293,9 +473,10 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             }
             // Already consumed by `resolve_interfaces` above.
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {}
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(_))) => {}
             ModuleItem::Stmt(_) => {
                 return Err(
-                    "Phase 0/1/2 only support top-level function declarations and `interface`s; wrap other code in a function"
+                    "Phase 0/1/2 only support top-level function, interface, and enum declarations; wrap other code in a function"
                         .into(),
                 )
             }
@@ -318,6 +499,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 &signatures,
                 &interfaces,
                 &generic_interfaces,
+                &enum_values,
                 Some(&call_constraints),
             )?;
             if signatures[&name].ret == HirType::Dynamic && function.ret != HirType::Dynamic {
@@ -409,7 +591,16 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let functions = fn_decls
         .into_iter()
-        .map(|fn_decl| lower_fn_decl(fn_decl, &signatures, &interfaces, &generic_interfaces, None))
+        .map(|fn_decl| {
+            lower_fn_decl(
+                fn_decl,
+                &signatures,
+                &interfaces,
+                &generic_interfaces,
+                &enum_values,
+                None,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let mut specialized = functions
         .into_iter()
@@ -444,6 +635,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             &signatures,
             &interfaces,
             &generic_interfaces,
+            &enum_values,
             Some(&nested_constraints),
         )?;
         completed.push((name, types));
@@ -782,6 +974,7 @@ fn lower_generic_instance(
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let base_name = fn_decl.ident.sym.to_string();
@@ -822,6 +1015,7 @@ fn lower_generic_instance(
         &concrete_signatures,
         interfaces,
         generic_interfaces,
+        enum_values,
         ret.clone(),
         call_constraints,
     );
@@ -1029,6 +1223,7 @@ fn lower_fn_decl(
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let name = fn_decl.ident.sym.to_string();
@@ -1063,6 +1258,7 @@ fn lower_fn_decl(
         signatures,
         interfaces,
         generic_interfaces,
+        enum_values,
         declared_ret.clone(),
         call_constraints,
     );
@@ -2114,6 +2310,7 @@ struct FnLowerer<'a> {
     signatures: &'a HashMap<Symbol, FnSignature>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'a>,
+    enum_values: &'a EnumValues,
     ret_type: HirType,
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     loop_depth: usize,
@@ -2135,6 +2332,7 @@ impl<'a> FnLowerer<'a> {
         signatures: &'a HashMap<Symbol, FnSignature>,
         interfaces: &'a HashMap<Symbol, HirType>,
         generic_interfaces: &'a GenericInterfaces<'a>,
+        enum_values: &'a EnumValues,
         ret_type: HirType,
         call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     ) -> Self {
@@ -2148,6 +2346,7 @@ impl<'a> FnLowerer<'a> {
             signatures,
             interfaces,
             generic_interfaces,
+            enum_values,
             ret_type,
             call_constraints,
             loop_depth: 0,
@@ -5820,6 +6019,34 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
+        if let Expr::Ident(enum_name) = member.obj.as_ref() {
+            let member_name = match &member.prop {
+                MemberProp::Ident(member) => Some(member.sym.to_string()),
+                MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                    Expr::Lit(Lit::Str(member)) => {
+                        Some(member.value.to_string_lossy().into_owned())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(member_name) = member_name {
+                let key = (enum_name.sym.to_string(), member_name.clone());
+                if let Some(value) = self.enum_values.get(&key) {
+                    return Ok(HirExpr::Lit(value.clone()));
+                }
+                if self
+                    .enum_values
+                    .keys()
+                    .any(|(candidate, _)| candidate == enum_name.sym.as_str())
+                {
+                    return Err(format!(
+                        "enum `{}` has no member `{member_name}`",
+                        enum_name.sym
+                    ));
+                }
+            }
+        }
         // `process.env.NAME` -- checked before the general cases since it's
         // a fixed two-level member chain, not a general property access.
         if let MemberProp::Ident(name_prop) = &member.prop {
@@ -11614,6 +11841,58 @@ mod tests {
     }
 
     #[test]
+    fn lowers_numeric_and_string_enum_members_declared_after_functions() {
+        let program = lower(
+            r#"function value(direction: Direction): number {
+                return direction + Direction.Next;
+            }
+            function main(): void {
+                console.log(value(Direction.None));
+                console.log(Direction["Mask"]);
+                console.log(Label.Alias);
+            }
+            enum Direction { None, Up = 4, Next = Up + 2, Mask = 1 << 3 }
+            enum Label { Ready = "ready", Alias = Ready }"#,
+        );
+        let value = program
+            .functions
+            .iter()
+            .find(|function| function.name == "value")
+            .unwrap();
+        assert_eq!(value.params[0].ty, HirType::F64);
+        assert!(matches!(
+            &value.body[0],
+            HirStmt::Return(Some(HirExpr::BinOp(BinOp::Add, _, right)))
+                if matches!(right.as_ref(), HirExpr::Lit(HirLit::F64(6.0)))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_enum_native_layouts_and_members() {
+        for (source, expected) in [
+            (
+                r#"enum Mixed { Number = 1, Text = "text" }
+                   function main(): void {}"#,
+                "mixes numeric and string members",
+            ),
+            (
+                r#"enum Text { First = "first", Second }
+                   function main(): void {}"#,
+                "needs an initializer after a string member",
+            ),
+            (
+                r#"enum Value { Present = 1 }
+                   function main(): void { console.log(Value.Missing); }"#,
+                "has no member `Missing`",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn lowers_nested_object_and_tuple_destructuring_once() {
         let program = lower(
             r#"function source(): { x: number; label: string; nested: { flag: boolean }; extra: number } {
@@ -12616,6 +12895,7 @@ mod tests {
                 &HashMap::new(),
                 &HashMap::new(),
                 &GenericInterfaces::new(),
+                &EnumValues::new(),
                 HirType::Void,
                 None,
             )

@@ -13197,6 +13197,31 @@ mod tests {
     }
 
     #[test]
+    fn compiles_numeric_and_string_enums_as_typed_constants() {
+        let source = r#"
+            function adjust(direction: Direction): number {
+                return direction + Direction.Next;
+            }
+            function label(value: Label): string { return value; }
+            function main(): void {
+                console.log(Direction.None);
+                console.log(Direction.Up);
+                console.log(Direction.Next);
+                console.log(Direction["Mask"]);
+                console.log(adjust(Direction.None));
+                console.log(label(Label.Ready));
+                console.log(Label.Alias === Label.Ready);
+            }
+            enum Direction { None, Up = 4, Next = Up + 2, Mask = 1 << 3 }
+            enum Label { Ready = "ready", Alias = Ready }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "typed_enums"),
+            "0\n4\n6\n8\n6\nready\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{
