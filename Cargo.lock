@@ -1425,6 +1425,7 @@ dependencies = [
 name = "thaw-registry"
 version = "0.1.0"
 dependencies = [
+ "brotli",
  "flate2",
  "rustls",
  "serde",
