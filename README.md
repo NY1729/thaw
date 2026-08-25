@@ -391,7 +391,10 @@ The workspace crates have narrow responsibilities:
   Writable Web streams reject direct close/abort while writer-locked; the
   owning writer serializes abort behind pending writes, calls the underlying
   abort algorithm before settling the write, and rejects later writes and its
-  `closed` Promise with the original reason.
+  `closed` Promise with the original reason. Writable queuing strategies apply
+  custom chunk sizes and high-water marks to `desiredSize`; `writer.ready`
+  remains pending while queued work is backpressured, resolves when capacity
+  returns, and rejects with the stream's original error.
   Releasing a Web reader rejects and removes its pending reads; releasing a
   writer leaves already-queued writes alive while rejecting subsequent calls,
   `ready`, and `closed` with `ERR_INVALID_STATE`. Both streams can then be
