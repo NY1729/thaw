@@ -360,9 +360,10 @@ The workspace crates have narrow responsibilities:
   environments, reported resource limits, protected transfer/clone markers,
   lifecycle events and
   EventEmitter-style listener management, shared exit-code termination Promises
-  and async disposal; JSON-cloneable eval/data/file workers without advanced
-  process or stream options run in independent QuickJS runtimes on OS threads,
-  while advanced transfer/process/stdio configurations retain the compatible
+  and async disposal; JSON-cloneable eval/data/file workers run in independent
+  QuickJS runtimes on OS threads with copied environments, argv/execArgv,
+  names and resource-limit metadata, while transfer-list, direct-thread-message,
+  shared-environment and redirected-stdio configurations retain the compatible
   in-process path (runtime-computed worker paths remain later); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
   streams, including redirected console output; `postMessageToThread()` routes
