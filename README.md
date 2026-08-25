@@ -305,6 +305,9 @@ The workspace crates have narrow responsibilities:
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose `performance.timeOrigin` and elapsed-millisecond
   `performance.now()` values scoped to the shared JavaScript context
+- The shared `process` global and `node:process` module provide asynchronous
+  `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
+  shapes, warning/event listeners, exit codes and standard identity fields
 - QuickJS bundles provide cycle-preserving `structuredClone` support for
   objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views
 - QuickJS bundles provide iterable `URLSearchParams` values with form
