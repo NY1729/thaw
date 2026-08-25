@@ -470,6 +470,8 @@ The workspace crates have narrow responsibilities:
   lifecycle controls
 - `fs/promises.watch` exposes those host changes as a queued async iterator,
   with iterator return/throw cleanup and AbortSignal rejection
+- Disposable temporary directories provide synchronous and Promise removal,
+  recursively clean nested contents and expose the corresponding dispose symbol
 - `globSync`, callback `glob` and the `fs/promises.glob` async iterator
   support `*`, `?`, `**`, multiple patterns, exclusions, cwd and Dirent output
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
