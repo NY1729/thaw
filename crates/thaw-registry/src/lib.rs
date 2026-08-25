@@ -185,6 +185,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "tty" => {
             "export declare function isatty(argsArray: any): any;\nexport declare function ReadStream(argsArray: any): any;\nexport declare function WriteStream(argsArray: any): any;\n"
         }
+        "module" => {
+            "export declare function createRequire(argsArray: any): any;\nexport declare function isBuiltin(argsArray: any): any;\nexport declare function syncBuiltinESMExports(argsArray: any): void;\nexport declare function findSourceMap(argsArray: any): any;\nexport declare function SourceMap(argsArray: any): any;\nexport declare function register(argsArray: any): any;\nexport declare function registerHooks(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -1582,9 +1585,9 @@ struct ModuleAnalysis {
 fn analyze_module(source: &str) -> ModuleAnalysis {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, Function, Lit,
-        MemberExpr, MemberProp, ModuleDecl, ModuleItem, ObjectLit, Prop, PropName, PropOrSpread,
-        SimpleAssignTarget,
+        ArrowExpr, AssignExpr, AssignTarget, AwaitExpr, CallExpr, Callee, Expr, Function,
+        ImportSpecifier, Lit, MemberExpr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem,
+        ObjectLit, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, VarDeclarator,
     };
 
     fn validate_attributes(source: &str, attributes: Option<&ObjectLit>) -> Result<(), String> {
@@ -1629,6 +1632,9 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
         commonjs_exports: Vec<String>,
         has_nonliteral_dynamic_import: bool,
         attribute_error: Option<String>,
+        require_functions: Vec<String>,
+        create_require_functions: Vec<String>,
+        module_namespaces: Vec<String>,
     }
 
     struct TopLevelAwait {
@@ -1749,7 +1755,7 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
             let is_require = matches!(
                 &call.callee,
                 Callee::Expr(callee)
-                    if matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym == "require")
+                    if matches!(callee.as_ref(), Expr::Ident(ident) if self.require_functions.iter().any(|name| name == ident.sym.as_ref()))
             );
             let is_import = matches!(&call.callee, Callee::Import(_));
             if ((is_require && call.args.len() == 1) || (is_import && !call.args.is_empty()))
@@ -1778,6 +1784,39 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
                 }
             }
             call.visit_children_with(self);
+        }
+
+        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            let Pat::Ident(binding) = &declaration.name else {
+                declaration.visit_children_with(self);
+                return;
+            };
+            let Some(Expr::Call(call)) = declaration.init.as_deref() else {
+                declaration.visit_children_with(self);
+                return;
+            };
+            let creates_require = match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(identifier) => self
+                        .create_require_functions
+                        .iter()
+                        .any(|name| name == identifier.sym.as_ref()),
+                    Expr::Member(member) => {
+                        matches!(member.obj.as_ref(), Expr::Ident(identifier)
+                            if self.module_namespaces.iter().any(|name| name == identifier.sym.as_ref()))
+                            && property_name(&member.prop).as_deref() == Some("createRequire")
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if creates_require {
+                let name = binding.id.sym.to_string();
+                if !self.require_functions.contains(&name) {
+                    self.require_functions.push(name);
+                }
+            }
+            declaration.visit_children_with(self);
         }
 
         fn visit_assign_expr(&mut self, assignment: &AssignExpr) {
@@ -1826,11 +1865,48 @@ fn analyze_module(source: &str) -> ModuleAnalysis {
     let Ok(module) = thaw_parser::parse_javascript(source) else {
         return ModuleAnalysis::default();
     };
+    let mut create_require_functions = Vec::new();
+    let mut module_namespaces = Vec::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        if !matches!(import.src.value.as_str(), Some("module" | "node:module")) {
+            continue;
+        }
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Named(named) => {
+                    let imported = named.imported.as_ref().map_or_else(
+                        || named.local.sym.to_string(),
+                        |name| match name {
+                            ModuleExportName::Ident(identifier) => identifier.sym.to_string(),
+                            ModuleExportName::Str(value) => {
+                                value.value.to_string_lossy().into_owned()
+                            }
+                        },
+                    );
+                    if imported == "createRequire" {
+                        create_require_functions.push(named.local.sym.to_string());
+                    }
+                }
+                ImportSpecifier::Namespace(namespace) => {
+                    module_namespaces.push(namespace.local.sym.to_string());
+                }
+                ImportSpecifier::Default(default) => {
+                    module_namespaces.push(default.local.sym.to_string());
+                }
+            }
+        }
+    }
     let mut calls = Calls {
         specs: Vec::new(),
         commonjs_exports: Vec::new(),
         has_nonliteral_dynamic_import: false,
         attribute_error: None,
+        require_functions: vec!["require".to_string()],
+        create_require_functions,
+        module_namespaces,
     };
     module.visit_with(&mut calls);
     let mut top_level_await = TopLevelAwait { found: false };
@@ -2978,6 +3054,18 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              WriteStream.prototype.getWindowSize = function() { return [this.columns, this.rows]; }; WriteStream.prototype.ref = function() { return this; }; WriteStream.prototype.unref = function() { return this; };\n\
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "module" => Some(
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','diagnostics_channel','events','fs','http','module','os','path','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util']; var builtinSet = new Set(builtinModules);\n\
+             function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
+             function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
+             function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
+             Module.builtinModules = builtinModules; Module.isBuiltin = isBuiltin; Module.createRequire = createRequire; Module._cache = {}; Module._extensions = { '.js': function() {}, '.json': function() {}, '.node': function() {} };\n\
+             function syncBuiltinESMExports() {} function findSourceMap() { return undefined; }\n\
+             function SourceMap(payload) { if (!(this instanceof SourceMap)) return new SourceMap(payload); this.payload = payload || {}; } SourceMap.prototype.findEntry = function(line, column) { return { generatedLine: Number(line), generatedColumn: Number(column || 0), originalSource: undefined, originalLine: undefined, originalColumn: undefined, name: undefined }; }; SourceMap.prototype.findOrigin = function(line, column) { return this.findEntry(line, column); };\n\
+             function register() { return undefined; } function registerHooks(hooks) { var active = true; return { deregister: function() { active = false; }, get active() { return active; }, hooks: hooks }; }\n\
+             Object.assign(Module, { Module: Module, createRequire: createRequire, builtinModules: builtinModules, isBuiltin: isBuiltin, syncBuiltinESMExports: syncBuiltinESMExports, findSourceMap: findSourceMap, SourceMap: SourceMap, register: register, registerHooks: registerHooks });\n\
+             module.exports = Module; module.exports.default = Module; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -3261,7 +3349,17 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
          \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; });\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
-         }\n",
+         }\n\
+         function __thaw_bundle_create_require(base) {\n\
+         \x20\x20var text = String(base || '');\n\
+         \x20\x20var keys = Object.keys(__thaw_bundle_require_maps);\n\
+         \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.find(function(key) { return text.endsWith('/' + key) || text.endsWith(key); });\n\
+         \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
+         \x20\x20var created = function(spec) { var target = __thaw_bundle_target(map, String(spec)); if (target) return __thaw_bundle_require(target.key, target.factory); return require(String(spec)); };\n\
+         \x20\x20created.resolve = function(spec) { var target = __thaw_bundle_target(map, String(spec)); return target ? target.key : String(spec); };\n\
+         \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
+         }\n\
+         globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n",
     );
 
     out.push_str(&format!(
@@ -3803,6 +3901,20 @@ mod tests {
                 .filter(|spec| spec.starts_with('.'))
                 .collect();
         assert_eq!(specs, vec!["./a".to_string(), "../lib/b".to_string()]);
+    }
+
+    #[test]
+    fn finds_literal_dependencies_called_through_create_require_aliases() {
+        assert_eq!(
+            find_module_specs(
+                "import { createRequire as makeRequire } from 'node:module';\n\
+                 import * as Module from 'module';\n\
+                 const local = makeRequire('pkg/index.js');\n\
+                 const other = Module.createRequire('pkg/index.js');\n\
+                 local('./dependency'); other(`./other`);"
+            ),
+            vec!["./dependency", "./other", "node:module", "module"]
+        );
     }
 
     #[test]
@@ -4953,6 +5065,47 @@ mod tests {
         assert_eq!(
             result,
             "[false,true,false,true,[80,24],24,8,true,false,\"text\\u001b[4;3H\\u001b[1D\\u001b[2B\\u001b[2K\\u001b[0J\",\"cursor,move\"]"
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn module_create_require_loads_relative_and_builtin_dependencies() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_module_create_require");
+        fs::write(
+            dir.join("index.js"),
+            "import { createRequire, isBuiltin, builtinModules, registerHooks } from 'node:module';\n\
+             const localRequire = createRequire('pkg/index.js');\n\
+             export default function () {\n\
+             \x20 const dependency = localRequire('./dependency'); const path = localRequire('node:path'); const hooks = registerHooks({}); hooks.deregister();\n\
+             \x20 return [dependency.value, path.basename('/tmp/file.txt'), localRequire.resolve('./dependency'), Object.keys(localRequire.cache).length >= 3, isBuiltin('node:path'), isBuiltin('missing'), builtinModules.includes('stream'), hooks.active];\n\
+             }",
+        )
+        .unwrap();
+        fs::write(dir.join("dependency.js"), "module.exports = { value: 42 };").unwrap();
+        let empty_node_modules = temp_registry("builtin_module_create_require_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 4);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseModule = module.exports.default;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseModule").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[42,"file.txt","pkg/dependency.js",true,true,false,true,false]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
