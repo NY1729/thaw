@@ -159,7 +159,7 @@ thread_local! {
 enum HostChildCommand {
     Stdin(Vec<u8>),
     StdinEnd,
-    Kill,
+    Kill(i32),
 }
 
 enum HostChildEvent {
@@ -1797,7 +1797,12 @@ fn run_host_child(
                 }
             }
             Ok(HostChildCommand::StdinEnd) => stdin = None,
-            Ok(HostChildCommand::Kill) => {
+            Ok(HostChildCommand::Kill(signal)) => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(process.id() as libc::pid_t, signal);
+                }
+                #[cfg(not(unix))]
                 let _ = process.kill();
                 stdin = None;
             }
@@ -1871,13 +1876,13 @@ fn send_host_child_stdin(handle: u32, value: String, end: bool) -> bool {
     })
 }
 
-fn kill_host_child(handle: u32) -> bool {
+fn kill_host_child(handle: u32, signal: i32) -> bool {
     HOST_CHILDREN.with(|table| {
         table
             .borrow()
             .children
             .get(&handle)
-            .is_some_and(|child| child.commands.send(HostChildCommand::Kill).is_ok())
+            .is_some_and(|child| child.commands.send(HostChildCommand::Kill(signal)).is_ok())
     })
 }
 
@@ -2129,8 +2134,10 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         send_host_child_stdin(handle, value, end)
                     })
                     .expect("failed to create child process stdin sender");
-                let child_kill = Function::new(ctx.clone(), |handle: u32| kill_host_child(handle))
-                    .expect("failed to create child process killer");
+                let child_kill = Function::new(ctx.clone(), |handle: u32, signal: i32| {
+                    kill_host_child(handle, signal)
+                })
+                .expect("failed to create child process killer");
                 let child_poll = Function::new(ctx.clone(), poll_host_children)
                     .expect("failed to create child process poller");
                 let child_active = Function::new(ctx.clone(), host_children_active)
