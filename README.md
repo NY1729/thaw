@@ -358,7 +358,9 @@ The workspace crates have narrow responsibilities:
   environments, reported resource limits, protected transfer/clone markers,
   lifecycle events and
   EventEmitter-style listener management and termination (runtime-computed
-  worker paths, stdio redirection and parallel OS threads remain later)
+  worker paths and parallel OS threads remain later); `stdin`/`stdout`/`stderr`
+  options connect parent Writable/Readable streams to the child `process`
+  streams, including redirected console output
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
