@@ -294,6 +294,8 @@ The workspace crates have narrow responsibilities:
   forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
   `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM
   removal, and fatal decoding errors
+- QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
+  globals, including standard padding and ASCII-whitespace decoding
 - The ambient `process` global and importable `node:process`/`process` module
   share a microtask-backed `nextTick` that is asynchronous and forwards
   callback arguments
