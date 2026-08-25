@@ -6103,6 +6103,35 @@ mod tests {
     }
 
     #[test]
+    fn readable_stream_tee_branches_and_aggregates_cancellation() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_readable_stream_tee");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { function code(action) { try { action(); } catch (error) { return error.code; } } var pulls = 0, chunks = [{ n: 1 }, { n: 2 }], source = new ReadableStream({ pull: function(controller) { controller.enqueue(chunks[pulls++]); if (pulls === 2) controller.close(); } }), branches = source.tee(), leftReader = branches[0].getReader(), rightReader = branches[1].getReader(), leftFirst = await leftReader.read(), leftSecond = await leftReader.read(), rightFirst = await rightReader.read(), rightSecond = await rightReader.read(), leftDone = await leftReader.read(), rightDone = await rightReader.read(), cancelReasons, cancelSource = new ReadableStream({ cancel: function(reasons) { cancelReasons = reasons; } }), cancelBranches = cancelSource.tee(), firstSettled = false, firstCancel = cancelBranches[0].cancel('left').then(function() { firstSettled = true; }); await Promise.resolve(); await Promise.resolve(); var firstPending = !firstSettled, secondCancel = cancelBranches[1].cancel('right'); await Promise.all([firstCancel, secondCancel]); var errorController, failed = new ReadableStream({ start: function(controller) { errorController = controller; } }), failedBranches = failed.tee(), failedLeftReader = failedBranches[0].getReader(), failedRightReader = failedBranches[1].getReader(), failedLeft = failedLeftReader.read().catch(function(error) { return error; }), failedRight = failedRightReader.read().catch(function(error) { return error; }), failure = new Error('boom'); errorController.error(failure); var failures = await Promise.all([failedLeft, failedRight]), locked = new ReadableStream(), lockedReader = locked.getReader(), lockedCode = code(function() { locked.tee(); }); lockedReader.releaseLock(); return [pulls, leftFirst.value === chunks[0], leftSecond.value === chunks[1], rightFirst.value === chunks[0], rightSecond.value === chunks[1], leftDone.done, rightDone.done, source.locked, firstPending, cancelReasons, cancelSource.locked, failures[0] === failure, failures[1] === failure, failed.locked, lockedCode]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_readable_stream_tee_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamTee = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseReadableStreamTee").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[2,true,true,true,true,true,true,true,true,["left","right"],true,true,true,true,"ERR_INVALID_STATE"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_pipe_to_propagates_completion_errors_and_abort() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_pipe_to_options");
