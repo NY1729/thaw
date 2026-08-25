@@ -441,6 +441,8 @@ The workspace crates have narrow responsibilities:
   same lifecycle table as Promise FileHandles
 - Scatter/gather `readv` and `writev` operations preserve vector buffers and
   positional semantics across sync, callback and Promise FileHandle APIs
+- Host filesystem capacity/inode statistics are exposed by sync, callback,
+  Promise and FileHandle `statfs`, including BigInt-valued results
 - Hard links, symbolic links, link-target reads and Unix permission changes
   are exposed through synchronous, callback and Promise APIs
 - Stats timestamps come from host metadata, and `utimes` updates access and
