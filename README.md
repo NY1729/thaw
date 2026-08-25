@@ -309,6 +309,10 @@ The workspace crates have narrow responsibilities:
 - `node:timers` shares those global timer functions, while
   `node:timers/promises` provides abortable timeout/immediate Promises,
   scheduler wait/yield helpers and an async interval iterator
+- `node:stream` provides EventEmitter-style Readable, Writable, Duplex,
+  Transform and PassThrough streams with buffering, piping, pipeline/finished
+  completion, iterable sources and AbortSignal destruction;
+  `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
