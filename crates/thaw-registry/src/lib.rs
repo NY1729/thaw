@@ -185,6 +185,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "stream/consumers" => {
             "export declare function arrayBuffer(argsArray: any): any;\nexport declare function blob(argsArray: any): any;\nexport declare function buffer(argsArray: any): any;\nexport declare function json(argsArray: any): any;\nexport declare function text(argsArray: any): any;\n"
         }
+        "stream/web" => {
+            "export declare const ReadableStream: any;\nexport declare const WritableStream: any;\nexport declare const TransformStream: any;\nexport declare const TextEncoderStream: any;\nexport declare const TextDecoderStream: any;\n"
+        }
         "readline" => {
             "export declare function createInterface(argsArray: any): any;\nexport declare function Interface(argsArray: any): any;\nexport declare function clearLine(argsArray: any): boolean;\nexport declare function clearScreenDown(argsArray: any): boolean;\nexport declare function cursorTo(argsArray: any): boolean;\nexport declare function moveCursor(argsArray: any): boolean;\n"
         }
@@ -3083,6 +3086,9 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         "stream/consumers" => Some(
             "function collect(stream) { if (stream && typeof stream[Symbol.asyncIterator] === 'function') return (async function() { var chunks = []; for await (var chunk of stream) chunks.push(Buffer.from(chunk)); return Buffer.concat(chunks); })(); return new Promise(function(resolve, reject) { var chunks = []; function cleanup() { if (stream.off) { stream.off('data', data); stream.off('end', end); stream.off('error', reject); } } function data(chunk) { chunks.push(Buffer.from(chunk)); } function end() { cleanup(); resolve(Buffer.concat(chunks)); } if (!stream || typeof stream.on !== 'function') { reject(new TypeError('stream must be readable')); return; } stream.on('data', data); stream.once('end', end); stream.once('error', reject); }); } function buffer(stream) { return collect(stream); } function text(stream) { return collect(stream).then(function(value) { return value.toString('utf8'); }); } function json(stream) { return text(stream).then(JSON.parse); } function arrayBuffer(stream) { return collect(stream).then(function(value) { var copy = Uint8Array.from(value); return copy.buffer; }); } function blob(stream) { return collect(stream).then(function(value) { return new Blob([value]); }); } module.exports = { arrayBuffer: arrayBuffer, blob: blob, buffer: buffer, json: json, text: text }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "stream/web" => Some(
+            "module.exports = { ReadableStream: globalThis.ReadableStream, ReadableStreamDefaultReader: globalThis.ReadableStreamDefaultReader, ReadableStreamDefaultController: globalThis.ReadableStreamDefaultController, WritableStream: globalThis.WritableStream, WritableStreamDefaultWriter: globalThis.WritableStreamDefaultWriter, TransformStream: globalThis.TransformStream, ByteLengthQueuingStrategy: globalThis.ByteLengthQueuingStrategy, CountQueuingStrategy: globalThis.CountQueuingStrategy, TextEncoderStream: globalThis.TextEncoderStream, TextDecoderStream: globalThis.TextDecoderStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         "diagnostics_channel" => Some(
             "var registry = globalThis.__thawDiagnosticChannels || (globalThis.__thawDiagnosticChannels = new Map());\n\
              function Channel(name) { this.name = String(name); this._subscribers = []; this._stores = []; }\n\
@@ -3153,7 +3159,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','events','fs','fs/promises','http','module','net','os','path','perf_hooks','process','punycode','querystring','readline','readline/promises','stream','stream/consumers','stream/promises','stream/web','string_decoder','timers','timers/promises','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -5837,6 +5843,30 @@ mod tests {
         assert_eq!(
             result,
             r#"["hello",42,"616263",[120,121],true,4,"blob","text/plain","lo","onetwo","a.txt"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn stream_web_pipes_transforms_and_exposes_readers_and_writers() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_stream_web");
+        fs::write(dir.join("index.js"), "var web = require('node:stream/web'); var consumers = require('node:stream/consumers'); module.exports = async function () { var source = new web.ReadableStream({ start: function(controller) { controller.enqueue('one'); controller.enqueue('two'); controller.close(); } }); var upper = new web.TransformStream({ transform: function(chunk, controller) { controller.enqueue(chunk.toUpperCase()); } }); var transformed = await consumers.text(source.pipeThrough(upper)); var writes = []; var writable = new web.WritableStream({ write: function(chunk) { writes.push(chunk); }, close: function() { writes.push('closed'); } }); var writer = writable.getWriter(); await writer.write('value'); await writer.close(); writer.releaseLock(); var encodedSource = new web.ReadableStream({ start: function(controller) { controller.enqueue('hé'); controller.close(); } }); var decoded = await consumers.text(encodedSource.pipeThrough(new web.TextEncoderStream()).pipeThrough(new web.TextDecoderStream())); var readerSource = new web.ReadableStream({ pull: function(controller) { controller.enqueue(7); controller.close(); } }); var reader = readerSource.getReader(); var first = await reader.read(); var done = await reader.read(); reader.releaseLock(); var byteStrategy = new web.ByteLengthQueuingStrategy({ highWaterMark: 8 }); var countStrategy = new web.CountQueuingStrategy({ highWaterMark: 3 }); return [web.ReadableStream === globalThis.ReadableStream, transformed, writes, decoded, first, done.done, readerSource.locked, byteStrategy.highWaterMark, byteStrategy.size(new Uint8Array(4)), countStrategy.highWaterMark, countStrategy.size('x')]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_stream_web_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStreamWeb = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseStreamWeb").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,"ONETWO",["value","closed"],"hé",{"value":7,"done":false},true,false,8,4,3,1]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

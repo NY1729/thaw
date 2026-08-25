@@ -1183,6 +1183,81 @@ const PLATFORM_GLOBALS: &str = r#"
       }
     };
   }
+  if (typeof globalThis.ReadableStream !== 'function') {
+    class ReadableStreamDefaultController {
+      constructor(stream) { this._stream = stream; }
+      enqueue(chunk) {
+        const stream = this._stream;
+        if (stream._state !== 'readable') throw new TypeError('stream is not readable');
+        if (stream._reads.length) stream._reads.shift().resolve({ value: chunk, done: false });
+        else stream._queue.push(chunk);
+      }
+      close() {
+        const stream = this._stream; if (stream._state !== 'readable') return;
+        stream._state = 'closed'; while (stream._reads.length) stream._reads.shift().resolve({ value: undefined, done: true }); stream._resolveClosed();
+      }
+      error(error) {
+        const stream = this._stream; if (stream._state !== 'readable') return;
+        stream._state = 'errored'; stream._error = error; while (stream._reads.length) stream._reads.shift().reject(error); stream._rejectClosed(error);
+      }
+      get desiredSize() { return this._stream._state === 'readable' ? 1 - this._stream._queue.length : null; }
+    }
+    class ReadableStreamDefaultReader {
+      constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._reader = this; this.closed = stream._closed; }
+      read() {
+        const stream = this._stream; if (!stream) return Promise.reject(new TypeError('reader is released'));
+        if (stream._queue.length) return Promise.resolve({ value: stream._queue.shift(), done: false });
+        if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
+        if (stream._state === 'errored') return Promise.reject(stream._error);
+        const result = new Promise((resolve, reject) => stream._reads.push({ resolve, reject }));
+        if (typeof stream._source.pull === 'function') Promise.resolve(stream._source.pull(stream._controller)).catch(error => stream._controller.error(error));
+        return result;
+      }
+      cancel(reason) { return this._stream.cancel(reason); }
+      releaseLock() { if (this._stream) this._stream._reader = null; this._stream = null; }
+    }
+    globalThis.ReadableStream = class ReadableStream {
+      constructor(source = {}) {
+        this._source = source; this._queue = []; this._reads = []; this._state = 'readable'; this._error = undefined; this._reader = null;
+        this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; });
+        this._closed.catch(() => {}); this._controller = new ReadableStreamDefaultController(this);
+        try { if (typeof source.start === 'function') Promise.resolve(source.start(this._controller)).catch(error => this._controller.error(error)); } catch (error) { this._controller.error(error); }
+      }
+      get locked() { return this._reader !== null; }
+      getReader() { return new ReadableStreamDefaultReader(this); }
+      cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); if (this._state === 'closed') return Promise.resolve(); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
+      async pipeTo(destination, options = {}) { const reader = this.getReader(), writer = destination.getWriter(); try { while (true) { const result = await reader.read(); if (result.done) break; await writer.write(result.value); } if (!options.preventClose) await writer.close(); } catch (error) { if (!options.preventAbort) await writer.abort(error); throw error; } finally { reader.releaseLock(); writer.releaseLock(); } }
+      pipeThrough(transform, options) { this.pipeTo(transform.writable, options).catch(error => transform.readable._controller.error(error)); return transform.readable; }
+      values(options = {}) { const reader = this.getReader(); return { next: () => reader.read(), return: async () => { if (!options.preventCancel) await reader.cancel(); reader.releaseLock(); return { value: undefined, done: true }; }, [Symbol.asyncIterator]() { return this; } }; }
+      [Symbol.asyncIterator]() { return this.values(); }
+    };
+    globalThis.ReadableStreamDefaultController = ReadableStreamDefaultController;
+    globalThis.ReadableStreamDefaultReader = ReadableStreamDefaultReader;
+    class WritableStreamDefaultWriter {
+      constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._writer = this; this.ready = Promise.resolve(); this.closed = stream._closed; }
+      write(chunk) { return this._stream._write(chunk); }
+      close() { return this._stream.close(); }
+      abort(reason) { return this._stream.abort(reason); }
+      releaseLock() { if (this._stream) this._stream._writer = null; this._stream = null; }
+      get desiredSize() { return this._stream && this._stream._state === 'writable' ? 1 : null; }
+    }
+    globalThis.WritableStream = class WritableStream {
+      constructor(sink = {}) { this._sink = sink; this._state = 'writable'; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); if (typeof sink.start === 'function') this._chain = this._chain.then(() => sink.start(this)); }
+      get locked() { return this._writer !== null; }
+      getWriter() { return new WritableStreamDefaultWriter(this); }
+      _write(chunk) { if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this) : undefined); return this._chain; }
+      close() { if (this._state !== 'writable') return this._closed; this._state = 'closed'; this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._rejectClosed(error); throw error; }); return this._chain; }
+      abort(reason) { this._state = 'errored'; this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return this._chain; }
+    };
+    globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+    globalThis.TransformStream = class TransformStream {
+      constructor(transformer = {}) { let controller; this.readable = new ReadableStream({ start(value) { controller = value; } }); this.writable = new WritableStream({ write(chunk) { return typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk); }, close() { return Promise.resolve(typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => controller.close()); }, abort(error) { controller.error(error); } }); }
+    };
+    globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size(chunk) { return chunk.byteLength; } };
+    globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size() { return 1; } };
+    globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); const transform = new TransformStream({ transform(chunk, controller) { controller.enqueue(encoder.encode(String(chunk))); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
+    globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const chunks = []; const transform = new TransformStream({ transform(chunk) { chunks.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); }, flush(controller) { const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0); const value = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { value.set(chunk, offset); offset += chunk.byteLength; } const text = decoder.decode(value); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
+  }
   if (typeof globalThis.MessageChannel !== 'function') {
     class MessagePort extends EventTarget {
       constructor() {
