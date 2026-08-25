@@ -347,7 +347,9 @@ The workspace crates have narrow responsibilities:
   consumption and `Symbol.asyncDispose` destroys abandoned readables. Stream
   instances expose flowing, aborted, closed, object-mode and pending-drain
   state; readable `unshift()`/legacy `wrap()` and writable
-  `setDefaultEncoding()` cover common compatibility paths;
+  `setDefaultEncoding()` cover common compatibility paths. Indexed-pair
+  iteration, static stream-state checks, writable async disposal and
+  non-half-open Duplex shutdown are also supported;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
