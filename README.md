@@ -318,6 +318,9 @@ The workspace crates have narrow responsibilities:
   completion, iterable sources and AbortSignal destruction. Writable and
   Transform work is serialized across asynchronous callbacks, with
   high-water-mark return values, queued length and `drain` notification.
+  Synchronously completed `_write`/`_writev` operations defer user callbacks
+  until after `write()` returns and reject repeated completion callbacks with
+  `ERR_MULTIPLE_CALLBACK`.
   Nested `cork()`/`uncork()` defers writes and uses `_writev` batches when
   available; `end()` safely releases any remaining cork level.
   Completion is deferred like Node: repeated `end()` callbacks settle exactly
