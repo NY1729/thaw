@@ -346,7 +346,9 @@ The workspace crates have narrow responsibilities:
 - `MessageChannel`/`MessagePort` provide structured-cloned asynchronous and
   synchronous delivery, while `BroadcastChannel` distributes isolated copies
   by channel name; `node:worker_threads` exposes the main-thread identity,
-  environment data and lifecycle APIs (isolated `Worker` execution is not yet available)
+  environment data and lifecycle APIs; `Worker` supports isolated eval scopes,
+  cloned `workerData`, `parentPort` message exchange, lifecycle events and
+  termination (filename-backed workers and parallel OS threads remain later)
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
