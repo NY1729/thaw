@@ -320,6 +320,9 @@ The workspace crates have narrow responsibilities:
 - `node:tty` reports the non-interactive host accurately while exposing
   Read/WriteStream raw mode, dimensions, color-depth checks and ANSI cursor /
   screen operations for terminal-aware packages
+- `node:module` exposes builtin discovery, Module/SourceMap compatibility
+  shapes and hook registration; parser-tracked `createRequire` aliases load
+  bundled relative files and Node builtins with working resolve/cache views
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
