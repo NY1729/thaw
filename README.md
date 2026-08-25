@@ -388,6 +388,9 @@ The workspace crates have narrow responsibilities:
   buffering, while default decoding passes Buffers with `buffer` encoding;
   TypedArray/DataView chunks are accepted and invalid/null chunks use Node
   error codes;
+  writes after `end()` return false and report `ERR_STREAM_WRITE_AFTER_END`
+  through the callback then `error`, while writes after destruction report
+  `ERR_STREAM_DESTROYED` only to their callback without reaching `_write`;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
