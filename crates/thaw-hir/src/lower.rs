@@ -1446,6 +1446,44 @@ fn strip_parenthesized_ts_type(mut ty: &TsType) -> &TsType {
     ty
 }
 
+fn function_expression_as_arrow(
+    expression: &swc_ecma_ast::FnExpr,
+) -> Result<swc_ecma_ast::ArrowExpr, String> {
+    let function = expression.function.as_ref();
+    if expression.ident.is_some() {
+        return Err("named function expressions are not supported yet".into());
+    }
+    if function.this_param.is_some()
+        || !function.decorators.is_empty()
+        || function
+            .params
+            .iter()
+            .any(|parameter| !parameter.decorators.is_empty())
+    {
+        return Err(
+            "function expressions with this parameters or decorators are not supported".into(),
+        );
+    }
+    let body = function
+        .body
+        .as_ref()
+        .ok_or("function expression needs a body")?;
+    Ok(swc_ecma_ast::ArrowExpr {
+        span: function.span,
+        ctxt: function.ctxt,
+        params: function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect(),
+        body: Box::new(ArrowFunctionBody::FunctionBody(body.clone())),
+        is_async: function.is_async,
+        is_generator: function.is_generator,
+        type_params: function.type_params.clone(),
+        return_type: function.return_type.clone(),
+    })
+}
+
 /// Resolves every top-level `interface` declaration, so `lower_ts_type` can
 /// treat a `TsTypeRef` naming one exactly like an inline `{ ... }` type
 /// literal. Interfaces may be declared in any order and may reference each
@@ -4730,6 +4768,24 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+                if let (Expr::Fn(function), Some(annotation)) = (init, binding.type_ann.as_ref()) {
+                    if function.function.type_params.is_some() {
+                        if let Some((expected, callable_name)) =
+                            self.generic_callable_annotation_signature(&annotation.type_ann)?
+                        {
+                            let arrow = function_expression_as_arrow(function)?;
+                            let actual = self.generic_arrow_signature(&arrow)?;
+                            self.validate_generic_callable_shape(
+                                &expected,
+                                &actual,
+                                &callable_name,
+                            )?;
+                            let hir_name = self.bind_local(&name, HirType::Dynamic);
+                            self.generic_arrows.insert(hir_name, arrow);
+                            continue;
+                        }
+                    }
+                }
                 if let (Expr::Ident(identifier), Some(annotation)) =
                     (init, binding.type_ann.as_ref())
                 {
@@ -4812,10 +4868,13 @@ impl<'a> FnLowerer<'a> {
                     })
                     .transpose()?;
                 if annotated.is_none()
-                    && matches!(init, Expr::Arrow(arrow) if arrow.type_params.is_some())
+                    && (matches!(init, Expr::Arrow(arrow) if arrow.type_params.is_some())
+                        || matches!(init, Expr::Fn(function) if function.function.type_params.is_some()))
                 {
-                    let Expr::Arrow(arrow) = init else {
-                        unreachable!()
+                    let arrow = match init {
+                        Expr::Arrow(arrow) => arrow.clone(),
+                        Expr::Fn(function) => function_expression_as_arrow(function)?,
+                        _ => unreachable!(),
                     };
                     if arrow.is_async || arrow.is_generator {
                         return Err(
@@ -4823,12 +4882,16 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                     let hir_name = self.bind_local(&name, HirType::Dynamic);
-                    self.generic_arrows.insert(hir_name, arrow.clone());
+                    self.generic_arrows.insert(hir_name, arrow);
                     continue;
                 }
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
+                    }
+                    (Expr::Fn(function), Some(HirType::Function(params, ret))) => {
+                        let arrow = function_expression_as_arrow(function)?;
+                        self.lower_contextual_arrow(&arrow, params, Some(ret))?
                     }
                     _ => self.lower_expr(init)?,
                 };
@@ -6969,6 +7032,10 @@ impl<'a> FnLowerer<'a> {
             },
 
             Expr::Arrow(arrow) => self.lower_arrow(arrow),
+            Expr::Fn(function) => {
+                let arrow = function_expression_as_arrow(function)?;
+                self.lower_arrow(&arrow)
+            }
 
             Expr::Array(array_lit) => {
                 if array_lit
@@ -7471,6 +7538,10 @@ impl<'a> FnLowerer<'a> {
         let callback = match expr {
             Expr::Arrow(arrow) => {
                 return self.lower_contextual_arrow(arrow, parameter_types, expected_return)
+            }
+            Expr::Fn(function) => {
+                let arrow = function_expression_as_arrow(function)?;
+                return self.lower_contextual_arrow(&arrow, parameter_types, expected_return);
             }
             Expr::Ident(ident) => {
                 let mut name = self.resolve_binding(ident.sym.as_ref());
@@ -9134,6 +9205,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Fn(function) => function.function.params.len(),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
                 self.scope
@@ -9180,6 +9252,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Fn(function) => function.function.params.len(),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
                 self.scope
@@ -9230,6 +9303,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Fn(function) => function.function.params.len(),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
                 self.scope
@@ -9274,6 +9348,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let arity = match expr {
             Expr::Arrow(arrow) => arrow.params.len(),
+            Expr::Fn(function) => function.function.params.len(),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
                 self.scope
@@ -12770,7 +12845,10 @@ impl<'a> FnLowerer<'a> {
                 None
             };
             let value = if let Some((params, ret)) = contextual_function {
-                if matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Ident(_)) {
+                if matches!(
+                    argument.expr.as_ref(),
+                    Expr::Arrow(_) | Expr::Fn(_) | Expr::Ident(_)
+                ) {
                     self.lower_promise_callback(&argument.expr, &params, Some(&ret))?
                 } else {
                     self.lower_expr(&argument.expr)?
@@ -14138,6 +14216,10 @@ mod tests {
             (
                 "type Stringify = { <T>(value: T): string }; function main(): void { const invalid: Stringify = <T>(value: T): T => value; }",
                 "incompatible with function type alias `Stringify`",
+            ),
+            (
+                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = function<T>(value: T): string { return String(value); }; }",
+                "incompatible with function type alias `Identity`",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
