@@ -337,7 +337,8 @@ The workspace crates have narrow responsibilities:
   Readables and writables track buffered length and support object mode,
   including independent `readableObjectMode` and `writableObjectMode` on
   Duplex and Transform streams. Pipes pause until a backpressured destination
-  drains. Readable async iterators yield
+  drains; a source close detaches its pipe without implicitly destroying the
+  destination. Readable async iterators yield
   buffered and future chunks, reject stream errors and destroy on early return;
   callback and Promise pipelines accept AbortSignal options, remove settlement
   listeners, destroy every stage with the same error and preserve original
@@ -356,7 +357,9 @@ The workspace crates have narrow responsibilities:
   reject missing, directionally invalid or unsupported inputs synchronously
   with Node-compatible error codes. `Duplex.from()` uses object-mode readable
   output, preserves strings and Buffers as single chunks, and rejects null
-  iterable values with `ERR_STREAM_NULL_VALUES`. Stream
+  iterable values with `ERR_STREAM_NULL_VALUES`. Premature closure of any
+  composed stage destroys the remaining stages and the outer Duplex with
+  `ERR_STREAM_PREMATURE_CLOSE`. Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
   errored state, with the original destruction error retained on the stream.
   Default byte/object high-water marks are queryable and configurable for new
