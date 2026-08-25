@@ -251,6 +251,81 @@ const PLATFORM_GLOBALS: &str = r#"
       return clone(value);
     };
   }
+  if (typeof globalThis.URLSearchParams !== 'function') {
+    const encodeFormPart = value => encodeURIComponent(String(value)).replace(/%20/g, '+');
+    const decodeFormPart = value => decodeURIComponent(String(value).replace(/\+/g, ' '));
+    globalThis.URLSearchParams = class URLSearchParams {
+      constructor(init = '') {
+        this.__thawEntries = [];
+        if (typeof init === 'string') {
+          const source = init.charAt(0) === '?' ? init.substring(1) : init;
+          if (source !== '') for (const field of source.split('&')) {
+            const separator = field.indexOf('=');
+            const name = separator < 0 ? field : field.substring(0, separator);
+            const value = separator < 0 ? '' : field.substring(separator + 1);
+            this.append(decodeFormPart(name), decodeFormPart(value));
+          }
+        } else if (init != null && typeof init[Symbol.iterator] === 'function') {
+          for (const pair of init) {
+            if (pair == null || typeof pair[Symbol.iterator] !== 'function') throw new TypeError('URLSearchParams entry must be a pair');
+            const values = [...pair];
+            if (values.length !== 2) throw new TypeError('URLSearchParams entry must contain two values');
+            this.append(values[0], values[1]);
+          }
+        } else if (init != null && typeof init === 'object') {
+          for (const name of Object.keys(init)) this.append(name, init[name]);
+        }
+      }
+      get size() { return this.__thawEntries.length; }
+      append(name, value) { this.__thawEntries.push([String(name), String(value)]); }
+      delete(name, value) {
+        const key = String(name);
+        if (arguments.length < 2) this.__thawEntries = this.__thawEntries.filter(entry => entry[0] !== key);
+        else {
+          const expected = String(value);
+          this.__thawEntries = this.__thawEntries.filter(entry => entry[0] !== key || entry[1] !== expected);
+        }
+      }
+      get(name) {
+        const key = String(name);
+        const entry = this.__thawEntries.find(candidate => candidate[0] === key);
+        return entry ? entry[1] : null;
+      }
+      getAll(name) {
+        const key = String(name);
+        return this.__thawEntries.filter(entry => entry[0] === key).map(entry => entry[1]);
+      }
+      has(name, value) {
+        const key = String(name);
+        if (arguments.length < 2) return this.__thawEntries.some(entry => entry[0] === key);
+        const expected = String(value);
+        return this.__thawEntries.some(entry => entry[0] === key && entry[1] === expected);
+      }
+      set(name, value) {
+        const key = String(name);
+        const replacement = String(value);
+        const first = this.__thawEntries.findIndex(entry => entry[0] === key);
+        if (first < 0) this.__thawEntries.push([key, replacement]);
+        else {
+          this.__thawEntries[first][1] = replacement;
+          this.__thawEntries = this.__thawEntries.filter((entry, index) => entry[0] !== key || index === first);
+        }
+      }
+      sort() {
+        this.__thawEntries = this.__thawEntries.map((entry, index) => [entry, index])
+          .sort((left, right) => left[0][0] < right[0][0] ? -1 : left[0][0] > right[0][0] ? 1 : left[1] - right[1])
+          .map(item => item[0]);
+      }
+      entries() { return this.__thawEntries.map(entry => entry.slice())[Symbol.iterator](); }
+      keys() { return this.__thawEntries.map(entry => entry[0])[Symbol.iterator](); }
+      values() { return this.__thawEntries.map(entry => entry[1])[Symbol.iterator](); }
+      forEach(callback, thisArg) {
+        for (const entry of this.__thawEntries.slice()) callback.call(thisArg, entry[1], entry[0], this);
+      }
+      toString() { return this.__thawEntries.map(entry => encodeFormPart(entry[0]) + '=' + encodeFormPart(entry[1])).join('&'); }
+      [Symbol.iterator]() { return this.entries(); }
+    };
+  }
   if (typeof globalThis.Event !== 'function') {
     globalThis.Event = class Event {
       constructor(type, options = {}) {
@@ -1377,6 +1452,29 @@ mod tests {
             1
         );
         assert_eq!(call("cloneValues", "[]"), "[true,true,1,2,4,true,6,true]");
+    }
+
+    #[test]
+    fn url_search_params_preserves_duplicates_and_iterates() {
+        assert_eq!(
+            load(
+                "function queryParams() {\n\
+                   const params = new URLSearchParams('?b=two+words&a=1&a=2');\n\
+                   params.append('snow', '雪');\n\
+                   const before = [params.get('a'), params.getAll('a').join(','), params.has('a', '2'), params.size];\n\
+                   params.set('a', 3); params.delete('b', 'wrong'); params.sort();\n\
+                   const visited = []; params.forEach((value, key, owner) => visited.push(key + ':' + value + ':' + (owner === params)));\n\
+                   const record = new URLSearchParams({ x: 1, y: false });\n\
+                   const pairs = new URLSearchParams([['z', 4], ['z', 5]]); pairs.delete('z', 4);\n\
+                   return [before, params.toString(), [...params.keys()].join(','), visited.join('|'), record.toString(), pairs.toString()];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("queryParams", "[]"),
+            r#"[["1","1,2",true,4],"a=3&b=two+words&snow=%E9%9B%AA","a,b,snow","a:3:true|b:two words:true|snow:雪:true","x=1&y=false","z=5"]"#
+        );
     }
 
     #[test]
