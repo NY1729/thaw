@@ -13304,6 +13304,31 @@ mod tests {
     }
 
     #[test]
+    fn compiles_merged_enum_declarations() {
+        let source = r#"
+            enum Status {}
+            enum Status { First }
+            enum Status { Second }
+            enum Status { Third = 2 }
+            enum Label { First = "first" }
+            enum Label { Second = "second" }
+            function main(): void {
+                console.log(Status.First);
+                console.log(Status.Second);
+                console.log(Status.Third);
+                console.log(Status[0]);
+                console.log(Status[2]);
+                console.log(Label.First);
+                console.log(Label.Second);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "merged_enums"),
+            "0\n0\n2\nSecond\nThird\nfirst\nsecond\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{

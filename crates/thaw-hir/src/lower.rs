@@ -291,17 +291,14 @@ fn collect_enums(
     let mut values = EnumValues::new();
     let mut reverse_values = EnumReverseValues::new();
     let mut types = HashMap::new();
+    let mut enum_names = BTreeSet::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(declaration))) = item else {
             continue;
         };
         let name = declaration.id.sym.to_string();
-        if types.contains_key(&name) {
-            return Err(format!(
-                "duplicate enum declaration `{name}` is not supported"
-            ));
-        }
-        let mut enum_type = None;
+        enum_names.insert(name.clone());
+        let mut enum_type = types.get(&name).cloned();
         let mut next_number = Some(0.0);
         for member in &declaration.members {
             let member_name = enum_member_name(&member.id);
@@ -343,9 +340,16 @@ fn collect_enums(
                 ));
             }
         }
-        let ty =
-            enum_type.ok_or_else(|| format!("enum `{name}` must contain at least one member"))?;
-        types.insert(name, ty);
+        if let Some(ty) = enum_type {
+            types.insert(name, ty);
+        }
+    }
+    for name in enum_names {
+        if !types.contains_key(&name) {
+            return Err(format!(
+                "enum `{name}` must contain at least one member across its declarations"
+            ));
+        }
     }
     Ok((values, reverse_values, types))
 }
@@ -11949,6 +11953,43 @@ mod tests {
                 if matches!(index.as_ref(), HirExpr::Var(name) if name == "index")
                     && entries == &vec![(0.0, "Idle".into()), (4.0, "Alias".into())]
         ));
+    }
+
+    #[test]
+    fn merges_compatible_enum_declarations_in_source_order() {
+        let program = lower(
+            r#"enum Status {}
+               enum Status { First }
+               enum Status { Second }
+               enum Status { Third = 2 }
+               function read(index: number): string | undefined {
+                   return Status[index];
+               }"#,
+        );
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Return(Some(HirExpr::EnumReverseLookup(_, entries)))
+                if entries == &vec![(0.0, "Second".into()), (2.0, "Third".into())]
+        ));
+
+        for (source, expected) in [
+            (
+                r#"enum Value { First = 1 }
+                   enum Value { First = 2 }
+                   function main(): void {}"#,
+                "duplicate member `First`",
+            ),
+            (
+                r#"enum Value { First = 1 }
+                   enum Value { Text = "text" }
+                   function main(): void {}"#,
+                "mixes numeric and string members",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
