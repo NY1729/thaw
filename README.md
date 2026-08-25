@@ -334,6 +334,9 @@ The workspace crates have narrow responsibilities:
   Aborting after headers have resolved still destroys the active transport,
   errors a pending body reader with the signal reason and releases its abort
   listener; cancelling the body stream performs the same transport cleanup
+  Requests advertise gzip and deflate by default, and encoded responses flow
+  through the incremental DecompressionStream before body consumers read them;
+  caller-supplied `Accept-Encoding` values remain untouched
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
