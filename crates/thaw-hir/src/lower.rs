@@ -12480,11 +12480,32 @@ impl<'a> FnLowerer<'a> {
 
         let mut argument_bindings = Vec::new();
         let mut lowered_arguments = Vec::new();
-        let lowered = call
-            .args
-            .iter()
-            .map(|arg| self.lower_expr(&arg.expr))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut lowered = Vec::with_capacity(call.args.len());
+        for (index, argument) in call.args.iter().enumerate() {
+            let contextual_function = if argument.spread.is_none() {
+                param_types
+                    .as_ref()
+                    .and_then(|params| params.get(index))
+                    .and_then(|expected| match expected {
+                        HirType::Function(params, ret) => {
+                            Some((params.clone(), ret.as_ref().clone()))
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            };
+            let value = if let Some((params, ret)) = contextual_function {
+                if matches!(argument.expr.as_ref(), Expr::Arrow(_) | Expr::Ident(_)) {
+                    self.lower_promise_callback(&argument.expr, &params, Some(&ret))?
+                } else {
+                    self.lower_expr(&argument.expr)?
+                }
+            } else {
+                self.lower_expr(&argument.expr)?
+            };
+            lowered.push(value);
+        }
         let preserve_argument_order =
             call.args.iter().any(|arg| arg.spread.is_some()) || lowered.iter().any(contains_await);
         for (arg, value) in call.args.iter().zip(lowered) {
@@ -13451,6 +13472,26 @@ mod tests {
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn validates_user_function_generic_callback_constraints() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            function apply(callback: (value: string) => string, value: string): string {
+                return callback(value);
+            }
+            function numeric<T extends number>(value: T): T { return value; }
+            function main(): void { apply(numeric, "wrong"); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("cannot specialize generic callback `numeric`"),
+            "{error}"
+        );
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
     }
 
     #[test]

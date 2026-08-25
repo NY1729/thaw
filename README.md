@@ -368,6 +368,9 @@ The workspace crates have narrow responsibilities:
 - Unannotated local generic arrow variables specialize independently at each
   inferred or explicit call, including captured locals, tuple/array-literal
   spread arguments, array/Promise callback use and `typeof` observation
+- User-defined function parameters with a monomorphic function type provide
+  the same contextual specialization for named generic functions, local
+  generic arrows and inline generic arrows
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
