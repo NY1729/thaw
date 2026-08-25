@@ -173,6 +173,55 @@ const PLATFORM_GLOBALS: &str = r#"
       globalThis.performance.timeOrigin = performanceTimeOrigin;
     }
   }
+  if (typeof globalThis.structuredClone !== 'function') {
+    globalThis.structuredClone = value => {
+      const seen = new Map();
+      const clone = input => {
+        if (input === null || typeof input !== 'object') {
+          if (typeof input === 'function' || typeof input === 'symbol') {
+            throw new TypeError('value cannot be structured-cloned');
+          }
+          return input;
+        }
+        if (seen.has(input)) return seen.get(input);
+        let output;
+        if (input instanceof Date) {
+          output = new Date(input.getTime());
+        } else if (input instanceof RegExp) {
+          output = new RegExp(input.source, input.flags);
+          output.lastIndex = input.lastIndex;
+        } else if (input instanceof Map) {
+          output = new Map();
+          seen.set(input, output);
+          for (const [key, entry] of input) output.set(clone(key), clone(entry));
+          return output;
+        } else if (input instanceof Set) {
+          output = new Set();
+          seen.set(input, output);
+          for (const entry of input) output.add(clone(entry));
+          return output;
+        } else if (input instanceof ArrayBuffer) {
+          output = input.slice(0);
+        } else if (ArrayBuffer.isView(input)) {
+          if (input instanceof DataView) {
+            output = new DataView(input.buffer.slice(input.byteOffset,
+              input.byteOffset + input.byteLength));
+          } else {
+            output = new input.constructor(input);
+          }
+        } else {
+          output = Array.isArray(input) ? [] : {};
+        }
+        seen.set(input, output);
+        if (!(input instanceof Date) && !(input instanceof RegExp)
+            && !(input instanceof ArrayBuffer) && !ArrayBuffer.isView(input)) {
+          for (const key of Object.keys(input)) output[key] = clone(input[key]);
+        }
+        return output;
+      };
+      return clone(value);
+    };
+  }
   globalThis.__thaw_next_timer_delay = () => {
     let due = Infinity;
     for (const timer of timers.values()) due = Math.min(due, timer.due);
@@ -1150,6 +1199,25 @@ mod tests {
             1
         );
         assert_eq!(call("timing", "[]"), r#"["number",true,true]"#);
+    }
+
+    #[test]
+    fn structured_clone_copies_cycles_and_builtins() {
+        assert_eq!(
+            load(
+                "function cloneValues() {\n\
+                   const source = { nested: { value: 1 }, bytes: new Uint8Array([2, 3]), map: new Map([['key', 4]]), set: new Set([5]), date: new Date(6) };\n\
+                   source.self = source;\n\
+                   const copy = structuredClone(source);\n\
+                   copy.nested.value = 7; copy.bytes[0] = 8;\n\
+                   let rejected = false;\n\
+                   try { structuredClone(() => 1); } catch (error) { rejected = error instanceof TypeError; }\n\
+                   return [copy !== source, copy.self === copy, source.nested.value, source.bytes[0], copy.map.get('key'), copy.set.has(5), copy.date.getTime(), rejected];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("cloneValues", "[]"), "[true,true,1,2,4,true,6,true]");
     }
 
     #[test]
