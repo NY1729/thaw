@@ -14234,6 +14234,7 @@ mod tests {
             type Undefine = <T>(value: T) => undefined;
             type Predicate = <T>(value: T) => boolean;
             type NumericValue = <T>(value: T) => number;
+            type NumericOperation = <T extends number>(value: T) => number;
             function namedIdentity<T>(value: T): T { return value; }
             async function namedAsyncIdentity<T>(value: T): Promise<T> { return value; }
             async function main(): Promise<void> {
@@ -14262,6 +14263,7 @@ mod tests {
                 const equalsSelf: Predicate = <T>(value: T) => value === value;
                 const stringifyValue: Stringify = <T>(value: T) => String(value);
                 const numericValue: NumericValue = <T>(value: T) => Number(value);
+                const decrement: NumericOperation = <T extends number>(value: T) => value - 1;
                 const asyncIdentity: AsyncIdentity = namedAsyncIdentity;
                 console.log(identity(24));
                 console.log(identity("alias"));
@@ -14294,11 +14296,12 @@ mod tests {
                 console.log(equalsSelf("same"));
                 console.log(stringifyValue(38));
                 console.log(numericValue("39"));
+                console.log(decrement(41));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\nnull\nundefined\ntrue\n38\n39\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\nnull\nundefined\ntrue\n38\n39\n40\n"
         );
     }
 

@@ -388,7 +388,8 @@ The workspace crates have narrow responsibilities:
   parameter. Primitive number, string, boolean, `null` and `undefined` returns
   infer their distinct concrete type through the same control-flow check.
   Comparisons, supported unary operators, templates and primitive conversion
-  calls also contribute their statically fixed result type. The equivalent
+  calls also contribute their statically fixed result type. Numeric binary
+  operators except the string-sensitive `+` infer `number`. The equivalent
   call-signature literal form `type Identity = { <T>(value: T): T }` shares
   the same path
 - Callable assignment compares the effective Promise-wrapped return of named
