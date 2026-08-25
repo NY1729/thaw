@@ -149,7 +149,9 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
 pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
     let name = specifier.strip_prefix("node:").unwrap_or(specifier);
     let dts_source = match name {
-        "util" => "export declare function inspect(argsArray: any): any;\n",
+        "util" => {
+            "export declare function inspect(argsArray: any): any;\nexport declare function format(argsArray: any): any;\nexport declare function formatWithOptions(argsArray: any): any;\nexport declare function inherits(argsArray: any): void;\nexport declare function promisify(argsArray: any): any;\nexport declare function callbackify(argsArray: any): any;\nexport declare function deprecate(argsArray: any): any;\nexport declare function stripVTControlCharacters(argsArray: any): any;\nexport declare function toUSVString(argsArray: any): any;\n"
+        }
         "path" => {
             "export declare function resolve(argsArray: any): any;\nexport declare function join(argsArray: any): any;\nexport declare function dirname(argsArray: any): any;\nexport declare function basename(argsArray: any): any;\nexport declare function normalize(argsArray: any): any;\n"
         }
@@ -2463,9 +2465,60 @@ fn split_bare_spec(spec: &str) -> (&str, Option<&str>) {
 fn builtin_module_source(name: &str) -> Option<&'static str> {
     match name {
         "util" => Some(
-            "function inspect(value) { return String(value); }\n\
-             inspect.custom = Symbol.for('nodejs.util.inspect.custom');\n\
-             module.exports = { inspect: inspect };\n",
+            "var inspectCustom = Symbol.for('nodejs.util.inspect.custom');\n\
+             function inspect(value, options) {\n\
+             \x20\x20if (value && typeof value[inspectCustom] === 'function') return String(value[inspectCustom](2, options || {}, inspect));\n\
+             \x20\x20if (typeof value === 'string') return \"'\" + value.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\") + \"'\";\n\
+             \x20\x20if (typeof value === 'function') return '[Function' + (value.name ? ': ' + value.name : '') + ']';\n\
+             \x20\x20if (typeof value === 'symbol' || typeof value === 'bigint') return String(value);\n\
+             \x20\x20if (value instanceof Error) return value.stack || value.name + ': ' + value.message;\n\
+             \x20\x20var seen = new Set();\n\
+             \x20\x20function render(input) {\n\
+             \x20\x20\x20\x20if (input === null || typeof input !== 'object') return typeof input === 'string' ? \"'\" + input + \"'\" : String(input);\n\
+             \x20\x20\x20\x20if (seen.has(input)) return '[Circular]'; seen.add(input);\n\
+             \x20\x20\x20\x20var result;\n\
+             \x20\x20\x20\x20if (Array.isArray(input)) result = '[ ' + input.map(render).join(', ') + ' ]';\n\
+             \x20\x20\x20\x20else if (input instanceof Date) result = isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();\n\
+             \x20\x20\x20\x20else if (input instanceof RegExp) result = String(input);\n\
+             \x20\x20\x20\x20else if (input instanceof Map) result = 'Map(' + input.size + ') { ' + Array.from(input).map(function(entry) { return render(entry[0]) + ' => ' + render(entry[1]); }).join(', ') + ' }';\n\
+             \x20\x20\x20\x20else if (input instanceof Set) result = 'Set(' + input.size + ') { ' + Array.from(input).map(render).join(', ') + ' }';\n\
+             \x20\x20\x20\x20else result = '{ ' + Object.keys(input).map(function(key) { return key + ': ' + render(input[key]); }).join(', ') + ' }';\n\
+             \x20\x20\x20\x20seen.delete(input); return result;\n\
+             \x20\x20}\n\
+             \x20\x20return render(value);\n\
+             }\n\
+             inspect.custom = inspectCustom; inspect.defaultOptions = {};\n\
+             function format() {\n\
+             \x20\x20var args = Array.prototype.slice.call(arguments); if (args.length === 0) return '';\n\
+             \x20\x20if (typeof args[0] !== 'string') return args.map(inspect).join(' ');\n\
+             \x20\x20var index = 1; var output = args[0].replace(/%[sdifjoOc%]/g, function(token) {\n\
+             \x20\x20\x20\x20if (token === '%%') return '%'; if (index >= args.length) return token; var value = args[index++];\n\
+             \x20\x20\x20\x20if (token === '%s') return String(value); if (token === '%d') return String(Number(value));\n\
+             \x20\x20\x20\x20if (token === '%i') return String(parseInt(value, 10)); if (token === '%f') return String(parseFloat(value));\n\
+             \x20\x20\x20\x20if (token === '%j') { try { return JSON.stringify(value); } catch (_) { return '[Circular]'; } }\n\
+             \x20\x20\x20\x20if (token === '%c') return ''; return inspect(value);\n\
+             \x20\x20});\n\
+             \x20\x20while (index < args.length) { var extra = args[index++]; output += ' ' + (typeof extra === 'string' ? extra : inspect(extra)); } return output;\n\
+             }\n\
+             function formatWithOptions(options) { return format.apply(null, Array.prototype.slice.call(arguments, 1)); }\n\
+             function inherits(constructor, superConstructor) { if (constructor === undefined || superConstructor === undefined) throw new TypeError('constructors are required'); constructor.super_ = superConstructor; Object.setPrototypeOf(constructor.prototype, superConstructor.prototype); }\n\
+             var promisifyCustom = Symbol.for('nodejs.util.promisify.custom');\n\
+             function promisify(original) {\n\
+             \x20\x20if (typeof original !== 'function') throw new TypeError('original must be a function'); if (original[promisifyCustom]) return original[promisifyCustom];\n\
+             \x20\x20function wrapped() { var self = this; var args = Array.prototype.slice.call(arguments); return new Promise(function(resolve, reject) { args.push(function(error) { if (error) reject(error); else { var values = Array.prototype.slice.call(arguments, 1); resolve(values.length > 1 ? values : values[0]); } }); original.apply(self, args); }); }\n\
+             \x20\x20Object.setPrototypeOf(wrapped, Object.getPrototypeOf(original)); return wrapped;\n\
+             }\n\
+             promisify.custom = promisifyCustom;\n\
+             function callbackify(original) {\n\
+             \x20\x20if (typeof original !== 'function') throw new TypeError('original must be a function');\n\
+             \x20\x20return function() { var args = Array.prototype.slice.call(arguments); var callback = args.pop(); if (typeof callback !== 'function') throw new TypeError('callback must be a function'); Promise.resolve(original.apply(this, args)).then(function(value) { queueMicrotask(function() { callback(null, value); }); }, function(error) { queueMicrotask(function() { callback(error || new Error('Promise was rejected with a falsy value')); }); }); };\n\
+             }\n\
+             function deprecate(fn) { return function() { return fn.apply(this, arguments); }; }\n\
+             function stripVTControlCharacters(value) { return String(value).replace(/[\\u001B\\u009B][[\\]()#;?]*(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*)?\\u0007|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))/g, ''); }\n\
+             function toUSVString(value) { return String(value).replace(/[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(^|[^\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]/g, function(match, prefix) { return (prefix || '') + '\\uFFFD'; }); }\n\
+             var types = { isDate: function(value) { return value instanceof Date; }, isRegExp: function(value) { return value instanceof RegExp; }, isMap: function(value) { return value instanceof Map; }, isSet: function(value) { return value instanceof Set; }, isPromise: function(value) { return value instanceof Promise; }, isArrayBuffer: function(value) { return value instanceof ArrayBuffer; }, isAnyArrayBuffer: function(value) { return value instanceof ArrayBuffer; }, isTypedArray: function(value) { return ArrayBuffer.isView(value) && !(value instanceof DataView); }, isNativeError: function(value) { return value instanceof Error; }, isArgumentsObject: function(value) { return Object.prototype.toString.call(value) === '[object Arguments]'; } };\n\
+             module.exports = { inspect: inspect, format: format, formatWithOptions: formatWithOptions, inherits: inherits, promisify: promisify, callbackify: callbackify, deprecate: deprecate, stripVTControlCharacters: stripVTControlCharacters, toUSVString: toUSVString, types: types };\n\
+             module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         // Found necessary by a real ESM package (`has-flag`): `import
         // process from 'process'` -- Node exposes `process` as both a
@@ -4333,6 +4386,49 @@ mod tests {
             .into_owned();
         assert_eq!(result, "\"symbol\"");
 
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn util_helpers_run_through_bundled_commonjs_require() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_util_helpers");
+        fs::write(
+            dir.join("index.js"),
+            "var util = require('node:util');\n\
+             function Base() {} function Child() {} util.inherits(Child, Base);\n\
+             module.exports = async function () {\n\
+             \x20 var custom = {}; custom[util.inspect.custom] = function() { return 'custom'; };\n\
+             \x20 var add = util.promisify(function(a, b, callback) { queueMicrotask(function() { callback(null, a + b); }); });\n\
+             \x20 var sum = await add(2, 3);\n\
+             \x20 var callbackValue = await new Promise(function(resolve, reject) { util.callbackify(async function(value) { return value * 2; })(4, function(error, value) { if (error) reject(error); else resolve(value); }); });\n\
+             \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y')];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_util_helpers_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseUtil = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseUtil").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["value:4:{\"ok\":true}:%","custom",true,true,true,true,true,true,5,8,"red","x�y"]"#
+        );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }

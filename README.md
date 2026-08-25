@@ -287,12 +287,13 @@ The workspace crates have narrow responsibilities:
   wildcard substitutions in their targets are resolved in declaration order
 - Minimal importable `node:path`, `node:util`, `node:process`, `node:buffer`,
   `node:os`, `node:querystring`, `node:events`, `node:assert`, and `node:url`
-  modules backed by the same QuickJS polyfills used by npm dependencies. The CommonJS
+  modules backed by the same QuickJS polyfills used by npm dependencies. The
+  `node:util` surface includes formatting, custom inspection, inheritance,
+  type predicates, Promise/callback conversion and string cleanup. The CommonJS
   `EventEmitter` supports ordered, one-shot and prepended listeners, removal
   and introspection; native `new EventEmitter()` class bridging remains outside
-  this import surface. The
-  URL module shares the global constructors and provides
-  file-URL conversion plus HTTP-option projection
+  this import surface. The URL module shares the global constructors and
+  provides file-URL conversion plus HTTP-option projection
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
