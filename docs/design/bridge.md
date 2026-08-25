@@ -352,7 +352,7 @@ extern "C" fn thaw_dynamic_call(
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
   booleanおよび符号付き／符号なし整数bitfieldも明示できる。
-  scalar、`number[]`、タグ付きnullable、これらから再帰構成した固定object以外のvariadicは未対応。
+  scalar、number/string/handle配列、タグ付きnullable、これらから再帰構成した固定object以外のvariadicは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -424,10 +424,10 @@ describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
 Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
 parameter whose element is `number`, `boolean`, `string`, `JsValue`,
-`number[]`, or a scalar fixed object is represented as an LLVM variadic
+`number[]`, `string[]`, `JsValue[]`, or a fixed object is represented as an LLVM variadic
 declaration. Scalar values are passed as C `double`, default-promoted `int`,
-NUL-terminated `const char *`, or opaque `uint64_t` handles. Each `number[]`
-element expands to `(const double *, int64_t)`. Each fixed object recursively
+NUL-terminated `const char *`, or opaque `uint64_t` handles. Each supported
+array element expands to `(const element *, int64_t)`. Each fixed object recursively
 expands its declaration-ordered number, promoted-boolean, string, handle,
 `number[]`, or child-object fields; fixed arguments remain
 subject to the ordinary marshal rules. Version 4 `variadicAbi` can replace the
@@ -436,7 +436,8 @@ floating-point-to-integer conversion before the variadic call. Optional and
 nullable values prepend a default-promoted `int` present tag. Nullish values
 prepend a default-promoted state tag (`0` value, `1` null, `2` undefined).
 Their payload follows immediately using the same recursive expansion, even for
-an absent state. Non-number-array rest layouts remain future extensions.
+an absent state. Boolean-array rest layouts remain a future extension because
+their native one-byte values require C integer-promotion marshalling.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
 field follows the same ownership, pending-exception and `try/catch/finally`
