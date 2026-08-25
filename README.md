@@ -334,7 +334,9 @@ The workspace crates have narrow responsibilities:
   Duplex interface, while `Duplex.from()` adapts readable/writable pairs,
   Promises, sync and async iterables, and async-generator transforms. Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
-  errored state, with the original destruction error retained on the stream;
+  errored state, with the original destruction error retained on the stream.
+  Default byte/object high-water marks are queryable and configurable for new
+  streams, and an explicit zero high-water mark is preserved;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
