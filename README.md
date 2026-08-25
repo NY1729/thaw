@@ -323,7 +323,9 @@ The workspace crates have narrow responsibilities:
   Completion is deferred like Node: repeated `end()` callbacks settle exactly
   once before `finish`, and `writableFinished` stays false until that turn.
   Destroying a writable rejects queued and in-flight callbacks exactly once,
-  clears buffered length and prevents a later `finish` event.
+  clears buffered length and prevents a later `finish` event. Destruction state
+  is visible immediately, while `error` then `close` events are deferred to the
+  next microtask and emitted only once.
   Readables and writables track buffered length and support object mode,
   including independent `readableObjectMode` and `writableObjectMode` on
   Duplex and Transform streams. Pipes pause until a backpressured destination
