@@ -3790,8 +3790,8 @@ const PLATFORM_GLOBALS: &str = r#"
     class WritableStreamDefaultWriter {
       constructor(stream) { if (stream.locked) throw new TypeError('stream is locked'); this._stream = stream; stream._writer = this; this.ready = Promise.resolve(); this.closed = stream._closed; }
       write(chunk) { return this._stream._write(chunk); }
-      close() { return this._stream.close(); }
-      abort(reason) { return this._stream.abort(reason); }
+      close() { return this._stream ? this._stream._close() : Promise.reject(new TypeError('writer is released')); }
+      abort(reason) { return this._stream ? this._stream._abort(reason) : Promise.reject(new TypeError('writer is released')); }
       releaseLock() { if (this._stream) this._stream._writer = null; this._stream = null; }
       get desiredSize() { return this._stream && this._stream._state === 'writable' ? 1 : null; }
     }
@@ -3799,9 +3799,11 @@ const PLATFORM_GLOBALS: &str = r#"
       constructor(sink = {}) { this._sink = sink; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); if (typeof sink.start === 'function') this._chain = this._chain.then(() => sink.start(this)); }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
-      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this) : undefined); return this._chain; }
-      close() { if (this._state !== 'writable') return this._closed; this._state = 'closed'; this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._rejectClosed(error); throw error; }); return this._chain; }
-      abort(reason) { if (this._state === 'errored') return Promise.reject(this._error); this._state = 'errored'; this._error = reason; this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return this._chain; }
+      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); const operation = this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this) : undefined); return operation.then(value => Promise.resolve().then(() => value), error => Promise.resolve().then(() => { throw error; })); }
+      _close() { if (this._state !== 'writable') return this._closed; this._state = 'closed'; this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._rejectClosed(error); throw error; }); return this._chain; }
+      close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
+      _abort(reason) { if (this._state === 'errored') return Promise.resolve(); this._state = 'errored'; this._error = reason; const operation = this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
+      abort(reason) { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._abort(reason); }
     };
     globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
     globalThis.TransformStream = class TransformStream {
