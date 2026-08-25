@@ -1759,6 +1759,17 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         send_host_worker_port(handle, port, payload)
                     })
                     .expect("failed to create Worker port sender");
+                let worker_read_source =
+                    Function::new(ctx.clone(), |path: String| -> rquickjs::Result<String> {
+                        std::fs::read_to_string(&path).map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "Worker path",
+                                "JavaScript source",
+                                format!("failed to read `{path}`: {error}"),
+                            )
+                        })
+                    })
+                    .expect("failed to create Worker source reader");
                 let worker_poll = Function::new(ctx.clone(), poll_host_workers)
                     .expect("failed to create Worker event poller");
                 let worker_active = Function::new(ctx.clone(), host_workers_active)
@@ -1787,6 +1798,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_worker_port", worker_port)
                     .expect("failed to install Worker port sender");
+                ctx.globals()
+                    .set("__thaw_worker_read_source", worker_read_source)
+                    .expect("failed to install Worker source reader");
                 ctx.globals()
                     .set("__thaw_worker_poll", worker_poll)
                     .expect("failed to install Worker event poller");

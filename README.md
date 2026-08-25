@@ -369,8 +369,10 @@ The workspace crates have narrow responsibilities:
   main runtime and native Workers with acknowledgements and Node-style errors;
   `SHARE_ENV` uses one synchronized environment Proxy across the parent and
   native Workers; transferred MessagePorts use host-routed port IDs for
-  bidirectional communication across OS threads (runtime-computed worker paths
-  remain later); `stdin`/`stdout`/`stderr`
+  bidirectional communication across OS threads; non-eval Workers can load
+  runtime-computed absolute paths and `file:` URLs from the host filesystem
+  (embedding arbitrary runtime-selected files into one binary remains
+  impossible without declaring their candidate set); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
   streams, including redirected console output; `postMessageToThread()` routes
   structured-cloned values by thread ID to isolated `process` `workerMessage`
