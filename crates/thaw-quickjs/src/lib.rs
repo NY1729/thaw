@@ -3960,6 +3960,10 @@ const PLATFORM_GLOBALS: &str = r#"
     globalThis.ReadableByteStreamController = ReadableByteStreamController;
     globalThis.ReadableStreamBYOBReader = ReadableStreamBYOBReader;
     globalThis.ReadableStreamBYOBRequest = ReadableStreamBYOBRequest;
+    class WritableStreamDefaultController {
+      constructor(stream) { this._stream = stream; this._abortController = new AbortController(); this.signal = this._abortController.signal; }
+      error(error) { if (this._stream) this._stream._errorStream(error); }
+    }
     class WritableStreamDefaultWriter {
       constructor(stream) { if (stream.locked) throw webInvalidState('WritableStream is locked'); this._stream = stream; stream._writer = this; this.ready = Promise.resolve(); this.closed = stream._closed; }
       write(chunk) { return this._stream ? this._stream._write(chunk) : Promise.reject(webInvalidState('Writer is released')); }
@@ -3969,19 +3973,29 @@ const PLATFORM_GLOBALS: &str = r#"
       get desiredSize() { return this._stream && this._stream._state === 'writable' ? 1 : null; }
     }
     globalThis.WritableStream = class WritableStream {
-      constructor(sink = {}) { this._sink = sink; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); if (typeof sink.start === 'function') this._chain = this._chain.then(() => sink.start(this)); }
+      constructor(sink = {}) { this._sink = sink; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); this._controller = new WritableStreamDefaultController(this); if (typeof sink.start === 'function') { try { this._chain = Promise.resolve(sink.start(this._controller)).catch(error => { this._errorStream(error); throw error; }); } catch (error) { this._errorStream(error); this._chain = Promise.reject(error); } } }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
-      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); const operation = this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this) : undefined); return operation.then(value => Promise.resolve().then(() => value), error => Promise.resolve().then(() => { throw error; })); }
+      _errorStream(error) { if (this._state !== 'writable') return; this._state = 'errored'; this._error = error; this._rejectClosed(error); }
+      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); const operation = this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this._controller) : undefined); return operation.then(value => Promise.resolve().then(() => value), error => Promise.resolve().then(() => { throw error; })); }
       _close() { if (this._state !== 'writable') return this._closed; this._state = 'closed'; this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._error = error; this._state = 'errored'; this._rejectClosed(error); throw error; }); return this._chain; }
       close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
-      _abort(reason) { if (this._state === 'errored') return Promise.resolve(); this._state = 'errored'; this._error = reason; const operation = this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
+      _abort(reason) { if (this._state === 'errored') return Promise.resolve(); this._state = 'errored'; this._error = reason; this._controller._abortController.abort(reason); const operation = this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return operation.then(() => Promise.resolve()); }
       abort(reason) { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._abort(reason); }
     };
     globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
+    globalThis.WritableStreamDefaultController = WritableStreamDefaultController;
+    class TransformStreamDefaultController {
+      constructor(readableController) { this._readableController = readableController; this._writable = null; }
+      get desiredSize() { return this._readableController.desiredSize; }
+      enqueue(chunk) { this._readableController.enqueue(chunk); }
+      error(reason) { this._readableController.error(reason); if (this._writable) this._writable._errorStream(reason); }
+      terminate() { this._readableController.close(); if (this._writable) { const error = webInvalidState('TransformStream has been terminated'); this._writable._errorStream(error); } }
+    }
     globalThis.TransformStream = class TransformStream {
-      constructor(transformer = {}) { let controller; this.readable = new ReadableStream({ start(value) { controller = value; } }); this.writable = new WritableStream({ write(chunk) { return typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk); }, close() { return Promise.resolve(typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => controller.close()); }, abort(error) { controller.error(error); } }); }
+      constructor(transformer = {}) { let readableController, writable; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); } }); const controller = new TransformStreamDefaultController(readableController); writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk); }, close() { return Promise.resolve(typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()); }, abort(error) { readableController.error(error); } }); controller._writable = writable; }
     };
+    globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
     const hexFromBytes = value => Array.from(value, byte => byte.toString(16).padStart(2, '0')).join('');
     const bytesFromHex = value => new Uint8Array(String(value).match(/../g)?.map(pair => parseInt(pair, 16)) || []);
     const compressionTransform = (operation, format) => {
