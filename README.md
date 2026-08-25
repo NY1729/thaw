@@ -447,6 +447,8 @@ The workspace crates have narrow responsibilities:
   same lifecycle table as Promise FileHandles
 - Path `truncate` supports shrinking and zero-filled extension in all API
   styles; FileHandles also expose chmod, sync and datasync lifecycle methods
+- File, directory, descriptor and write-stream creation honors numeric or
+  octal-string modes through the host operating system's umask
 - Scatter/gather `readv` and `writev` operations preserve vector buffers and
   positional semantics across sync, callback and Promise FileHandle APIs
 - Host filesystem capacity/inode statistics are exposed by sync, callback,
