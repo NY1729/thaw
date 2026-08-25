@@ -364,8 +364,9 @@ The workspace crates have narrow responsibilities:
   QuickJS runtimes on OS threads with copied environments, argv/execArgv,
   names and resource-limit metadata; their workerData/messages preserve cycles,
   Map/Set, dates, regular expressions, ArrayBuffers and typed-array views, and
-  transferred ArrayBuffers detach their sources; MessagePort, direct-thread-message,
-  shared-environment and redirected-stdio configurations retain the compatible
+  transferred ArrayBuffers detach their sources, and redirected stdin/stdout/stderr
+  cross the native thread channel; MessagePort, direct-thread-message and
+  shared-environment configurations retain the compatible
   in-process path (runtime-computed worker paths remain later); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
   streams, including redirected console output; `postMessageToThread()` routes
