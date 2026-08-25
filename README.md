@@ -323,6 +323,9 @@ The workspace crates have narrow responsibilities:
   `ERR_MULTIPLE_CALLBACK`. When asynchronous writes release backpressure,
   `drain` clears `writableNeedDrain` and the next queued write starts before
   the completed write's callback, matching Node's ordering.
+  Exceptions thrown by `_final` and repeated final callbacks destroy the
+  stream, preserve the original error/code, and deliver end callbacks after
+  `error` and `close`.
   Nested `cork()`/`uncork()` defers writes and uses `_writev` batches when
   available; `end()` safely releases any remaining cork level.
   Completion is deferred like Node: repeated `end()` callbacks settle exactly
