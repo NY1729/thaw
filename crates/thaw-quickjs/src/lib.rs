@@ -2784,6 +2784,36 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     },
                 )
                 .expect("failed to create JavaScript HMAC function");
+                let hpack_huffman_encode = Function::new(ctx.clone(), |value: String| {
+                    let mut output = Vec::new();
+                    httlib_huffman::encode(&hex_decode(&value), &mut output)
+                        .map(|()| hex_encode(&output))
+                        .map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "HPACK bytes",
+                                "Huffman bytes",
+                                error.to_string(),
+                            )
+                        })
+                })
+                .expect("failed to create HPACK Huffman encoder");
+                let hpack_huffman_decode = Function::new(ctx.clone(), |value: String| {
+                    let mut output = Vec::new();
+                    httlib_huffman::decode(
+                        &hex_decode(&value),
+                        &mut output,
+                        httlib_huffman::DecoderSpeed::FourBits,
+                    )
+                    .map(|()| hex_encode(&output))
+                    .map_err(|error| {
+                        rquickjs::Error::new_from_js_message(
+                            "HPACK Huffman bytes",
+                            "decoded bytes",
+                            error.to_string(),
+                        )
+                    })
+                })
+                .expect("failed to create HPACK Huffman decoder");
                 let zlib_hex = Function::new(
                     ctx.clone(),
                     |operation: String,
@@ -3116,6 +3146,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_crypto_hmac_hex", hmac_hex)
                     .expect("failed to install JavaScript HMAC function");
+                ctx.globals()
+                    .set("__thaw_hpack_huffman_encode", hpack_huffman_encode)
+                    .expect("failed to install HPACK Huffman encoder");
+                ctx.globals()
+                    .set("__thaw_hpack_huffman_decode", hpack_huffman_decode)
+                    .expect("failed to install HPACK Huffman decoder");
                 ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");
@@ -6595,6 +6631,19 @@ mod tests {
     #[test]
     fn syntax_error_fails_to_load_instead_of_crashing() {
         assert_eq!(load("function( this is not valid js"), 0);
+    }
+
+    #[test]
+    fn hpack_huffman_host_functions_match_the_rfc_vector() {
+        assert_eq!(
+            load(
+                "function encodeHpack() { return __thaw_hpack_huffman_encode(Buffer.from('www.example.com').toString('hex')); }\n\
+                 function decodeHpack() { return Buffer.from(__thaw_hpack_huffman_decode('f1e3c2e5f23a6ba0ab90f4ff'), 'hex').toString(); }",
+            ),
+            1
+        );
+        assert_eq!(call("encodeHpack", "[]"), r#""f1e3c2e5f23a6ba0ab90f4ff""#);
+        assert_eq!(call("decodeHpack", "[]"), r#""www.example.com""#);
     }
 
     /// Regression test for the pre-fix behavior: a thrown exception during
