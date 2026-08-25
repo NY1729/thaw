@@ -474,6 +474,8 @@ The workspace crates have narrow responsibilities:
   recursively clean nested contents and expose the corresponding dispose symbol
 - `fs.openAsBlob()` returns typed standard Blob values and rejects reads when
   the backing file has changed or disappeared since the Blob was opened
+- Recursive `cp` supports synchronous and asynchronous filters, symbolic-link
+  dereferencing/verbatim targets, timestamp preservation and merge conflicts
 - `globSync`, callback `glob` and the `fs/promises.glob` async iterator
   support `*`, `?`, `**`, multiple patterns, exclusions, cwd and Dirent output
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
