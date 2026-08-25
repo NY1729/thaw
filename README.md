@@ -339,7 +339,9 @@ The workspace crates have narrow responsibilities:
   streams, and an explicit zero high-water mark is preserved. Readable,
   Writable and Duplex streams convert in both directions between Node and WHATWG
   stream interfaces while preserving object-mode values and close/error flow.
-  `Readable.from()` defaults to object mode, and readable collection helpers
+  `Readable.from()` defaults to object mode, treats strings and binary views as
+  single chunks, awaits promised iterable values, and rejects null values or
+  non-iterables with Node-compatible error codes. Readable collection helpers
   cover async `map`, `filter`, `flatMap`, `drop`, `take`, `toArray`, `forEach`,
   `some`, `every`, `find` and `reduce` operations with AbortSignal checks.
   Transforming helpers preserve input order with bounded `concurrency`, while
