@@ -3773,7 +3773,9 @@ mod tests {
                             const original = { nested: { value: 1 } };
                             const copied = structuredClone(original);
                             copied.nested.value = 2;
-                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text + ':' + btoa('hi') + ':' + atob('aGk=') + ':' + (performance.now() >= 0) + ':' + original.nested.value + ':' + copied.nested.value), 0);
+                            const controller = new AbortController();
+                            controller.abort('stopped');
+                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text + ':' + btoa('hi') + ':' + atob('aGk=') + ':' + (performance.now() >= 0) + ':' + original.nested.value + ':' + copied.nested.value + ':' + controller.signal.aborted + ':' + controller.signal.reason), 0);
                         }
                     }, 1);
                 });
@@ -3801,7 +3803,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "nextTick,microtask,immediate:2:雪:aGk=:hi:true:1:2\n"
+            "nextTick,microtask,immediate:2:雪:aGk=:hi:true:1:2:true:stopped\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
