@@ -1180,14 +1180,10 @@ fn lower_generic_instance(
 /// `Box<number>` twice just produces two equal values, not two different
 /// ones.
 ///
-/// Scope note: a generic interface may only be referenced directly from a
-/// function signature/`let` annotation/etc. (wherever `lower_ts_type` is
-/// normally called) -- not from *inside another interface's field* (e.g.
-/// `interface Wrapper { box: Box<number>; }` is not resolved specially;
-/// `resolve_interface`/`resolve_type_with_interfaces` below never consult
-/// the generic map). Supporting that needs the eager resolution pass
-/// itself to be substitution-aware, deferred until a real use case asks
-/// for it.
+/// The eager declaration pass also consults the generic map, allowing a
+/// non-generic interface to extend a concrete generic base or contain a
+/// concretely instantiated generic interface field, including forward
+/// references to the generic declaration and its non-generic bases.
 #[derive(Default)]
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
@@ -1264,7 +1260,14 @@ fn resolve_interfaces(
         .cloned()
         .collect::<Vec<_>>();
     for name in names {
-        resolve_named_type(&name, &raw, &aliases, &mut resolved, &mut Vec::new())?;
+        resolve_named_type(
+            &name,
+            &raw,
+            &aliases,
+            &generic,
+            &mut resolved,
+            &mut Vec::new(),
+        )?;
     }
     Ok((resolved, generic))
 }
@@ -1273,6 +1276,7 @@ fn resolve_named_type(
     name: &str,
     interfaces: &HashMap<Symbol, &TsInterfaceDecl>,
     aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    generic: &GenericInterfaces,
     resolved: &mut HashMap<Symbol, HirType>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<HirType, String> {
@@ -1281,7 +1285,7 @@ fn resolve_named_type(
     }
     if in_progress.iter().any(|active| active == name) {
         if interfaces.contains_key(name) {
-            return resolve_interface(name, interfaces, aliases, resolved, in_progress);
+            return resolve_interface(name, interfaces, aliases, generic, resolved, in_progress);
         }
         let mut cycle = in_progress.clone();
         cycle.push(name.to_string());
@@ -1291,13 +1295,14 @@ fn resolve_named_type(
         ));
     }
     if interfaces.contains_key(name) {
-        resolve_interface(name, interfaces, aliases, resolved, in_progress)
+        resolve_interface(name, interfaces, aliases, generic, resolved, in_progress)
     } else if let Some(alias) = aliases.get(name) {
         in_progress.push(name.to_string());
         let ty = resolve_type_with_interfaces(
             &alias.type_ann,
             interfaces,
             aliases,
+            generic,
             resolved,
             in_progress,
         )?;
@@ -1313,6 +1318,7 @@ fn resolve_interface(
     name: &str,
     raw: &HashMap<Symbol, &TsInterfaceDecl>,
     aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    generic: &GenericInterfaces,
     resolved: &mut HashMap<Symbol, HirType>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<HirType, String> {
@@ -1344,21 +1350,49 @@ fn resolve_interface(
     // than guessing an override/merge rule.
     let mut fields: Vec<(Symbol, HirType)> = Vec::new();
     for base in &iface.extends {
-        if base.type_args.is_some() {
-            return Err(format!(
-                "interface `{name}` extends a base with type arguments, which is not supported yet"
-            ));
-        }
         let Expr::Ident(base_ident) = base.expr.as_ref() else {
             return Err(format!(
                 "interface `{name}` has an unsupported `extends` target (only a plain interface name is supported)"
             ));
         };
         let base_name = base_ident.sym.to_string();
-        let HirType::Object(base_fields) =
-            resolve_interface(&base_name, raw, aliases, resolved, in_progress)?
-        else {
-            unreachable!("resolve_interface always returns HirType::Object or an Err")
+        let base_ty = if let Some(base_decl) = generic.interfaces.get(&base_name) {
+            resolve_generic_interface_dependencies(
+                &base_name,
+                base_decl,
+                raw,
+                aliases,
+                generic,
+                resolved,
+                in_progress,
+                &mut Vec::new(),
+            )?;
+            let reference = swc_ecma_ast::TsTypeRef {
+                span: base.span,
+                type_name: swc_ecma_ast::TsEntityName::Ident(base_ident.clone()),
+                type_params: base.type_args.clone(),
+            };
+            resolve_generic_interface(
+                &base_name,
+                base_decl,
+                &reference,
+                resolved,
+                generic,
+                None,
+                in_progress,
+            )?
+        } else {
+            if base.type_args.is_some() {
+                return Err(format!(
+                    "interface `{name}` supplies type arguments to non-generic base `{base_name}`"
+                ));
+            }
+            resolve_interface(&base_name, raw, aliases, generic, resolved, in_progress)?
+        };
+        let HirType::Object(base_fields) = base_ty else {
+            return Err(format!(
+                "interface `{name}` can only extend object-shaped interface `{base_name}`"
+            ));
         };
         for (field_name, field_ty) in base_fields {
             if fields.iter().any(|(n, _)| *n == field_name) {
@@ -1392,8 +1426,14 @@ fn resolve_interface(
         let ann = prop.type_ann.as_ref().ok_or_else(|| {
             format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
         })?;
-        let field_ty =
-            resolve_type_with_interfaces(&ann.type_ann, raw, aliases, resolved, in_progress)?;
+        let field_ty = resolve_type_with_interfaces(
+            &ann.type_ann,
+            raw,
+            aliases,
+            generic,
+            resolved,
+            in_progress,
+        )?;
         fields.push((field_name, field_ty));
     }
 
@@ -1404,6 +1444,47 @@ fn resolve_interface(
     Ok(hir_ty)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn resolve_generic_interface_dependencies(
+    name: &str,
+    decl: &TsInterfaceDecl,
+    raw: &HashMap<Symbol, &TsInterfaceDecl>,
+    aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    generic: &GenericInterfaces,
+    resolved: &mut HashMap<Symbol, HirType>,
+    in_progress: &mut Vec<Symbol>,
+    dependency_progress: &mut Vec<Symbol>,
+) -> Result<(), String> {
+    if dependency_progress.iter().any(|active| active == name) {
+        return Ok(());
+    }
+    dependency_progress.push(name.to_string());
+    for base in &decl.extends {
+        let Expr::Ident(base_ident) = base.expr.as_ref() else {
+            return Err(format!(
+                "generic interface `{name}` has an unsupported `extends` target"
+            ));
+        };
+        let base_name = base_ident.sym.as_str();
+        if raw.contains_key(base_name) || aliases.contains_key(base_name) {
+            resolve_named_type(base_name, raw, aliases, generic, resolved, in_progress)?;
+        } else if let Some(base_decl) = generic.interfaces.get(base_name) {
+            resolve_generic_interface_dependencies(
+                base_name,
+                base_decl,
+                raw,
+                aliases,
+                generic,
+                resolved,
+                in_progress,
+                dependency_progress,
+            )?;
+        }
+    }
+    dependency_progress.pop();
+    Ok(())
+}
+
 /// Like `lower_ts_type`, but additionally resolves a `TsTypeRef` naming a
 /// not-yet-resolved interface, recursively. Used only while building the
 /// interface table (`resolve_interfaces`); everywhere else, `lower_ts_type`
@@ -1412,17 +1493,19 @@ fn resolve_type_with_interfaces(
     ty: &TsType,
     raw: &HashMap<Symbol, &TsInterfaceDecl>,
     aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    generic: &GenericInterfaces,
     resolved: &mut HashMap<Symbol, HirType>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<HirType, String> {
-    resolve_type_dependencies(ty, raw, aliases, resolved, in_progress)?;
-    lower_ts_type(ty, resolved, &GenericInterfaces::new())
+    resolve_type_dependencies(ty, raw, aliases, generic, resolved, in_progress)?;
+    lower_ts_type(ty, resolved, generic)
 }
 
 fn resolve_type_dependencies(
     ty: &TsType,
     interfaces: &HashMap<Symbol, &TsInterfaceDecl>,
     aliases: &HashMap<Symbol, &swc_ecma_ast::TsTypeAliasDecl>,
+    generic: &GenericInterfaces,
     resolved: &mut HashMap<Symbol, HirType>,
     in_progress: &mut Vec<Symbol>,
 ) -> Result<(), String> {
@@ -1431,7 +1514,18 @@ fn resolve_type_dependencies(
             if let swc_ecma_ast::TsEntityName::Ident(id) = &reference.type_name {
                 let name = id.sym.as_str();
                 if interfaces.contains_key(name) || aliases.contains_key(name) {
-                    resolve_named_type(name, interfaces, aliases, resolved, in_progress)?;
+                    resolve_named_type(name, interfaces, aliases, generic, resolved, in_progress)?;
+                } else if let Some(decl) = generic.interfaces.get(name) {
+                    resolve_generic_interface_dependencies(
+                        name,
+                        decl,
+                        interfaces,
+                        aliases,
+                        generic,
+                        resolved,
+                        in_progress,
+                        &mut Vec::new(),
+                    )?;
                 }
             }
             if let Some(arguments) = &reference.type_params {
@@ -1440,6 +1534,7 @@ fn resolve_type_dependencies(
                         argument,
                         interfaces,
                         aliases,
+                        generic,
                         resolved,
                         in_progress,
                     )?;
@@ -1450,15 +1545,28 @@ fn resolve_type_dependencies(
             &parenthesized.type_ann,
             interfaces,
             aliases,
+            generic,
             resolved,
             in_progress,
         )?,
-        TsType::TsArrayType(array) => {
-            resolve_type_dependencies(&array.elem_type, interfaces, aliases, resolved, in_progress)?
-        }
+        TsType::TsArrayType(array) => resolve_type_dependencies(
+            &array.elem_type,
+            interfaces,
+            aliases,
+            generic,
+            resolved,
+            in_progress,
+        )?,
         TsType::TsTupleType(tuple) => {
             for element in &tuple.elem_types {
-                resolve_type_dependencies(&element.ty, interfaces, aliases, resolved, in_progress)?;
+                resolve_type_dependencies(
+                    &element.ty,
+                    interfaces,
+                    aliases,
+                    generic,
+                    resolved,
+                    in_progress,
+                )?;
             }
         }
         TsType::TsUnionOrIntersectionType(value) => {
@@ -1467,7 +1575,14 @@ fn resolve_type_dependencies(
                 TsUnionOrIntersectionType::TsIntersectionType(intersection) => &intersection.types,
             };
             for element in elements {
-                resolve_type_dependencies(element, interfaces, aliases, resolved, in_progress)?;
+                resolve_type_dependencies(
+                    element,
+                    interfaces,
+                    aliases,
+                    generic,
+                    resolved,
+                    in_progress,
+                )?;
             }
         }
         TsType::TsTypeLit(literal) => {
@@ -1478,6 +1593,7 @@ fn resolve_type_dependencies(
                             &annotation.type_ann,
                             interfaces,
                             aliases,
+                            generic,
                             resolved,
                             in_progress,
                         )?;
@@ -1493,6 +1609,7 @@ fn resolve_type_dependencies(
                             &annotation.type_ann,
                             interfaces,
                             aliases,
+                            generic,
                             resolved,
                             in_progress,
                         )?;
@@ -1503,6 +1620,7 @@ fn resolve_type_dependencies(
                 &function.type_ann.type_ann,
                 interfaces,
                 aliases,
+                generic,
                 resolved,
                 in_progress,
             )?;
@@ -13139,6 +13257,17 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("collides with an inherited field"));
+    }
+
+    #[test]
+    fn validates_concrete_generic_base_constraints() {
+        let module = thaw_parser::parse_typescript(
+            "interface Bad extends Numeric<string> {} interface Numeric<T extends number> { value: T } function bad(value: Bad): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("does not satisfy constraint F64"));
     }
 
     #[test]
