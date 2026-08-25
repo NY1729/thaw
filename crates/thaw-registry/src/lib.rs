@@ -10767,6 +10767,35 @@ mod tests {
     }
 
     #[test]
+    fn global_request_normalizes_inherits_and_clones_bodies() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_global_request");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { function capture(action) { try { action(); } catch (error) { return error.name; } } var controller = new AbortController(), request = new Request('https://example.com/a?x=1', { method: 'post', headers: { X: ' y ' }, body: 'hello', signal: controller.signal }), before = [request.url, request.method, [...request.headers], request.body.constructor.name, request.bodyUsed, request.cache, request.credentials, request.destination, request.integrity, request.keepalive, request.mode, request.redirect, request.referrer, request.referrerPolicy, request.duplex, request.signal === controller.signal], clone = request.clone(), cloneText = await clone.text(), originalStillUnused = !request.bodyUsed, inherited = new Request(request, { method: 'PUT', headers: { Z: '1' } }), originalTransferred = request.bodyUsed && request.body.locked, inheritedText = await inherited.text(); controller.abort('stop'); await Promise.resolve(); var stream = new ReadableStream({ start: function(value) { value.enqueue(new TextEncoder().encode('stream')); value.close(); } }), streamRequest = new Request('http://example.com/', { method: 'POST', body: stream, duplex: 'half' }), streamText = await streamRequest.text(), params = new Request('http://example.com/', { method: 'POST', body: new URLSearchParams({ a: 'b' }) }), form = await params.formData(); return [before, cloneText, originalStillUnused, inherited.method, inherited.url, [...inherited.headers], inheritedText, originalTransferred, request.signal.aborted, request.signal.reason, inherited.signal.aborted, streamText, form.get('a'), Object.prototype.toString.call(request), capture(function() { new Request('/relative'); }), capture(function() { new Request('http://example.com/', { body: 'x' }); }), capture(function() { new Request('http://example.com/', { method: 'HEAD', body: 'x' }); }), capture(function() { new Request('http://example.com/', { method: 'bad method' }); }), capture(function() { new Request('http://example.com/', { method: 'CONNECT' }); }), capture(function() { new Request('http://example.com/', { method: 'POST', body: new ReadableStream() }); })]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_global_request_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRequest = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseRequest").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["https://example.com/a?x=1","POST",[["content-type","text/plain;charset=UTF-8"],["x","y"]],"ReadableStream",false,"default","same-origin","","",false,"cors","follow","about:client","","half",false],"hello",true,"PUT","https://example.com/a?x=1",[["z","1"]],"hello",true,true,"stop",true,"stream","b","[object Request]","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn text_decoder_stream_decodes_incrementally_and_flushes_errors() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_text_decoder_streaming");
