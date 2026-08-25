@@ -1481,38 +1481,82 @@ fn function_expression_as_arrow(
     })
 }
 
-fn inferred_generic_arrow_return_type(arrow: &swc_ecma_ast::ArrowExpr) -> Option<Box<TsType>> {
-    let returned = match arrow.body.as_ref() {
-        ArrowFunctionBody::Expr(expression) => expression.as_ref(),
-        ArrowFunctionBody::FunctionBody(body) => {
-            let [Stmt::Return(return_statement)] = body.stmts.as_slice() else {
-                return None;
-            };
-            return_statement.arg.as_deref()?
-        }
-    };
-    let returned = match returned {
+fn returned_generic_parameter_index(expr: &Expr, params: &[Pat]) -> Option<usize> {
+    let returned = match expr {
         Expr::Paren(parenthesized) => parenthesized.expr.as_ref(),
         Expr::TsAs(assertion) => assertion.expr.as_ref(),
         Expr::TsTypeAssertion(assertion) => assertion.expr.as_ref(),
         expression => expression,
     };
+    if let Expr::Cond(conditional) = returned {
+        let consequent = returned_generic_parameter_index(&conditional.cons, params)?;
+        let alternate = returned_generic_parameter_index(&conditional.alt, params)?;
+        return (consequent == alternate).then_some(consequent);
+    }
     let Expr::Ident(returned) = returned else {
         return None;
     };
-    arrow.params.iter().find_map(|parameter| {
+    params.iter().position(|parameter| {
         let Pat::Ident(binding) = parameter else {
-            return None;
+            return false;
         };
-        (binding.id.sym == returned.sym)
-            .then(|| {
-                binding
-                    .type_ann
-                    .as_ref()
-                    .map(|annotation| annotation.type_ann.clone())
-            })
-            .flatten()
+        binding.id.sym == returned.sym
     })
+}
+
+fn collect_generic_return_parameters(
+    statement: &Stmt,
+    params: &[Pat],
+    returned: &mut Vec<usize>,
+) -> bool {
+    match statement {
+        Stmt::Return(return_statement) => return_statement
+            .arg
+            .as_deref()
+            .and_then(|expr| returned_generic_parameter_index(expr, params))
+            .map(|index| returned.push(index))
+            .is_some(),
+        Stmt::If(if_statement) => {
+            collect_generic_return_parameters(&if_statement.cons, params, returned)
+                && if_statement.alt.as_deref().is_none_or(|alternate| {
+                    collect_generic_return_parameters(alternate, params, returned)
+                })
+        }
+        Stmt::Block(block) => block
+            .stmts
+            .iter()
+            .all(|statement| collect_generic_return_parameters(statement, params, returned)),
+        Stmt::Empty(_) => true,
+        _ => false,
+    }
+}
+
+fn inferred_generic_arrow_return_type(arrow: &swc_ecma_ast::ArrowExpr) -> Option<Box<TsType>> {
+    let index = match arrow.body.as_ref() {
+        ArrowFunctionBody::Expr(expression) => {
+            returned_generic_parameter_index(expression, &arrow.params)?
+        }
+        ArrowFunctionBody::FunctionBody(body) => {
+            let mut returned = Vec::new();
+            if !body.stmts.iter().all(|statement| {
+                collect_generic_return_parameters(statement, &arrow.params, &mut returned)
+            }) {
+                return None;
+            }
+            let first = *returned.first()?;
+            returned
+                .iter()
+                .all(|index| *index == first)
+                .then_some(first)?
+        }
+    };
+    let Pat::Ident(binding) = &arrow.params[index] else {
+        return None;
+    };
+    binding
+        .type_ann
+        .as_ref()
+        .map(|annotation| annotation.type_ann.clone())
 }
 
 /// Resolves every top-level `interface` declaration, so `lower_ts_type` can
@@ -14302,6 +14346,10 @@ mod tests {
             ),
             (
                 "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"not inferred\"; }",
+                "needs an explicit return type",
+            ),
+            (
+                "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",
                 "needs an explicit return type",
             ),
             (
