@@ -402,6 +402,8 @@ The workspace crates have narrow responsibilities:
 - `node:tls` performs real rustls handshakes with WebPKI roots or a custom PEM/DER
   CA, then exposes verified TLSSocket write/end/data/secureConnect lifecycle;
   TLS listening servers and unrestricted certificate bypass remain later steps
+- `node:os` reads host CPU, memory, uptime, load, hostname, release, home/tmp and
+  user information while exposing Node-shaped loopback interfaces and constants
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and

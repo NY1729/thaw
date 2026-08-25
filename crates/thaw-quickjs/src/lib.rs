@@ -421,6 +421,75 @@ fn hmac_bytes(algorithm: &str, key: &[u8], value: &[u8]) -> Vec<u8> {
     digest_bytes(algorithm, &outer)
 }
 
+fn os_info_json() -> String {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        value => value,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        value => value,
+    };
+    let mut hostname = std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_else(|_| "localhost".to_string())
+        .trim()
+        .to_string();
+    if hostname.is_empty() {
+        hostname = "localhost".to_string();
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let tmp = std::env::var("TMPDIR")
+        .or_else(|_| std::env::var("TMP"))
+        .unwrap_or_else(|_| "/tmp".to_string());
+    let cpu_info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let model = cpu_info
+        .lines()
+        .find_map(|line| line.strip_prefix("model name\t: "))
+        .unwrap_or(arch)
+        .to_string();
+    let speed = cpu_info
+        .lines()
+        .find_map(|line| line.strip_prefix("cpu MHz\t\t: "))
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        .round() as u64;
+    let cpu_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let cpus = (0..cpu_count)
+        .map(|_| serde_json::json!({ "model": model, "speed": speed, "times": { "user": 0, "nice": 0, "sys": 0, "idle": 0, "irq": 0 } }))
+        .collect::<Vec<_>>();
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let memory_value = |name: &str| {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    };
+    let uptime = std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|value| value.split_whitespace().next()?.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let loadavg = std::fs::read_to_string("/proc/loadavg")
+        .unwrap_or_default()
+        .split_whitespace()
+        .take(3)
+        .filter_map(|value| value.parse::<f64>().ok())
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "platform": platform, "arch": arch, "type": if platform == "linux" { "Linux" } else { platform },
+        "hostname": hostname, "homedir": home, "tmpdir": tmp, "release": std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim(),
+        "version": std::fs::read_to_string("/proc/sys/kernel/version").unwrap_or_default().trim(), "machine": std::env::consts::ARCH,
+        "endianness": if cfg!(target_endian = "little") { "LE" } else { "BE" }, "cpus": cpus,
+        "totalmem": memory_value("MemTotal:"), "freemem": memory_value("MemAvailable:"), "uptime": uptime, "loadavg": loadavg,
+        "userInfo": { "username": std::env::var("USER").unwrap_or_default(), "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 }
+    }).to_string()
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
     JS.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -545,6 +614,8 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_destroy_function =
                     Function::new(ctx.clone(), |handle: u32| tls_destroy(handle))
                         .expect("failed to create JavaScript TLS closer");
+                let os_info_function = Function::new(ctx.clone(), os_info_json)
+                    .expect("failed to create JavaScript OS information source");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -605,6 +676,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_tls_destroy", tls_destroy_function)
                     .expect("failed to install JavaScript TLS closer");
+                ctx.globals()
+                    .set("__thaw_os_info", os_info_function)
+                    .expect("failed to install JavaScript OS information source");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
