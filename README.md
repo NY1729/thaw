@@ -383,6 +383,9 @@ The workspace crates have narrow responsibilities:
   From-Web adapters retain their reader/writer lock for their lifetime and
   defer Node `error`/`close` until asynchronous underlying cancel/abort work
   settles; reader-owned cancellation bypasses the public locked-stream guard.
+  `Readable.toWeb()` starts its Node source paused, resumes on Web pulls,
+  pauses at the controller high-water mark, and resolves cancellation only
+  after the Node source has emitted its error/close lifecycle.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
