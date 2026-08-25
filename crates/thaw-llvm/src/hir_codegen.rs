@@ -14004,6 +14004,27 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_function_type_defaults() {
+        let source = r#"
+            function make<T = string>(): T { return "ready"; }
+            function duplicate<T, U = T>(value: T): { first: T; second: U } {
+                return { first: value, second: value };
+            }
+            function numeric<T extends number = number>(): T { return 9; }
+            function main(): void {
+                console.log(make());
+                const pair = duplicate("same");
+                console.log(pair.first + pair.second);
+                console.log(numeric());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_function_defaults"),
+            "ready\nsamesame\n9\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };

@@ -80,6 +80,7 @@ struct FnSignature {
     source_range: (u32, u32),
     generic_type_params: Vec<Symbol>,
     generic_type_constraints: Vec<Option<Box<TsType>>>,
+    generic_type_defaults: Vec<Option<Box<TsType>>>,
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_return_type: Option<Box<TsType>>,
 }
@@ -397,6 +398,17 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let generic_type_defaults = func
+                    .type_params
+                    .as_ref()
+                    .map(|parameters| {
+                        parameters
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.default.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let generic_param_patterns = if generic_type_params.is_empty() {
                     Vec::new()
                 } else {
@@ -487,6 +499,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                         source_range: (func.span.lo.0, func.span.hi.0),
                         generic_type_params,
                         generic_type_constraints,
+                        generic_type_defaults,
                         generic_param_patterns,
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                     },
@@ -1091,21 +1104,33 @@ fn infer_generic_type_tuple(
     for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
         match_generic_pattern(pattern, actual, &mut inferred)?;
     }
-    let types = signature
+    let mut types = Vec::with_capacity(signature.generic_type_params.len());
+    let mut substitution = HashMap::new();
+    for ((name, default), index) in signature
         .generic_type_params
         .iter()
-        .map(|name| {
-            inferred.get(name).cloned().ok_or_else(|| {
-                format!("cannot infer generic type parameter `{name}` from this call")
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let substitution = signature
-        .generic_type_params
-        .iter()
-        .cloned()
-        .zip(types.iter().cloned())
-        .collect::<HashMap<_, _>>();
+        .zip(&signature.generic_type_defaults)
+        .zip(0..)
+    {
+        let concrete = if let Some(inferred) = inferred.get(name) {
+            inferred.clone()
+        } else if let Some(default) = default {
+            resolve_ts_type_with_substitution(
+                default,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                &mut Vec::new(),
+            )?
+        } else {
+            return Err(format!(
+                "cannot infer generic type parameter `{name}` from this call (parameter {})",
+                index + 1
+            ));
+        };
+        substitution.insert(name.clone(), concrete.clone());
+        types.push(concrete);
+    }
     for ((name, actual), constraint) in signature
         .generic_type_params
         .iter()
@@ -12614,6 +12639,19 @@ mod tests {
             error.contains("does not satisfy constraint Object"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn validates_generic_function_defaults_against_constraints() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            function invalid<T extends number = string>(): T { return "wrong"; }
+            function main(): void { invalid(); }
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("does not satisfy constraint F64"), "{error}");
     }
 
     #[test]
