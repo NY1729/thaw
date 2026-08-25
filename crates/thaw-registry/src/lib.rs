@@ -176,6 +176,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "stream/promises" => {
             "export declare function pipeline(argsArray: any): any;\nexport declare function finished(argsArray: any): any;\n"
         }
+        "diagnostics_channel" => {
+            "export declare function channel(argsArray: any): any;\nexport declare function hasSubscribers(argsArray: any): any;\nexport declare function subscribe(argsArray: any): void;\nexport declare function unsubscribe(argsArray: any): any;\nexport declare function tracingChannel(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2911,6 +2914,26 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function pipeline() { var streams = Array.prototype.slice.call(arguments); var options = streams.length && streams[streams.length - 1] && streams[streams.length - 1].signal && typeof streams[streams.length - 1].pipe !== 'function' ? streams.pop() : {}; return new Promise(function(resolve, reject) { var settled = false; function fail(error) { if (settled) return; settled = true; streams.forEach(function(stream) { if (stream.destroy) stream.destroy(); }); reject(error); } streams.forEach(function(stream) { stream.once('error', fail); }); for (var index = 0; index + 1 < streams.length; index++) streams[index].pipe(streams[index + 1]); var last = streams[streams.length - 1]; last.once('finish', function() { if (!settled) { settled = true; resolve(last); } }); if (options.signal) { if (options.signal.aborted) fail(options.signal.reason); else options.signal.addEventListener('abort', function() { fail(options.signal.reason); }, { once: true }); } }); }\n\
              module.exports = { pipeline: pipeline, finished: finished }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "diagnostics_channel" => Some(
+            "var registry = globalThis.__thawDiagnosticChannels || (globalThis.__thawDiagnosticChannels = new Map());\n\
+             function Channel(name) { this.name = String(name); this._subscribers = []; this._stores = []; }\n\
+             Object.defineProperty(Channel.prototype, 'hasSubscribers', { get: function() { return this._subscribers.length !== 0; } });\n\
+             Channel.prototype.subscribe = function(callback) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); if (this._subscribers.indexOf(callback) < 0) this._subscribers.push(callback); };\n\
+             Channel.prototype.unsubscribe = function(callback) { var index = this._subscribers.indexOf(callback); if (index < 0) return false; this._subscribers.splice(index, 1); return true; };\n\
+             Channel.prototype.bindStore = function(store, transform) { if (!store || typeof store.run !== 'function') throw new TypeError('store must provide run'); this._stores.push({ store: store, transform: typeof transform === 'function' ? transform : function(value) { return value; } }); };\n\
+             Channel.prototype.unbindStore = function(store) { var before = this._stores.length; this._stores = this._stores.filter(function(binding) { return binding.store !== store; }); return before !== this._stores.length; };\n\
+             Channel.prototype.runStores = function(data, callback, thisArg) { var args = Array.prototype.slice.call(arguments, 3); var bindings = this._stores.slice(); function invoke(index) { if (index === bindings.length) return callback.apply(thisArg, args); var binding = bindings[index]; return binding.store.run(binding.transform(data), function() { return invoke(index + 1); }); } return invoke(0); };\n\
+             Channel.prototype.publish = function(data) { var self = this; return this.runStores(data, function() { self._subscribers.slice().forEach(function(callback) { callback(data, self.name); }); }); };\n\
+             function channel(name) { var key = String(name); if (!registry.has(key)) registry.set(key, new Channel(key)); return registry.get(key); }\n\
+             function hasSubscribers(name) { return channel(name).hasSubscribers; }\n\
+             function subscribe(name, callback) { channel(name).subscribe(callback); }\n\
+             function unsubscribe(name, callback) { return channel(name).unsubscribe(callback); }\n\
+             function tracingChannel(nameOrChannels) {\n\
+             \x20\x20var channels = typeof nameOrChannels === 'string' ? { start: channel('tracing:' + nameOrChannels + ':start'), end: channel('tracing:' + nameOrChannels + ':end'), asyncStart: channel('tracing:' + nameOrChannels + ':asyncStart'), asyncEnd: channel('tracing:' + nameOrChannels + ':asyncEnd'), error: channel('tracing:' + nameOrChannels + ':error') } : nameOrChannels;\n\
+             \x20\x20return { start: channels.start, end: channels.end, asyncStart: channels.asyncStart, asyncEnd: channels.asyncEnd, error: channels.error, traceSync: function(callback, context, thisArg) { var args = Array.prototype.slice.call(arguments, 3); context = context || {}; channels.start.publish(context); try { var result = channels.start.runStores(context, callback, thisArg, ...args); context.result = result; channels.end.publish(context); return result; } catch (error) { context.error = error; channels.error.publish(context); channels.end.publish(context); throw error; } }, tracePromise: function(callback, context, thisArg) { var args = Array.prototype.slice.call(arguments, 3); context = context || {}; channels.start.publish(context); return Promise.resolve().then(function() { return channels.start.runStores(context, callback, thisArg, ...args); }).then(function(result) { context.result = result; channels.asyncStart.publish(context); channels.asyncEnd.publish(context); channels.end.publish(context); return result; }, function(error) { context.error = error; channels.error.publish(context); channels.asyncStart.publish(context); channels.asyncEnd.publish(context); channels.end.publish(context); throw error; }); }, traceCallback: function(callback, position, context, thisArg) { var args = Array.prototype.slice.call(arguments, 4); context = context || {}; channels.start.publish(context); var original = args[position]; args[position] = function(error, result) { if (error) { context.error = error; channels.error.publish(context); } else context.result = result; channels.asyncStart.publish(context); try { return original.apply(this, arguments); } finally { channels.asyncEnd.publish(context); channels.end.publish(context); } }; return channels.start.runStores(context, callback, thisArg, ...args); } };\n\
+             }\n\
+             module.exports = { channel: channel, hasSubscribers: hasSubscribers, subscribe: subscribe, unsubscribe: unsubscribe, tracingChannel: tracingChannel, Channel: Channel }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -4760,6 +4783,50 @@ mod tests {
         assert_eq!(
             result,
             r#"["AB",true,true,"leftright","pass",true,"promise",true,"stop"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn diagnostics_channels_publish_bind_stores_and_trace() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_diagnostics_channel");
+        fs::write(
+            dir.join("index.js"),
+            "var diagnostics = require('node:diagnostics_channel');\n\
+             module.exports = async function () {\n\
+             \x20 var events = []; var work = diagnostics.channel('work'); var same = work === diagnostics.channel('work');\n\
+             \x20 function subscriber(data, name) { events.push(name + ':' + data.value); } diagnostics.subscribe('work', subscriber); diagnostics.subscribe('work', subscriber);\n\
+             \x20 var store = { run: function(value, callback) { events.push('store:' + value); return callback(); } }; work.bindStore(store, function(data) { return data.value * 2; });\n\
+             \x20 var storeResult = work.runStores({ value: 2 }, function(left, right) { return left + right; }, null, 3, 4); work.publish({ value: 5 }); var removed = diagnostics.unsubscribe('work', subscriber); work.publish({ value: 6 }); work.unbindStore(store);\n\
+             \x20 var trace = diagnostics.tracingChannel('operation'); ['start', 'end', 'asyncStart', 'asyncEnd', 'error'].forEach(function(name) { trace[name].subscribe(function(context) { events.push(name + ':' + (context.result || context.error && context.error.message || '')); }); });\n\
+             \x20 var sync = trace.traceSync(function(value) { return value + 1; }, {}, null, 4); var promised = await trace.tracePromise(async function(value) { return value * 2; }, {}, null, 3); var failed; try { trace.traceSync(function() { throw new Error('bad'); }, {}); } catch (error) { failed = error.message; }\n\
+             \x20 return [same, storeResult, removed, diagnostics.hasSubscribers('work'), sync, promised, failed, events];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_diagnostics_channel_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseDiagnostics = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseDiagnostics").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,7,true,false,5,6,"bad",["store:4","store:10","work:5","store:12","start:","end:5","start:","asyncStart:6","asyncEnd:6","end:6","start:","error:bad","end:bad"]]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
