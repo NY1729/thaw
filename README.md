@@ -354,7 +354,10 @@ The workspace crates have narrow responsibilities:
   the observed stream. `addAbortSignal()` and `Readable.compose({ signal })`
   destroy their complete stream graph with an `AbortError` carrying code
   `ABORT_ERR` and the original signal reason as `cause`; invalid signals and
-  streams are rejected synchronously. `stream.compose()` joins transform stages behind one
+  streams are rejected synchronously. The same helper errors locked WHATWG
+  readable and writable streams in place without invoking their underlying
+  `cancel` or `abort` algorithms or releasing the caller's lock.
+  `stream.compose()` joins transform stages behind one
   Duplex interface, while `Duplex.from()` adapts readable/writable pairs,
   Promises, sync and async iterables, and async-generator transforms. Both APIs
   reject missing, directionally invalid or unsupported inputs synchronously

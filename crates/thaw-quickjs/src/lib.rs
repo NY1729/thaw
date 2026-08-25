@@ -3795,12 +3795,12 @@ const PLATFORM_GLOBALS: &str = r#"
       get desiredSize() { return this._stream && this._stream._state === 'writable' ? 1 : null; }
     }
     globalThis.WritableStream = class WritableStream {
-      constructor(sink = {}) { this._sink = sink; this._state = 'writable'; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); if (typeof sink.start === 'function') this._chain = this._chain.then(() => sink.start(this)); }
+      constructor(sink = {}) { this._sink = sink; this._state = 'writable'; this._error = undefined; this._writer = null; this._chain = Promise.resolve(); this._closed = new Promise((resolve, reject) => { this._resolveClosed = resolve; this._rejectClosed = reject; }); this._closed.catch(() => {}); if (typeof sink.start === 'function') this._chain = this._chain.then(() => sink.start(this)); }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
-      _write(chunk) { if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this) : undefined); return this._chain; }
+      _write(chunk) { if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'writable') return Promise.reject(new TypeError('stream is not writable')); this._chain = this._chain.then(() => typeof this._sink.write === 'function' ? this._sink.write(chunk, this) : undefined); return this._chain; }
       close() { if (this._state !== 'writable') return this._closed; this._state = 'closed'; this._chain = this._chain.then(() => typeof this._sink.close === 'function' ? this._sink.close() : undefined).then(() => this._resolveClosed(), error => { this._rejectClosed(error); throw error; }); return this._chain; }
-      abort(reason) { this._state = 'errored'; this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return this._chain; }
+      abort(reason) { if (this._state === 'errored') return Promise.reject(this._error); this._state = 'errored'; this._error = reason; this._chain = this._chain.then(() => typeof this._sink.abort === 'function' ? this._sink.abort(reason) : undefined).then(() => this._rejectClosed(reason)); return this._chain; }
     };
     globalThis.WritableStreamDefaultWriter = WritableStreamDefaultWriter;
     globalThis.TransformStream = class TransformStream {
