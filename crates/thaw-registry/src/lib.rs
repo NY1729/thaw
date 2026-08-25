@@ -4169,12 +4169,14 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
         function cleanup() { if (request.signal) request.signal.removeEventListener('abort', onAbort); }
         function onAbort() { if (active && typeof active.destroy === 'function') active.destroy(); finishReject(aborted()); }
         if (request.signal) request.signal.addEventListener('abort', onAbort, { once: true });
-        function dispatch(url, method, bytes, redirected) {
+        var initialHeaders = {}; request.headers.forEach(function(value, name) { initialHeaders[name] = value; });
+        function dispatch(url, method, bytes, redirected, headers) {
           var parsed;
           try { parsed = new URL(url); } catch (error) { finishReject(error); return; }
           if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') { finishReject(new TypeError('fetch only supports http: and https: URLs')); return; }
+          if (parsed.username || parsed.password) { finishReject(new TypeError('Request URL cannot contain credentials')); return; }
+          parsed.hash = '';
           var transport = __thaw_bundle_require(parsed.protocol === 'https:' ? 'node:https' : 'node:http');
-          var headers = {}; request.headers.forEach(function(value, name) { headers[name] = value; });
           if ((method === 'GET' || method === 'HEAD') && bytes.length) { bytes = new Uint8Array(); delete headers['content-length']; }
           var options = { method: method, headers: headers, signal: request.signal };
           try {
@@ -4184,9 +4186,10 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
                 if (request.redirect === 'error') { finishReject(new TypeError('fetch redirect mode is set to error')); return; }
                 if (request.redirect === 'follow') {
                   if (++redirects > 20) { finishReject(new TypeError('fetch redirect count exceeded')); return; }
-                  var nextMethod = method, nextBody = bytes;
-                  if (status === 303 && method !== 'HEAD' || (status === 301 || status === 302) && method === 'POST') { nextMethod = 'GET'; nextBody = new Uint8Array(); }
-                  dispatch(new URL(String(location), parsed).href, nextMethod, nextBody, true); return;
+                  var nextUrl = new URL(String(location), parsed), nextMethod = method, nextBody = bytes, nextHeaders = Object.assign({}, headers);
+                  if (status === 303 && method !== 'HEAD' || (status === 301 || status === 302) && method === 'POST') { nextMethod = 'GET'; nextBody = new Uint8Array(); Object.keys(nextHeaders).forEach(function(name) { if (name.indexOf('content-') === 0) delete nextHeaders[name]; }); }
+                  if (nextUrl.origin !== parsed.origin) ['authorization', 'proxy-authorization', 'cookie', 'cookie2'].forEach(function(name) { delete nextHeaders[name]; });
+                  dispatch(nextUrl.href, nextMethod, nextBody, true, nextHeaders); return;
                 }
               }
               var responseHeaders = new Headers();
@@ -4211,7 +4214,7 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
             active.end();
           } catch (error) { finishReject(error); }
         }
-        dispatch(request.url, request.method, body, false);
+        dispatch(request.url, request.method, body, false, initialHeaders);
       });
     });
   };
@@ -10235,17 +10238,24 @@ mod tests {
                 "GET /final ",
                 "POST /echo ",
                 "POST /multipart ",
+                "POST /post-redirect ",
+                "GET /post-final ",
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 stream.read_to_end(&mut request).unwrap();
                 let request = String::from_utf8(request).unwrap();
                 assert!(request.starts_with(expected), "{request}");
-                if expected.contains("redirect") {
+                if expected.contains("post-redirect") {
+                    assert!(request.ends_with("again"));
+                    stream
+                        .write_all(b"HTTP/1.1 302 Found\r\nLocation: /post-final#ignored\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .unwrap();
+                } else if expected.contains("redirect") {
                     stream
                         .write_all(b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                         .unwrap();
-                } else if expected.contains("final") {
+                } else if expected == "GET /final " {
                     stream
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}")
                         .unwrap();
@@ -10255,7 +10265,7 @@ mod tests {
                     stream
                         .write_all(b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload")
                         .unwrap();
-                } else {
+                } else if expected.contains("multipart") {
                     let lower = request.to_ascii_lowercase();
                     assert!(lower.contains(
                         "content-type: multipart/form-data; boundary=----thaw-formdata-"
@@ -10266,6 +10276,12 @@ mod tests {
                     stream
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/form-data; boundary=reply-boundary\r\nConnection: close\r\n\r\n--reply-boundary\r\nContent-Disposition: form-data; name=\"answer\"\r\n\r\n42\r\n--reply-boundary\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"reply.txt\"\r\nContent-Type: text/plain\r\n\r\nreply-body\r\n--reply-boundary--\r\n")
                         .unwrap();
+                } else {
+                    assert!(!request.to_ascii_lowercase().contains("content-type:"));
+                    assert!(!request.to_ascii_lowercase().contains("content-length:"));
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nrewritten")
+                        .unwrap();
                 }
             }
         });
@@ -10273,7 +10289,7 @@ mod tests {
         let dir = temp_registry("global_fetch");
         fs::write(
             dir.join("index.js"),
-            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text()]; };",
+            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect'), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var rewritten = await fetch(base + '/post-redirect#source', { method: 'POST', body: 'again' }), rewrittenText = await rewritten.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text(), rewritten.redirected, rewritten.url, rewrittenText]; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("global_fetch_node_modules");
@@ -10290,7 +10306,7 @@ mod tests {
         assert_eq!(
             result,
             format!(
-                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body"]"#
+                r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body",true,"http://127.0.0.1:{port}/post-final","rewritten"]"#
             )
         );
         server.join().unwrap();
