@@ -222,13 +222,20 @@ fn net_listen(host: &str, port: u16) -> String {
     }
 }
 
-fn net_accept(handle: u32) -> String {
+fn net_accept_impl(handle: u32, nonblocking: bool) -> String {
     NET_LISTENERS.with(|listeners| {
         let listeners = listeners.borrow();
         let Some(listener) = listeners.1.get(&handle) else {
             return "err:server is closed".to_string();
         };
-        match listener.accept() {
+        if let Err(error) = listener.set_nonblocking(nonblocking) {
+            return format!("err:{error}");
+        }
+        let accepted = listener.accept();
+        if nonblocking {
+            let _ = listener.set_nonblocking(false);
+        }
+        match accepted {
             Ok((stream, peer)) => NET_STREAMS.with(|streams| {
                 let mut streams = streams.borrow_mut();
                 let stream_handle = streams.0;
@@ -237,9 +244,20 @@ fn net_accept(handle: u32) -> String {
                 streams.1.insert(stream_handle, stream);
                 format!("ok:{stream_handle}:{}:{}", peer.ip(), peer.port())
             }),
+            Err(error) if nonblocking && error.kind() == io::ErrorKind::WouldBlock => {
+                "err:pending".to_string()
+            }
             Err(error) => format!("err:{error}"),
         }
     })
+}
+
+fn net_accept(handle: u32) -> String {
+    net_accept_impl(handle, false)
+}
+
+fn net_poll_accept(handle: u32) -> String {
+    net_accept_impl(handle, true)
 }
 
 fn net_read_all(handle: u32) -> String {
@@ -1062,6 +1080,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 .expect("failed to create JavaScript TCP listener");
                 let tcp_accept = Function::new(ctx.clone(), |handle: u32| net_accept(handle))
                     .expect("failed to create JavaScript TCP acceptor");
+                let tcp_poll_accept =
+                    Function::new(ctx.clone(), |handle: u32| net_poll_accept(handle))
+                        .expect("failed to create JavaScript TCP polling acceptor");
                 let tcp_read = Function::new(ctx.clone(), |handle: u32| net_read_all(handle))
                     .expect("failed to create JavaScript TCP reader");
                 let tcp_close_listener =
@@ -1280,6 +1301,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_net_accept", tcp_accept)
                     .expect("failed to install JavaScript TCP acceptor");
+                ctx.globals()
+                    .set("__thaw_net_poll_accept", tcp_poll_accept)
+                    .expect("failed to install JavaScript TCP polling acceptor");
                 ctx.globals()
                     .set("__thaw_net_read", tcp_read)
                     .expect("failed to install JavaScript TCP reader");
