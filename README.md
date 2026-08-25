@@ -146,9 +146,11 @@ The workspace crates have narrow responsibilities:
 - Fixed-shape object fields can also use static string-computed reads,
   assignments, compound assignments, and updates; JSON accepts string keys
 - Dynamic string-computed reads are supported for fixed objects whose fields
-  share one untagged native type. Object and key evaluate once; known keys
-  return a present optional value and unknown keys return `undefined`, including
-  when key evaluation suspends
+  share one native type, including uniformly optional, nullable, or nullish
+  fields. Object and key evaluate once; known keys preserve their existing
+  nullable state, nullable fields widen to distinguish an unknown key as
+  `undefined`, and unknown keys return `undefined`, including when key
+  evaluation suspends
 - Optional member, computed-member, and function calls are accepted for native
   types whose static layout excludes `null`/`undefined`; tagged optional fixed
   objects additionally short-circuit named and static string-computed field

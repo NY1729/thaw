@@ -4134,9 +4134,7 @@ impl<'a> FnLowerer<'a> {
                     "cannot access `.{field}` on a value of type {other:?}"
                 )),
             },
-            HirExpr::DynamicPropAccess(_, _, _, payload) => {
-                Ok(HirType::Optional(Box::new(payload.clone())))
-            }
+            HirExpr::DynamicPropAccess(_, _, _, result) => Ok(result.clone()),
             HirExpr::PropAssign(_, _, _, value) => self.infer_expr_type(value),
             HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) => Ok(HirType::Json),
             HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
@@ -5875,22 +5873,20 @@ impl<'a> FnLowerer<'a> {
                                     .into(),
                             );
                         }
-                        if matches!(
-                            &payload,
-                            HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
-                        ) {
-                            return Err(
-                                "dynamic object index of tagged nullable fields is not supported"
-                                    .into(),
-                            );
-                        }
+                        let result = match &payload {
+                            HirType::Optional(inner) => HirType::Optional(inner.clone()),
+                            HirType::Nullable(inner) | HirType::Nullish(inner) => {
+                                HirType::Nullish(inner.clone())
+                            }
+                            other => HirType::Optional(Box::new(other.clone())),
+                        };
                         let key = self.lower_expr(&computed.expr)?;
                         self.expect_type(&HirType::Str, &key, "computed object key")?;
                         Ok(HirExpr::DynamicPropAccess(
                             Box::new(obj),
                             Box::new(key),
                             fields,
-                            payload,
+                            result,
                         ))
                     }
                     HirType::Json => match computed.expr.as_ref() {
@@ -11569,6 +11565,38 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("requires every field to have the same type"));
+    }
+
+    #[test]
+    fn dynamic_computed_object_reads_flatten_uniform_tagged_fields() {
+        let program = lower(
+            r#"function read(
+                optional: { a: number | undefined; b: number | undefined },
+                nullable: { a: number | null; b: number | null },
+                nullish: { a: number | null | undefined; b: number | null | undefined },
+                key: string
+            ): void {
+                console.log(optional[key]);
+                console.log(nullable[key]);
+                console.log(nullish[key]);
+            }"#,
+        );
+        let body = &program.functions[0].body;
+        assert!(matches!(
+            &body[0],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::DynamicPropAccess(_, _, _, HirType::Optional(inner)) if inner.as_ref() == &HirType::F64)
+        ));
+        assert!(matches!(
+            &body[1],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::DynamicPropAccess(_, _, _, HirType::Nullish(inner)) if inner.as_ref() == &HirType::F64)
+        ));
+        assert!(matches!(
+            &body[2],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(&args[0], HirExpr::DynamicPropAccess(_, _, _, HirType::Nullish(inner)) if inner.as_ref() == &HirType::F64)
+        ));
     }
 
     #[test]
