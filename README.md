@@ -347,7 +347,9 @@ The workspace crates have narrow responsibilities:
   consumption and `Symbol.asyncDispose` destroys abandoned readables. Stream
   instances expose flowing, aborted, closed, object-mode and pending-drain
   state; readable `unshift()`/legacy `wrap()` and writable
-  `setDefaultEncoding()` cover common compatibility paths. Indexed-pair
+  `setDefaultEncoding()` cover common compatibility paths. Readable
+  `setEncoding()` retains incomplete UTF-8, UTF-16 and base64 input across
+  chunk boundaries and flushes incomplete trailing input at EOF. Indexed-pair
   iteration, static stream-state checks, writable async disposal and
   non-half-open Duplex shutdown are also supported. Callback and Promise
   pipelines accept Iterable sources, source/transform/destination functions,
