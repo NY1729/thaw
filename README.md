@@ -399,9 +399,11 @@ The workspace crates have narrow responsibilities:
   readers, writers, piping, async iteration, queuing strategies and text codecs
 - Web `CompressionStream`/`DecompressionStream` connect those pipelines to the
   native gzip, deflate and raw-deflate implementation
-- `node:tls` performs real rustls handshakes with WebPKI roots or a custom PEM/DER
-  CA, then exposes verified TLSSocket write/end/data/secureConnect lifecycle;
-  TLS listening servers and unrestricted certificate bypass remain later steps
+- `node:tls` performs real rustls client and server handshakes with WebPKI roots
+  or custom PEM/DER certificates and PEM PKCS#8/RSA keys, then exposes verified
+  TLSSocket and createServer write/end/data/secureConnection lifecycles;
+  multi-client serving, client-certificate authentication and unrestricted
+  certificate bypass remain later steps
 - `node:os` reads host CPU, memory, uptime, load, hostname, release, home/tmp and
   user information while exposing Node-shaped loopback interfaces and constants
 - `node:http` exposes native `serveOnce(port, body)` and
