@@ -290,7 +290,8 @@ The workspace crates have narrow responsibilities:
   `node:os`, `node:querystring`, `node:events`, `node:assert`, and `node:url`
   modules backed by the same QuickJS polyfills used by npm dependencies. The
   `node:util` surface includes formatting, custom inspection, inheritance,
-  type predicates, Promise/callback conversion and string cleanup. The CommonJS
+  type predicates, Promise/callback conversion, string cleanup, TextEncoder /
+  TextDecoder exports and token-producing CLI argument parsing. The CommonJS
   `EventEmitter` supports ordered, one-shot and prepended listeners, Symbol
   events, removal, maximum-listener controls and introspection. `events.on()`
   exposes queued async iteration with AbortSignal cancellation; native
