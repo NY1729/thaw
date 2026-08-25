@@ -10751,7 +10751,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             .map_err(|error| error.to_string())?;
                         compiled_args.push(promoted.into());
                     }
-                    HirType::Str => compiled_args.push(value.into()),
+                    HirType::Str | HirType::JsValue => compiled_args.push(value.into()),
                     other => {
                         return Err(format!(
                             "FFI function `{}` has unsupported variadic element type {other:?}",
@@ -18844,6 +18844,8 @@ mod tests {
             declare function native_sum(count: number, ...values: number[]): number;
             declare function native_true_count(count: number, ...values: boolean[]): number;
             declare function native_total_length(count: number, ...values: string[]): number;
+            declare function native_handle(): JsValue;
+            declare function native_handle_sum(count: number, ...values: JsValue[]): number;
             declare function native_sum_i32(count: number, ...values: number[]): number;
             declare function native_sum_i64(count: number, ...values: number[]): number;
             declare function native_sum_u32(count: number, ...values: number[]): number;
@@ -18854,6 +18856,7 @@ mod tests {
                 console.log(native_sum(3, 2, 3, 5));
                 console.log(native_true_count(4, true, false, true, true));
                 console.log(native_total_length(3, "thaw", "ffi", "ok"));
+                console.log(native_handle_sum(2, native_handle(), native_handle()));
                 console.log(native_sum_i32(2, 0 - 2, 5));
                 console.log(native_sum_i64(2, 0 - 4, 10));
                 console.log(native_sum_u32(2, 20, 22));
@@ -18874,6 +18877,10 @@ mod tests {
             .extern_functions
             .iter()
             .any(|signature| signature.variadic == Some(HirType::Str)));
+        assert!(program
+            .extern_functions
+            .iter()
+            .any(|signature| signature.variadic == Some(HirType::JsValue)));
         for (symbol, abi) in [
             ("native_sum_i32", thaw_hir::FfiVariadicAbi::I32),
             ("native_sum_i64", thaw_hir::FfiVariadicAbi::I64),
@@ -18905,7 +18912,7 @@ mod tests {
         compiler.write_object_file(&obj_path).unwrap();
         std::fs::write(
             &native_c_path,
-            "#include <stdarg.h>\n#include <string.h>\n\
+            "#include <stdarg.h>\n#include <stdint.h>\n#include <string.h>\n\
              double native_sum(double raw_count, ...) {\n\
                int count = (int)raw_count; double sum = 0; va_list args;\n\
                va_start(args, raw_count);\n\
@@ -18923,6 +18930,13 @@ mod tests {
                va_start(args, raw_count);\n\
                for (int i = 0; i < count; ++i) length += strlen(va_arg(args, const char *));\n\
                va_end(args); return (double)length;\n\
+             }\n\
+             uint64_t native_handle(void) { return 20; }\n\
+             double native_handle_sum(double raw_count, ...) {\n\
+               int count = (int)raw_count; uint64_t sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) sum += va_arg(args, uint64_t);\n\
+               va_end(args); return (double)sum;\n\
              }\n\
              double native_sum_i32(double raw_count, ...) {\n\
                int count = (int)raw_count; int sum = 0; va_list args;\n\
@@ -18972,7 +18986,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "0\n10\n3\n9\n3\n6\n42\n42\n"
+            "0\n10\n3\n9\n40\n3\n6\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

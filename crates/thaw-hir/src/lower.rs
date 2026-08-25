@@ -236,12 +236,18 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                         )?;
                         match ty {
                             HirType::Array(element)
-                                if matches!(*element, HirType::F64 | HirType::Bool | HirType::Str) =>
+                                if matches!(
+                                    *element,
+                                    HirType::F64
+                                        | HirType::Bool
+                                        | HirType::Str
+                                        | HirType::JsValue
+                                ) =>
                             {
                                 Ok(*element)
                             }
                             other => Err(format!(
-                                "ambient variadic function `{name}` requires a number[], boolean[], or string[] rest parameter, found {other:?}"
+                                "ambient variadic function `{name}` requires a number[], boolean[], string[], or JsValue[] rest parameter, found {other:?}"
                             )),
                         }
                     }).transpose()?
@@ -13114,7 +13120,7 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(
-            error.contains("requires a number[], boolean[], or string[] rest parameter"),
+            error.contains("requires a number[], boolean[], string[], or JsValue[] rest parameter"),
             "{error}"
         );
     }

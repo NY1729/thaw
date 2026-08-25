@@ -352,7 +352,7 @@ extern "C" fn thaw_dynamic_call(
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
   booleanおよび符号付き／符号なし整数bitfieldも明示できる。
-  number／boolean／string以外のvariadicは未対応。
+  number／boolean／string／`JsValue`以外のvariadicは未対応。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
@@ -423,12 +423,13 @@ Metadata is deliberately separate from `.d.ts`: TypeScript declarations do not
 describe C ownership or error conventions. Unknown versions, ABI spellings, or
 ambient symbols are rejected instead of silently assuming a calling convention.
 Versions 1 and 2 remain backward-compatible. A trailing TypeScript rest
-parameter of `number[]`, `boolean[]`, or `string[]` is represented as an LLVM
-variadic declaration. Extra values are passed as C `double`, default-promoted
-`int`, or NUL-terminated `const char *`, respectively; fixed arguments remain
+parameter of `number[]`, `boolean[]`, `string[]`, or `JsValue[]` is represented
+as an LLVM variadic declaration. Extra values are passed as C `double`,
+default-promoted `int`, NUL-terminated `const char *`, or opaque `uint64_t`
+handles, respectively; fixed arguments remain
 subject to the ordinary marshal rules. Version 4 `variadicAbi` can replace the
 number default with `i32`, `i64`, `u32`, or `u64`; LLVM performs the requested
-floating-point-to-integer conversion before the variadic call. Additional rest
+floating-point-to-integer conversion before the variadic call. Aggregate rest
 element types remain future extensions.
 Void declarations use an ordinary C `void` return with the direct
 ABI. With `thaw-result`, they return `struct { const char *error; }`; the error
