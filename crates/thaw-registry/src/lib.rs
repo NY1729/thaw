@@ -164,6 +164,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "querystring" => {
             "export declare function stringify(argsArray: any): any;\nexport declare function encode(argsArray: any): any;\nexport declare function parse(argsArray: any): any;\nexport declare function decode(argsArray: any): any;\nexport declare function escape(argsArray: any): any;\nexport declare function unescape(argsArray: any): any;\n"
         }
+        "events" => {
+            "export declare function EventEmitter(argsArray: any): any;\nexport declare function once(argsArray: any): any;\n"
+        }
         "fs" => {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
@@ -2591,6 +2594,60 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
+        "events" => Some(
+            "function EventEmitter() {\n\
+             \x20\x20if (!(this instanceof EventEmitter)) return new EventEmitter();\n\
+             \x20\x20this._events = Object.create(null);\n\
+             }\n\
+             EventEmitter.prototype._add = function(event, listener, prepend, once) {\n\
+             \x20\x20if (typeof listener !== 'function') throw new TypeError('listener must be a function');\n\
+             \x20\x20var name = String(event); var list = this._events[name] || (this._events[name] = []);\n\
+             \x20\x20var entry = { listener: listener, once: Boolean(once) };\n\
+             \x20\x20if (prepend) list.unshift(entry); else list.push(entry);\n\
+             \x20\x20return this;\n\
+             };\n\
+             EventEmitter.prototype.addListener = EventEmitter.prototype.on = function(event, listener) { return this._add(event, listener, false, false); };\n\
+             EventEmitter.prototype.once = function(event, listener) { return this._add(event, listener, false, true); };\n\
+             EventEmitter.prototype.prependListener = function(event, listener) { return this._add(event, listener, true, false); };\n\
+             EventEmitter.prototype.prependOnceListener = function(event, listener) { return this._add(event, listener, true, true); };\n\
+             EventEmitter.prototype.emit = function(event) {\n\
+             \x20\x20var name = String(event); var list = this._events[name];\n\
+             \x20\x20if (!list || list.length === 0) {\n\
+             \x20\x20\x20\x20if (name === 'error') { var error = arguments[1]; throw error instanceof Error ? error : new Error('Unhandled error event'); }\n\
+             \x20\x20\x20\x20return false;\n\
+             \x20\x20}\n\
+             \x20\x20var args = Array.prototype.slice.call(arguments, 1);\n\
+             \x20\x20list.slice().forEach(function(entry) {\n\
+             \x20\x20\x20\x20if (entry.once) this.removeListener(name, entry.listener);\n\
+             \x20\x20\x20\x20entry.listener.apply(this, args);\n\
+             \x20\x20}, this);\n\
+             \x20\x20return true;\n\
+             };\n\
+             EventEmitter.prototype.removeListener = EventEmitter.prototype.off = function(event, listener) {\n\
+             \x20\x20var name = String(event); var list = this._events[name]; if (!list) return this;\n\
+             \x20\x20for (var index = list.length - 1; index >= 0; index--) if (list[index].listener === listener || list[index].listener.listener === listener) { list.splice(index, 1); break; }\n\
+             \x20\x20if (list.length === 0) delete this._events[name]; return this;\n\
+             };\n\
+             EventEmitter.prototype.removeAllListeners = function(event) { if (event === undefined) this._events = Object.create(null); else delete this._events[String(event)]; return this; };\n\
+             EventEmitter.prototype.listeners = function(event) { var list = this._events[String(event)] || []; return list.map(function(entry) { return entry.listener.listener || entry.listener; }); };\n\
+             EventEmitter.prototype.rawListeners = function(event) { var list = this._events[String(event)] || []; return list.map(function(entry) { return entry.listener; }); };\n\
+             EventEmitter.prototype.listenerCount = function(event) { var list = this._events[String(event)]; return list ? list.length : 0; };\n\
+             EventEmitter.prototype.eventNames = function() { return Object.keys(this._events); };\n\
+             EventEmitter.listenerCount = function(emitter, event) { return emitter.listenerCount(event); };\n\
+             function once(emitter, event) {\n\
+             \x20\x20return new Promise(function(resolve, reject) {\n\
+             \x20\x20\x20\x20function cleanup() { emitter.removeListener(event, done); emitter.removeListener('error', failed); }\n\
+             \x20\x20\x20\x20function done() { var values = Array.prototype.slice.call(arguments); cleanup(); resolve(values); }\n\
+             \x20\x20\x20\x20function failed(error) { cleanup(); reject(error); }\n\
+             \x20\x20\x20\x20emitter.once(event, done); if (event !== 'error') emitter.once('error', failed);\n\
+             \x20\x20});\n\
+             }\n\
+             module.exports = EventEmitter;\n\
+             module.exports.EventEmitter = EventEmitter;\n\
+             module.exports.once = once;\n\
+             module.exports.default = EventEmitter;\n\
+             module.exports.__esModule = true;\n",
+        ),
         // Same real dependency chain as `path` above (`node-gyp-build.js`
         // reads `os.arch()`/`os.platform()` to build its target string).
         "os" => Some(
@@ -4096,6 +4153,55 @@ mod tests {
         assert_eq!(
             result,
             r#""a=1&a=2&space=two%20words:{\"x\":[\"1\",\"2\"]}""#
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn events_builtin_runs_event_emitter_through_commonjs_require() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_events");
+        fs::write(
+            dir.join("index.js"),
+            "var EventEmitter = require('events');\n\
+             function Child() { EventEmitter.call(this); }\n\
+             Child.prototype = Object.create(EventEmitter.prototype);\n\
+             Child.prototype.constructor = Child;\n\
+             module.exports = function () {\n\
+             \x20 var emitter = new Child(); var seen = [];\n\
+             \x20 function regular(value) { seen.push('regular:' + value); }\n\
+             \x20 emitter.on('value', regular);\n\
+             \x20 emitter.prependOnceListener('value', function(value) { seen.push('once:' + value); });\n\
+             \x20 var first = emitter.emit('value', 1); var second = emitter.emit('value', 2);\n\
+             \x20 emitter.off('value', regular); var third = emitter.emit('value', 3);\n\
+             \x20 return [seen.join(','), first, second, third, emitter.listenerCount('value'), emitter.eventNames().length];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_events_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseEvents = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseEvents").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["once:1,regular:1,regular:2",true,true,false,0,0]"#
         );
 
         let _ = fs::remove_dir_all(&dir);
