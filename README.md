@@ -365,6 +365,8 @@ The workspace crates have narrow responsibilities:
   including Symbol event names, once-listener ordering and max-listener state.
   `newListener`/`removeListener` meta-events observe single and bulk changes;
   duplicate removal is one-at-a-time and raw once wrappers expose `.listener`;
+  emitting `error` without a listener throws the supplied error, while pipeline
+  teardown retains protective error listeners across cascading destruction;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
