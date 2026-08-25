@@ -1327,6 +1327,122 @@ fn runtime_export_specifiers(
     Ok(specifiers)
 }
 
+fn rewrite_static_worker_urls(source: &str, module_path: &Path) -> Result<String, String> {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Expr, Lit, NewExpr};
+    use thaw_parser::common::Spanned;
+
+    struct WorkerUrls {
+        spans: Vec<(u32, u32, u32, u32, String)>,
+    }
+    impl Visit for WorkerUrls {
+        fn visit_new_expr(&mut self, expression: &NewExpr) {
+            let Expr::Ident(callee) = expression.callee.as_ref() else {
+                expression.visit_children_with(self);
+                return;
+            };
+            if callee.sym != "Worker" {
+                expression.visit_children_with(self);
+                return;
+            }
+            let Some(arguments) = expression.args.as_ref() else {
+                return;
+            };
+            let Some(first) = arguments.first() else {
+                return;
+            };
+            let Expr::New(url) = first.expr.as_ref() else {
+                expression.visit_children_with(self);
+                return;
+            };
+            let Expr::Ident(url_callee) = url.callee.as_ref() else {
+                expression.visit_children_with(self);
+                return;
+            };
+            let Some(url_arguments) = url.args.as_ref() else {
+                return;
+            };
+            if url_callee.sym != "URL" || url_arguments.len() != 2 {
+                expression.visit_children_with(self);
+                return;
+            }
+            let Expr::Lit(Lit::Str(path)) = url_arguments[0].expr.as_ref() else {
+                expression.visit_children_with(self);
+                return;
+            };
+            let span = first.expr.span();
+            let base_span = url_arguments[1].expr.span();
+            self.spans.push((
+                span.lo.0,
+                span.hi.0,
+                base_span.lo.0,
+                base_span.hi.0,
+                path.value.to_string_lossy().into_owned(),
+            ));
+            expression.visit_children_with(self);
+        }
+    }
+
+    let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
+        return Ok(source.to_string());
+    };
+    let mut workers = WorkerUrls { spans: Vec::new() };
+    module.visit_with(&mut workers);
+    if workers.spans.is_empty() {
+        return Ok(source.to_string());
+    }
+    workers.spans.sort_by_key(|(lo, _, _, _, _)| *lo);
+    let directory = module_path.parent().unwrap_or(Path::new(""));
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    for (lo, hi, base_lo, base_hi, relative) in workers.spans {
+        if !(relative.starts_with("./") || relative.starts_with("../")) {
+            continue;
+        }
+        let base_lo = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(base_lo))
+            .pos
+            .0 as usize;
+        let base_hi = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(base_hi))
+            .pos
+            .0 as usize;
+        if source[base_lo..base_hi].trim() != "import.meta.url" {
+            continue;
+        }
+        let worker_path = directory.join(&relative);
+        let worker_source = fs::read(&worker_path).map_err(|error| {
+            format!(
+                "failed to read Worker source `{}` referenced by `{}`: {error}",
+                worker_path.display(),
+                module_path.display()
+            )
+        })?;
+        let encoded = worker_source
+            .iter()
+            .map(|byte| format!("%{byte:02X}"))
+            .collect::<String>();
+        let replacement = serde_json::to_string(&format!("data:text/javascript,{encoded}"))
+            .expect("Worker data URL is serializable");
+        let lo = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
+            .pos
+            .0 as usize;
+        let hi = source_map
+            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
+            .pos
+            .0 as usize;
+        if lo < cursor {
+            continue;
+        }
+        output.push_str(&source[cursor..lo]);
+        output.push_str(&replacement);
+        cursor = hi;
+    }
+    output.push_str(&source[cursor..]);
+    Ok(output)
+}
+
 /// Bundles `root_package`'s own CommonJS module graph -- starting from
 /// `main_relative` (its `main` field, or a default) -- into a single
 /// self-contained JS string with a small embedded module-system
@@ -1401,6 +1517,7 @@ fn bundle_commonjs_package(
         } else {
             source
         };
+        let source = rewrite_static_worker_urls(&source, &abs_path)?;
         let analysis = analyze_module(&source);
         if let Some(error) = &analysis.attribute_error {
             return Err(format!("invalid import attributes in `{key}`: {error}"));
@@ -5538,6 +5655,36 @@ mod tests {
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(result, r#"[["online","message:17:false","exit:0"],true]"#);
         let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn bundler_embeds_static_file_url_worker_sources() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_worker_file_url");
+        fs::write(
+            dir.join("worker.js"),
+            "var wt = require('node:worker_threads'); wt.parentPort.postMessage(wt.workerData * 2); wt.parentPort.close();",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("index.js"),
+            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var worker = new Worker(new URL('./worker.js', import.meta.url), { workerData: 21 }); var events = []; await new Promise(function(resolve, reject) { worker.on('message', function(value) { events.push(value); }); worker.on('error', reject); worker.on('exit', function(code) { events.push(code); resolve(); }); }); return events; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_worker_file_url_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        fs::remove_dir_all(&dir).unwrap();
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFileWorker = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseFileWorker").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, "[42,0]");
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
 
