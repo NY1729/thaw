@@ -6192,6 +6192,37 @@ mod tests {
     }
 
     #[test]
+    fn byob_supports_dataview_alignment_and_request_lifecycle() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_readable_stream_byob_views");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var dataInfo, dataStream = new ReadableStream({ type: 'bytes', pull: function(controller) { var request = controller.byobRequest; dataInfo = [request.view.constructor.name, request.view.byteLength]; request.view[0] = 3; request.respond(1); controller.close(); } }), dataResult = await dataStream.getReader({ mode: 'byob' }).read(new DataView(new ArrayBuffer(4))), calls = 0, closeCode, viewCode, staleRequest, typed = new ReadableStream({ type: 'bytes', pull: function(controller) { calls++; var request = controller.byobRequest; staleRequest = request; if (calls === 1) { try { request.respondWithNewView(new Uint8Array(request.view.buffer, request.view.byteOffset + 1, 1)); } catch (error) { viewCode = error.code; } request.view[0] = 1; request.respond(1); try { controller.close(); } catch (error) { closeCode = error.code; } } else { request.view[0] = 2; request.respond(1); controller.close(); } } }), typedResult = await typed.getReader({ mode: 'byob' }).read(new Uint16Array(2)), staleCode; try { staleRequest.respond(0); } catch (error) { staleCode = error.code; } return [dataInfo, dataResult.value.constructor.name, dataResult.value.byteLength, dataResult.value.getUint8(0), calls, typedResult.value.constructor.name, typedResult.value.length, Array.from(new Uint8Array(typedResult.value.buffer, typedResult.value.byteOffset, typedResult.value.byteLength)), viewCode, closeCode, staleCode]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_readable_stream_byob_views_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamByobViews = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseReadableStreamByobViews")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[["Uint8Array",4],"DataView",1,3,2,"Uint16Array",1,[1,2],"ERR_INVALID_ARG_VALUE","ERR_INVALID_STATE","ERR_INVALID_STATE"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_stream_default_controllers_manage_errors_and_termination() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_stream_controllers");
