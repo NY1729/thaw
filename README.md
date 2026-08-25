@@ -463,6 +463,12 @@ The workspace crates have narrow responsibilities:
   to arena-backed closures, including captured values and nested closures, and
   Rust can invoke them through the callback FFI in fully static executables;
   captured mutable bindings are shared with their outer scope
+- QuickJS/npm bundles receive Node-shaped `http.request()` and `http.get()`
+  clients over the native TCP transport, including `ClientRequest` lifecycle
+  events, request headers and bodies, `IncomingMessage` status/header fields,
+  duplicate `set-cookie` preservation and chunked response decoding. Builtin
+  CommonJS dependencies are collected recursively rather than through
+  per-module special cases
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
