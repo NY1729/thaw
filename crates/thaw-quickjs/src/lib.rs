@@ -226,6 +226,31 @@ fn fs_chown(_path: &str, _value: &str, _follow: bool) -> io::Result<()> {
     ))
 }
 
+#[cfg(unix)]
+fn fs_access(path: &str, mode: i32) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    if unsafe { libc::access(path.as_ptr(), mode) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn fs_access(path: &str, mode: i32) -> io::Result<()> {
+    let metadata = std::fs::metadata(path)?;
+    if mode & 2 != 0 && metadata.permissions().readonly() {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "path is read-only",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
     let metadata = std::fs::symlink_metadata(source)?;
     if metadata.is_dir() {
@@ -280,6 +305,7 @@ fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
 fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
+        "access" => fs_access(&path, value.parse::<i32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
         "read" => std::fs::read(&path).map(|bytes| serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })),
         "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
