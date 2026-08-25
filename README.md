@@ -327,6 +327,10 @@ The workspace crates have narrow responsibilities:
   redirects with standard POST rewriting, supports `manual`/`error` redirect
   modes, removes body headers after method rewriting and credentials across
   origins, and rejects with the AbortSignal reason or a transport `TypeError`
+  Response headers resolve before the body completes: TCP and TLS sockets poll
+  incremental reads, the HTTP parser emits decoded content-length, chunked or
+  close-delimited body chunks as they arrive, and body completion closes the
+  Web stream independently of the initial fetch Promise
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the
