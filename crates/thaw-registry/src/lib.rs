@@ -182,6 +182,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "async_hooks" => {
             "export declare function AsyncLocalStorage(argsArray: any): any;\nexport declare function AsyncResource(argsArray: any): any;\nexport declare function createHook(argsArray: any): any;\nexport declare function executionAsyncId(argsArray: any): any;\nexport declare function triggerAsyncId(argsArray: any): any;\nexport declare function executionAsyncResource(argsArray: any): any;\n"
         }
+        "tty" => {
+            "export declare function isatty(argsArray: any): any;\nexport declare function ReadStream(argsArray: any): any;\nexport declare function WriteStream(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2959,6 +2962,22 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function executionAsyncId() { return currentAsyncId; } function triggerAsyncId() { return currentTriggerId; } function executionAsyncResource() { return currentResource; }\n\
              module.exports = { AsyncLocalStorage: AsyncLocalStorage, AsyncResource: AsyncResource, createHook: createHook, executionAsyncId: executionAsyncId, triggerAsyncId: triggerAsyncId, executionAsyncResource: executionAsyncResource }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "tty" => Some(
+            "function isatty(fd) { return false; }\n\
+             function ReadStream(fd, options) { if (!(this instanceof ReadStream)) return new ReadStream(fd, options); this.fd = Number(fd); this.isRaw = false; this.isTTY = true; this.readable = true; this.destroyed = false; }\n\
+             ReadStream.prototype.setRawMode = function(mode) { this.isRaw = Boolean(mode); return this; }; ReadStream.prototype.ref = function() { return this; }; ReadStream.prototype.unref = function() { return this; };\n\
+             function WriteStream(fd) { if (!(this instanceof WriteStream)) return new WriteStream(fd); this.fd = Number(fd); this.isTTY = true; this.columns = 80; this.rows = 24; this.writable = true; this.destroyed = false; this._output = ''; }\n\
+             WriteStream.prototype.write = function(value, callback) { this._output += String(value); if (typeof callback === 'function') queueMicrotask(callback); return true; };\n\
+             WriteStream.prototype.getColorDepth = function(environment) { var env = environment || globalThis.process && process.env || {}; if (env.FORCE_COLOR === '0' || env.NO_COLOR !== undefined) return 1; if (env.FORCE_COLOR === '3' || env.COLORTERM === 'truecolor') return 24; if (env.FORCE_COLOR === '2' || /256color/i.test(env.TERM || '')) return 8; if (env.FORCE_COLOR === '1' || /color|ansi|xterm|screen/i.test(env.TERM || '')) return 4; return 1; };\n\
+             WriteStream.prototype.hasColors = function(count, environment) { if (typeof count === 'object') { environment = count; count = 16; } count = count === undefined ? 16 : Number(count); return Math.pow(2, this.getColorDepth(environment)) >= count; };\n\
+             WriteStream.prototype._ansi = function(sequence, callback) { this._output += sequence; if (typeof callback === 'function') queueMicrotask(callback); return true; };\n\
+             WriteStream.prototype.clearLine = function(direction, callback) { var sequence = Number(direction) < 0 ? '\\u001b[1K' : Number(direction) > 0 ? '\\u001b[0K' : '\\u001b[2K'; return this._ansi(sequence, callback); };\n\
+             WriteStream.prototype.clearScreenDown = function(callback) { return this._ansi('\\u001b[0J', callback); };\n\
+             WriteStream.prototype.cursorTo = function(x, y, callback) { if (typeof y === 'function') { callback = y; y = undefined; } var sequence = y === undefined ? '\\u001b[' + (Number(x) + 1) + 'G' : '\\u001b[' + (Number(y) + 1) + ';' + (Number(x) + 1) + 'H'; return this._ansi(sequence, callback); };\n\
+             WriteStream.prototype.moveCursor = function(dx, dy, callback) { var sequence = ''; dx = Number(dx); dy = Number(dy); if (dx < 0) sequence += '\\u001b[' + -dx + 'D'; else if (dx > 0) sequence += '\\u001b[' + dx + 'C'; if (dy < 0) sequence += '\\u001b[' + -dy + 'A'; else if (dy > 0) sequence += '\\u001b[' + dy + 'B'; return this._ansi(sequence, callback); };\n\
+             WriteStream.prototype.getWindowSize = function() { return [this.columns, this.rows]; }; WriteStream.prototype.ref = function() { return this; }; WriteStream.prototype.unref = function() { return this; };\n\
+             module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -4894,6 +4913,46 @@ mod tests {
         assert_eq!(
             result,
             r#"[["default","outer:4","outer","inner:outer","undefined:outer"],"done","outer!","outer",true,1,[2,1,true,5],2,2,1,true,{}]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn tty_builtin_reports_capabilities_and_emits_ansi_sequences() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_tty");
+        fs::write(
+            dir.join("index.js"),
+            "var tty = require('node:tty');\n\
+             module.exports = async function () {\n\
+             \x20 var input = new tty.ReadStream(0); var same = input.setRawMode(true) === input; input.setRawMode(false);\n\
+             \x20 var output = new tty.WriteStream(1); var callbacks = []; output.write('text'); output.cursorTo(2, 3, function() { callbacks.push('cursor'); }); output.moveCursor(-1, 2, function() { callbacks.push('move'); }); output.clearLine(0); output.clearScreenDown(); await Promise.resolve();\n\
+             \x20 return [tty.isatty(1), input.isTTY, input.isRaw, same, output.getWindowSize(), output.getColorDepth({ FORCE_COLOR: '3' }), output.getColorDepth({ TERM: 'xterm-256color' }), output.hasColors(256, { TERM: 'xterm-256color' }), output.hasColors(16, {}), output._output, callbacks.sort().join(',')];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_tty_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseTty = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseTty").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            "[false,true,false,true,[80,24],24,8,true,false,\"text\\u001b[4;3H\\u001b[1D\\u001b[2B\\u001b[2K\\u001b[0J\",\"cursor,move\"]"
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

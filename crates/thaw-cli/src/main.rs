@@ -3827,6 +3827,7 @@ mod tests {
                 import { EventEmitter } from "node:events";
                 import { strictEqual } from "node:assert/strict";
                 import { StringDecoder } from "node:string_decoder";
+                import { isatty } from "node:tty";
                 import { pathToFileURL, fileURLToPath, urlToHttpOptions } from "node:url";
                 function main(): void {
                     console.log(String(path.join(JSON.parse("[\"a\",\"b\"]"))));
@@ -3837,6 +3838,7 @@ mod tests {
                     console.log(String(cwd(JSON.parse("[]"))));
                     console.log(Number(byteLength(JSON.parse("[\"thaw\"]"))));
                     console.log(String(os.arch(JSON.parse("[]"))) + ":" + String(os.platform(JSON.parse("[]"))) + ":" + String(os.type(JSON.parse("[]"))) + ":" + String(os.tmpdir(JSON.parse("[]"))));
+                    console.log(Boolean(isatty(JSON.parse("[1]"))));
                     console.log(String(querystring.stringify(JSON.parse("[{\"a\":[1,2],\"space\":\"two words\"}]"))));
                     console.log(String(querystring.parse(JSON.parse("[\"a=1&a=2&space=two+words\"]"))));
                     console.log(String(EventEmitter(JSON.parse("[]"))));
@@ -3857,7 +3859,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:/tmp\na=1&a=2&space=two%20words\n{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}\n{\"_events\":{}}\nfile:///tmp/a%20b\n/tmp/a b\n{\"auth\":\"user:pass\",\"hash\":\"#c\",\"hostname\":\"example.test\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"path\":\"/a?b=1\",\"pathname\":\"/a\",\"port\":8443,\"protocol\":\"https:\",\"search\":\"?b=1\"}\n"
+            "a/b\n.gz\n../c/d\n42\nvalue:4\n/\n4\nx64:linux:Linux:/tmp\nfalse\na=1&a=2&space=two%20words\n{\"a\":[\"1\",\"2\"],\"space\":\"two words\"}\n{\"_events\":{}}\nfile:///tmp/a%20b\n/tmp/a b\n{\"auth\":\"user:pass\",\"hash\":\"#c\",\"hostname\":\"example.test\",\"href\":\"https://user:pass@example.test:8443/a?b=1#c\",\"path\":\"/a?b=1\",\"pathname\":\"/a\",\"port\":8443,\"protocol\":\"https:\",\"search\":\"?b=1\"}\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
