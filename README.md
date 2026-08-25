@@ -328,6 +328,10 @@ The workspace crates have narrow responsibilities:
   Workers are process-local compatibility objects; spawning isolated copies of
   the compiled executable and Node-compatible IPC handle transfer remain future
   work
+- `node:test` runs synchronous or asynchronous tests and nested suites in
+  declaration order with lifecycle hooks, skip/todo states, nested test
+  contexts, mock functions/method restoration and async result streams;
+  `node:test/reporters` formats those streams as dot, spec, TAP, JUnit or LCOV
 - Legacy `_http_*` and `_tls_*` imports share the public `node:http` and
   `node:tls` constructors, agents, header validators and secure contexts;
   `_http_common` also exposes the parser-pool and leniency constants expected
