@@ -379,7 +379,9 @@ The workspace crates have narrow responsibilities:
   `interface Identity { <T>(value: T): T }`, use the same polymorphic template,
   assignment checks and direct/callback specialization paths; annotated local
   variables can forward either arrow or named-function templates through
-  compatible callable aliases and interfaces without losing polymorphism
+  compatible callable aliases and interfaces without losing polymorphism.
+  Non-generic alias chains ending in either callable form are resolved across
+  multiple links and forward declarations
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
