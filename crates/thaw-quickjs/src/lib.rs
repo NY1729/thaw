@@ -437,6 +437,91 @@ const PLATFORM_GLOBALS: &str = r#"
       globalThis.performance.timeOrigin = performanceTimeOrigin;
     }
   }
+  const performanceEntries = [];
+  const performanceObservers = new Set();
+  class PerformanceEntry {
+    constructor(name, entryType, startTime, duration = 0, detail = null) {
+      this.name = String(name); this.entryType = String(entryType);
+      this.startTime = Number(startTime); this.duration = Number(duration); this.detail = detail;
+    }
+    toJSON() { return { name: this.name, entryType: this.entryType, startTime: this.startTime, duration: this.duration, detail: this.detail }; }
+  }
+  class PerformanceMark extends PerformanceEntry {
+    constructor(name, options = {}) { super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail); }
+  }
+  class PerformanceMeasure extends PerformanceEntry {
+    constructor(name, startTime, duration, detail) { super(name, 'measure', startTime, duration, detail); }
+  }
+  class PerformanceObserverEntryList {
+    constructor(entries) { this._entries = entries; }
+    getEntries() { return this._entries.slice().sort((left, right) => left.startTime - right.startTime); }
+    getEntriesByType(type) { return this.getEntries().filter(entry => entry.entryType === String(type)); }
+    getEntriesByName(name, type) { return this.getEntries().filter(entry => entry.name === String(name) && (type === undefined || entry.entryType === String(type))); }
+  }
+  const queuePerformanceEntry = entry => {
+    performanceEntries.push(entry);
+    for (const observer of performanceObservers) {
+      if (!observer._types.has(entry.entryType)) continue;
+      observer._records.push(entry);
+      if (!observer._queued) {
+        observer._queued = true;
+        queueMicrotask(() => {
+          observer._queued = false;
+          const records = observer.takeRecords();
+          if (records.length) observer._callback(new PerformanceObserverEntryList(records), observer);
+        });
+      }
+    }
+    return entry;
+  };
+  class PerformanceObserver {
+    constructor(callback) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); this._callback = callback; this._types = new Set(); this._records = []; this._queued = false; }
+    observe(options = {}) {
+      if (options.type) this._types.add(String(options.type));
+      if (options.entryTypes) for (const type of options.entryTypes) this._types.add(String(type));
+      performanceObservers.add(this);
+      if (options.buffered && options.type) this._records.push(...performanceEntries.filter(entry => entry.entryType === String(options.type)));
+      if (this._records.length && !this._queued) {
+        this._queued = true;
+        queueMicrotask(() => { this._queued = false; const records = this.takeRecords(); if (records.length) this._callback(new PerformanceObserverEntryList(records), this); });
+      }
+    }
+    disconnect() { performanceObservers.delete(this); this._records = []; this._types.clear(); }
+    takeRecords() { const records = this._records; this._records = []; return records; }
+  }
+  PerformanceObserver.supportedEntryTypes = ['function', 'mark', 'measure'];
+  const entryTime = (value, fallback) => {
+    if (value === undefined) return fallback;
+    if (typeof value === 'number') return value;
+    const entry = performanceEntries.slice().reverse().find(candidate => candidate.name === String(value));
+    if (!entry) throw new SyntaxError(`Unknown performance mark: ${value}`);
+    return entry.startTime;
+  };
+  Object.assign(globalThis.performance, {
+    mark(name, options = {}) { return queuePerformanceEntry(new PerformanceMark(name, options)); },
+    measure(name, startOrOptions, endMark) {
+      let start, end, detail;
+      if (startOrOptions && typeof startOrOptions === 'object') {
+        start = entryTime(startOrOptions.start, 0); detail = startOrOptions.detail;
+        end = startOrOptions.duration === undefined ? entryTime(startOrOptions.end, performanceNow()) : start + Number(startOrOptions.duration);
+      } else { start = entryTime(startOrOptions, 0); end = entryTime(endMark, performanceNow()); }
+      return queuePerformanceEntry(new PerformanceMeasure(name, start, end - start, detail));
+    },
+    clearMarks(name) { for (let index = performanceEntries.length - 1; index >= 0; index--) if (performanceEntries[index].entryType === 'mark' && (name === undefined || performanceEntries[index].name === String(name))) performanceEntries.splice(index, 1); },
+    clearMeasures(name) { for (let index = performanceEntries.length - 1; index >= 0; index--) if (performanceEntries[index].entryType === 'measure' && (name === undefined || performanceEntries[index].name === String(name))) performanceEntries.splice(index, 1); },
+    getEntries() { return new PerformanceObserverEntryList(performanceEntries).getEntries(); },
+    getEntriesByType(type) { return this.getEntries().filter(entry => entry.entryType === String(type)); },
+    getEntriesByName(name, type) { return this.getEntries().filter(entry => entry.name === String(name) && (type === undefined || entry.entryType === String(type))); },
+    timerify(callback) {
+      return function(...args) { const start = performanceNow(); try { const result = callback.apply(this, args); if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => queuePerformanceEntry(new PerformanceEntry(callback.name || 'anonymous', 'function', start, performanceNow() - start))); queuePerformanceEntry(new PerformanceEntry(callback.name || 'anonymous', 'function', start, performanceNow() - start)); return result; } catch (error) { queuePerformanceEntry(new PerformanceEntry(callback.name || 'anonymous', 'function', start, performanceNow() - start)); throw error; } };
+    },
+    toJSON() { return { timeOrigin: this.timeOrigin }; }
+  });
+  globalThis.PerformanceEntry = PerformanceEntry;
+  globalThis.PerformanceMark = PerformanceMark;
+  globalThis.PerformanceMeasure = PerformanceMeasure;
+  globalThis.PerformanceObserver = PerformanceObserver;
+  globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
   if (typeof globalThis.structuredClone !== 'function') {
     globalThis.structuredClone = value => {
       const seen = new Map();
@@ -2052,6 +2137,31 @@ mod tests {
             1
         );
         assert_eq!(call("timing", "[]"), r#"["number",true,true]"#);
+    }
+
+    #[test]
+    fn performance_timeline_marks_measures_and_observes_entries() {
+        assert_eq!(
+            load(
+                "async function performanceTimeline() {\n\
+                   performance.clearMarks(); performance.clearMeasures();\n\
+                   performance.mark('start', { startTime: 10, detail: { id: 1 } });\n\
+                   const observed = []; const observer = new PerformanceObserver(list => observed.push(...list.getEntries().map(entry => entry.name)));\n\
+                   observer.observe({ type: 'mark', buffered: true }); performance.mark('end', { startTime: 25 }); await Promise.resolve();\n\
+                   const measure = performance.measure('work', { start: 'start', end: 'end', detail: 'detail' });\n\
+                   const wrapped = performance.timerify(function double(value) { return value * 2; }); const result = wrapped(4);\n\
+                   const asyncWrapped = performance.timerify(async function later(value) { await Promise.resolve(); return value + 1; }); const asyncResult = await asyncWrapped(4);\n\
+                   observer.disconnect(); const marks = performance.getEntriesByType('mark'); const functions = performance.getEntriesByType('function');\n\
+                   const beforeClear = performance.getEntriesByName('work', 'measure').length; performance.clearMarks('start'); performance.clearMeasures();\n\
+                   return [observed.join(','), marks.map(entry => entry.name).join(','), marks[0].detail.id, measure.startTime, measure.duration, measure.detail, result, asyncResult, functions.map(entry => entry.name).sort().join(','), beforeClear, performance.getEntriesByName('start').length, PerformanceObserver.supportedEntryTypes.join(',')];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("performanceTimeline", "[]"),
+            r#"["start,end","start,end",1,10,15,"detail",8,5,"double,later",1,0,"function,mark,measure"]"#
+        );
     }
 
     #[test]
