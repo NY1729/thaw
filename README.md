@@ -286,7 +286,7 @@ The workspace crates have narrow responsibilities:
   entries and can be imported alongside the root; export arrays and repeated
   wildcard substitutions in their targets are resolved in declaration order
 - Minimal importable `node:path`, `node:util`, `node:process`, `node:buffer`,
-  and `node:url` modules backed by the same QuickJS polyfills used by npm
+  `node:os`, and `node:url` modules backed by the same QuickJS polyfills used by npm
   dependencies. The URL module shares the global constructors and provides
   file-URL conversion plus HTTP-option projection
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
