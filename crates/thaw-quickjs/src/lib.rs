@@ -325,6 +325,43 @@ fn fs_utimes(path: &str, value: &str) -> io::Result<()> {
         .set_times(times)
 }
 
+#[cfg(unix)]
+fn fs_lutimes(path: &str, value: &str) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut values = value.split(',');
+    let to_timespec = |value: Option<&str>| {
+        let seconds = value.unwrap_or("0").parse::<f64>().unwrap_or(0.0).max(0.0);
+        libc::timespec {
+            tv_sec: seconds.trunc() as libc::time_t,
+            tv_nsec: (seconds.fract() * 1_000_000_000.0).round() as libc::c_long,
+        }
+    };
+    let times = [to_timespec(values.next()), to_timespec(values.next())];
+    let path = CString::new(std::ffi::OsStr::new(path).as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    if unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn fs_lutimes(_path: &str, _value: &str) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symbolic-link timestamps are unsupported",
+    ))
+}
+
 fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
@@ -350,6 +387,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "readlink" => std::fs::read_link(&path).map(|target| serde_json::json!({ "ok": true, "path": target.to_string_lossy() })),
         "chmod" => fs_chmod(&path, value.parse::<u32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
         "utimes" => fs_utimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
+        "lutimes" => fs_lutimes(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "chown" => fs_chown(&path, &value, true).map(|_| serde_json::json!({ "ok": true })),
         "lchown" => fs_chown(&path, &value, false).map(|_| serde_json::json!({ "ok": true })),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),

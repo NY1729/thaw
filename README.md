@@ -447,6 +447,8 @@ The workspace crates have narrow responsibilities:
   are exposed through synchronous, callback and Promise APIs
 - `lstat` and `Dirent.isSymbolicLink()` inspect links themselves while `stat`
   follows targets, preserving host type bits, ownership and link size
+- `lutimes` updates symbolic-link timestamps without modifying the target,
+  through synchronous, callback and Promise APIs
 - Stats timestamps come from host metadata, and `utimes` updates access and
   modification times through sync, callback, Promise and FileHandle APIs
 - Unix ownership metadata and `chown`/`lchown` operations are host-backed
