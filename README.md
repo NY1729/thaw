@@ -352,6 +352,8 @@ The workspace crates have narrow responsibilities:
   non-half-open Duplex shutdown are also supported. Callback and Promise
   pipelines accept Iterable sources, source/transform/destination functions,
   mixed stream stages, destination return values and abort propagation;
+  function-stage failures abort the shared internal signal, close source
+  iterators and destroy every materialized stage with the original error;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
