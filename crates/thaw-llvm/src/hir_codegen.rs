@@ -4833,6 +4833,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into_int_value();
                 self.unpack_union_payload(payload, member)
             }
+            HirExpr::UnionMemberIsEqual(union, member, index, elements) => {
+                self.compile_union_member_equality(union, member, *index, elements)
+            }
             HirExpr::NullishValue(value, _) => {
                 let nullish = self.compile_expr(value)?.into_struct_value();
                 self.builder
@@ -5274,6 +5277,126 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map(Into::into)
                 .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn compile_union_member_equality(
+        &mut self,
+        union: &HirExpr,
+        member: &HirExpr,
+        index: usize,
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let member_type = elements
+            .get(index)
+            .ok_or_else(|| format!("union member index {index} is out of bounds"))?;
+        let union = self.compile_expr(union)?.into_struct_value();
+        let member = self.compile_expr(member)?;
+        let tag = self
+            .builder
+            .build_extract_value(union, 0, "union_equality_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let tag_matches = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                tag,
+                self.context.i8_type().const_int(index as u64, false),
+                "union_equality_tag_matches",
+            )
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let matched = self
+            .context
+            .append_basic_block(function, "union_equality_matched");
+        let mismatched = self
+            .context
+            .append_basic_block(function, "union_equality_mismatched");
+        let merge = self
+            .context
+            .append_basic_block(function, "union_equality_merge");
+        let result = self
+            .builder
+            .build_alloca(self.context.bool_type(), "union_equality_result")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(tag_matches, matched, mismatched)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(mismatched);
+        self.builder
+            .build_store(result, self.context.bool_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(matched);
+        let payload = self
+            .builder
+            .build_extract_value(union, 1, "union_equality_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self.unpack_union_payload(payload, member_type)?;
+        let payload_matches = self.compile_native_strict_equality(payload, member, member_type)?;
+        self.builder
+            .build_store(result, payload_matches)
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(merge);
+        self.builder
+            .build_load(self.context.bool_type(), result, "union_member_equal")
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_native_strict_equality(
+        &mut self,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<IntValue<'ctx>, String> {
+        match (left, right) {
+            (BasicValueEnum::FloatValue(left), BasicValueEnum::FloatValue(right)) => self
+                .builder
+                .build_float_compare(FloatPredicate::OEQ, left, right, "union_float_equal")
+                .map_err(|error| error.to_string()),
+            (BasicValueEnum::IntValue(left), BasicValueEnum::IntValue(right)) => self
+                .builder
+                .build_int_compare(IntPredicate::EQ, left, right, "union_int_equal")
+                .map_err(|error| error.to_string()),
+            (BasicValueEnum::PointerValue(left), BasicValueEnum::PointerValue(right)) => {
+                if ty == &HirType::Str {
+                    let compared = self
+                        .builder
+                        .build_call(
+                            self.module.get_function("strcmp").unwrap(),
+                            &[left.into(), right.into()],
+                            "union_string_compare",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or("strcmp returned no union string comparison")?
+                        .into_int_value();
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            compared,
+                            self.context.i32_type().const_zero(),
+                            "union_string_equal",
+                        )
+                        .map_err(|error| error.to_string())
+                } else {
+                    self.builder
+                        .build_int_compare(IntPredicate::EQ, left, right, "union_pointer_equal")
+                        .map_err(|error| error.to_string())
+                }
+            }
+            _ => Err(format!("cannot compare union member with type {ty:?}")),
         }
     }
 
@@ -8486,6 +8609,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::UnionInject(_, _, elements) => Some(HirType::Union(elements.clone())),
             HirExpr::UnionTag(_, _) => Some(HirType::F64),
             HirExpr::UnionValue(_, index, elements) => elements.get(*index).cloned(),
+            HirExpr::UnionMemberIsEqual(..) => Some(HirType::Bool),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
             HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
                 .iter()
@@ -13656,6 +13780,13 @@ mod tests {
             function triple(value: string | number | boolean): string | number | boolean {
                 return value;
             }
+            function equality(value: string | number): void {
+                console.log(value === "same");
+                console.log("same" === value);
+                console.log(value === 2);
+                console.log(value !== 2);
+            }
+            function unionNaN(value: string | number): boolean { return value === NaN; }
             function kind(value: string | number): string { return typeof value; }
             function describe(value: string | number): string {
                 if (typeof value === "string") {
@@ -13702,6 +13833,9 @@ mod tests {
                 console.log(identity("direct"));
                 console.log(identity(12));
                 console.log(triple(true));
+                equality("same");
+                equality(2);
+                console.log(unionNaN(NaN));
                 console.log(describe("hello"));
                 console.log(describe(42));
                 console.log(describeReverse("ok"));
@@ -13721,7 +13855,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
-            "string\nnumber\ndirect\n12\ntrue\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
+            "string\nnumber\ndirect\n12\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\nfalse\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
         );
     }
 

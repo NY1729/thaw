@@ -1912,6 +1912,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(value, names);
         }
         HirExpr::BinOp(_, left, right)
+        | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
@@ -2008,6 +2009,7 @@ fn contains_await(expr: &HirExpr) -> bool {
     match expr {
         HirExpr::Await(_) | HirExpr::AwaitPromise(_, _) => true,
         HirExpr::BinOp(_, left, right)
+        | HirExpr::UnionMemberIsEqual(left, right, _, _)
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
@@ -3993,6 +3995,18 @@ impl<'a> FnLowerer<'a> {
                     .cloned()
                     .ok_or_else(|| format!("union member index {index} is out of bounds"))
             }
+            HirExpr::UnionMemberIsEqual(union, member, index, elements) => {
+                self.expect_type(
+                    &HirType::Union(elements.clone()),
+                    union,
+                    "union equality receiver",
+                )?;
+                let expected = elements
+                    .get(*index)
+                    .ok_or_else(|| format!("union member index {index} is out of bounds"))?;
+                self.expect_type(expected, member, "union equality member")?;
+                Ok(HirType::Bool)
+            }
             HirExpr::ArrayAlloc(length, element) => {
                 self.expect_type(&HirType::F64, length, "array allocation length")?;
                 Ok(HirType::Array(Box::new(element.clone())))
@@ -5014,6 +5028,28 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Undefined, _) | (_, HirType::Undefined) => {
                     Some(HirExpr::Lit(HirLit::Bool(false)))
                 }
+                (HirType::Union(elements), member) => elements
+                    .iter()
+                    .position(|element| element == member)
+                    .map(|index| {
+                        HirExpr::UnionMemberIsEqual(
+                            Box::new(lhs),
+                            Box::new(rhs),
+                            index,
+                            elements.clone(),
+                        )
+                    }),
+                (member, HirType::Union(elements)) => elements
+                    .iter()
+                    .position(|element| element == member)
+                    .map(|index| {
+                        HirExpr::UnionMemberIsEqual(
+                            Box::new(rhs),
+                            Box::new(lhs),
+                            index,
+                            elements.clone(),
+                        )
+                    }),
                 _ => None,
             };
         Ok(result)
