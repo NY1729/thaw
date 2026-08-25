@@ -459,6 +459,8 @@ The workspace crates have narrow responsibilities:
   through synchronous, callback and Promise APIs
 - Stats timestamps come from host metadata, and `utimes` updates access and
   modification times through sync, callback, Promise and FileHandle APIs
+- `{ bigint: true }` Stats expose BigInt size, identity, ownership, block and
+  timestamp fields plus nanosecond timestamps across stat/lstat/fstat handles
 - Unix ownership metadata and `chown`/`lchown` operations are host-backed
   across synchronous, callback, Promise and FileHandle APIs
 - `watchFile`/`unwatchFile` provide host-backed Stats change notifications,
