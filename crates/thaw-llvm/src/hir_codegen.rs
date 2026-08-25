@@ -5087,7 +5087,12 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn compile_zero_value(&mut self, ty: &HirType) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
-            HirType::Array(element) if element.as_ref() == &HirType::F64 => {
+            HirType::Array(element)
+                if matches!(
+                    element.as_ref(),
+                    HirType::F64 | HirType::Str | HirType::JsValue
+                ) =>
+            {
                 let i64_type = self.context.i64_type();
                 let allocation = self
                     .builder
@@ -10691,7 +10696,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 output.push(promoted.into());
             }
-            HirType::Array(element) if element.as_ref() == &HirType::F64 => {
+            HirType::Array(element)
+                if matches!(
+                    element.as_ref(),
+                    HirType::F64 | HirType::Str | HirType::JsValue
+                ) =>
+            {
                 let base = value.into_pointer_value();
                 let i64_type = self.context.i64_type();
                 let length = self
@@ -19042,6 +19052,8 @@ mod tests {
             declare function native_handle(): JsValue;
             declare function native_handle_sum(count: number, ...values: JsValue[]): number;
             declare function native_array_total(count: number, ...values: number[][]): number;
+            declare function native_string_array_total(count: number, ...values: string[][]): number;
+            declare function native_handle_array_total(count: number, ...values: JsValue[][]): number;
             declare function native_object_total(
                 count: number,
                 ...values: {
@@ -19074,6 +19086,12 @@ mod tests {
                 console.log(native_total_length(3, "thaw", "ffi", "ok"));
                 console.log(native_handle_sum(2, native_handle(), native_handle()));
                 console.log(native_array_total(2, [1, 2], [3, 4, 5]));
+                console.log(native_string_array_total(2, ["a", "bc"], ["def"]));
+                console.log(native_handle_array_total(
+                    2,
+                    [native_handle()],
+                    [native_handle(), native_handle()]
+                ));
                 console.log(native_object_total(
                     2,
                     { value: 2, meta: { enabled: true, label: "abc" }, samples: [1, 2] },
@@ -19109,6 +19127,12 @@ mod tests {
             .any(|signature| signature.variadic == Some(HirType::JsValue)));
         assert!(program.extern_functions.iter().any(|signature| {
             signature.variadic == Some(HirType::Array(Box::new(HirType::F64)))
+        }));
+        assert!(program.extern_functions.iter().any(|signature| {
+            signature.variadic == Some(HirType::Array(Box::new(HirType::Str)))
+        }));
+        assert!(program.extern_functions.iter().any(|signature| {
+            signature.variadic == Some(HirType::Array(Box::new(HirType::JsValue)))
         }));
         assert!(program.extern_functions.iter().any(|signature| {
             matches!(&signature.variadic, Some(HirType::Object(fields)) if fields.len() == 3)
@@ -19188,6 +19212,26 @@ mod tests {
                  for (long long j = 0; j < length; ++j) sum += data[j];\n\
                }\n\
                va_end(args); return sum;\n\
+             }\n\
+             double native_string_array_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 const char *const *data = va_arg(args, const char *const *);\n\
+                 long long length = va_arg(args, long long);\n\
+                 for (long long j = 0; j < length; ++j) sum += strlen(data[j]);\n\
+               }\n\
+               va_end(args); return sum;\n\
+             }\n\
+             double native_handle_array_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; uint64_t sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 const uint64_t *data = va_arg(args, const uint64_t *);\n\
+                 long long length = va_arg(args, long long);\n\
+                 for (long long j = 0; j < length; ++j) sum += data[j];\n\
+               }\n\
+               va_end(args); return (double)sum;\n\
              }\n\
              double native_object_total(double raw_count, ...) {\n\
                int count = (int)raw_count; double sum = 0; va_list args;\n\
@@ -19282,7 +19326,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "0\n10\n3\n9\n40\n15\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
+            "0\n10\n3\n9\n40\n15\n6\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

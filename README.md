@@ -186,10 +186,10 @@ The workspace crates have narrow responsibilities:
   `(pointer, length)`, object parameters become scalar fields, and metadata-
   selected portable array/object return structs are copied into the Thaw arena
 - Ambient and `.d.ts` Fast-path declarations ending in number, boolean, string,
-  `JsValue`, `number[]`, or scalar fixed-object array rest parameters lower to
+  `JsValue`, `number[]`, `string[]`, `JsValue[]`, or fixed-object array rest parameters lower to
   real C varargs. Scalar extras are passed as `double`, C-promoted `int`,
-  NUL-terminated `const char *`, or opaque 64-bit handles. Each `number[]`
-  expands to `(const double *, int64_t)` and each fixed object expands to its
+  NUL-terminated `const char *`, or opaque 64-bit handles. Each supported array
+  expands to `(const element *, int64_t)` and each fixed object expands to its
   declaration-ordered fields with C default promotions, recursively applying
   the same rules to nested fixed objects and `number[]` fields. Optional and
   nullable values prepend a promoted `int` present tag; nullish values prepend
@@ -735,7 +735,7 @@ The workspace crates have narrow responsibilities:
   and recursively nested object-return field offsets/alignment, including
   boolean and signed/unsigned integer bitfields, explicit direct register
   classes for aggregates up to 16 bytes, and integer representations for
-  number varargs. Non-number-array rest layouts are not yet described
+  number varargs. Boolean-array rest layouts are not yet described
 - Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
   exports the complete Node-API v10 symbol surface used by the current headers,
   plus the implemented experimental SharedArrayBuffer/finalizer/module-file
