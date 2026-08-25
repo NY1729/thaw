@@ -166,6 +166,10 @@ enum HostWorkerCommand {
         request: u64,
         error: Option<String>,
     },
+    PortMessage {
+        port: String,
+        payload: String,
+    },
     Terminate,
 }
 
@@ -183,6 +187,10 @@ enum HostWorkerEvent {
     ParentDirectResult {
         request: u64,
         error: Option<String>,
+    },
+    PortMessage {
+        port: String,
+        payload: String,
     },
     Error(String),
     Exit(i32),
@@ -1063,6 +1071,31 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         globalThis.__thaw_host_worker_events = [];
         globalThis.__thaw_host_worker_closed = false;
         const __thaw_host_worker_listeners = new Map();
+        const __thaw_host_ports = new Map();
+        let __thaw_host_port_sequence = 1;
+        function __thaw_configure_worker_port_bridge(port, id) {{
+          port.__thawHostPortId = id;
+          port.__thawSchedule = function() {{
+            while (port.__thawQueue.length) {{ const record = port.__thawQueue.shift(); __thaw_host_worker_events.push({{ type: 'port', port: id, payload: __thaw_worker_encode(record.data) }}); }}
+          }};
+        }}
+        function __thaw_prepare_worker_ports(transfer) {{
+          for (const port of transfer || []) {{
+            if (!(port instanceof MessagePort)) continue;
+            if (port.__thawHostPortId) continue;
+            const id = 'w:{thread_id}:' + (__thaw_host_port_sequence++), moved = port.__thawTransfer();
+            port.__thawHostPortId = id; __thaw_configure_worker_port_bridge(moved, id);
+            const receiver = moved.__thawPeer, close = receiver.close.bind(receiver); receiver.close = function() {{ __thaw_host_ports.delete(id); close(); }};
+            __thaw_host_ports.set(id, receiver);
+          }}
+        }}
+        globalThis.__thaw_create_worker_port = function(id) {{
+          id = String(id); if (__thaw_host_ports.has(id)) return __thaw_host_ports.get(id);
+          const port = new MessagePort(); port.__thawHostPortId = id;
+          port.postMessage = function(value, transfer) {{ __thaw_prepare_worker_ports(transfer); __thaw_host_worker_events.push({{ type: 'port', port: id, payload: __thaw_worker_encode(value) }}); }};
+          const close = port.close.bind(port); port.close = function() {{ __thaw_host_ports.delete(id); close(); }};
+          __thaw_host_ports.set(id, port); return port;
+        }};
         function __thaw_host_worker_on(name, listener) {{
           const key = String(name), list = __thaw_host_worker_listeners.get(key) || [];
           list.push(listener); __thaw_host_worker_listeners.set(key, list); return parentPort;
@@ -1072,7 +1105,8 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           __thaw_host_worker_listeners.set(key, list.filter(item => item !== listener && item.listener !== listener)); return parentPort;
         }}
         const parentPort = {{
-          postMessage(value) {{
+          postMessage(value, transfer) {{
+            __thaw_prepare_worker_ports(transfer);
             const payload = __thaw_worker_encode(value);
             __thaw_host_worker_events.push({{ type: 'message', payload }});
           }},
@@ -1137,6 +1171,10 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           const name = ended ? 'end' : 'data';
           for (const listener of (__thaw_stdin_listeners.get(name) || []).slice()) listener(ended ? undefined : payload);
         }};
+        globalThis.__thaw_host_worker_port = function(id, payload) {{
+          const port = __thaw_host_ports.get(String(id)); if (!port) return;
+          port.__thawQueue.push({{ data: __thaw_worker_decode(payload), ports: [] }}); port.__thawSchedule();
+        }};
         globalThis.__thaw_host_worker_direct_deliver = function(payload, source) {{
           if (!process.listenerCount || process.listenerCount('workerMessage') === 0) return 'ERR_WORKER_MESSAGING_FAILED:The destination thread has no workerMessage listener';
           try {{ process.emit('workerMessage', __thaw_worker_decode(payload), Number(source)); return ''; }}
@@ -1149,7 +1187,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         }};
         globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
         globalThis.__thaw_host_worker_should_exit = function() {{
-          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((!process.listenerCount || process.listenerCount('workerMessage') === 0)) && __thaw_direct_pending.size === 0 && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && __thaw_next_timer_delay() < 0);
+          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((!process.listenerCount || process.listenerCount('workerMessage') === 0)) && __thaw_direct_pending.size === 0 && __thaw_host_ports.size === 0 && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && __thaw_next_timer_delay() < 0);
         }};
         "#
     )
@@ -1186,6 +1224,14 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
                     .get("request")
                     .and_then(|value| value.as_u64())
                     .unwrap_or_default(),
+                payload,
+            },
+            Some("port") => HostWorkerEvent::PortMessage {
+                port: event
+                    .get("port")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 payload,
             },
             _ => HostWorkerEvent::Message(payload),
@@ -1292,6 +1338,15 @@ fn run_host_worker(
                         .map_err(|error| error.to_string())?;
                     resolve
                         .call::<_, ()>((request, error.unwrap_or_default()))
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(HostWorkerCommand::PortMessage { port, payload }) => {
+                    let deliver: Function = ctx
+                        .globals()
+                        .get("__thaw_host_worker_port")
+                        .map_err(|error| error.to_string())?;
+                    deliver
+                        .call::<_, ()>((port, payload))
                         .map_err(|error| error.to_string())?;
                 }
                 Ok(HostWorkerCommand::Terminate) => return Ok(1),
@@ -1507,6 +1562,17 @@ fn resolve_host_worker_direct(handle: u32, request: u64, error: String) -> bool 
     })
 }
 
+fn send_host_worker_port(handle: u32, port: String, payload: String) -> bool {
+    HOST_WORKERS.with(|table| {
+        table.borrow().workers.get(&handle).is_some_and(|worker| {
+            worker
+                .commands
+                .send(HostWorkerCommand::PortMessage { port, payload })
+                .is_ok()
+        })
+    })
+}
+
 fn terminate_host_worker(handle: u32) -> bool {
     HOST_WORKERS.with(|table| {
         table
@@ -1561,6 +1627,9 @@ fn poll_host_workers() -> String {
                     }
                     Ok(HostWorkerEvent::ParentDirectResult { request, error }) => {
                         output.push(serde_json::json!({ "handle": handle, "type": "directResult", "request": request, "error": error }));
+                    }
+                    Ok(HostWorkerEvent::PortMessage { port, payload }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "port", "port": port, "payload": payload }));
                     }
                     Ok(HostWorkerEvent::Error(error)) => {
                         output.push(
@@ -1685,6 +1754,11 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         resolve_host_worker_direct(handle, request, error)
                     })
                     .expect("failed to create Worker direct resolver");
+                let worker_port =
+                    Function::new(ctx.clone(), |handle: u32, port: String, payload: String| {
+                        send_host_worker_port(handle, port, payload)
+                    })
+                    .expect("failed to create Worker port sender");
                 let worker_poll = Function::new(ctx.clone(), poll_host_workers)
                     .expect("failed to create Worker event poller");
                 let worker_active = Function::new(ctx.clone(), host_workers_active)
@@ -1710,6 +1784,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_worker_direct_result", worker_direct_result)
                     .expect("failed to install Worker direct resolver");
+                ctx.globals()
+                    .set("__thaw_worker_port", worker_port)
+                    .expect("failed to install Worker port sender");
                 ctx.globals()
                     .set("__thaw_worker_poll", worker_poll)
                     .expect("failed to install Worker event poller");
@@ -2566,6 +2643,10 @@ const PLATFORM_GLOBALS: &str = r#"
       else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags, i: input.lastIndex };
       else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, entry => [encode(entry[0]), encode(entry[1])]) };
       else if (input instanceof Set) node = { t: 'Set', v: Array.from(input, encode) };
+      else if (typeof globalThis.MessagePort === 'function' && input instanceof globalThis.MessagePort) {
+        if (!input.__thawHostPortId) throw new DOMException('MessagePort requires a transfer list', 'DataCloneError');
+        node = { t: 'MessagePort', v: String(input.__thawHostPortId) };
+      }
       else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
       else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
       else node = { t: 'Object', v: Object.keys(input).map(key => [key, encode(input[key])]) };
@@ -2590,6 +2671,10 @@ const PLATFORM_GLOBALS: &str = r#"
       else if (node.t === 'RegExp') { values[id] = new RegExp(node.s, node.f); values[id].lastIndex = node.i; }
       else if (node.t === 'Map') values[id] = new Map();
       else if (node.t === 'Set') values[id] = new Set();
+      else if (node.t === 'MessagePort') {
+        if (typeof globalThis.__thaw_create_worker_port !== 'function') throw new DOMException('MessagePort cannot be restored in this context', 'DataCloneError');
+        values[id] = globalThis.__thaw_create_worker_port(node.v);
+      }
       else if (node.t === 'ArrayBuffer') { const bytes = new Uint8Array(node.v.length / 2); for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16); values[id] = bytes.buffer; }
       else if (node.t === 'Object') values[id] = {};
     });
