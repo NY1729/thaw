@@ -336,7 +336,9 @@ The workspace crates have narrow responsibilities:
   lifecycle predicates expose readable, writable, destroyed, disturbed and
   errored state, with the original destruction error retained on the stream.
   Default byte/object high-water marks are queryable and configurable for new
-  streams, and an explicit zero high-water mark is preserved;
+  streams, and an explicit zero high-water mark is preserved. Readable,
+  Writable and Duplex streams convert in both directions between Node and WHATWG
+  stream interfaces while preserving object-mode values and close/error flow;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
