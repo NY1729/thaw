@@ -445,6 +445,8 @@ The workspace crates have narrow responsibilities:
 - Numeric descriptors support sync and callback open/close/read/write,
   fstat/truncate/metadata updates and sync/data-sync operations, sharing the
   same lifecycle table as Promise FileHandles
+- Path `truncate` supports shrinking and zero-filled extension in all API
+  styles; FileHandles also expose chmod, sync and datasync lifecycle methods
 - Scatter/gather `readv` and `writev` operations preserve vector buffers and
   positional semantics across sync, callback and Promise FileHandle APIs
 - Host filesystem capacity/inode statistics are exposed by sync, callback,
