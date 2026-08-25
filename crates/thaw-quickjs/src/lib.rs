@@ -153,6 +153,38 @@ thread_local! {
     static TLS_CLIENT_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
     static TLS_SERVER_CERTIFICATES: RefCell<HashMap<u32, TlsCertificates>> = RefCell::new(HashMap::new());
     static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new(), shared_env: Arc::new(Mutex::new(HashMap::new())) });
+    static HOST_CHILDREN: RefCell<HostChildTable> = RefCell::new(HostChildTable { next_handle: 1, children: HashMap::new() });
+}
+
+enum HostChildCommand {
+    Stdin(Vec<u8>),
+    StdinEnd,
+    Kill,
+}
+
+enum HostChildEvent {
+    Spawn(u32),
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Error {
+        message: String,
+        code: String,
+    },
+    Exit {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+}
+
+struct HostChild {
+    commands: Sender<HostChildCommand>,
+    events: Receiver<HostChildEvent>,
+    thread: Option<JoinHandle<()>>,
+}
+
+struct HostChildTable {
+    next_handle: u32,
+    children: HashMap<u32, HostChild>,
 }
 
 enum HostWorkerCommand {
@@ -1666,10 +1698,12 @@ fn poll_host_workers() -> String {
     })
 }
 
-fn run_child_process(command: String, arguments_json: String, options_json: String) -> String {
-    let arguments: Vec<String> = serde_json::from_str(&arguments_json).unwrap_or_default();
-    let options: serde_json::Value = serde_json::from_str(&options_json).unwrap_or_default();
-    let mut child = Command::new(&command);
+fn configure_child_command(
+    command: &str,
+    arguments: &[String],
+    options: &serde_json::Value,
+) -> Command {
+    let mut child = Command::new(command);
     child.args(arguments);
     if let Some(cwd) = options.get("cwd").and_then(|value| value.as_str()) {
         child.current_dir(cwd);
@@ -1682,6 +1716,224 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
             }
         }
     }
+    child
+}
+
+fn run_host_child(
+    command: String,
+    arguments: Vec<String>,
+    options: serde_json::Value,
+    commands: Receiver<HostChildCommand>,
+    events: Sender<HostChildEvent>,
+) {
+    let mut process = configure_child_command(&command, &arguments, &options);
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut process = match process.spawn() {
+        Ok(process) => process,
+        Err(error) => {
+            let code = if error.kind() == io::ErrorKind::NotFound {
+                "ENOENT"
+            } else if error.kind() == io::ErrorKind::PermissionDenied {
+                "EACCES"
+            } else {
+                "UNKNOWN"
+            };
+            let _ = events.send(HostChildEvent::Error {
+                message: error.to_string(),
+                code: code.to_string(),
+            });
+            let _ = events.send(HostChildEvent::Exit {
+                code: None,
+                signal: None,
+            });
+            return;
+        }
+    };
+    let _ = events.send(HostChildEvent::Spawn(process.id()));
+    let stdout_events = events.clone();
+    let stdout = process.stdout.take();
+    let stdout_thread = std::thread::spawn(move || {
+        if let Some(mut stdout) = stdout {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match stdout.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(length) => {
+                        let _ =
+                            stdout_events.send(HostChildEvent::Stdout(buffer[..length].to_vec()));
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    let stderr_events = events.clone();
+    let stderr = process.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        if let Some(mut stderr) = stderr {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(length) => {
+                        let _ =
+                            stderr_events.send(HostChildEvent::Stderr(buffer[..length].to_vec()));
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    let mut stdin = process.stdin.take();
+    let status = loop {
+        match commands.recv_timeout(Duration::from_millis(2)) {
+            Ok(HostChildCommand::Stdin(value)) => {
+                if let Some(input) = &mut stdin {
+                    let _ = input.write_all(&value);
+                    let _ = input.flush();
+                }
+            }
+            Ok(HostChildCommand::StdinEnd) => stdin = None,
+            Ok(HostChildCommand::Kill) => {
+                let _ = process.kill();
+                stdin = None;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => stdin = None,
+        }
+        match process.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = events.send(HostChildEvent::Error {
+                    message: error.to_string(),
+                    code: "UNKNOWN".to_string(),
+                });
+                break None;
+            }
+        }
+    };
+    drop(stdin);
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    #[cfg(unix)]
+    let signal = status.as_ref().and_then(std::process::ExitStatus::signal);
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    let _ = events.send(HostChildEvent::Exit {
+        code: status.and_then(|status| status.code()),
+        signal,
+    });
+}
+
+fn spawn_host_child(command: String, arguments_json: String, options_json: String) -> u32 {
+    let arguments: Vec<String> = serde_json::from_str(&arguments_json).unwrap_or_default();
+    let options: serde_json::Value = serde_json::from_str(&options_json).unwrap_or_default();
+    let (command_sender, command_receiver) = mpsc::channel();
+    let (event_sender, event_receiver) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        run_host_child(command, arguments, options, command_receiver, event_sender);
+    });
+    HOST_CHILDREN.with(|table| {
+        let mut table = table.borrow_mut();
+        let handle = table.next_handle;
+        table.next_handle = table.next_handle.wrapping_add(1).max(1);
+        table.children.insert(
+            handle,
+            HostChild {
+                commands: command_sender,
+                events: event_receiver,
+                thread: Some(thread),
+            },
+        );
+        handle
+    })
+}
+
+fn send_host_child_stdin(handle: u32, value: String, end: bool) -> bool {
+    HOST_CHILDREN.with(|table| {
+        let table = table.borrow();
+        let Some(child) = table.children.get(&handle) else {
+            return false;
+        };
+        if !value.is_empty()
+            && child
+                .commands
+                .send(HostChildCommand::Stdin(hex_decode(&value)))
+                .is_err()
+        {
+            return false;
+        }
+        !end || child.commands.send(HostChildCommand::StdinEnd).is_ok()
+    })
+}
+
+fn kill_host_child(handle: u32) -> bool {
+    HOST_CHILDREN.with(|table| {
+        table
+            .borrow()
+            .children
+            .get(&handle)
+            .is_some_and(|child| child.commands.send(HostChildCommand::Kill).is_ok())
+    })
+}
+
+fn host_children_active() -> bool {
+    HOST_CHILDREN.with(|table| !table.borrow().children.is_empty())
+}
+
+fn poll_host_children() -> String {
+    HOST_CHILDREN.with(|table| {
+        let mut table = table.borrow_mut();
+        let mut output = Vec::new();
+        let mut finished = Vec::new();
+        for (&handle, child) in &table.children {
+            loop {
+                match child.events.try_recv() {
+                    Ok(HostChildEvent::Spawn(pid)) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "spawn", "pid": pid }));
+                    }
+                    Ok(HostChildEvent::Stdout(value)) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "stdout", "value": hex_encode(&value) }));
+                    }
+                    Ok(HostChildEvent::Stderr(value)) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "stderr", "value": hex_encode(&value) }));
+                    }
+                    Ok(HostChildEvent::Error { message, code }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "error", "message": message, "code": code }));
+                    }
+                    Ok(HostChildEvent::Exit { code, signal }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "exit", "code": code, "signal": signal }));
+                        finished.push(handle);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        finished.push(handle);
+                        break;
+                    }
+                }
+            }
+        }
+        finished.sort_unstable();
+        finished.dedup();
+        for handle in finished {
+            if let Some(mut child) = table.children.remove(&handle) {
+                if let Some(thread) = child.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        serde_json::to_string(&output).unwrap_or_else(|_| "[]".into())
+    })
+}
+
+fn run_child_process(command: String, arguments_json: String, options_json: String) -> String {
+    let arguments: Vec<String> = serde_json::from_str(&arguments_json).unwrap_or_default();
+    let options: serde_json::Value = serde_json::from_str(&options_json).unwrap_or_default();
+    let mut child = configure_child_command(&command, &arguments, &options);
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
     let input = options
         .get("input")
@@ -1865,6 +2117,24 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     },
                 )
                 .expect("failed to create child process runner");
+                let child_spawn = Function::new(
+                    ctx.clone(),
+                    |command: String, arguments: String, options: String| {
+                        spawn_host_child(command, arguments, options)
+                    },
+                )
+                .expect("failed to create child process spawner");
+                let child_stdin =
+                    Function::new(ctx.clone(), |handle: u32, value: String, end: bool| {
+                        send_host_child_stdin(handle, value, end)
+                    })
+                    .expect("failed to create child process stdin sender");
+                let child_kill = Function::new(ctx.clone(), |handle: u32| kill_host_child(handle))
+                    .expect("failed to create child process killer");
+                let child_poll = Function::new(ctx.clone(), poll_host_children)
+                    .expect("failed to create child process poller");
+                let child_active = Function::new(ctx.clone(), host_children_active)
+                    .expect("failed to create child process activity probe");
                 ctx.globals()
                     .set("__thaw_worker_spawn", worker_spawn)
                     .expect("failed to install Worker spawner");
@@ -1901,6 +2171,21 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_child_process_sync", child_process)
                     .expect("failed to install child process runner");
+                ctx.globals()
+                    .set("__thaw_child_process_spawn", child_spawn)
+                    .expect("failed to install child process spawner");
+                ctx.globals()
+                    .set("__thaw_child_process_stdin", child_stdin)
+                    .expect("failed to install child process stdin sender");
+                ctx.globals()
+                    .set("__thaw_child_process_kill", child_kill)
+                    .expect("failed to install child process killer");
+                ctx.globals()
+                    .set("__thaw_child_process_poll", child_poll)
+                    .expect("failed to install child process poller");
+                ctx.globals()
+                    .set("__thaw_child_process_active", child_active)
+                    .expect("failed to install child process activity probe");
                 let random_hex = Function::new(ctx.clone(), |size: u32| {
                     let mut bytes = vec![0u8; size as usize];
                     getrandom::getrandom(&mut bytes).expect("OS random source failed");
@@ -3941,7 +4226,13 @@ fn finish_with_platform_events<'js>(
                 .get::<_, Function>("__thaw_worker_active")
                 .ok()
                 .and_then(|probe| probe.call::<_, bool>(()).ok())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || ctx
+                    .globals()
+                    .get::<_, Function>("__thaw_child_process_active")
+                    .ok()
+                    .and_then(|probe| probe.call::<_, bool>(()).ok())
+                    .unwrap_or(false);
             if active {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
