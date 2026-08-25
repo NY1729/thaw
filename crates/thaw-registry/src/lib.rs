@@ -3682,17 +3682,18 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              Http2Stream.prototype.setEncoding = function(encoding) { this._encoding = encoding; return this; }; Http2Stream.prototype._maybeClose = function() { if (!this.closed && this.readableEnded && this.writableEnded) { this.closed = true; this.emit('close'); } }; Http2Stream.prototype.write = function(chunk, encoding, callback) { if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (this.closed || this._ending || this.writableEnded) return false; return this.session._queueData(this, Buffer.from(chunk, typeof encoding === 'string' ? encoding : undefined), false, callback); }; Http2Stream.prototype.end = function(chunk, encoding, callback) { if (typeof chunk === 'function') { callback = chunk; chunk = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (this.closed || this._ending || this.writableEnded) return this; this._ending = true; this.session._queueData(this, chunk === undefined ? Buffer.alloc(0) : Buffer.from(chunk, typeof encoding === 'string' ? encoding : undefined), true, callback); return this; }; Http2Stream.prototype.close = function(code, callback) { if (this.closed) return; code = code === undefined ? 0 : Number(code); var payload = Buffer.alloc(4); payload[0] = code >>> 24; payload[1] = code >>> 16; payload[2] = code >>> 8; payload[3] = code; this.session._send(frame(3, 0, this.id, payload)); this.rstCode = code; this.closed = true; this.emit('close'); if (callback) queueMicrotask(callback); }; Http2Stream.prototype.destroy = function(error) { this.destroyed = true; if (error) this.emit('error', error); this.close(constants.NGHTTP2_CANCEL); return this; }; Http2Stream.prototype.pause = function() { this._paused = true; return this; }; Http2Stream.prototype.resume = function() { this._paused = false; while (this._queuedData && this._queuedData.length) this.emit('data', this._queuedData.shift()); return this; };
              function ClientHttp2Stream(session, id) { Http2Stream.call(this, session, id); } ClientHttp2Stream.prototype = Object.create(Http2Stream.prototype); ClientHttp2Stream.prototype.constructor = ClientHttp2Stream;
              function ServerHttp2Stream(session, id) { Http2Stream.call(this, session, id); this.headersSent = false; } ServerHttp2Stream.prototype = Object.create(Http2Stream.prototype); ServerHttp2Stream.prototype.constructor = ServerHttp2Stream; ServerHttp2Stream.prototype.respond = function(headers, options) { if (this.headersSent) throw new Error('Response has already been initiated'); headers = Object.assign({ ':status': 200 }, headers || {}); this.sentHeaders = headers; this.headersSent = true; this.session._sendHeaders(this.id, headers, Boolean(options && options.endStream)); if (options && options.endStream) { this.writableEnded = true; this.emit('finish'); this._maybeClose(); } }; ServerHttp2Stream.prototype.additionalHeaders = function(headers) { this.session._sendHeaders(this.id, headers, false); };
-             function Http2Session(handle, server) { EventEmitter.call(this); this._handle = handle; this._server = server; this._buffer = Buffer.alloc(0); this._streams = new Map(); this._headerBlocks = new Map(); this._encoderTable = []; this._encoderTableSize = 0; this._decoderTable = []; this._decoderTableSize = 0; this._decoderMaxSize = 4096; this._nextStream = server ? 2 : 1; this._sendWindow = 65535; this._receiveWindow = 65535; this.closed = false; this.destroyed = false; this.connecting = false; this.localSettings = getDefaultSettings(); this.remoteSettings = getDefaultSettings(); this.type = server ? 0 : 1; this.encrypted = false; this.alpnProtocol = 'h2c'; }
-             Http2Session.prototype = Object.create(EventEmitter.prototype); Http2Session.prototype.constructor = Http2Session; Http2Session.prototype._send = function(value) { if (!this._handle || this.destroyed) return false; var outcome = __thaw_net_write(this._handle, Buffer.from(value).toString('hex')); if (outcome !== 'ok') { var error = new Error(outcome.substring(4)); error.code = 'ERR_HTTP2_ERROR'; this.emit('error', error); return false; } return true; }; Http2Session.prototype._sendHeaders = function(id, headers, endStream) { var block = encodeHeaders(headers, this), maximum = Math.max(16384, Number(this.remoteSettings.maxFrameSize || 16384)), offset = 0, first = true; do { var end = Math.min(block.length, offset + maximum), final = end === block.length, flags = (final ? 4 : 0) | (first && endStream ? 1 : 0); this._send(frame(first ? 1 : 9, flags, id, block.subarray(offset, end))); offset = end; first = false; } while (offset < block.length); }; Http2Session.prototype._queueData = function(stream, data, end, callback) { stream._writeQueue.push({ data: data, offset: 0, end: end, callback: callback }); this._flushStream(stream); return stream._writeQueue.length === 0; }; Http2Session.prototype._flushStream = function(stream) { var maximum = Math.max(16384, Number(this.remoteSettings.maxFrameSize || 16384)); while (stream._writeQueue.length && !stream.destroyed && !this.destroyed) { var item = stream._writeQueue[0], remaining = item.data.length - item.offset; if (remaining === 0) { this._send(frame(0, item.end ? 1 : 0, stream.id)); stream._writeQueue.shift(); if (item.end) { stream.writableEnded = true; stream._ending = false; stream.emit('finish'); stream._maybeClose(); } if (item.callback) queueMicrotask(item.callback); continue; } var available = Math.min(remaining, maximum, this._sendWindow, stream._sendWindow); if (available <= 0) break; var final = available === remaining, flags = final && item.end ? 1 : 0; this._send(frame(0, flags, stream.id, item.data.subarray(item.offset, item.offset + available))); item.offset += available; this._sendWindow -= available; stream._sendWindow -= available; if (final) { stream._writeQueue.shift(); if (item.end) { stream.writableEnded = true; stream._ending = false; stream.emit('finish'); stream._maybeClose(); } if (item.callback) queueMicrotask(item.callback); } } }; Http2Session.prototype._sendWindowUpdate = function(id, amount) { if (amount <= 0) return; var payload = Buffer.alloc(4); payload[0] = (amount >>> 24) & 127; payload[1] = amount >>> 16; payload[2] = amount >>> 8; payload[3] = amount; this._send(frame(8, 0, id, payload)); }; Http2Session.prototype._start = function() { var self = this; if (!this._server) this._send(Buffer.concat([PREFACE, frame(4, 0, 0, settingsPayload(this.localSettings))])); function pump() { if (!self._handle || self.destroyed) return; var outcome = __thaw_net_poll_read(self._handle); if (outcome === 'pending') { setTimeout(pump, 0); return; } if (outcome.indexOf('ok:') === 0) { var chunk = Buffer.from(outcome.substring(3), 'hex'); if (chunk.length) { self._buffer = Buffer.concat([self._buffer, chunk]); try { self._parse(); } catch (error) { self.emit('error', error); self.destroy(error); return; } } setTimeout(pump, 0); return; } if (outcome === 'eof') self.destroy(); else { var error = new Error(outcome.substring(4)); error.code = 'ERR_HTTP2_ERROR'; self.destroy(error); } } queueMicrotask(pump); };
+             function Http2Session(handle, server, transport) { EventEmitter.call(this); this._handle = handle; this._server = server; this._transport = transport || 'tcp'; this._buffer = Buffer.alloc(0); this._streams = new Map(); this._headerBlocks = new Map(); this._encoderTable = []; this._encoderTableSize = 0; this._decoderTable = []; this._decoderTableSize = 0; this._decoderMaxSize = 4096; this._nextStream = server ? 2 : 1; this._sendWindow = 65535; this._receiveWindow = 65535; this.closed = false; this.destroyed = false; this.connecting = false; this.localSettings = getDefaultSettings(); this.remoteSettings = getDefaultSettings(); this.type = server ? 0 : 1; this.encrypted = this._transport === 'tls'; this.alpnProtocol = this.encrypted ? 'h2' : 'h2c'; }
+             Http2Session.prototype = Object.create(EventEmitter.prototype); Http2Session.prototype.constructor = Http2Session; Http2Session.prototype._send = function(value) { if (!this._handle || this.destroyed) return false; var outcome = this._transport === 'tls' ? __thaw_tls_write(this._handle, Buffer.from(value).toString('hex')) : __thaw_net_write(this._handle, Buffer.from(value).toString('hex')); if (outcome !== 'ok') { var error = new Error(outcome.substring(4)); error.code = 'ERR_HTTP2_ERROR'; this.emit('error', error); return false; } return true; }; Http2Session.prototype._sendHeaders = function(id, headers, endStream) { var block = encodeHeaders(headers, this), maximum = Math.max(16384, Number(this.remoteSettings.maxFrameSize || 16384)), offset = 0, first = true; do { var end = Math.min(block.length, offset + maximum), final = end === block.length, flags = (final ? 4 : 0) | (first && endStream ? 1 : 0); this._send(frame(first ? 1 : 9, flags, id, block.subarray(offset, end))); offset = end; first = false; } while (offset < block.length); }; Http2Session.prototype._queueData = function(stream, data, end, callback) { stream._writeQueue.push({ data: data, offset: 0, end: end, callback: callback }); this._flushStream(stream); return stream._writeQueue.length === 0; }; Http2Session.prototype._flushStream = function(stream) { var maximum = Math.max(16384, Number(this.remoteSettings.maxFrameSize || 16384)); while (stream._writeQueue.length && !stream.destroyed && !this.destroyed) { var item = stream._writeQueue[0], remaining = item.data.length - item.offset; if (remaining === 0) { this._send(frame(0, item.end ? 1 : 0, stream.id)); stream._writeQueue.shift(); if (item.end) { stream.writableEnded = true; stream._ending = false; stream.emit('finish'); stream._maybeClose(); } if (item.callback) queueMicrotask(item.callback); continue; } var available = Math.min(remaining, maximum, this._sendWindow, stream._sendWindow); if (available <= 0) break; var final = available === remaining, flags = final && item.end ? 1 : 0; this._send(frame(0, flags, stream.id, item.data.subarray(item.offset, item.offset + available))); item.offset += available; this._sendWindow -= available; stream._sendWindow -= available; if (final) { stream._writeQueue.shift(); if (item.end) { stream.writableEnded = true; stream._ending = false; stream.emit('finish'); stream._maybeClose(); } if (item.callback) queueMicrotask(item.callback); } } }; Http2Session.prototype._sendWindowUpdate = function(id, amount) { if (amount <= 0) return; var payload = Buffer.alloc(4); payload[0] = (amount >>> 24) & 127; payload[1] = amount >>> 16; payload[2] = amount >>> 8; payload[3] = amount; this._send(frame(8, 0, id, payload)); }; Http2Session.prototype._start = function() { var self = this; if (!this._server) this._send(Buffer.concat([PREFACE, frame(4, 0, 0, settingsPayload(this.localSettings))])); function pump() { if (!self._handle || self.destroyed) return; var outcome = self._transport === 'tls' ? __thaw_tls_poll_read(self._handle) : __thaw_net_poll_read(self._handle); if (outcome === 'pending') { setTimeout(pump, 0); return; } if (outcome.indexOf('ok:') === 0) { var chunk = Buffer.from(outcome.substring(3), 'hex'); if (chunk.length) { self._buffer = Buffer.concat([self._buffer, chunk]); try { self._parse(); } catch (error) { self.emit('error', error); self.destroy(error); return; } } setTimeout(pump, 0); return; } if (outcome === 'eof') self.destroy(); else { var error = new Error(outcome.substring(4)); error.code = 'ERR_HTTP2_ERROR'; self.destroy(error); } } queueMicrotask(pump); };
              Http2Session.prototype._parse = function() { if (this._server && !this._preface) { if (this._buffer.length < PREFACE.length) return; if (!this._buffer.subarray(0, PREFACE.length).equals(PREFACE)) throw new Error('Invalid HTTP/2 connection preface'); this._buffer = this._buffer.subarray(PREFACE.length); this._preface = true; this._send(frame(4, 0, 0, settingsPayload(this.localSettings))); this.emit('connect', this, null); } while (this._buffer.length >= 9) { var length = (this._buffer[0] << 16) | (this._buffer[1] << 8) | this._buffer[2]; if (this._buffer.length < 9 + length) return; var type = this._buffer[3], flags = this._buffer[4], id = ((this._buffer[5] & 127) * 0x1000000) + (this._buffer[6] << 16) + (this._buffer[7] << 8) + this._buffer[8], payload = this._buffer.subarray(9, 9 + length); this._buffer = this._buffer.subarray(9 + length); this._frame(type, flags, id, payload); } };
              Http2Session.prototype._deliverHeaders = function(id, flags, payload) { var stream = this._streams.get(id), headers = decodeHeaders(payload, this); if (!stream) { stream = new ServerHttp2Stream(this, id); stream.sentHeaders = headers; this._streams.set(id, stream); this.emit('stream', stream, headers, 0, []); } else { stream.emit(stream._responseReceived ? 'trailers' : 'response', headers, flags); stream._responseReceived = true; } if (flags & 1) { stream.readableEnded = true; stream.emit('end'); stream._maybeClose(); } }; Http2Session.prototype._frame = function(type, flags, id, payload) { if (type === 4) { if (!(flags & 1)) { var previousWindow = Number(this.remoteSettings.initialWindowSize || 65535), update = unpackSettings(payload); this.remoteSettings = Object.assign({}, this.remoteSettings, update); if (update.initialWindowSize !== undefined) { var delta = Number(update.initialWindowSize) - previousWindow, session = this; this._streams.forEach(function(stream) { stream._sendWindow += delta; session._flushStream(stream); }); } if (update.headerTableSize !== undefined) resizeDynamic(this, '_encoderTable', Number(update.headerTableSize)); this.emit('remoteSettings', this.remoteSettings); this._send(frame(4, 1, 0)); } else this.emit('localSettings', this.localSettings); return; } if (type === 6) { if (!(flags & 1)) this._send(frame(6, 1, 0, payload)); else this.emit('_pingAck', payload); return; } if (type === 7) { this.closed = true; this.emit('goaway', payload.length >= 8 ? ((payload[4] * 0x1000000) + (payload[5] << 16) + (payload[6] << 8) + payload[7]) : 0, payload.length >= 4 ? ((payload[0] & 127) * 0x1000000 + (payload[1] << 16) + (payload[2] << 8) + payload[3]) : 0, payload.subarray(8)); return; } if (type === 8) { if (payload.length !== 4) throw new Error('Invalid WINDOW_UPDATE frame'); var increment = ((payload[0] & 127) * 0x1000000) + (payload[1] << 16) + (payload[2] << 8) + payload[3]; if (!increment) throw new Error('Invalid zero WINDOW_UPDATE increment'); if (id === 0) { this._sendWindow += increment; var owner = this; this._streams.forEach(function(value) { owner._flushStream(value); }); } else { var writable = this._streams.get(id); if (writable) { writable._sendWindow += increment; this._flushStream(writable); } } return; } if (type === 1) { var pad = flags & 8 ? payload[0] : 0, start = (flags & 8 ? 1 : 0) + (flags & 32 ? 5 : 0), block = payload.subarray(start, payload.length - pad); if (flags & 4) this._deliverHeaders(id, flags, block); else this._headerBlocks.set(id, { chunks: [Buffer.from(block)], flags: flags }); return; } if (type === 9) { var pending = this._headerBlocks.get(id); if (!pending) throw new Error('Unexpected CONTINUATION frame'); pending.chunks.push(Buffer.from(payload)); if (flags & 4) { this._headerBlocks.delete(id); this._deliverHeaders(id, pending.flags | 4, Buffer.concat(pending.chunks)); } return; } var stream = this._streams.get(id); if (!stream) return; if (type === 0) { if (payload.length > this._receiveWindow || payload.length > stream._receiveWindow) throw new Error('HTTP/2 flow-control window exceeded'); this._receiveWindow -= payload.length; stream._receiveWindow -= payload.length; var value = stream._encoding ? payload.toString(stream._encoding) : Buffer.from(payload); if (stream._paused) (stream._queuedData || (stream._queuedData = [])).push(value); else stream.emit('data', value); if (payload.length) { this._receiveWindow += payload.length; stream._receiveWindow += payload.length; this._sendWindowUpdate(0, payload.length); this._sendWindowUpdate(id, payload.length); } if (flags & 1) { stream.readableEnded = true; stream.emit('end'); stream._maybeClose(); } } else if (type === 3) { stream.rstCode = payload.length >= 4 ? (payload[0] * 0x1000000 + (payload[1] << 16) + (payload[2] << 8) + payload[3]) : 0; stream.closed = true; stream.emit('aborted'); stream.emit('close'); } };
              Http2Session.prototype.request = function(headers, options) { if (this._server) throw new Error('request is only available on client sessions'); headers = Object.assign({ ':method': 'GET', ':path': '/', ':scheme': this.encrypted ? 'https' : 'http', ':authority': this.authority }, headers || {}); var id = this._nextStream; this._nextStream += 2; var stream = new ClientHttp2Stream(this, id); stream.sentHeaders = headers; this._streams.set(id, stream); this._sendHeaders(id, headers, Boolean(options && options.endStream)); if (options && options.endStream) { stream.writableEnded = true; stream.emit('finish'); } return stream; }; Http2Session.prototype.settings = function(settings, callback) { this.localSettings = Object.assign({}, this.localSettings, settings || {}); this._send(frame(4, 0, 0, settingsPayload(settings || {}))); if (callback) this.once('localSettings', function(value) { callback(null, value); }); }; Http2Session.prototype.ping = function(payload, callback) { if (typeof payload === 'function') { callback = payload; payload = Buffer.alloc(8); } payload = Buffer.from(payload || Buffer.alloc(8)); if (payload.length !== 8) throw new RangeError('HTTP/2 ping payload must be 8 bytes'); var start = Date.now(), self = this, listener = function(value) { if (value.equals(payload)) { self.off('_pingAck', listener); if (callback) callback(null, Date.now() - start, value); } }; this.on('_pingAck', listener); this._send(frame(6, 0, 0, payload)); return true; }; Http2Session.prototype.goaway = function(code, lastStreamID, opaqueData) { code = code || 0; lastStreamID = lastStreamID || 0; var payload = Buffer.alloc(8), opaque = opaqueData ? Buffer.from(opaqueData) : Buffer.alloc(0); payload[0] = (lastStreamID >>> 24) & 127; payload[1] = lastStreamID >>> 16; payload[2] = lastStreamID >>> 8; payload[3] = lastStreamID; payload[4] = code >>> 24; payload[5] = code >>> 16; payload[6] = code >>> 8; payload[7] = code; this._send(frame(7, 0, 0, Buffer.concat([payload, opaque]))); }; Http2Session.prototype.close = function(callback) { if (callback) this.once('close', callback); if (this.closed) return; this.closed = true; this.goaway(); this.destroy(); }; Http2Session.prototype.destroy = function(error) { if (this.destroyed) return; this.destroyed = true; if (this._handle) __thaw_net_destroy(this._handle); this._handle = 0; if (error) this.emit('error', error); this.emit('close'); }; Http2Session.prototype.ref = function() { return this; }; Http2Session.prototype.unref = function() { return this; };
-             function ClientHttp2Session(handle) { Http2Session.call(this, handle, false); } ClientHttp2Session.prototype = Object.create(Http2Session.prototype); ClientHttp2Session.prototype.constructor = ClientHttp2Session;
-             function ServerHttp2Session(handle) { Http2Session.call(this, handle, true); } ServerHttp2Session.prototype = Object.create(Http2Session.prototype); ServerHttp2Session.prototype.constructor = ServerHttp2Session;
-             function connect(authority, options, listener) { if (typeof options === 'function') { listener = options; options = {}; } options = options || {}; var target = authority instanceof URL ? authority : new URL(String(authority)), port = Number(target.port || (target.protocol === 'https:' ? 443 : 80)); if (target.protocol !== 'http:') { var error = new Error('Only cleartext h2c sessions are currently supported'); error.code = 'ERR_HTTP2_UNSUPPORTED_PROTOCOL'; throw error; } var outcome = __thaw_net_connect(target.hostname, port); if (outcome.indexOf('ok:') !== 0) throw new Error(outcome.substring(4)); var session = new ClientHttp2Session(Number(outcome.substring(3))); session.authority = target.host; if (listener) session.once('connect', listener); session._start(); queueMicrotask(function() { session.emit('connect', session, null); }); return session; }
-             function Http2Server(options, listener) { EventEmitter.call(this); if (typeof options === 'function') { listener = options; options = {}; } this.options = options || {}; this.listening = false; this._handle = 0; this._sessions = new Set(); this._refed = true; if (listener) this.on('stream', listener); }
-             Http2Server.prototype = Object.create(EventEmitter.prototype); Http2Server.prototype.constructor = Http2Server; Http2Server.prototype.listen = function(port, host, callback) { if (typeof host === 'function') { callback = host; host = undefined; } host = host || '127.0.0.1'; if (callback) this.once('listening', callback); var outcome = __thaw_net_listen(String(host), Number(port || 0)); if (outcome.indexOf('ok:') !== 0) throw new Error(outcome.substring(4)); var parts = outcome.split(':'), server = this; this._handle = Number(parts[1]); this._address = { address: String(host), family: String(host).indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(parts[2]) }; this.listening = true; function accept() { if (!server.listening || !server._handle) return; var value = __thaw_net_poll_accept(server._handle); if (value === 'err:pending') { setTimeout(accept, 0); return; } if (value.indexOf('ok:') !== 0) { server.emit('sessionError', new Error(value.substring(4))); setTimeout(accept, 1); return; } var peer = value.split(':'), session = new ServerHttp2Session(Number(peer[1])); server._sessions.add(session); session.socket = { remoteAddress: peer[2], remotePort: Number(peer[3]), encrypted: false }; session.on('stream', function(stream, headers, flags, rawHeaders) { server.emit('stream', stream, headers, flags, rawHeaders); }); session.once('close', function() { server._sessions.delete(session); }); server.emit('session', session); session._start(); setTimeout(accept, 0); } queueMicrotask(function() { server.emit('listening'); accept(); }); return this; }; Http2Server.prototype.address = function() { return this._address || null; }; Http2Server.prototype.close = function(callback) { if (callback) this.once('close', callback); if (this._handle) __thaw_net_close_listener(this._handle); this._handle = 0; this.listening = false; var server = this; this._sessions.forEach(function(session) { session.close(); }); queueMicrotask(function() { server.emit('close'); }); return this; }; Http2Server.prototype.closeAllConnections = Http2Server.prototype.closeIdleConnections = function() { this._sessions.forEach(function(session) { session.destroy(); }); }; Http2Server.prototype.setTimeout = function(timeout, callback) { this.timeout = Number(timeout); if (callback) this.on('timeout', callback); return this; }; Http2Server.prototype.ref = function() { this._refed = true; return this; }; Http2Server.prototype.unref = function() { this._refed = false; return this; };
-             function Http2SecureServer(options, listener) { Http2Server.call(this, options, listener); } Http2SecureServer.prototype = Object.create(Http2Server.prototype); Http2SecureServer.prototype.constructor = Http2SecureServer; function createServer(options, listener) { return new Http2Server(options, listener); } function createSecureServer(options, listener) { var server = new Http2SecureServer(options, listener); server.listen = function() { var error = new Error('HTTP/2 TLS server transport is not implemented'); error.code = 'ERR_HTTP2_UNSUPPORTED_PROTOCOL'; throw error; }; return server; }
+             Http2Session.prototype.destroy = function(error) { if (this.destroyed) return; this.destroyed = true; if (this._handle) { if (this._transport === 'tls') __thaw_tls_destroy(this._handle); else __thaw_net_destroy(this._handle); } this._handle = 0; if (error) this.emit('error', error); this.emit('close'); };
+             function ClientHttp2Session(handle, transport) { Http2Session.call(this, handle, false, transport); } ClientHttp2Session.prototype = Object.create(Http2Session.prototype); ClientHttp2Session.prototype.constructor = ClientHttp2Session;
+             function ServerHttp2Session(handle, transport) { Http2Session.call(this, handle, true, transport); } ServerHttp2Session.prototype = Object.create(Http2Session.prototype); ServerHttp2Session.prototype.constructor = ServerHttp2Session;
+             function connect(authority, options, listener) { if (typeof options === 'function') { listener = options; options = {}; } options = options || {}; var target = authority instanceof URL ? authority : new URL(String(authority)), port = Number(target.port || (target.protocol === 'https:' ? 443 : 80)), transport = target.protocol === 'https:' ? 'tls' : 'tcp', outcome; if (transport === 'tls') { var ca = options.ca, cert = options.cert, key = options.key; if (Array.isArray(ca)) ca = ca[0]; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; outcome = __thaw_tls_connect_with_options(target.hostname, port, options.servername || target.hostname, ca === undefined ? '' : Buffer.from(ca).toString('hex'), cert === undefined ? '' : Buffer.from(cert).toString('hex'), key === undefined ? '' : Buffer.from(key).toString('hex'), (options.rejectUnauthorized === false ? '0' : '1') + '|' + Buffer.from('h2').toString('hex')); } else if (target.protocol === 'http:') outcome = __thaw_net_connect(target.hostname, port); else { var protocolError = new Error('Unsupported protocol ' + target.protocol); protocolError.code = 'ERR_HTTP2_UNSUPPORTED_PROTOCOL'; throw protocolError; } if (outcome.indexOf('ok:') !== 0) throw new Error(outcome.substring(4)); var parts = outcome.split(':'); if (transport === 'tls' && Buffer.from(parts[2] || '', 'hex').toString() !== 'h2') { __thaw_tls_destroy(Number(parts[1])); var alpnError = new Error('Remote peer did not negotiate h2'); alpnError.code = 'ERR_HTTP2_ALPN_NEGOTIATION_FAILED'; throw alpnError; } var session = new ClientHttp2Session(Number(parts[1]), transport); session.authority = target.host; session.socket = { encrypted: transport === 'tls', alpnProtocol: session.alpnProtocol }; if (listener) session.once('connect', listener); session._start(); queueMicrotask(function() { session.emit('connect', session, null); }); return session; }
+             function Http2Server(options, listener, secure) { EventEmitter.call(this); if (typeof options === 'function') { listener = options; options = {}; } this.options = options || {}; this._secure = Boolean(secure); this.listening = false; this._handle = 0; this._sessions = new Set(); this._refed = true; if (listener) this.on('stream', listener); }
+             Http2Server.prototype = Object.create(EventEmitter.prototype); Http2Server.prototype.constructor = Http2Server; Http2Server.prototype.listen = function(port, host, callback) { if (typeof host === 'function') { callback = host; host = undefined; } host = host || '127.0.0.1'; if (callback) this.once('listening', callback); var outcome; if (this._secure) { var cert = this.options.cert, key = this.options.key, ca = this.options.ca; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; if (Array.isArray(ca)) ca = ca[0]; if (cert === undefined || key === undefined) throw new Error('cert and key are required'); var flags = (this.options.requestCert ? 1 : 0) | (this.options.rejectUnauthorized !== false ? 2 : 0); outcome = __thaw_tls_server_listen_with_options(String(host), Number(port || 0), Buffer.from(cert).toString('hex'), Buffer.from(key).toString('hex'), ca === undefined ? '' : Buffer.from(ca).toString('hex'), flags, Buffer.from('h2').toString('hex')); } else outcome = __thaw_net_listen(String(host), Number(port || 0)); if (outcome.indexOf('ok:') !== 0) throw new Error(outcome.substring(4)); var parts = outcome.split(':'), server = this; this._handle = Number(parts[1]); this._address = { address: String(host), family: String(host).indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(parts[2]) }; this.listening = true; function accept() { if (!server.listening || !server._handle) return; var value = server._secure ? __thaw_tls_server_poll_accept(server._handle) : __thaw_net_poll_accept(server._handle); if (value === 'err:pending') { setTimeout(accept, 0); return; } if (value.indexOf('ok:') !== 0) { server.emit('sessionError', new Error(value.substring(4))); setTimeout(accept, 1); return; } var peer = value.split(':'), transport = server._secure ? 'tls' : 'tcp'; if (server._secure && Buffer.from(peer[4] || '', 'hex').toString() !== 'h2') { __thaw_tls_destroy(Number(peer[1])); server.emit('unknownProtocol', { alpnProtocol: Buffer.from(peer[4] || '', 'hex').toString() }); setTimeout(accept, 0); return; } var session = new ServerHttp2Session(Number(peer[1]), transport); server._sessions.add(session); session.socket = { remoteAddress: peer[2], remotePort: Number(peer[3]), encrypted: server._secure, alpnProtocol: session.alpnProtocol }; session.on('stream', function(stream, headers, flags, rawHeaders) { server.emit('stream', stream, headers, flags, rawHeaders); }); session.once('close', function() { server._sessions.delete(session); }); server.emit('session', session); session._start(); setTimeout(accept, 0); } queueMicrotask(function() { server.emit('listening'); accept(); }); return this; }; Http2Server.prototype.address = function() { return this._address || null; }; Http2Server.prototype.close = function(callback) { if (callback) this.once('close', callback); if (this._handle) { if (this._secure) __thaw_tls_server_close(this._handle); else __thaw_net_close_listener(this._handle); } this._handle = 0; this.listening = false; var server = this; this._sessions.forEach(function(session) { session.close(); }); queueMicrotask(function() { server.emit('close'); }); return this; }; Http2Server.prototype.closeAllConnections = Http2Server.prototype.closeIdleConnections = function() { this._sessions.forEach(function(session) { session.destroy(); }); }; Http2Server.prototype.setTimeout = function(timeout, callback) { this.timeout = Number(timeout); if (callback) this.on('timeout', callback); return this; }; Http2Server.prototype.ref = function() { this._refed = true; return this; }; Http2Server.prototype.unref = function() { this._refed = false; return this; };
+             function Http2SecureServer(options, listener) { Http2Server.call(this, options, listener, true); } Http2SecureServer.prototype = Object.create(Http2Server.prototype); Http2SecureServer.prototype.constructor = Http2SecureServer; function createServer(options, listener) { return new Http2Server(options, listener, false); } function createSecureServer(options, listener) { return new Http2SecureServer(options, listener); }
              module.exports = { connect: connect, createServer: createServer, createSecureServer: createSecureServer, getDefaultSettings: getDefaultSettings, getPackedSettings: getPackedSettings, getUnpackedSettings: getUnpackedSettings, sensitiveHeaders: sensitiveHeaders, constants: constants, Http2Session: Http2Session, ClientHttp2Session: ClientHttp2Session, ServerHttp2Session: ServerHttp2Session, Http2Stream: Http2Stream, ClientHttp2Stream: ClientHttp2Stream, ServerHttp2Stream: ServerHttp2Stream, Http2Server: Http2Server, Http2SecureServer: Http2SecureServer }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
@@ -6348,6 +6349,282 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn http2_tls_sessions_negotiate_h2_with_alpn() {
+        use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection, StreamOwned};
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::process::Command;
+        use std::sync::Arc;
+
+        let certificate_dir = temp_registry("builtin_http2_tls_certificate");
+        let key_path = certificate_dir.join("key.pem");
+        let cert_path = certificate_dir.join("cert.pem");
+        let key_der_path = certificate_dir.join("key.der");
+        let cert_der_path = certificate_dir.join("cert.der");
+        assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-keyout",
+            ])
+            .arg(&key_path)
+            .arg("-out")
+            .arg(&cert_path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&cert_path)
+            .args(["-outform", "DER", "-out"])
+            .arg(&cert_der_path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+            .arg(&key_path)
+            .args(["-outform", "DER", "-out"])
+            .arg(&key_der_path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let certificate = fs::read_to_string(&cert_path).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut tls_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(fs::read(&cert_der_path).unwrap())],
+                PrivatePkcs8KeyDer::from(fs::read(&key_der_path).unwrap()).into(),
+            )
+            .unwrap();
+        tls_config.alpn_protocols = vec![b"h2".to_vec()];
+        let tls_config = Arc::new(tls_config);
+        let peer = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(tls_config).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut preface = [0u8; 24];
+            stream.read_exact(&mut preface).unwrap();
+            assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+            loop {
+                let mut header = [0u8; 9];
+                stream.read_exact(&mut header).unwrap();
+                let length =
+                    ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize;
+                let mut payload = vec![0u8; length];
+                stream.read_exact(&mut payload).unwrap();
+                if header[3] == 1 {
+                    let body = b"encrypted";
+                    let response = [
+                        vec![0, 0, 0, 4, 0, 0, 0, 0, 0],
+                        vec![0, 0, 1, 1, 4, 0, 0, 0, 1, 0x88],
+                        vec![0, 0, body.len() as u8, 0, 1, 0, 0, 0, 1],
+                        body.to_vec(),
+                    ]
+                    .concat();
+                    stream.write_all(&response).unwrap();
+                    stream.flush().unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    break;
+                }
+            }
+        });
+        let dir = temp_registry("builtin_http2_tls");
+        fs::write(
+            dir.join("index.js"),
+            format!(
+                "var http2 = require('node:http2'), certificate = {}; module.exports = function () {{ return new Promise(function(resolve, reject) {{ var secureServer = http2.createSecureServer({{}}), session = http2.connect('https://127.0.0.1:{}', {{ ca: certificate }}); session.on('error', reject); session.on('connect', function() {{ var request = session.request({{ ':path': '/secure' }}), chunks = [], response; request.on('response', function(headers) {{ response = headers; }}); request.on('data', function(chunk) {{ chunks.push(Buffer.from(chunk)); }}); request.on('end', function() {{ session.close(); resolve([secureServer instanceof http2.Http2SecureServer, session.encrypted, session.alpnProtocol, session.socket.alpnProtocol, response[':status'], Buffer.concat(chunks).toString()]); }}); request.end(); }}); }}); }};",
+                serde_json::to_string(&certificate).unwrap(),
+                port
+            ),
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_http2_tls_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Tls = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseHttp2Tls").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[true,true,"h2","h2","200","encrypted"]"#);
+        peer.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        let _ = fs::remove_dir_all(&certificate_dir);
+    }
+
+    #[test]
+    fn http2_secure_server_accepts_an_alpn_h2_peer() {
+        use rustls::pki_types::{CertificateDer, ServerName};
+        use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let certificate_dir = temp_registry("builtin_http2_secure_server_certificate");
+        let key_path = certificate_dir.join("key.pem");
+        let cert_path = certificate_dir.join("cert.pem");
+        let cert_der_path = certificate_dir.join("cert.der");
+        assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-keyout",
+            ])
+            .arg(&key_path)
+            .arg("-out")
+            .arg(&cert_path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&cert_path)
+            .args(["-outform", "DER", "-out"])
+            .arg(&cert_der_path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let certificate = fs::read_to_string(&cert_path).unwrap();
+        let key = fs::read_to_string(&key_path).unwrap();
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(fs::read(&cert_der_path).unwrap()))
+            .unwrap();
+        let mut client_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
+        let client_config = Arc::new(client_config);
+        let peer = std::thread::spawn(move || {
+            let socket = (0..100)
+                .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(socket) => Some(socket),
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        None
+                    }
+                })
+                .expect("HTTP/2 secure server did not start");
+            let connection = ClientConnection::new(
+                client_config,
+                ServerName::try_from("127.0.0.1".to_string()).unwrap(),
+            )
+            .unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let request = [
+                b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec(),
+                vec![0, 0, 0, 4, 0, 0, 0, 0, 0],
+                vec![0, 0, 3, 1, 5, 0, 0, 0, 1, 0x82, 0x84, 0x87],
+            ]
+            .concat();
+            stream.write_all(&request).unwrap();
+            stream.flush().unwrap();
+            let mut body = Vec::new();
+            loop {
+                let mut header = [0u8; 9];
+                stream.read_exact(&mut header).unwrap();
+                let length =
+                    ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize;
+                let mut payload = vec![0u8; length];
+                stream.read_exact(&mut payload).unwrap();
+                if header[3] == 0 {
+                    body.extend(payload);
+                    if header[4] & 1 != 0 {
+                        break;
+                    }
+                }
+            }
+            (
+                stream
+                    .conn
+                    .alpn_protocol()
+                    .map(|value| value.to_vec())
+                    .unwrap_or_default(),
+                body,
+            )
+        });
+        let dir = temp_registry("builtin_http2_secure_server");
+        fs::write(
+            dir.join("index.js"),
+            format!(
+                "var http2 = require('node:http2'), certificate = {}, key = {}; module.exports = function () {{ return new Promise(function(resolve, reject) {{ var sessionState, server = http2.createSecureServer({{ cert: certificate, key: key }}); server.on('error', reject); server.on('sessionError', reject); server.on('session', function(session) {{ sessionState = [session.encrypted, session.alpnProtocol, session.socket.alpnProtocol]; }}); server.on('stream', function(stream, headers) {{ stream.on('close', function() {{ server.close(function() {{ resolve([server instanceof http2.Http2SecureServer, sessionState, headers[':scheme']]); }}); }}); stream.respond({{ ':status': 202 }}); stream.end('served'); }}); server.listen({}, '127.0.0.1'); }}); }};",
+                serde_json::to_string(&certificate).unwrap(),
+                serde_json::to_string(&key).unwrap(),
+                port
+            ),
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_http2_secure_server_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2SecureServer = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseHttp2SecureServer").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[true,[true,"h2","h2"],"https"]"#);
+        let (alpn, body) = peer.join().unwrap();
+        assert_eq!(alpn, b"h2");
+        assert_eq!(body, b"served");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        let _ = fs::remove_dir_all(&certificate_dir);
     }
 
     #[test]
