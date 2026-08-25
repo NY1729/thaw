@@ -486,8 +486,9 @@ The workspace crates have narrow responsibilities:
   the QuickJS event loop polls ordered spawn/stdout/stderr/error/exit/close
   events; writable stdin, readable output streams, kill/ref/unref and process
   metadata are exposed. Pipe, ignore and inherit stdio modes, timeout
-  termination, AbortSignal cancellation and detached process metadata are
-  supported, and `kill(signal)` forwards named or numeric POSIX signals.
+  termination and AbortSignal cancellation are supported. Detached children
+  start in a separate Unix session, and `kill(signal)` forwards named or
+  numeric POSIX signals.
   `exec()` and `execFile()` collect those streams for Node-style
   success, nonzero-exit, ENOENT and max-buffer callbacks
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed

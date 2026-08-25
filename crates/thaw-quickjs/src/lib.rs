@@ -32,7 +32,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
 #[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -1714,6 +1714,24 @@ fn configure_child_command(
             if let Some(value) = value.as_str() {
                 child.env(name, value);
             }
+        }
+    }
+    #[cfg(unix)]
+    if options
+        .get("detached")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        // SAFETY: setsid has no memory-safety preconditions and this closure
+        // performs no allocation or lock acquisition after fork.
+        unsafe {
+            child.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
         }
     }
     child
