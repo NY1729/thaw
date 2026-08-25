@@ -25,7 +25,7 @@
 //! Thaw's `try`/`catch`. The original `thaw_js_call` JSON-error-object API is
 //! retained for C ABI compatibility with older callers.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -34,6 +34,7 @@ use std::os::raw::c_char;
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -146,6 +147,95 @@ fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
         _ => ZlibDecoder::new(value).read_to_end(&mut output)?,
     };
     Ok(output)
+}
+
+enum WebZlibWriter {
+    GzipEncoder(flate2::write::GzEncoder<Vec<u8>>),
+    ZlibEncoder(flate2::write::ZlibEncoder<Vec<u8>>),
+    DeflateEncoder(flate2::write::DeflateEncoder<Vec<u8>>),
+    GzipDecoder(flate2::write::GzDecoder<Vec<u8>>),
+    ZlibDecoder(flate2::write::ZlibDecoder<Vec<u8>>),
+    DeflateDecoder(flate2::write::DeflateDecoder<Vec<u8>>),
+}
+
+struct WebZlibStream {
+    writer: WebZlibWriter,
+    emitted: usize,
+}
+
+impl WebZlibStream {
+    fn new(operation: &str, format: &str) -> io::Result<Self> {
+        use flate2::Compression;
+        let writer = match (operation, format) {
+            ("compress", "gzip") => WebZlibWriter::GzipEncoder(flate2::write::GzEncoder::new(
+                Vec::new(),
+                Compression::default(),
+            )),
+            ("compress", "deflateRaw") => WebZlibWriter::DeflateEncoder(
+                flate2::write::DeflateEncoder::new(Vec::new(), Compression::default()),
+            ),
+            ("compress", "deflate") => WebZlibWriter::ZlibEncoder(flate2::write::ZlibEncoder::new(
+                Vec::new(),
+                Compression::default(),
+            )),
+            ("decompress", "gzip") => {
+                WebZlibWriter::GzipDecoder(flate2::write::GzDecoder::new(Vec::new()))
+            }
+            ("decompress", "deflateRaw") => {
+                WebZlibWriter::DeflateDecoder(flate2::write::DeflateDecoder::new(Vec::new()))
+            }
+            ("decompress", "deflate") => {
+                WebZlibWriter::ZlibDecoder(flate2::write::ZlibDecoder::new(Vec::new()))
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid zlib stream",
+                ))
+            }
+        };
+        Ok(Self { writer, emitted: 0 })
+    }
+
+    fn write_and_flush(&mut self, input: &[u8]) -> io::Result<Vec<u8>> {
+        macro_rules! write {
+            ($writer:expr) => {{
+                $writer.write_all(input)?;
+                $writer.flush()?;
+                $writer.get_ref()
+            }};
+        }
+        let output = match &mut self.writer {
+            WebZlibWriter::GzipEncoder(writer) => write!(writer),
+            WebZlibWriter::ZlibEncoder(writer) => write!(writer),
+            WebZlibWriter::DeflateEncoder(writer) => write!(writer),
+            WebZlibWriter::GzipDecoder(writer) => write!(writer),
+            WebZlibWriter::ZlibDecoder(writer) => write!(writer),
+            WebZlibWriter::DeflateDecoder(writer) => write!(writer),
+        };
+        let chunk = output[self.emitted..].to_vec();
+        self.emitted = output.len();
+        Ok(chunk)
+    }
+
+    fn finish(self, input: &[u8]) -> io::Result<Vec<u8>> {
+        macro_rules! finish {
+            ($mut_writer:expr) => {{
+                let mut writer = $mut_writer;
+                writer.write_all(input)?;
+                writer.finish()?
+            }};
+        }
+        let output = match self.writer {
+            WebZlibWriter::GzipEncoder(writer) => finish!(writer),
+            WebZlibWriter::ZlibEncoder(writer) => finish!(writer),
+            WebZlibWriter::DeflateEncoder(writer) => finish!(writer),
+            WebZlibWriter::GzipDecoder(writer) => finish!(writer),
+            WebZlibWriter::ZlibDecoder(writer) => finish!(writer),
+            WebZlibWriter::DeflateDecoder(writer) => finish!(writer),
+        };
+        Ok(output[self.emitted..].to_vec())
+    }
 }
 
 fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
@@ -2574,6 +2664,80 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     },
                 )
                 .expect("failed to create JavaScript compression function");
+                let web_zlib_streams = Rc::new(RefCell::new(HashMap::<u32, WebZlibStream>::new()));
+                let next_web_zlib_stream = Rc::new(Cell::new(1u32));
+                let create_web_zlib_stream = {
+                    let streams = Rc::clone(&web_zlib_streams);
+                    let next = Rc::clone(&next_web_zlib_stream);
+                    Function::new(
+                        ctx.clone(),
+                        move |operation: String, format: String| -> rquickjs::Result<u32> {
+                            let stream =
+                                WebZlibStream::new(&operation, &format).map_err(|error| {
+                                    rquickjs::Error::new_from_js_message(
+                                        "zlib stream",
+                                        "handle",
+                                        error.to_string(),
+                                    )
+                                })?;
+                            let handle = next.get();
+                            next.set(handle.wrapping_add(1).max(1));
+                            streams.borrow_mut().insert(handle, stream);
+                            Ok(handle)
+                        },
+                    )
+                    .expect("failed to create streaming zlib allocator")
+                };
+                let write_web_zlib_stream = {
+                    let streams = Rc::clone(&web_zlib_streams);
+                    Function::new(
+                        ctx.clone(),
+                        move |handle: u32,
+                              value: String,
+                              finish: bool|
+                              -> rquickjs::Result<String> {
+                            let input = hex_decode(&value);
+                            let result = if finish {
+                                let stream =
+                                    streams.borrow_mut().remove(&handle).ok_or_else(|| {
+                                        rquickjs::Error::new_from_js_message(
+                                            "zlib stream",
+                                            "handle",
+                                            "unknown stream handle",
+                                        )
+                                    })?;
+                                stream.finish(&input)
+                            } else {
+                                streams
+                                    .borrow_mut()
+                                    .get_mut(&handle)
+                                    .ok_or_else(|| {
+                                        rquickjs::Error::new_from_js_message(
+                                            "zlib stream",
+                                            "handle",
+                                            "unknown stream handle",
+                                        )
+                                    })?
+                                    .write_and_flush(&input)
+                            };
+                            result.map(|bytes| hex_encode(&bytes)).map_err(|error| {
+                                rquickjs::Error::new_from_js_message(
+                                    "zlib stream",
+                                    "Buffer",
+                                    error.to_string(),
+                                )
+                            })
+                        },
+                    )
+                    .expect("failed to create streaming zlib writer")
+                };
+                let drop_web_zlib_stream = {
+                    let streams = Rc::clone(&web_zlib_streams);
+                    Function::new(ctx.clone(), move |handle: u32| {
+                        streams.borrow_mut().remove(&handle).is_some()
+                    })
+                    .expect("failed to create streaming zlib closer")
+                };
                 let fs_function = Function::new(
                     ctx.clone(),
                     |operation: String, path: String, value: String, recursive: bool| {
@@ -2802,6 +2966,15 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");
+                ctx.globals()
+                    .set("__thaw_zlib_stream_create", create_web_zlib_stream)
+                    .expect("failed to install streaming zlib allocator");
+                ctx.globals()
+                    .set("__thaw_zlib_stream_write", write_web_zlib_stream)
+                    .expect("failed to install streaming zlib writer");
+                ctx.globals()
+                    .set("__thaw_zlib_stream_drop", drop_web_zlib_stream)
+                    .expect("failed to install streaming zlib closer");
                 ctx.globals()
                     .set("__thaw_fs", fs_function)
                     .expect("failed to install JavaScript filesystem function");
@@ -4050,7 +4223,7 @@ const PLATFORM_GLOBALS: &str = r#"
       terminate() { const error = webInvalidState('TransformStream has been terminated'); this._readableController._stream._rejectCapacity(error); this._readableController.close(); if (this._writable) this._writable._errorStream(error); }
     }
     globalThis.TransformStream = class TransformStream {
-      constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) { let readableController, writable; const readableQueueStrategy = { ...readableStrategy, highWaterMark: readableStrategy.highWaterMark === undefined ? 0 : readableStrategy.highWaterMark }; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); } }, readableQueueStrategy); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return readableController._stream._waitForCapacity().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { readableController.error(error); } }, writableStrategy); controller._writable = writable; }
+      constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) { let readableController, writable; const readableQueueStrategy = { ...readableStrategy, highWaterMark: readableStrategy.highWaterMark === undefined ? 0 : readableStrategy.highWaterMark }, cancel = reason => typeof transformer.cancel === 'function' ? transformer.cancel(reason) : undefined; this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); return cancel(error); } }, readableQueueStrategy); const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; }; writable = this.writable = new WritableStream({ start() { return typeof transformer.start === 'function' ? transformer.start(controller) : undefined; }, write(chunk) { return readableController._stream._waitForCapacity().then(() => typeof transformer.transform === 'function' ? transformer.transform(chunk, controller) : controller.enqueue(chunk)).catch(fail); }, close() { return Promise.resolve().then(() => typeof transformer.flush === 'function' ? transformer.flush(controller) : undefined).then(() => readableController.close()).catch(fail); }, abort(error) { return Promise.resolve(cancel(error)).then(() => readableController.error(error)); } }, writableStrategy); controller._writable = writable; }
     };
     globalThis.TransformStreamDefaultController = TransformStreamDefaultController;
     const hexFromBytes = value => Array.from(value, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -4058,15 +4231,23 @@ const PLATFORM_GLOBALS: &str = r#"
     const compressionTransform = (operation, format) => {
       const normalized = String(format);
       if (normalized !== 'gzip' && normalized !== 'deflate' && normalized !== 'deflate-raw') throw new TypeError('Unsupported compression format');
-      const chunks = [];
+      const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized, handle = __thaw_zlib_stream_create(operation, nativeFormat);
+      let active = true;
+      const release = () => { if (active) { active = false; __thaw_zlib_stream_drop(handle); } };
       return new TransformStream({
-        transform(chunk) { chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); },
+        transform(chunk, controller) {
+          try {
+            if (!(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) throw new TypeError('chunk must be an ArrayBuffer or view');
+            const bytes = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+            const output = bytesFromHex(__thaw_zlib_stream_write(handle, hexFromBytes(bytes), false));
+            if (output.byteLength) controller.enqueue(output);
+          } catch (error) { release(); throw error; }
+        },
         flush(controller) {
-          const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0), input = new Uint8Array(length); let offset = 0;
-          for (const chunk of chunks) { input.set(chunk, offset); offset += chunk.byteLength; }
-          const nativeFormat = normalized === 'deflate-raw' ? 'deflateRaw' : normalized;
-          controller.enqueue(bytesFromHex(__thaw_zlib_hex(operation, nativeFormat, hexFromBytes(input))));
-        }
+          try { const output = bytesFromHex(__thaw_zlib_stream_write(handle, '', true)); active = false; if (output.byteLength) controller.enqueue(output); }
+          catch (error) { release(); throw error; }
+        },
+        cancel: release
       });
     };
     globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this.readable = stream.readable; this.writable = stream.writable; } };
