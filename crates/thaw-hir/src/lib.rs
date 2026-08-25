@@ -207,6 +207,13 @@ pub enum HirExpr {
     NullishIsUndefined(Box<HirExpr>, HirType),
     NullishIsNone(Box<HirExpr>, HirType),
     NullishValue(Box<HirExpr>, HirType),
+    /// Injects one native value into a heterogeneous tagged union. The
+    /// zero-based member index is the runtime tag.
+    UnionInject(Box<HirExpr>, usize, Vec<HirType>),
+    /// Reads the runtime member tag of a heterogeneous union.
+    UnionTag(Box<HirExpr>, Vec<HirType>),
+    /// Extracts a member after lowering has established the matching tag.
+    UnionValue(Box<HirExpr>, usize, Vec<HirType>),
     Call(Box<HirExpr>, Vec<HirExpr>),
     /// A homogeneous `Promise.all` join. The element type is retained so
     /// codegen can copy and later load non-number result slots correctly.
@@ -441,7 +448,10 @@ pub fn set_ffi_error_abi(
             | HirExpr::NullishIsNull(inner, _)
             | HirExpr::NullishIsUndefined(inner, _)
             | HirExpr::NullishIsNone(inner, _)
-            | HirExpr::NullishValue(inner, _) => visit_expr(inner, symbol, abi, found),
+            | HirExpr::NullishValue(inner, _)
+            | HirExpr::UnionInject(inner, _, _)
+            | HirExpr::UnionTag(inner, _)
+            | HirExpr::UnionValue(inner, _, _) => visit_expr(inner, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -608,7 +618,12 @@ pub fn set_ffi_ownership(
             | HirExpr::NullishIsNull(inner, _)
             | HirExpr::NullishIsUndefined(inner, _)
             | HirExpr::NullishIsNone(inner, _)
-            | HirExpr::NullishValue(inner, _) => update_expr(inner, symbol, returns, errors, found),
+            | HirExpr::NullishValue(inner, _)
+            | HirExpr::UnionInject(inner, _, _)
+            | HirExpr::UnionTag(inner, _)
+            | HirExpr::UnionValue(inner, _, _) => {
+                update_expr(inner, symbol, returns, errors, found)
+            }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
             HirExpr::PromiseNew(executor, _, _) => {
                 update_expr(executor, symbol, returns, errors, found)
@@ -838,7 +853,10 @@ pub fn set_ffi_string_abi(
             | HirExpr::NullishIsNull(inner, _)
             | HirExpr::NullishIsUndefined(inner, _)
             | HirExpr::NullishIsNone(inner, _)
-            | HirExpr::NullishValue(inner, _) => update_expr(
+            | HirExpr::NullishValue(inner, _)
+            | HirExpr::UnionInject(inner, _, _)
+            | HirExpr::UnionTag(inner, _)
+            | HirExpr::UnionValue(inner, _, _) => update_expr(
                 inner,
                 symbol,
                 params,

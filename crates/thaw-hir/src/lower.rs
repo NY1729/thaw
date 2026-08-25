@@ -1468,9 +1468,27 @@ fn lower_ts_type(
                     return Ok(HirType::Nullable(Box::new(elements[0].clone())));
                 }
             }
-            Err(format!(
-                "unsupported union type {elements:?}"
-            ))
+            if elements.len() >= 2
+                && elements.iter().all(|element| {
+                    matches!(
+                        element,
+                        HirType::F64
+                            | HirType::I64
+                            | HirType::Bool
+                            | HirType::Str
+                            | HirType::Json
+                            | HirType::JsValue
+                            | HirType::Array(_)
+                            | HirType::Tuple(_)
+                            | HirType::Object(_)
+                            | HirType::Function(_, _)
+                    )
+                })
+            {
+                Ok(HirType::Union(elements))
+            } else {
+                Err(format!("unsupported union type {elements:?}"))
+            }
         }
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
             intersection,
@@ -1920,6 +1938,9 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
+        | HirExpr::UnionInject(value, _, _)
+        | HirExpr::UnionTag(value, _)
+        | HirExpr::UnionValue(value, _, _)
         | HirExpr::OptionalSome(value, _)
         | HirExpr::OptionalIsNone(value, _)
         | HirExpr::OptionalValue(value, _)
@@ -2016,6 +2037,9 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::JsonAsNumber(value)
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
+        | HirExpr::UnionInject(value, _, _)
+        | HirExpr::UnionTag(value, _)
+        | HirExpr::UnionValue(value, _, _)
         | HirExpr::OptionalSome(value, _)
         | HirExpr::OptionalIsNone(value, _)
         | HirExpr::OptionalValue(value, _)
@@ -2351,6 +2375,7 @@ struct FnLowerer<'a> {
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,
+    union_narrowings: HashMap<Symbol, (usize, Vec<HirType>)>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -2389,6 +2414,7 @@ impl<'a> FnLowerer<'a> {
             narrowings: HashMap::new(),
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
+            union_narrowings: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
             signatures,
@@ -2432,11 +2458,13 @@ impl<'a> FnLowerer<'a> {
         let saved_narrowings = self.narrowings.clone();
         let saved_nullable_narrowings = self.nullable_narrowings.clone();
         let saved_nullish_narrowings = self.nullish_narrowings.clone();
+        let saved_union_narrowings = self.union_narrowings.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
         self.narrowings = saved_narrowings;
         self.nullable_narrowings = saved_nullable_narrowings;
         self.nullish_narrowings = saved_nullish_narrowings;
+        self.union_narrowings = saved_union_narrowings;
         lowered
     }
 
@@ -2704,6 +2732,57 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn union_typeof_narrowing(&self, expr: &Expr) -> Option<(Symbol, usize, Vec<HirType>, bool)> {
+        let Expr::Bin(binary) = expr else { return None };
+        let equal_when_true = match binary.op {
+            BinaryOp::EqEqEq | BinaryOp::EqEq => true,
+            BinaryOp::NotEqEq | BinaryOp::NotEq => false,
+            _ => return None,
+        };
+        let (ident, type_name) = match (binary.left.as_ref(), binary.right.as_ref()) {
+            (Expr::Unary(unary), Expr::Lit(Lit::Str(name))) if unary.op == UnaryOp::TypeOf => {
+                let Expr::Ident(ident) = unary.arg.as_ref() else {
+                    return None;
+                };
+                (ident, name.value.to_string_lossy())
+            }
+            (Expr::Lit(Lit::Str(name)), Expr::Unary(unary)) if unary.op == UnaryOp::TypeOf => {
+                let Expr::Ident(ident) = unary.arg.as_ref() else {
+                    return None;
+                };
+                (ident, name.value.to_string_lossy())
+            }
+            _ => return None,
+        };
+        let name = self.resolve_binding(ident.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let matching = elements
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| native_typeof_name(member) == Some(type_name.as_ref()))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        (matching.len() == 1).then(|| (name, matching[0], elements.clone(), equal_when_true))
+    }
+
+    fn lower_body_with_union_narrowing(
+        &mut self,
+        stmt: &Stmt,
+        narrowing: Option<&(Symbol, usize, Vec<HirType>)>,
+        optional: Option<&(Symbol, HirType, u8)>,
+    ) -> Result<Vec<HirStmt>, String> {
+        let saved = self.union_narrowings.clone();
+        if let Some((name, index, elements)) = narrowing {
+            self.union_narrowings
+                .insert(name.clone(), (*index, elements.clone()));
+        }
+        let lowered = self.lower_body_with_optional_narrowing(stmt, optional);
+        self.union_narrowings = saved;
+        lowered
+    }
+
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         match stmt {
             // Empty statements have no runtime effect. `debugger` only has an
@@ -2737,6 +2816,7 @@ impl<'a> FnLowerer<'a> {
 
             Stmt::If(if_stmt) => {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
+                let union_narrowing = self.union_typeof_narrowing(&if_stmt.test);
                 let cond = self.lower_expr(&if_stmt.test)?;
                 self.expect_type(&HirType::Bool, &cond, "if condition")?;
                 let then_narrowing = narrowing
@@ -2751,12 +2831,40 @@ impl<'a> FnLowerer<'a> {
                     .map(|(name, payload, _, nullable)| {
                         (name.clone(), payload.clone(), *nullable)
                     });
+                let then_union = union_narrowing.as_ref().and_then(
+                    |(name, index, elements, equal)| {
+                        if *equal {
+                            Some((name.clone(), *index, elements.clone()))
+                        } else if elements.len() == 2 {
+                            Some((name.clone(), 1 - *index, elements.clone()))
+                        } else {
+                            None
+                        }
+                    },
+                );
+                let else_union = union_narrowing.as_ref().and_then(
+                    |(name, index, elements, equal)| {
+                        if !*equal {
+                            Some((name.clone(), *index, elements.clone()))
+                        } else if elements.len() == 2 {
+                            Some((name.clone(), 1 - *index, elements.clone()))
+                        } else {
+                            None
+                        }
+                    },
+                );
                 let then_branch = self
-                    .lower_body_with_optional_narrowing(&if_stmt.cons, then_narrowing.as_ref())?;
+                    .lower_body_with_union_narrowing(
+                        &if_stmt.cons,
+                        then_union.as_ref(),
+                        then_narrowing.as_ref(),
+                    )?;
                 let else_branch = match &if_stmt.alt {
-                    Some(alt) => {
-                        self.lower_body_with_optional_narrowing(alt, else_narrowing.as_ref())?
-                    }
+                    Some(alt) => self.lower_body_with_union_narrowing(
+                        alt,
+                        else_union.as_ref(),
+                        else_narrowing.as_ref(),
+                    )?,
                     None => Vec::new(),
                 };
                 Ok(vec![HirStmt::If(cond, then_branch, else_branch)])
@@ -3618,6 +3726,22 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        if let HirType::Union(elements) = declared {
+            let actual = self.infer_expr_type(&value)?;
+            if &actual == declared {
+                return Ok(value);
+            }
+            if let Some(index) = elements.iter().position(|element| element == &actual) {
+                return Ok(HirExpr::UnionInject(
+                    Box::new(value),
+                    index,
+                    elements.clone(),
+                ));
+            }
+            return Err(format!(
+                "value has type {actual:?}, which is not a member of {declared:?}"
+            ));
+        }
         if let HirType::Optional(payload) = declared {
             return match self.infer_expr_type(&value)? {
                 HirType::Undefined => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
@@ -3808,6 +3932,28 @@ impl<'a> FnLowerer<'a> {
                     "nullish payload extraction",
                 )?;
                 Ok(payload.clone())
+            }
+            HirExpr::UnionInject(value, index, elements) => {
+                let member = elements
+                    .get(*index)
+                    .ok_or_else(|| format!("union member index {index} is out of bounds"))?;
+                self.expect_type(member, value, "union payload")?;
+                Ok(HirType::Union(elements.clone()))
+            }
+            HirExpr::UnionTag(value, elements) => {
+                self.expect_type(&HirType::Union(elements.clone()), value, "union tag access")?;
+                Ok(HirType::F64)
+            }
+            HirExpr::UnionValue(value, index, elements) => {
+                self.expect_type(
+                    &HirType::Union(elements.clone()),
+                    value,
+                    "union value extraction",
+                )?;
+                elements
+                    .get(*index)
+                    .cloned()
+                    .ok_or_else(|| format!("union member index {index} is out of bounds"))
             }
             HirExpr::ArrayAlloc(length, element) => {
                 self.expect_type(&HirType::F64, length, "array allocation length")?;
@@ -4853,6 +4999,13 @@ impl<'a> FnLowerer<'a> {
                         _ => {}
                     }
                 }
+                if let Some((index, elements)) = self.union_narrowings.get(&name) {
+                    return Ok(HirExpr::UnionValue(
+                        Box::new(HirExpr::Var(name)),
+                        *index,
+                        elements.clone(),
+                    ));
+                }
                 match self
                     .narrowings
                     .get(&name)
@@ -5122,6 +5275,57 @@ impl<'a> FnLowerer<'a> {
                         }
                         .map(Ok)
                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        if let HirType::Union(elements) = &operand_type {
+                            let parameter = format!("__thaw_typeof_union_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(parameter.clone(), operand_type.clone());
+                            let bound = HirExpr::Var(parameter.clone());
+                            let mut branches = vec![HirStmt::Return(Some(HirExpr::Lit(
+                                HirLit::Str(
+                                    native_typeof_name(elements.last().ok_or(
+                                        "`typeof` cannot inspect an empty union",
+                                    )?)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "`typeof` union member has no runtime category: {:?}",
+                                            elements.last().unwrap()
+                                        )
+                                    })?
+                                    .into(),
+                                ),
+                            )))];
+                            for (index, member) in elements
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .skip(1)
+                            {
+                                let type_name = native_typeof_name(member).ok_or_else(|| {
+                                    format!(
+                                        "`typeof` union member has no runtime category: {member:?}"
+                                    )
+                                })?;
+                                branches = vec![HirStmt::If(
+                                    HirExpr::BinOp(
+                                        BinOp::EqEqEq,
+                                        Box::new(HirExpr::UnionTag(
+                                            Box::new(bound.clone()),
+                                            elements.clone(),
+                                        )),
+                                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                    ),
+                                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
+                                        type_name.into(),
+                                    ))))],
+                                    branches,
+                                )];
+                            }
+                            let result = HirExpr::Block(branches);
+                            return self.wrap_call_argument_bindings(
+                                result,
+                                &[(parameter, operand_type, value)],
+                            );
+                        }
                         if let HirType::Nullish(payload) = &operand_type {
                             let Some(type_name) = native_typeof_name(payload) else {
                                 return Err(format!(
@@ -12045,9 +12249,42 @@ mod tests {
         let module =
             thaw_parser::parse_typescript(r#"function mixed(value: string | number): void {}"#)
                 .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("unsupported union type"));
+        let mixed = lower_module(&module).unwrap();
+        assert_eq!(
+            mixed.functions[0].params[0].ty,
+            HirType::Union(vec![HirType::Str, HirType::F64])
+        );
+    }
+
+    #[test]
+    fn lowers_heterogeneous_unions_to_tagged_injections() {
+        let program = lower(
+            r#"function identity(value: string | number): string | number { return value; }
+               function kind(value: string | number): string { return typeof value; }
+               function main(): void {
+                   const first: string | number = "text";
+                   const second: string | number = 2;
+                   kind(identity(first));
+                   kind(identity(second));
+               }"#,
+        );
+        let union = HirType::Union(vec![HirType::Str, HirType::F64]);
+        assert_eq!(program.functions[0].params[0].ty, union);
+        assert_eq!(program.functions[0].ret, union);
+        assert!(matches!(
+            &program.functions[2].body[0],
+            HirStmt::Let(_, ty, HirExpr::UnionInject(value, 0, members))
+                if ty == &union
+                    && members == &vec![HirType::Str, HirType::F64]
+                    && matches!(value.as_ref(), HirExpr::Lit(HirLit::Str(_)))
+        ));
+        assert!(matches!(
+            &program.functions[2].body[1],
+            HirStmt::Let(_, ty, HirExpr::UnionInject(value, 1, members))
+                if ty == &union
+                    && members == &vec![HirType::Str, HirType::F64]
+                    && matches!(value.as_ref(), HirExpr::Lit(HirLit::F64(2.0)))
+        ));
     }
 
     #[test]
