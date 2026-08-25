@@ -14227,6 +14227,7 @@ mod tests {
             type ParenthesizedForward = (ParenthesizedIdentity);
             type Choose = <T, U>(left: T, right: U) => T;
             type Numeric = <T extends number>(value: T) => T;
+            type DefaultFactory = <T = string>() => T;
             function namedIdentity<T>(value: T): T { return value; }
             function main(): void {
                 const identity: Identity = <Value>(value: Value): Value => value;
@@ -14243,6 +14244,7 @@ mod tests {
                 const expression: Identity = function<T>(value: T): T { return value; };
                 const inferredExpression = function<T>(value: T): T { return value; };
                 const namedExpression: Identity = function localIdentity<T>(value: T): T { return value; };
+                const factory: DefaultFactory = <Value = string>(): Value => "default";
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14262,11 +14264,12 @@ mod tests {
                 console.log(inferredExpression(32));
                 console.log([33, 34].map(function<T>(value: T): T { return value; })[1]);
                 console.log(namedExpression<string>("named-expression"));
+                console.log(factory());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\n"
         );
     }
 
