@@ -188,6 +188,24 @@ fn fs_chmod(_path: &str, _mode: u32) -> io::Result<()> {
     ))
 }
 
+fn fs_copy_recursive(source: &std::path::Path, destination: &std::path::Path) -> io::Result<u64> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.is_dir() {
+        std::fs::create_dir_all(destination)?;
+        let mut copied = 0;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copied += fs_copy_recursive(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        Ok(copied)
+    } else {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, destination)
+    }
+}
+
 fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
     let result = match operation.as_str() {
         "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
@@ -201,6 +219,7 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
         "copy" => std::fs::copy(&path, &value).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "cp" => if recursive { fs_copy_recursive(std::path::Path::new(&path), std::path::Path::new(&value)) } else { std::fs::copy(&path, &value) }.map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
         "realpath" => std::fs::canonicalize(&path).map(|resolved| serde_json::json!({ "ok": true, "path": resolved.to_string_lossy() })),
         "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let created = format!("{}{}", path, hex_encode(&random)); std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created })) })(),
         "truncate" => std::fs::OpenOptions::new().write(true).open(&path).and_then(|file| file.set_len(value.parse::<u64>().unwrap_or(0))).map(|_| serde_json::json!({ "ok": true })),
