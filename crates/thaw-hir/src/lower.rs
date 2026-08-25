@@ -1913,6 +1913,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         }
         HirExpr::BinOp(_, left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
+        | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
@@ -2010,6 +2011,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         HirExpr::Await(_) | HirExpr::AwaitPromise(_, _) => true,
         HirExpr::BinOp(_, left, right)
         | HirExpr::UnionMemberIsEqual(left, right, _, _)
+        | HirExpr::UnionIsEqual(left, right, _)
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
@@ -4007,6 +4009,12 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(expected, member, "union equality member")?;
                 Ok(HirType::Bool)
             }
+            HirExpr::UnionIsEqual(left, right, elements) => {
+                let union = HirType::Union(elements.clone());
+                self.expect_type(&union, left, "union equality left operand")?;
+                self.expect_type(&union, right, "union equality right operand")?;
+                Ok(HirType::Bool)
+            }
             HirExpr::ArrayAlloc(length, element) => {
                 self.expect_type(&HirType::F64, length, "array allocation length")?;
                 Ok(HirType::Array(Box::new(element.clone())))
@@ -5028,6 +5036,9 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Undefined, _) | (_, HirType::Undefined) => {
                     Some(HirExpr::Lit(HirLit::Bool(false)))
                 }
+                (HirType::Union(left), HirType::Union(right)) if left == right => Some(
+                    HirExpr::UnionIsEqual(Box::new(lhs), Box::new(rhs), left.clone()),
+                ),
                 (HirType::Union(elements), member) => elements
                     .iter()
                     .position(|element| element == member)
