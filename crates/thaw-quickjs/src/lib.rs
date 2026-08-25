@@ -113,6 +113,11 @@ fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::Compression;
     let compression = Compression::default();
     match format {
+        "brotli" => {
+            let mut encoder = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
+            encoder.write_all(value)?;
+            Ok(encoder.into_inner())
+        }
         "gzip" => {
             let mut encoder = GzEncoder::new(Vec::new(), compression);
             encoder.write_all(value)?;
@@ -135,6 +140,7 @@ fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
     let mut output = Vec::new();
     match format {
+        "brotli" => brotli::Decompressor::new(value, 4096).read_to_end(&mut output)?,
         "gzip" => GzDecoder::new(value).read_to_end(&mut output)?,
         "deflateRaw" => DeflateDecoder::new(value).read_to_end(&mut output)?,
         _ => ZlibDecoder::new(value).read_to_end(&mut output)?,
