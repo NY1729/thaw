@@ -328,6 +328,10 @@ The workspace crates have narrow responsibilities:
   Workers are process-local compatibility objects; spawning isolated copies of
   the compiled executable and Node-compatible IPC handle transfer remain future
   work
+- Legacy `_http_*` and `_tls_*` imports share the public `node:http` and
+  `node:tls` constructors, agents, header validators and secure contexts;
+  `_http_common` also exposes the parser-pool and leniency constants expected
+  by packages that still reach into Node internals
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
