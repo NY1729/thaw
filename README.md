@@ -366,6 +366,8 @@ The workspace crates have narrow responsibilities:
   streams, including redirected console output; `postMessageToThread()` routes
   structured-cloned values by thread ID to isolated `process` `workerMessage`
   listeners with Node-style failure codes and keep process-only receivers alive;
+  `moveMessagePortToContext()` validates `vm.Context` targets and transfers port
+  ownership;
   Worker diagnostics expose running-
   state CPU usage, heap statistics, readable heap snapshots and stoppable CPU
   profile shapes
