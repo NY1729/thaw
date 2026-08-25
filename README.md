@@ -313,6 +313,12 @@ The workspace crates have narrow responsibilities:
   corresponding shared `node:stream` constructors rather than duplicate shims
 - `node:trace_events` creates independently enabled tracing handles while
   reference-counting and reporting the process-wide sorted category set
+- `node:inspector` and `node:inspector/promises` provide connected Session
+  lifecycles plus callback/Promise protocol calls for `Runtime.evaluate`,
+  isolate/schema discovery and Runtime/Debugger/Profiler enablement. Evaluation
+  returns remote-object and exception-detail records from the live QuickJS
+  global context; `open()` tracks a process-local URL but does not expose an
+  external Chrome DevTools websocket
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
