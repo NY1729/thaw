@@ -338,7 +338,10 @@ The workspace crates have narrow responsibilities:
   Default byte/object high-water marks are queryable and configurable for new
   streams, and an explicit zero high-water mark is preserved. Readable,
   Writable and Duplex streams convert in both directions between Node and WHATWG
-  stream interfaces while preserving object-mode values and close/error flow;
+  stream interfaces while preserving object-mode values and close/error flow.
+  `Readable.from()` defaults to object mode, and readable collection helpers
+  cover async `map`, `filter`, `flatMap`, `drop`, `take`, `toArray`, `forEach`,
+  `some`, `every`, `find` and `reduce` operations with AbortSignal checks;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
