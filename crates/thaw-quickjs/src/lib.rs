@@ -36,13 +36,24 @@ use std::time::Duration;
 use base64::Engine as _;
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
-use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName,
+};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+};
 use sha2::{Digest, Sha256, Sha512};
 use std::sync::Arc;
 
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 type TlsStreamTable = (u32, HashMap<u32, TlsStream>);
+type TlsServerStream = StreamOwned<ServerConnection, TcpStream>;
+type TlsServerStreamTable = (u32, HashMap<u32, TlsServerStream>);
+
+struct TlsListener {
+    socket: TcpListener,
+    config: Arc<ServerConfig>,
+}
 
 fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
@@ -84,6 +95,8 @@ thread_local! {
     static NET_LISTENERS: RefCell<(u32, HashMap<u32, TcpListener>)> = RefCell::new((1, HashMap::new()));
     static UDP_SOCKETS: RefCell<(u32, HashMap<u32, UdpSocket>)> = RefCell::new((1, HashMap::new()));
     static TLS_STREAMS: RefCell<TlsStreamTable> = RefCell::new((1, HashMap::new()));
+    static TLS_SERVER_STREAMS: RefCell<TlsServerStreamTable> = RefCell::new((1, HashMap::new()));
+    static TLS_LISTENERS: RefCell<(u32, HashMap<u32, TlsListener>)> = RefCell::new((1, HashMap::new()));
 }
 
 fn net_connect(host: &str, port: u16) -> String {
@@ -260,35 +273,69 @@ fn udp_close(handle: u32) {
     });
 }
 
+fn decode_pem_blocks(bytes: &[u8], label: &str) -> Result<Vec<Vec<u8>>, String> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end_marker = format!("-----END {label}-----");
+    let text = String::from_utf8_lossy(bytes);
+    let mut remaining = text.as_ref();
+    let mut decoded = Vec::new();
+    while let Some(start) = remaining.find(&begin) {
+        remaining = &remaining[start + begin.len()..];
+        let Some(end) = remaining.find(&end_marker) else {
+            return Err(format!("unterminated PEM {label}"));
+        };
+        let encoded = remaining[..end]
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        decoded.push(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| error.to_string())?,
+        );
+        remaining = &remaining[end + end_marker.len()..];
+    }
+    Ok(decoded)
+}
+
+fn decode_certificates(spec: &str) -> Result<Vec<CertificateDer<'static>>, String> {
+    let bytes = hex_decode(spec);
+    let values = if bytes.starts_with(b"-----BEGIN CERTIFICATE-----") {
+        decode_pem_blocks(&bytes, "CERTIFICATE")?
+    } else {
+        vec![bytes]
+    };
+    Ok(values.into_iter().map(CertificateDer::from).collect())
+}
+
+fn decode_private_key(spec: &str) -> Result<PrivateKeyDer<'static>, String> {
+    let bytes = hex_decode(spec);
+    if bytes.starts_with(b"-----BEGIN PRIVATE KEY-----") {
+        let value = decode_pem_blocks(&bytes, "PRIVATE KEY")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing PEM private key".to_string())?;
+        Ok(PrivatePkcs8KeyDer::from(value).into())
+    } else if bytes.starts_with(b"-----BEGIN RSA PRIVATE KEY-----") {
+        let value = decode_pem_blocks(&bytes, "RSA PRIVATE KEY")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "missing PEM RSA private key".to_string())?;
+        Ok(PrivatePkcs1KeyDer::from(value).into())
+    } else {
+        Ok(PrivatePkcs8KeyDer::from(bytes).into())
+    }
+}
+
 fn tls_connect(host: &str, port: u16, server_name: &str, ca_spec: &str) -> String {
     let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    for certificate in ca_spec.split(',').filter(|value| !value.is_empty()) {
-        let bytes = hex_decode(certificate);
-        let certificates = if bytes.starts_with(b"-----BEGIN CERTIFICATE-----") {
-            let text = String::from_utf8_lossy(&bytes);
-            let mut remaining = text.as_ref();
-            let mut decoded = Vec::new();
-            while let Some(start) = remaining.find("-----BEGIN CERTIFICATE-----") {
-                remaining = &remaining[start + "-----BEGIN CERTIFICATE-----".len()..];
-                let Some(end) = remaining.find("-----END CERTIFICATE-----") else {
-                    return "err:unterminated PEM certificate".to_string();
-                };
-                let encoded = remaining[..end]
-                    .chars()
-                    .filter(|character| !character.is_whitespace())
-                    .collect::<String>();
-                match base64::engine::general_purpose::STANDARD.decode(encoded) {
-                    Ok(value) => decoded.push(value),
-                    Err(error) => return format!("err:{error}"),
-                }
-                remaining = &remaining[end + "-----END CERTIFICATE-----".len()..];
-            }
-            decoded
-        } else {
-            vec![bytes]
+    for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
+        let certificates = match decode_certificates(certificate_spec) {
+            Ok(certificates) => certificates,
+            Err(error) => return format!("err:{error}"),
         };
         for certificate in certificates {
-            if let Err(error) = roots.add(CertificateDer::from(certificate)) {
+            if let Err(error) = roots.add(certificate) {
                 return format!("err:{error}");
             }
         }
@@ -327,39 +374,159 @@ fn tls_connect(host: &str, port: u16, server_name: &str, ca_spec: &str) -> Strin
     })
 }
 
-fn tls_write(handle: u32, value: &[u8]) -> String {
-    TLS_STREAMS.with(|streams| {
+fn tls_server_listen(host: &str, port: u16, cert_spec: &str, key_spec: &str) -> String {
+    let certificates = match decode_certificates(cert_spec) {
+        Ok(certificates) => certificates,
+        Err(error) => return format!("err:{error}"),
+    };
+    let private_key = match decode_private_key(key_spec) {
+        Ok(private_key) => private_key,
+        Err(error) => return format!("err:{error}"),
+    };
+    let config = match ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+    {
+        Ok(config) => Arc::new(config),
+        Err(error) => return format!("err:{error}"),
+    };
+    let socket = match TcpListener::bind((host, port)) {
+        Ok(socket) => socket,
+        Err(error) => return format!("err:{error}"),
+    };
+    let actual_port = match socket.local_addr() {
+        Ok(address) => address.port(),
+        Err(error) => return format!("err:{error}"),
+    };
+    TLS_LISTENERS.with(|listeners| {
+        let mut listeners = listeners.borrow_mut();
+        let handle = listeners.0;
+        listeners.0 = listeners.0.wrapping_add(1).max(1);
+        listeners.1.insert(handle, TlsListener { socket, config });
+        format!("ok:{handle}:{actual_port}")
+    })
+}
+
+fn tls_server_accept(handle: u32) -> String {
+    let accepted = TLS_LISTENERS.with(|listeners| {
+        let listeners = listeners.borrow();
+        let Some(listener) = listeners.1.get(&handle) else {
+            return Err("listener is closed".to_string());
+        };
+        listener
+            .socket
+            .accept()
+            .map(|(socket, peer)| (socket, peer, Arc::clone(&listener.config)))
+            .map_err(|error| error.to_string())
+    });
+    let (mut socket, peer, config) = match accepted {
+        Ok(accepted) => accepted,
+        Err(error) => return format!("err:{error}"),
+    };
+    let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut connection = match ServerConnection::new(config) {
+        Ok(connection) => connection,
+        Err(error) => return format!("err:{error}"),
+    };
+    while connection.is_handshaking() {
+        if let Err(error) = connection.complete_io(&mut socket) {
+            return format!("err:{error}");
+        }
+    }
+    TLS_SERVER_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let stream_handle = streams.0;
+        streams.0 = streams.0.wrapping_add(1).max(1);
+        streams
+            .1
+            .insert(stream_handle, StreamOwned::new(connection, socket));
+        format!("ok:{stream_handle}:{}:{}", peer.ip(), peer.port())
+    })
+}
+
+fn tls_server_read(handle: u32) -> String {
+    TLS_SERVER_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let Some(stream) = streams.1.get_mut(&handle) else {
             return "err:socket is closed".to_string();
         };
+        let mut value = Vec::new();
         stream
-            .write_all(value)
-            .and_then(|_| stream.flush())
-            .map(|_| "ok".to_string())
+            .read_to_end(&mut value)
+            .map(|_| format!("ok:{}", hex_encode(&value)))
             .unwrap_or_else(|error| format!("err:{error}"))
     })
 }
 
+fn tls_server_close_listener(handle: u32) {
+    TLS_LISTENERS.with(|listeners| {
+        listeners.borrow_mut().1.remove(&handle);
+    });
+}
+
+fn tls_write(handle: u32, value: &[u8]) -> String {
+    let client_result = TLS_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let stream = streams.1.get_mut(&handle)?;
+        Some(
+            stream
+                .write_all(value)
+                .and_then(|_| stream.flush())
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| format!("err:{error}")),
+        )
+    });
+    client_result.unwrap_or_else(|| {
+        TLS_SERVER_STREAMS.with(|streams| {
+            let mut streams = streams.borrow_mut();
+            let Some(stream) = streams.1.get_mut(&handle) else {
+                return "err:socket is closed".to_string();
+            };
+            stream
+                .write_all(value)
+                .and_then(|_| stream.flush())
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| format!("err:{error}"))
+        })
+    })
+}
+
 fn tls_finish(handle: u32) -> String {
-    TLS_STREAMS.with(|streams| {
-        let Some(mut stream) = streams.borrow_mut().1.remove(&handle) else {
-            return "err:socket is closed".to_string();
-        };
+    let client_result = TLS_STREAMS.with(|streams| {
+        let mut stream = streams.borrow_mut().1.remove(&handle)?;
         stream.conn.send_close_notify();
         if let Err(error) = stream.flush() {
-            return format!("err:{error}");
+            return Some(format!("err:{error}"));
         }
         let mut value = Vec::new();
-        match stream.read_to_end(&mut value) {
+        Some(match stream.read_to_end(&mut value) {
             Ok(_) => format!("ok:{}", hex_encode(&value)),
             Err(error) => format!("err:{error}"),
-        }
+        })
+    });
+    client_result.unwrap_or_else(|| {
+        TLS_SERVER_STREAMS.with(|streams| {
+            let Some(mut stream) = streams.borrow_mut().1.remove(&handle) else {
+                return "err:socket is closed".to_string();
+            };
+            stream.conn.send_close_notify();
+            if let Err(error) = stream.flush() {
+                return format!("err:{error}");
+            }
+            let mut value = Vec::new();
+            match stream.read_to_end(&mut value) {
+                Ok(_) => format!("ok:{}", hex_encode(&value)),
+                Err(error) => format!("err:{error}"),
+            }
+        })
     })
 }
 
 fn tls_destroy(handle: u32) {
     TLS_STREAMS.with(|streams| {
+        streams.borrow_mut().1.remove(&handle);
+    });
+    TLS_SERVER_STREAMS.with(|streams| {
         streams.borrow_mut().1.remove(&handle);
     });
 }
@@ -614,6 +781,22 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let tls_destroy_function =
                     Function::new(ctx.clone(), |handle: u32| tls_destroy(handle))
                         .expect("failed to create JavaScript TLS closer");
+                let tls_server_listen_function = Function::new(
+                    ctx.clone(),
+                    |host: String, port: u32, cert: String, key: String| {
+                        tls_server_listen(&host, port as u16, &cert, &key)
+                    },
+                )
+                .expect("failed to create JavaScript TLS listener");
+                let tls_server_accept_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_server_accept(handle))
+                        .expect("failed to create JavaScript TLS acceptor");
+                let tls_server_read_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_server_read(handle))
+                        .expect("failed to create JavaScript TLS reader");
+                let tls_server_close_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_server_close_listener(handle))
+                        .expect("failed to create JavaScript TLS listener closer");
                 let os_info_function = Function::new(ctx.clone(), os_info_json)
                     .expect("failed to create JavaScript OS information source");
                 ctx.globals()
@@ -676,6 +859,18 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_tls_destroy", tls_destroy_function)
                     .expect("failed to install JavaScript TLS closer");
+                ctx.globals()
+                    .set("__thaw_tls_server_listen", tls_server_listen_function)
+                    .expect("failed to install JavaScript TLS listener");
+                ctx.globals()
+                    .set("__thaw_tls_server_accept", tls_server_accept_function)
+                    .expect("failed to install JavaScript TLS acceptor");
+                ctx.globals()
+                    .set("__thaw_tls_server_read", tls_server_read_function)
+                    .expect("failed to install JavaScript TLS reader");
+                ctx.globals()
+                    .set("__thaw_tls_server_close", tls_server_close_function)
+                    .expect("failed to install JavaScript TLS listener closer");
                 ctx.globals()
                     .set("__thaw_os_info", os_info_function)
                     .expect("failed to install JavaScript OS information source");

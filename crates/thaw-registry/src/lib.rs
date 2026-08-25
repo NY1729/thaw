@@ -213,7 +213,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function isatty(argsArray: any): any;\nexport declare function ReadStream(argsArray: any): any;\nexport declare function WriteStream(argsArray: any): any;\n"
         }
         "tls" => {
-            "export declare function connect(argsArray: any): any;\nexport declare function TLSSocket(argsArray: any): any;\nexport declare function createSecureContext(argsArray: any): any;\nexport declare function checkServerIdentity(argsArray: any): any;\nexport declare function getCiphers(argsArray: any): any;\n"
+            "export declare function connect(argsArray: any): any;\nexport declare function TLSSocket(argsArray: any): any;\nexport declare function createSecureContext(argsArray: any): any;\nexport declare function checkServerIdentity(argsArray: any): any;\nexport declare function getCiphers(argsArray: any): any;\nexport declare function Server(argsArray: any): any;\nexport declare function createServer(argsArray: any): any;\n"
         }
         "module" => {
             "export declare function createRequire(argsArray: any): any;\nexport declare function isBuiltin(argsArray: any): any;\nexport declare function syncBuiltinESMExports(argsArray: any): void;\nexport declare function findSourceMap(argsArray: any): any;\nexport declare function SourceMap(argsArray: any): any;\nexport declare function register(argsArray: any): any;\nexport declare function registerHooks(argsArray: any): any;\n"
@@ -3181,9 +3181,16 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function Server(options, listener) { if (!(this instanceof Server)) return new Server(options, listener); if (typeof options === 'function') { listener = options; options = {}; } this._events = Object.create(null); this._handle = 0; this._address = null; this.listening = false; this.maxConnections = 0; this.connections = 0; this._refed = true; if (typeof listener === 'function') this.on('connection', listener); } Server.prototype.on = Socket.prototype.on; Server.prototype.once = Socket.prototype.once; Server.prototype.off = Server.prototype.removeListener = Socket.prototype.off; Server.prototype.emit = Socket.prototype.emit; Server.prototype.listen = function(port, host, callback) { var options = typeof port === 'object' ? port : { port: port, host: host }; if (typeof host === 'function') callback = host; if (typeof callback === 'function') this.once('listening', callback); var hostname = String(options.host || '127.0.0.1'); var outcome = __thaw_net_listen(hostname, Number(options.port)); if (outcome.indexOf('ok:') !== 0) { var error = new Error(outcome.substring(4)); error.code = 'EADDRINUSE'; queueMicrotask(() => this.emit('error', error)); return this; } var fields = outcome.split(':'); this._handle = Number(fields[1]); this._address = { address: hostname, family: isIPv6(hostname) ? 'IPv6' : 'IPv4', port: Number(fields[2]) }; this.listening = true; queueMicrotask(() => { this.emit('listening'); var accepted = __thaw_net_accept(this._handle); if (accepted.indexOf('ok:') !== 0) return; var peer = accepted.split(':'); var socket = new Socket(); socket._handle = Number(peer[1]); socket.pending = false; socket.readable = true; socket.writable = true; socket.remoteAddress = peer[2]; socket.remotePort = Number(peer[3]); socket.remoteFamily = isIPv6(peer[2]) ? 'IPv6' : 'IPv4'; this.connections++; this.emit('connection', socket); var incoming = __thaw_net_read(socket._handle); if (incoming.indexOf('ok:') === 0) { var data = Buffer.from(incoming.substring(3), 'hex'); if (data.length) { socket.bytesRead += data.length; socket.emit('data', data); } socket.emit('end'); } else { var readError = new Error(incoming.substring(4)); readError.code = 'ECONNRESET'; socket.emit('error', readError); } }); return this; }; Server.prototype.address = function() { return this._address; }; Server.prototype.getConnections = function(callback) { queueMicrotask(() => callback(null, this.connections)); }; Server.prototype.close = function(callback) { if (typeof callback === 'function') this.once('close', callback); if (this._handle) __thaw_net_close_listener(this._handle); this._handle = 0; this.listening = false; queueMicrotask(() => this.emit('close')); return this; }; Server.prototype.closeAllConnections = Server.prototype.closeIdleConnections = function() {}; Server.prototype.ref = function() { this._refed = true; return this; }; Server.prototype.unref = function() { this._refed = false; return this; }; function createServer(options, listener) { return new Server(options, listener); }\n\
              module.exports = { isIP: isIP, isIPv4: isIPv4, isIPv6: isIPv6, BlockList: BlockList, SocketAddress: SocketAddress, Socket: Socket, createConnection: createConnection, connect: createConnection, Server: Server, createServer: createServer }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
-        "tls" => Some(
+        "tls" => Some(concat!(
             "function TLSSocket(socket, options) { if (!(this instanceof TLSSocket)) return new TLSSocket(socket, options); this._events = Object.create(null); this._handle = 0; this.connecting = false; this.destroyed = false; this.readable = false; this.writable = false; this.encrypted = true; this.authorized = false; this.authorizationError = null; this.alpnProtocol = false; this.servername = null; this.bytesRead = 0; this.bytesWritten = 0; this._refed = true; } TLSSocket.prototype.on = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: false }); return this; }; TLSSocket.prototype.once = function(name, listener) { var key = String(name); (this._events[key] || (this._events[key] = [])).push({ listener: listener, once: true }); return this; }; TLSSocket.prototype.off = TLSSocket.prototype.removeListener = function(name, listener) { var key = String(name); this._events[key] = (this._events[key] || []).filter(function(entry) { return entry.listener !== listener; }); return this; }; TLSSocket.prototype.emit = function(name) { var key = String(name), list = (this._events[key] || []).slice(), args = Array.prototype.slice.call(arguments, 1); list.forEach(function(entry) { if (entry.once) this.off(key, entry.listener); entry.listener.apply(this, args); }, this); return list.length > 0; }; TLSSocket.prototype.connect = function(options, listener) { if (typeof options === 'number') options = { port: options }; options = options || {}; if (typeof listener === 'function') this.once('secureConnect', listener); var host = String(options.host || 'localhost'), port = Number(options.port), servername = String(options.servername || host); var ca = options.ca; if (Array.isArray(ca)) ca = ca[0]; var caHex = ca === undefined ? '' : Buffer.from(ca).toString('hex'); this.connecting = true; var outcome = __thaw_tls_connect(host, port, servername, caHex); this.connecting = false; this.servername = servername; if (outcome.indexOf('ok:') === 0) { this._handle = Number(outcome.substring(3)); this.readable = true; this.writable = true; this.authorized = true; queueMicrotask(() => { this.emit('connect'); this.emit('secureConnect'); }); } else { var error = new Error(outcome.substring(4)); error.code = 'ERR_TLS_CERT_ALTNAME_INVALID'; this.authorizationError = error.message; this.destroyed = true; queueMicrotask(() => { this.emit('error', error); this.emit('close', true); }); } return this; }; TLSSocket.prototype.write = function(value, encoding, callback) { if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (!this._handle || !this.writable) throw new Error('TLS socket is not writable'); var buffer = Buffer.isBuffer(value) ? value : Buffer.from(value, encoding); var outcome = __thaw_tls_write(this._handle, buffer.toString('hex')); if (outcome !== 'ok') throw new Error(outcome.substring(4)); this.bytesWritten += buffer.length; if (callback) queueMicrotask(callback); return true; }; TLSSocket.prototype.end = function(value, encoding, callback) { if (typeof value === 'function') { callback = value; value = undefined; } else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (value !== undefined) this.write(value, encoding); var outcome = __thaw_tls_finish(this._handle); this._handle = 0; this.writable = false; this.readable = false; this.destroyed = true; queueMicrotask(() => { if (outcome.indexOf('ok:') === 0) { var data = Buffer.from(outcome.substring(3), 'hex'); if (data.length) { this.bytesRead += data.length; this.emit('data', data); } this.emit('end'); if (callback) callback(); this.emit('close', false); } else { var error = new Error(outcome.substring(4)); error.code = 'ECONNRESET'; this.emit('error', error); this.emit('close', true); } }); return this; }; TLSSocket.prototype.destroy = function(error) { if (this._handle) __thaw_tls_destroy(this._handle); this._handle = 0; this.destroyed = true; if (error) queueMicrotask(() => this.emit('error', error)); queueMicrotask(() => this.emit('close', Boolean(error))); return this; }; TLSSocket.prototype.setEncoding = function(encoding) { var emit = this.emit; this.emit = function(name, value) { if (name === 'data' && Buffer.isBuffer(value)) value = value.toString(encoding); return emit.call(this, name, value); }; return this; }; TLSSocket.prototype.getProtocol = function() { return this.authorized ? 'TLSv1.3' : null; }; TLSSocket.prototype.getCipher = function() { return { name: 'TLS_AES_256_GCM_SHA384', standardName: 'TLS_AES_256_GCM_SHA384', version: 'TLSv1.3' }; }; TLSSocket.prototype.getPeerCertificate = function() { return this.authorized ? { subject: {}, issuer: {}, valid_from: '', valid_to: '' } : {}; }; TLSSocket.prototype.getCertificate = function() { return {}; }; TLSSocket.prototype.getFinished = TLSSocket.prototype.getPeerFinished = function() { return undefined; }; TLSSocket.prototype.isSessionReused = function() { return false; }; TLSSocket.prototype.renegotiate = function(options, callback) { if (callback) queueMicrotask(function() { callback(new Error('TLS renegotiation is not supported')); }); return false; }; TLSSocket.prototype.setMaxSendFragment = function() { return true; }; TLSSocket.prototype.enableTrace = function() {}; TLSSocket.prototype.ref = function() { this._refed = true; return this; }; TLSSocket.prototype.unref = function() { this._refed = false; return this; }; function connect(options, listener) { return new TLSSocket().connect(options, listener); } function createSecureContext(options) { return { context: options || {}, options: options || {} }; } function checkServerIdentity() { return undefined; } function getCiphers() { return ['tls_aes_128_gcm_sha256', 'tls_aes_256_gcm_sha384', 'tls_chacha20_poly1305_sha256']; } module.exports = { TLSSocket: TLSSocket, connect: connect, createSecureContext: createSecureContext, checkServerIdentity: checkServerIdentity, getCiphers: getCiphers, rootCertificates: [], DEFAULT_MIN_VERSION: 'TLSv1.2', DEFAULT_MAX_VERSION: 'TLSv1.3', CLIENT_RENEG_LIMIT: 3, CLIENT_RENEG_WINDOW: 600 }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
-        ),
+            r#"
+             function Server(options, listener) { if (!(this instanceof Server)) return new Server(options, listener); this._events = Object.create(null); this._options = options || {}; this._handle = 0; this._address = null; this.listening = false; this.connections = 0; this.maxConnections = 0; this._refed = true; if (typeof listener === 'function') this.on('secureConnection', listener); }
+             Server.prototype.on = TLSSocket.prototype.on; Server.prototype.once = TLSSocket.prototype.once; Server.prototype.off = Server.prototype.removeListener = TLSSocket.prototype.off; Server.prototype.emit = TLSSocket.prototype.emit;
+             Server.prototype.listen = function(port, host, callback) { var options = typeof port === 'object' ? port : { port: port, host: host }; if (typeof host === 'function') callback = host; if (typeof callback === 'function') this.once('listening', callback); var hostname = String(options.host || '127.0.0.1'); var cert = this._options.cert, key = this._options.key; if (Array.isArray(cert)) cert = cert[0]; if (Array.isArray(key)) key = key[0]; if (cert === undefined || key === undefined) { queueMicrotask(() => this.emit('error', new Error('cert and key are required'))); return this; } var outcome = __thaw_tls_server_listen(hostname, Number(options.port), Buffer.from(cert).toString('hex'), Buffer.from(key).toString('hex')); if (outcome.indexOf('ok:') !== 0) { queueMicrotask(() => this.emit('error', new Error(outcome.substring(4)))); return this; } var fields = outcome.split(':'); this._handle = Number(fields[1]); this._address = { address: hostname, family: hostname.indexOf(':') >= 0 ? 'IPv6' : 'IPv4', port: Number(fields[2]) }; this.listening = true; queueMicrotask(() => { this.emit('listening'); var accepted = __thaw_tls_server_accept(this._handle); if (accepted.indexOf('ok:') !== 0) { this.emit('tlsClientError', new Error(accepted.substring(4))); return; } var peer = accepted.split(':'); var socket = new TLSSocket(); socket._handle = Number(peer[1]); socket.authorized = true; socket.readable = true; socket.writable = true; socket.remoteAddress = peer[2]; socket.remotePort = Number(peer[3]); socket.remoteFamily = peer[2].indexOf(':') >= 0 ? 'IPv6' : 'IPv4'; this.connections++; this.emit('secureConnection', socket); var incoming = __thaw_tls_server_read(socket._handle); if (incoming.indexOf('ok:') === 0) { var data = Buffer.from(incoming.substring(3), 'hex'); if (data.length) { socket.bytesRead += data.length; socket.emit('data', data); } socket.emit('end'); } else socket.emit('error', new Error(incoming.substring(4))); }); return this; };
+             Server.prototype.address = function() { return this._address; }; Server.prototype.getConnections = function(callback) { queueMicrotask(() => callback(null, this.connections)); }; Server.prototype.close = function(callback) { if (typeof callback === 'function') this.once('close', callback); if (this._handle) __thaw_tls_server_close(this._handle); this._handle = 0; this.listening = false; queueMicrotask(() => this.emit('close')); return this; }; Server.prototype.ref = function() { this._refed = true; return this; }; Server.prototype.unref = function() { this._refed = false; return this; }; function createServer(options, listener) { return new Server(options, listener); }
+             module.exports.Server = Server; module.exports.createServer = createServer;
+"#,
+        )),
         "console" => Some(
             "module.exports = globalThis.console; module.exports.Console = globalThis.Console; module.exports.console = globalThis.console; module.exports.default = globalThis.console; module.exports.__esModule = true;\n",
         ),
@@ -6010,6 +6017,125 @@ mod tests {
             r#"[["connect","secureConnect","data:pong","end","close:false"],true,null,true,"TLSv1.3","TLSv1.3",4,4,3,"TLSv1.2"]"#
         );
         server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        let _ = fs::remove_dir_all(&certificate_dir);
+    }
+
+    #[test]
+    fn tls_server_accepts_verified_clients_and_exchanges_encrypted_bytes() {
+        use rustls::pki_types::{CertificateDer, ServerName};
+        use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+        use std::ffi::{CStr, CString};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::process::Command;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let certificate_dir = temp_registry("builtin_tls_server_certificate");
+        let key_pem = certificate_dir.join("key.pem");
+        let cert_pem = certificate_dir.join("cert.pem");
+        let cert_der = certificate_dir.join("cert.der");
+        assert!(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=critical,digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-keyout",
+            ])
+            .arg(&key_pem)
+            .arg("-out")
+            .arg(&cert_pem)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        assert!(Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(&cert_pem)
+            .args(["-outform", "DER", "-out"])
+            .arg(&cert_der)
+            .status()
+            .unwrap()
+            .success());
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(fs::read(&cert_der).unwrap()))
+            .unwrap();
+        let config = Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        );
+        let client = std::thread::spawn(move || {
+            let socket = (0..50)
+                .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(socket) => Some(socket),
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        None
+                    }
+                })
+                .expect("TLS server did not start");
+            let connection = ClientConnection::new(
+                config,
+                ServerName::try_from("localhost".to_string()).unwrap(),
+            )
+            .unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            stream.write_all(b"ping").unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            response
+        });
+        let to_hex = |value: &[u8]| {
+            value.iter().fold(String::new(), |mut output, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(output, "{byte:02x}");
+                output
+            })
+        };
+        let cert_hex = to_hex(&fs::read(&cert_pem).unwrap());
+        let key_hex = to_hex(&fs::read(&key_pem).unwrap());
+        let dir = temp_registry("builtin_tls_server");
+        fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function(port, certHex, keyHex) { var events = []; var server; var closed = new Promise(function(resolve, reject) { server = tls.createServer({ cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex') }, function(socket) { events.push('secureConnection'); socket.on('error', reject); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); socket.end('pong', function() { server.close(); }); }); }); server.on('listening', function() { events.push('listening'); }); server.on('error', reject); server.on('tlsClientError', reject); server.on('close', function() { events.push('close'); resolve(); }); server.listen(port, '127.0.0.1'); }); await closed; return [events, server.listening, server.address().port, server.connections]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_tls_server_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsServer = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseTlsServer").unwrap();
+        let arguments = CString::new(format!("[{port},\"{cert_hex}\",\"{key_hex}\"]")).unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            format!(r#"[["listening","secureConnection","data:ping","close"],false,{port},1]"#)
+        );
+        assert_eq!(client.join().unwrap(), b"pong");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
         let _ = fs::remove_dir_all(&certificate_dir);
