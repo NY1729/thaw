@@ -164,6 +164,12 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "string_decoder" => {
             "export declare function StringDecoder(argsArray: any): any;\n"
         }
+        "timers" => {
+            "export declare function setTimeout(argsArray: any): any;\nexport declare function clearTimeout(argsArray: any): void;\nexport declare function setInterval(argsArray: any): any;\nexport declare function clearInterval(argsArray: any): void;\nexport declare function setImmediate(argsArray: any): any;\nexport declare function clearImmediate(argsArray: any): void;\n"
+        }
+        "timers/promises" => {
+            "export declare function setTimeout(argsArray: any): any;\nexport declare function setImmediate(argsArray: any): any;\nexport declare function setInterval(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2833,6 +2839,34 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { StringDecoder: StringDecoder };\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
+        "timers" => Some(
+            "module.exports = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval, setImmediate: globalThis.setImmediate, clearImmediate: globalThis.clearImmediate };\n\
+             module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "timers/promises" => Some(
+            "function abortReason(signal) { return signal && signal.reason !== undefined ? signal.reason : new DOMException('This operation was aborted', 'AbortError'); }\n\
+             function promiseTimer(schedule, delay, value, options) {\n\
+             \x20\x20options = options || {}; var signal = options.signal;\n\
+             \x20\x20return new Promise(function(resolve, reject) {\n\
+             \x20\x20\x20\x20if (signal && signal.aborted) { reject(abortReason(signal)); return; }\n\
+             \x20\x20\x20\x20var id; function aborted() { if (schedule === globalThis.setImmediate) globalThis.clearImmediate(id); else globalThis.clearTimeout(id); reject(abortReason(signal)); }\n\
+             \x20\x20\x20\x20id = schedule(function() { if (signal) signal.removeEventListener('abort', aborted); resolve(value); }, delay);\n\
+             \x20\x20\x20\x20if (signal) signal.addEventListener('abort', aborted, { once: true });\n\
+             \x20\x20});\n\
+             }\n\
+             function setTimeoutPromise(delay, value, options) { return promiseTimer(globalThis.setTimeout, delay, value, options); }\n\
+             function setImmediatePromise(value, options) { return promiseTimer(globalThis.setImmediate, 0, value, options); }\n\
+             function setIntervalPromise(delay, value, options) {\n\
+             \x20\x20options = options || {}; var signal = options.signal; var values = []; var waiters = []; var done = false; var failure;\n\
+             \x20\x20var id = globalThis.setInterval(function() { var result = { value: value, done: false }; if (waiters.length) waiters.shift().resolve(result); else values.push(result); }, delay);\n\
+             \x20\x20function stop(error) { if (done) return; done = true; failure = error; globalThis.clearInterval(id); while (waiters.length) { var waiter = waiters.shift(); if (error) waiter.reject(error); else waiter.resolve({ value: undefined, done: true }); } }\n\
+             \x20\x20if (signal) { if (signal.aborted) stop(abortReason(signal)); else signal.addEventListener('abort', function() { stop(abortReason(signal)); }, { once: true }); }\n\
+             \x20\x20return { next: function() { if (values.length) return Promise.resolve(values.shift()); if (done) return failure ? Promise.reject(failure) : Promise.resolve({ value: undefined, done: true }); return new Promise(function(resolve, reject) { waiters.push({ resolve: resolve, reject: reject }); }); }, return: function() { stop(); return Promise.resolve({ value: undefined, done: true }); }, [Symbol.asyncIterator]: function() { return this; } };\n\
+             }\n\
+             var scheduler = { wait: function(delay, options) { return setTimeoutPromise(delay, undefined, options); }, yield: function() { return setImmediatePromise(); } };\n\
+             module.exports = { setTimeout: setTimeoutPromise, setImmediate: setImmediatePromise, setInterval: setIntervalPromise, scheduler: scheduler };\n\
+             module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
         _ => None,
     }
 }
@@ -4594,6 +4628,48 @@ mod tests {
         assert_eq!(
             result,
             r#"[["","","雪",""],["A","雪"],"aGVsbG8=","�",0,"utf8"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn timer_modules_share_the_runtime_queue_and_support_abort() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_timers");
+        fs::write(
+            dir.join("index.js"),
+            "var timers = require('node:timers'); var promises = require('node:timers/promises');\n\
+             module.exports = async function () {\n\
+             \x20 var immediate = await new Promise(function(resolve) { timers.setImmediate(resolve, 'immediate'); });\n\
+             \x20 var delayed = await promises.setTimeout(0, 'delayed'); await promises.scheduler.yield();\n\
+             \x20 var controller = new AbortController(); controller.abort('cancelled'); var reason; try { await promises.setTimeout(1, 'wrong', { signal: controller.signal }); } catch (error) { reason = error; }\n\
+             \x20 var interval = promises.setInterval(0, 'tick'); var first = await interval.next(); var second = await interval.next(); var ended = await interval.return();\n\
+             \x20 return [immediate, delayed, reason, first.value, first.done, second.value, ended.done];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_timers_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseTimers = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseTimers").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["immediate","delayed","cancelled","tick",false,"tick",true]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
