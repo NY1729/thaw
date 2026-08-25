@@ -112,6 +112,49 @@ const PLATFORM_GLOBALS: &str = r#"
     cwd: globalThis.process.cwd || (() => '/'),
     nextTick
   });
+
+  const base64Alphabet =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  globalThis.btoa = input => {
+    const text = String(input);
+    let output = '';
+    for (let offset = 0; offset < text.length; offset += 3) {
+      const first = text.charCodeAt(offset);
+      const second = offset + 1 < text.length ? text.charCodeAt(offset + 1) : 0;
+      const third = offset + 2 < text.length ? text.charCodeAt(offset + 2) : 0;
+      if (first > 255 || second > 255 || third > 255) {
+        throw new TypeError('btoa input must contain only Latin-1 characters');
+      }
+      const bits = first << 16 | second << 8 | third;
+      output += base64Alphabet[bits >> 18 & 63];
+      output += base64Alphabet[bits >> 12 & 63];
+      output += offset + 1 < text.length ? base64Alphabet[bits >> 6 & 63] : '=';
+      output += offset + 2 < text.length ? base64Alphabet[bits & 63] : '=';
+    }
+    return output;
+  };
+  globalThis.atob = input => {
+    const encoded = String(input).replace(/[\t\n\f\r ]/g, '');
+    if (encoded.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+      throw new TypeError('invalid base64 input');
+    }
+    const unpadded = encoded.replace(/=+$/, '');
+    if (encoded.includes('=') && encoded.length % 4 !== 0) {
+      throw new TypeError('invalid base64 padding');
+    }
+    let output = '';
+    let bits = 0;
+    let bitCount = 0;
+    for (const character of unpadded) {
+      bits = bits << 6 | base64Alphabet.indexOf(character);
+      bitCount += 6;
+      if (bitCount >= 8) {
+        bitCount -= 8;
+        output += String.fromCharCode(bits >> bitCount & 255);
+      }
+    }
+    return output;
+  };
   globalThis.__thaw_next_timer_delay = () => {
     let due = Infinity;
     for (const timer of timers.values()) due = Math.min(due, timer.due);
@@ -1057,6 +1100,23 @@ mod tests {
             1
         );
         assert_eq!(call("tickOrder", "[]"), r#"["sync","after","nextTick"]"#);
+    }
+
+    #[test]
+    fn base64_globals_round_trip_latin1_and_validate_input() {
+        assert_eq!(
+            load(
+                "function base64() {\n\
+                   let invalid = false;\n\
+                   try { atob('%%%'); } catch (error) { invalid = error instanceof TypeError; }\n\
+                   let invalidUnicode = false;\n\
+                   try { btoa('雪'); } catch (error) { invalidUnicode = error instanceof TypeError; }\n\
+                   return [btoa('hello\\u00ff'), atob('aGVs bG//\\n'), invalid, invalidUnicode];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("base64", "[]"), r#"["aGVsbG//","helloÿ",true,true]"#);
     }
 
     #[test]
