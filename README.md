@@ -134,6 +134,9 @@ The workspace crates have narrow responsibilities:
   primitive representation (`"a" | "b"` to string, numeric literals to
   number, and boolean literals to boolean), including `.d.ts` Fast-path
   signatures, nested object/array positions, and async frames
+- Compatible fixed-object intersections merge distinct fields in source order
+  across native calls, `.d.ts` Fast paths, and async frames; duplicate fields
+  must have the same native type
 - Heterogeneous native unions use an explicit tag and word payload across
   locals, function parameters/returns, fixed-shape object fields, nested calls,
   async frames, and homogeneous arrays (including index updates and spread
@@ -671,7 +674,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual/generic TypeScript inference, overload resolution, classes,
-  tuples, heterogeneous intersections, multi-capture export keys and the
+  tuples, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant

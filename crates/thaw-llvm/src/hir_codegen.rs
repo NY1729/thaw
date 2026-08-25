@@ -13884,6 +13884,31 @@ mod tests {
     }
 
     #[test]
+    fn compiles_compatible_object_intersections() {
+        let source = r#"
+            function inspect(
+                value: { name: string } & { count: number } & { enabled: boolean }
+            ): string {
+                return value.name + ":" + String(value.count) + ":" + String(value.enabled);
+            }
+            async function delayed(
+                value: { name: string } & { count: number }
+            ): Promise<string> {
+                await sleep(1);
+                return value.name + String(value.count);
+            }
+            async function main(): Promise<void> {
+                console.log(inspect({ enabled: true, count: 3, name: "item" }));
+                console.log(await delayed({ count: 4, name: "later" }));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "compatible_object_intersections"),
+            "item:3:true\nlater4\n"
+        );
+    }
+
+    #[test]
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }
