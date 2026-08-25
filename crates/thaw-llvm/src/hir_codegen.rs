@@ -14233,6 +14233,8 @@ mod tests {
                 const chained: Identity = identity;
                 const namedChain: Identity = forwarded;
                 const aliasChain: ForwardIdentity = identity;
+                const inferredArrowChain = aliasChain;
+                const inferredNamedChain = namedChain;
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14244,11 +14246,13 @@ mod tests {
                 console.log(chained<string>("arrow-chain"));
                 console.log(namedChain(29));
                 console.log(aliasChain<string>("type-alias-chain"));
+                console.log(inferredArrowChain(30));
+                console.log(inferredNamedChain<string>("inferred-chain"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\n"
         );
     }
 
