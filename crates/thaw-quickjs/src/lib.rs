@@ -1777,8 +1777,9 @@ const PLATFORM_GLOBALS: &str = r#"
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
   if (typeof globalThis.structuredClone !== 'function') {
-    globalThis.structuredClone = value => {
+    globalThis.structuredClone = (value, options = {}) => {
       const seen = new Map();
+      const transfer = new Set(options.transfer || []);
       const clone = input => {
         if (input === null || typeof input !== 'object') {
           if (typeof input === 'function' || typeof input === 'symbol') {
@@ -1788,6 +1789,16 @@ const PLATFORM_GLOBALS: &str = r#"
           return input;
         }
         if (seen.has(input)) return seen.get(input);
+        if (typeof globalThis.MessagePort === 'function'
+            && input instanceof globalThis.MessagePort) {
+          if (!transfer.has(input)) {
+            throw new DOMException('MessagePort requires a transfer list',
+                                   'DataCloneError');
+          }
+          const output = input.__thawTransfer();
+          seen.set(input, output);
+          return output;
+        }
         let output;
         if (input instanceof Date) {
           output = new Date(input.getTime());
@@ -2238,8 +2249,24 @@ const PLATFORM_GLOBALS: &str = r#"
           queueMicrotask(() => peer.__thawDispatchError(error));
           return;
         }
-        this.__thawPeer.__thawQueue.push({ data: copy, ports: [] });
+        const ports = transfer.filter(item => item instanceof MessagePort)
+          .map(item => item.__thawTransferredPort || item);
+        this.__thawPeer.__thawQueue.push({ data: copy, ports });
         this.__thawPeer.__thawSchedule();
+      }
+      __thawTransfer() {
+        if (this.__thawClosed || !this.__thawPeer) {
+          throw new DOMException('MessagePort is already detached', 'DataCloneError');
+        }
+        const transferred = new MessagePort();
+        transferred.__thawPeer = this.__thawPeer;
+        transferred.__thawQueue = this.__thawQueue;
+        this.__thawPeer.__thawPeer = transferred;
+        this.__thawQueue = [];
+        this.__thawPeer = null;
+        this.__thawClosed = true;
+        this.__thawTransferredPort = transferred;
+        return transferred;
       }
       __thawSchedule() {
         if (this.__thawScheduled || this.__thawClosed) return;
@@ -3708,6 +3735,26 @@ mod tests {
             1
         );
         assert_eq!(call("cloneValues", "[]"), "[true,true,1,2,4,true,6,true]");
+    }
+
+    #[test]
+    fn message_port_transfer_detaches_the_source_port() {
+        assert_eq!(
+            load(
+                "async function transferPort() {\n\
+                   const channel = new MessageChannel(), carrier = new MessageChannel();\n\
+                   const received = new Promise(resolve => { carrier.port2.onmessage = event => resolve([event.data.port, event.ports]); });\n\
+                   carrier.port1.postMessage({ port: channel.port1 }, [channel.port1]);\n\
+                   const [port, ports] = await received;\n\
+                   const delivered = new Promise(resolve => { channel.port2.onmessage = event => resolve(event.data); });\n\
+                   channel.port1.postMessage('ignored'); port.postMessage('through');\n\
+                   const value = await delivered; carrier.port1.close(); carrier.port2.close(); port.close(); channel.port2.close();\n\
+                   return [channel.port1.__thawClosed, value, ports[0] === port];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("transferPort", "[]"), r#"[true,"through",true]"#);
     }
 
     #[test]
