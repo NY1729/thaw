@@ -312,6 +312,11 @@ The workspace crates have narrow responsibilities:
   consumers with disturbance tracking, clones bodies through `tee()`, and
   provides `json()`, `redirect()` and `error()` factories. The supporting
   `FormData` collection covers repeated string/Blob fields and ordered mutation
+- Global `Request` normalizes absolute credential-free URLs and standard HTTP
+  methods, validates fetch mode/cache/credentials/redirect/referrer policies,
+  follows AbortSignals, inherits or overrides other Requests, moves inherited
+  bodies, clones through `tee()`, and enforces GET/HEAD and streaming-duplex
+  body rules while sharing the Response body consumers
 - QuickJS bundles receive `setTimeout`/`clearTimeout`, repeating
   `setInterval`/`clearInterval`, `setImmediate`/`clearImmediate`, and
   `queueMicrotask`. Promise waits drive the

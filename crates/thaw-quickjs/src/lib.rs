@@ -4401,7 +4401,82 @@ const PLATFORM_GLOBALS: &str = r#"
       static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); return new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); }
       get [Symbol.toStringTag]() { return 'Response'; }
     }
+    const requestData = new WeakMap();
+    const consumeRequestBody = async request => {
+      const record = requestData.get(request); if (!record) throw new TypeError('invalid Request receiver');
+      if (!record.body) return new Uint8Array();
+      if (record.body._disturbed || record.body.locked) throw new TypeError('Body is unusable');
+      const reader = record.body.getReader(), chunks = []; let length = 0;
+      while (true) { const result = await reader.read(); if (result.done) break; const chunk = result.value instanceof ArrayBuffer ? new Uint8Array(result.value) : ArrayBuffer.isView(result.value) ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength) : Uint8Array.from(encodeUtf8(String(result.value))); chunks.push(chunk); length += chunk.byteLength; }
+      const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; } return output;
+    };
+    class Request {
+      constructor(input, init = {}) {
+        const inherited = requestData.get(input), url = new URL(inherited ? inherited.url : String(input));
+        if (url.username || url.password) throw new TypeError('Request URL cannot contain credentials');
+        let method = init.method === undefined ? inherited ? inherited.method : 'GET' : String(init.method);
+        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(method)) throw new TypeError('invalid HTTP method');
+        const upperMethod = method.toUpperCase(); if (['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upperMethod)) method = upperMethod;
+        if (upperMethod === 'CONNECT' || upperMethod === 'TRACE' || upperMethod === 'TRACK') throw new TypeError(`unsupported HTTP method ${upperMethod}`);
+        const headers = new Headers(init.headers === undefined ? inherited ? inherited.headers : undefined : init.headers), hasBody = Object.prototype.hasOwnProperty.call(init, 'body');
+        let normalized = { stream: null, type: null };
+        if (hasBody) normalized = responseBody(init.body);
+        else if (inherited && inherited.body) {
+          if (inherited.body._disturbed || inherited.body.locked) throw new TypeError('Body is unusable');
+          const reader = inherited.body.getReader(); inherited.body._disturbed = true;
+          normalized.stream = new ReadableStream({ async pull(controller) { const result = await reader.read(); if (result.done) controller.close(); else controller.enqueue(result.value); }, cancel(reason) { return reader.cancel(reason); } });
+        }
+        if ((method === 'GET' || method === 'HEAD') && normalized.stream) throw new TypeError('Request with GET/HEAD method cannot have body');
+        if (hasBody && init.body instanceof ReadableStream && init.duplex !== 'half') throw new TypeError('duplex option is required for a streaming body');
+        if (normalized.type && !headers.has('content-type')) headers.set('content-type', normalized.type);
+        const sourceSignal = init.signal === undefined ? inherited ? inherited.signal : null : init.signal, signalController = new AbortController();
+        if (sourceSignal) { if (typeof sourceSignal.aborted !== 'boolean' || typeof sourceSignal.addEventListener !== 'function') throw new TypeError('signal must be an AbortSignal'); if (sourceSignal.aborted) signalController.abort(sourceSignal.reason); else sourceSignal.addEventListener('abort', () => signalController.abort(sourceSignal.reason), { once: true }); }
+        const select = (value, fallback, accepted, name) => { const selected = value === undefined ? fallback : String(value); if (!accepted.includes(selected)) throw new TypeError(`invalid Request ${name}`); return selected; };
+        const mode = select(init.mode, inherited ? inherited.mode : 'cors', ['same-origin', 'no-cors', 'cors'], 'mode');
+        const cache = select(init.cache, inherited ? inherited.cache : 'default', ['default', 'no-store', 'reload', 'no-cache', 'force-cache', 'only-if-cached'], 'cache');
+        if (cache === 'only-if-cached' && mode !== 'same-origin') throw new TypeError('only-if-cached requires same-origin mode');
+        const credentials = select(init.credentials, inherited ? inherited.credentials : 'same-origin', ['omit', 'same-origin', 'include'], 'credentials');
+        const redirect = select(init.redirect, inherited ? inherited.redirect : 'follow', ['follow', 'manual', 'error'], 'redirect');
+        const referrerPolicy = select(init.referrerPolicy, inherited ? inherited.referrerPolicy : '', ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'], 'referrerPolicy');
+        let referrer = init.referrer === undefined ? inherited ? inherited.referrer : 'about:client' : String(init.referrer);
+        if (referrer && referrer !== 'about:client') referrer = new URL(referrer).href;
+        requestData.set(this, {
+          body: normalized.stream, headers, method, url: url.href, signal: signalController.signal,
+          cache, credentials,
+          destination: inherited ? inherited.destination : '',
+          integrity: init.integrity === undefined ? inherited ? inherited.integrity : '' : String(init.integrity),
+          keepalive: init.keepalive === undefined ? inherited ? inherited.keepalive : false : Boolean(init.keepalive),
+          mode, redirect, referrer, referrerPolicy,
+          duplex: 'half'
+        });
+      }
+      get body() { return requestData.get(this).body; }
+      get bodyUsed() { const body = requestData.get(this).body; return Boolean(body && body._disturbed); }
+      get cache() { return requestData.get(this).cache; }
+      get credentials() { return requestData.get(this).credentials; }
+      get destination() { return requestData.get(this).destination; }
+      get duplex() { return requestData.get(this).duplex; }
+      get headers() { return requestData.get(this).headers; }
+      get integrity() { return requestData.get(this).integrity; }
+      get keepalive() { return requestData.get(this).keepalive; }
+      get method() { return requestData.get(this).method; }
+      get mode() { return requestData.get(this).mode; }
+      get redirect() { return requestData.get(this).redirect; }
+      get referrer() { return requestData.get(this).referrer; }
+      get referrerPolicy() { return requestData.get(this).referrerPolicy; }
+      get signal() { return requestData.get(this).signal; }
+      get url() { return requestData.get(this).url; }
+      async arrayBuffer() { const bytes = await consumeRequestBody(this); return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength); }
+      async blob() { const record = requestData.get(this), bytes = await consumeRequestBody(this); return new Blob([bytes], { type: record.headers.get('content-type') || '' }); }
+      async bytes() { return consumeRequestBody(this); }
+      async json() { return JSON.parse(await this.text()); }
+      async text() { return new TextDecoder().decode(await consumeRequestBody(this)); }
+      async formData() { const type = this.headers.get('content-type') || ''; if (!type.toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new TypeError('unsupported form data content type'); const params = new URLSearchParams(await this.text()), data = new FormData(); for (const [name, value] of params) data.append(name, value); return data; }
+      clone() { const record = requestData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } return new Request(record.url, { method: record.method, headers: record.headers, body, signal: record.signal, cache: record.cache, credentials: record.credentials, integrity: record.integrity, keepalive: record.keepalive, mode: record.mode, redirect: record.redirect, referrer: record.referrer, referrerPolicy: record.referrerPolicy, duplex: 'half' }); }
+      get [Symbol.toStringTag]() { return 'Request'; }
+    }
     globalThis.Response = Response;
+    globalThis.Request = Request;
   }
   if (typeof globalThis.MessageChannel !== 'function') {
     class MessagePort extends EventTarget {
