@@ -354,8 +354,9 @@ The workspace crates have narrow responsibilities:
   top-level `const` and `path.join/resolve(__dirname, ...)`), and their bundled
   `require()` dependencies, CommonJS or ESM worker entry syntax, cloned
   `workerData`, `parentPort` message exchange,
-  per-worker `argv`, copied or `SHARE_ENV` process environments, reported
-  resource limits, protected transfer/clone markers, lifecycle events and
+  per-worker `argv`/`execArgv` and thread names, copied or `SHARE_ENV` process
+  environments, reported resource limits, protected transfer/clone markers,
+  lifecycle events and
   EventEmitter-style listener management and termination (runtime-computed
   worker paths, stdio redirection and parallel OS threads remain later)
 - The shared `process` global and `node:process` module provide asynchronous
