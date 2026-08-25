@@ -3779,8 +3779,56 @@ const PLATFORM_GLOBALS: &str = r#"
       }
       get locked() { return this._reader !== null; }
       getReader() { return new ReadableStreamDefaultReader(this); }
-      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
+      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; if (typeof this._source.cancel === 'function') return Promise.resolve(this._source.cancel(reason)).then(() => this._controller.close()); this._controller.close(); return Promise.resolve(); }
       cancel(reason) { if (this.locked) return Promise.reject(new TypeError('stream is locked')); return this._cancel(reason); }
+      tee() {
+        if (this.locked) throw webInvalidState('ReadableStream is locked');
+        const reader = this.getReader(), controllers = [null, null], cancelled = [false, false], reasons = [undefined, undefined], demand = [false, false];
+        let reading = false, finished = false, resolveCancellation, rejectCancellation;
+        const cancellation = new Promise((resolve, reject) => { resolveCancellation = resolve; rejectCancellation = reject; });
+        const finish = result => {
+          if (finished) return;
+          finished = true;
+          for (let index = 0; index < 2; index++) {
+            if (cancelled[index]) continue;
+            if (result && result.error) controllers[index].error(result.error);
+            else controllers[index].close();
+          }
+          resolveCancellation();
+        };
+        const pump = () => {
+          if (reading || finished || !demand.some((wanted, index) => wanted && !cancelled[index])) return;
+          reading = true;
+          reader.read().then(result => {
+            reading = false;
+            if (result.done) { finish(); return; }
+            for (let index = 0; index < 2; index++) {
+              if (cancelled[index]) continue;
+              demand[index] = false;
+              controllers[index].enqueue(result.value);
+            }
+            pump();
+          }, error => { reading = false; finish({ error }); });
+        };
+        const pull = index => { demand[index] = true; pump(); };
+        const cancel = (index, reason) => {
+          if (cancelled[index]) return cancellation;
+          cancelled[index] = true; reasons[index] = reason; demand[index] = false;
+          if (cancelled[0] && cancelled[1] && !finished) {
+            finished = true;
+            Promise.resolve(reader.cancel(reasons)).then(resolveCancellation, rejectCancellation);
+          } else {
+            pump();
+          }
+          return cancellation;
+        };
+        const branches = [0, 1].map(index => new ReadableStream({
+          start(controller) { controllers[index] = controller; },
+          pull() { return pull(index); },
+          cancel(reason) { return cancel(index, reason); }
+        }));
+        return branches;
+      }
       async pipeTo(destination, options = {}) {
         const signal = options.signal;
         if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean' || typeof signal.addEventListener !== 'function')) throw new TypeError('signal must be an AbortSignal');
