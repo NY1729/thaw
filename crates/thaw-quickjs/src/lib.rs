@@ -155,12 +155,16 @@ thread_local! {
 
 enum HostWorkerCommand {
     Message(String),
+    Stdin(String),
+    StdinEnd,
     Terminate,
 }
 
 enum HostWorkerEvent {
     Online,
     Message(String),
+    Stdout(String),
+    Stderr(String),
     Error(String),
     Exit(i32),
 }
@@ -1041,7 +1045,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         const parentPort = {{
           postMessage(value) {{
             const payload = __thaw_worker_encode(value);
-            __thaw_host_worker_events.push(payload);
+            __thaw_host_worker_events.push({{ type: 'message', payload }});
           }},
           on: __thaw_host_worker_on,
           addListener: __thaw_host_worker_on,
@@ -1058,6 +1062,18 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         process.env = Object.assign({{}}, __thaw_host_worker_config.env || {{}});
         process.argv = Array.from(__thaw_host_worker_config.argv || []);
         process.execArgv = Array.from(__thaw_host_worker_config.execArgv || []);
+        const __thaw_stdin_listeners = new Map();
+        process.stdin = {{
+          setEncoding(encoding) {{ this.encoding = String(encoding); return this; }},
+          on(name, listener) {{ const key = String(name), list = __thaw_stdin_listeners.get(key) || []; list.push(listener); __thaw_stdin_listeners.set(key, list); return this; }},
+          once(name, listener) {{ const wrapped = value => {{ this.off(name, wrapped); listener(value); }}; wrapped.listener = listener; return this.on(name, wrapped); }},
+          off(name, listener) {{ const key = String(name), list = __thaw_stdin_listeners.get(key) || []; __thaw_stdin_listeners.set(key, list.filter(item => item !== listener && item.listener !== listener)); return this; }},
+          resume() {{ return this; }}, pause() {{ return this; }}
+        }};
+        process.stdout = {{ write(value) {{ __thaw_host_worker_events.push({{ type: 'stdout', payload: String(value) }}); return true; }} }};
+        process.stderr = {{ write(value) {{ __thaw_host_worker_events.push({{ type: 'stderr', payload: String(value) }}); return true; }} }};
+        if (__thaw_host_worker_config.stdout) console.log = console.info = (...values) => process.stdout.write(values.map(String).join(' ') + '\n');
+        if (__thaw_host_worker_config.stderr) console.warn = console.error = (...values) => process.stderr.write(values.map(String).join(' ') + '\n');
         globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }} }};
         globalThis.require = function(name) {{
           if (name === 'worker_threads' || name === 'node:worker_threads') return globalThis.__thaw_worker_module;
@@ -1068,9 +1084,13 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           const value = __thaw_worker_decode(payload);
           for (const listener of (__thaw_host_worker_listeners.get('message') || []).slice()) listener(value);
         }};
+        globalThis.__thaw_host_worker_stdin = function(payload, ended) {{
+          const name = ended ? 'end' : 'data';
+          for (const listener of (__thaw_stdin_listeners.get(name) || []).slice()) listener(ended ? undefined : payload);
+        }};
         globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
         globalThis.__thaw_host_worker_should_exit = function() {{
-          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && __thaw_next_timer_delay() < 0);
+          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && __thaw_next_timer_delay() < 0);
         }};
         "#
     )
@@ -1082,10 +1102,21 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
         .get("__thaw_host_worker_drain")
         .map_err(|error| error.to_string())?;
     let payloads: String = drain.call(()).map_err(|error| error.to_string())?;
-    let payloads: Vec<String> =
+    let payloads: Vec<serde_json::Value> =
         serde_json::from_str(&payloads).map_err(|error| error.to_string())?;
-    for payload in payloads {
-        let _ = events.send(HostWorkerEvent::Message(payload));
+    for event in payloads {
+        let kind = event.get("type").and_then(|value| value.as_str());
+        let payload = event
+            .get("payload")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let event = match kind {
+            Some("stdout") => HostWorkerEvent::Stdout(payload),
+            Some("stderr") => HostWorkerEvent::Stderr(payload),
+            _ => HostWorkerEvent::Message(payload),
+        };
+        let _ = events.send(event);
     }
     Ok(())
 }
@@ -1144,6 +1175,24 @@ fn run_host_worker(
                             rquickjs::Error::Exception => describe_exception(&ctx),
                             error => error.to_string(),
                         })?;
+                }
+                Ok(HostWorkerCommand::Stdin(payload)) => {
+                    let deliver: Function = ctx
+                        .globals()
+                        .get("__thaw_host_worker_stdin")
+                        .map_err(|error| error.to_string())?;
+                    deliver
+                        .call::<_, ()>((payload, false))
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(HostWorkerCommand::StdinEnd) => {
+                    let deliver: Function = ctx
+                        .globals()
+                        .get("__thaw_host_worker_stdin")
+                        .map_err(|error| error.to_string())?;
+                    deliver
+                        .call::<_, ()>((String::new(), true))
+                        .map_err(|error| error.to_string())?;
                 }
                 Ok(HostWorkerCommand::Terminate) => return Ok(1),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1209,6 +1258,19 @@ fn send_host_worker(handle: u32, payload: String) -> bool {
     })
 }
 
+fn send_host_worker_stdin(handle: u32, payload: String, ended: bool) -> bool {
+    HOST_WORKERS.with(|table| {
+        table.borrow().workers.get(&handle).is_some_and(|worker| {
+            let command = if ended {
+                HostWorkerCommand::StdinEnd
+            } else {
+                HostWorkerCommand::Stdin(payload)
+            };
+            worker.commands.send(command).is_ok()
+        })
+    })
+}
+
 fn terminate_host_worker(handle: u32) -> bool {
     HOST_WORKERS.with(|table| {
         table
@@ -1241,6 +1303,16 @@ fn poll_host_workers() -> String {
                     Ok(HostWorkerEvent::Message(payload)) => {
                         output.push(
                             serde_json::json!({ "handle": handle, "type": "message", "payload": payload }),
+                        );
+                    }
+                    Ok(HostWorkerEvent::Stdout(payload)) => {
+                        output.push(
+                            serde_json::json!({ "handle": handle, "type": "stdout", "payload": payload }),
+                        );
+                    }
+                    Ok(HostWorkerEvent::Stderr(payload)) => {
+                        output.push(
+                            serde_json::json!({ "handle": handle, "type": "stderr", "payload": payload }),
                         );
                     }
                     Ok(HostWorkerEvent::Error(error)) => {
@@ -1336,6 +1408,11 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let worker_terminate =
                     Function::new(ctx.clone(), |handle: u32| terminate_host_worker(handle))
                         .expect("failed to create Worker terminator");
+                let worker_stdin =
+                    Function::new(ctx.clone(), |handle: u32, payload: String, ended: bool| {
+                        send_host_worker_stdin(handle, payload, ended)
+                    })
+                    .expect("failed to create Worker stdin sender");
                 let worker_poll = Function::new(ctx.clone(), poll_host_workers)
                     .expect("failed to create Worker event poller");
                 let worker_active = Function::new(ctx.clone(), host_workers_active)
@@ -1349,6 +1426,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_worker_terminate", worker_terminate)
                     .expect("failed to install Worker terminator");
+                ctx.globals()
+                    .set("__thaw_worker_stdin", worker_stdin)
+                    .expect("failed to install Worker stdin sender");
                 ctx.globals()
                     .set("__thaw_worker_poll", worker_poll)
                     .expect("failed to install Worker event poller");
