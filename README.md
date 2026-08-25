@@ -369,6 +369,8 @@ The workspace crates have narrow responsibilities:
   duplicate removal is one-at-a-time and raw once wrappers expose `.listener`;
   emitting `error` without a listener throws the supplied error, while pipeline
   teardown retains protective error listeners across cascading destruction;
+  `duplexPair()`, the public destroy helper, binary-view predicates/conversion
+  helpers and the `stream.promises` namespace match Node's export surface;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
