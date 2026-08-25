@@ -1333,20 +1333,105 @@ fn rewrite_static_worker_urls(
     package_name: &str,
     package_dir: &Path,
 ) -> Result<String, String> {
+    use std::collections::BTreeSet;
     use swc_ecma_visit::{Visit, VisitWith};
-    use thaw_parser::ast::{Expr, Lit, NewExpr};
+    use thaw_parser::ast::{
+        Callee, Expr, ImportDecl, ImportSpecifier, Lit, MemberProp, NewExpr, Pat, VarDeclarator,
+    };
     use thaw_parser::common::Spanned;
 
+    #[derive(Default)]
+    struct WorkerBindings {
+        constructors: BTreeSet<String>,
+        namespaces: BTreeSet<String>,
+    }
+    impl Visit for WorkerBindings {
+        fn visit_import_decl(&mut self, declaration: &ImportDecl) {
+            if !matches!(
+                declaration.src.value.as_str(),
+                Some("worker_threads" | "node:worker_threads")
+            ) {
+                return;
+            }
+            for specifier in &declaration.specifiers {
+                match specifier {
+                    ImportSpecifier::Named(named)
+                        if named
+                            .imported
+                            .as_ref()
+                            .map(|name| match name {
+                                thaw_parser::ast::ModuleExportName::Ident(name) => {
+                                    name.sym.as_ref()
+                                }
+                                thaw_parser::ast::ModuleExportName::Str(name) => {
+                                    name.value.as_str().unwrap_or("")
+                                }
+                            })
+                            .unwrap_or(named.local.sym.as_ref())
+                            == "Worker" =>
+                    {
+                        self.constructors.insert(named.local.sym.to_string());
+                    }
+                    ImportSpecifier::Namespace(namespace) => {
+                        self.namespaces.insert(namespace.local.sym.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            let Some(initializer) = declaration.init.as_deref() else {
+                return;
+            };
+            let (call, property) = match initializer {
+                Expr::Call(call) => (call, None),
+                Expr::Member(member) => {
+                    let Expr::Call(call) = member.obj.as_ref() else {
+                        return;
+                    };
+                    let property = match &member.prop {
+                        MemberProp::Ident(property) => Some(property.sym.as_ref()),
+                        _ => None,
+                    };
+                    (call, property)
+                }
+                _ => return,
+            };
+            let is_worker_threads = matches!(
+                &call.callee,
+                Callee::Expr(callee) if matches!(callee.as_ref(), Expr::Ident(name) if name.sym == "require")
+            ) && matches!(call.args.first().map(|argument| argument.expr.as_ref()), Some(Expr::Lit(Lit::Str(value))) if matches!(value.value.as_str(), Some("worker_threads" | "node:worker_threads")));
+            if !is_worker_threads {
+                return;
+            }
+            let Pat::Ident(binding) = &declaration.name else {
+                return;
+            };
+            if property == Some("Worker") {
+                self.constructors.insert(binding.id.sym.to_string());
+            } else if property.is_none() {
+                self.namespaces.insert(binding.id.sym.to_string());
+            }
+        }
+    }
+
     struct WorkerUrls {
+        constructors: BTreeSet<String>,
+        namespaces: BTreeSet<String>,
         spans: Vec<(u32, u32, u32, u32, String)>,
     }
     impl Visit for WorkerUrls {
         fn visit_new_expr(&mut self, expression: &NewExpr) {
-            let Expr::Ident(callee) = expression.callee.as_ref() else {
-                expression.visit_children_with(self);
-                return;
+            let is_worker = match expression.callee.as_ref() {
+                Expr::Ident(callee) => self.constructors.contains(callee.sym.as_ref()),
+                Expr::Member(member) => {
+                    matches!(member.obj.as_ref(), Expr::Ident(namespace) if self.namespaces.contains(namespace.sym.as_ref()))
+                        && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "Worker")
+                }
+                _ => false,
             };
-            if callee.sym != "Worker" {
+            if !is_worker {
                 expression.visit_children_with(self);
                 return;
             }
@@ -1391,7 +1476,13 @@ fn rewrite_static_worker_urls(
     let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map(source) else {
         return Ok(source.to_string());
     };
-    let mut workers = WorkerUrls { spans: Vec::new() };
+    let mut bindings = WorkerBindings::default();
+    module.visit_with(&mut bindings);
+    let mut workers = WorkerUrls {
+        constructors: bindings.constructors,
+        namespaces: bindings.namespaces,
+        spans: Vec::new(),
+    };
     module.visit_with(&mut workers);
     if workers.spans.is_empty() {
         return Ok(source.to_string());
@@ -5720,6 +5811,16 @@ mod tests {
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(result, "[42,0]");
         let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn worker_url_rewrite_ignores_unrelated_worker_bindings() {
+        let dir = temp_registry("unrelated_worker_url");
+        let source = "class Worker {}\nnew Worker(new URL('./missing.js', import.meta.url));";
+        let rewritten = rewrite_static_worker_urls(source, &dir.join("index.js"), "pkg", &dir)
+            .expect("an unrelated Worker must not attempt to read its URL");
+        assert_eq!(rewritten, source);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
