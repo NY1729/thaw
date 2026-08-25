@@ -200,6 +200,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "v8" => {
             "export declare function serialize(argsArray: any): any;\nexport declare function deserialize(argsArray: any): any;\nexport declare function getHeapStatistics(argsArray: any): any;\nexport declare function getHeapSpaceStatistics(argsArray: any): any;\nexport declare function getHeapCodeStatistics(argsArray: any): any;\nexport declare function cachedDataVersionTag(argsArray: any): number;\nexport declare function setFlagsFromString(argsArray: any): void;\n"
         }
+        "zlib" => {
+            "export declare function gzipSync(argsArray: any): any;\nexport declare function gunzipSync(argsArray: any): any;\nexport declare function deflateSync(argsArray: any): any;\nexport declare function inflateSync(argsArray: any): any;\nexport declare function deflateRawSync(argsArray: any): any;\nexport declare function inflateRawSync(argsArray: any): any;\nexport declare function gzip(argsArray: any): void;\nexport declare function gunzip(argsArray: any): void;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -3067,7 +3070,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -3100,6 +3103,11 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              function getHeapStatistics() { return { total_heap_size: 0, total_heap_size_executable: 0, total_physical_size: 0, total_available_size: 0, used_heap_size: 0, heap_size_limit: Number.MAX_SAFE_INTEGER, malloced_memory: 0, peak_malloced_memory: 0, does_zap_garbage: 0, number_of_native_contexts: 1, number_of_detached_contexts: 0, total_global_handles_size: 0, used_global_handles_size: 0, external_memory: 0 }; }\n\
              function getHeapSpaceStatistics() { return []; } function getHeapCodeStatistics() { return { code_and_metadata_size: 0, bytecode_and_metadata_size: 0, external_script_source_size: 0, cpu_profiler_metadata_size: 0 }; } function cachedDataVersionTag() { return 0; } function setFlagsFromString() {}\n\
              module.exports = { serialize: serialize, deserialize: deserialize, getHeapStatistics: getHeapStatistics, getHeapSpaceStatistics: getHeapSpaceStatistics, getHeapCodeStatistics: getHeapCodeStatistics, cachedDataVersionTag: cachedDataVersionTag, setFlagsFromString: setFlagsFromString }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
+        ),
+        "zlib" => Some(
+            "function input(value) { return Buffer.isBuffer(value) ? value : Buffer.from(value); } function run(operation, format, value) { return Buffer.from(__thaw_zlib_hex(operation, format, input(value).toString('hex')), 'hex'); } function sync(operation, format) { return function(value) { return run(operation, format, value); }; } function async(syncFunction) { return function(value, options, callback) { if (typeof options === 'function') callback = options; try { var result = syncFunction(value, options); queueMicrotask(function() { callback(null, result); }); } catch (error) { queueMicrotask(function() { callback(error); }); } }; }\n\
+             var gzipSync = sync('compress', 'gzip'), gunzipSync = sync('decompress', 'gzip'), deflateSync = sync('compress', 'deflate'), inflateSync = sync('decompress', 'deflate'), deflateRawSync = sync('compress', 'deflateRaw'), inflateRawSync = sync('decompress', 'deflateRaw');\n\
+             module.exports = { gzipSync: gzipSync, gunzipSync: gunzipSync, deflateSync: deflateSync, inflateSync: inflateSync, deflateRawSync: deflateRawSync, inflateRawSync: inflateRawSync, gzip: async(gzipSync), gunzip: async(gunzipSync), deflate: async(deflateSync), inflate: async(inflateSync), deflateRaw: async(deflateRawSync), inflateRaw: async(inflateRawSync), constants: { Z_OK: 0, Z_STREAM_END: 1, Z_DEFAULT_COMPRESSION: -1 } }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         _ => None,
     }
@@ -5283,6 +5291,28 @@ mod tests {
             result,
             r#"[true,true,true,true,"thaw",42,true,true,true,1,true,0,0,0]"#
         );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn zlib_builtin_compresses_sync_and_callback_values() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_zlib");
+        fs::write(dir.join("index.js"), "var zlib = require('node:zlib'); module.exports = async function () { var source = Buffer.from('thaw compression '.repeat(8)); var gzip = zlib.gzipSync(source); var raw = zlib.deflateRawSync(source); var callback = await new Promise(function(resolve, reject) { zlib.gunzip(gzip, function(error, value) { error ? reject(error) : resolve(value); }); }); return [gzip[0], gzip[1], zlib.gunzipSync(gzip).toString() === source.toString(), zlib.inflateRawSync(raw).toString() === source.toString(), callback.toString() === source.toString(), zlib.constants.Z_OK]; };").unwrap();
+        let empty_node_modules = temp_registry("builtin_zlib_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseZlib = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseZlib").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(result, r#"[31,139,true,true,true,0]"#);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
