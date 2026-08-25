@@ -308,6 +308,11 @@ The workspace crates have narrow responsibilities:
   member transfer/removal and disposal over the shared EventEmitter layer
 - `node:string_decoder` preserves incomplete UTF-8, UTF-16LE and Base64 input
   across chunk boundaries and flushes incomplete terminal input from `end()`
+- Legacy `_stream_readable`, `_stream_writable`, `_stream_duplex`,
+  `_stream_transform`, `_stream_passthrough` and `_stream_wrap` resolve to the
+  corresponding shared `node:stream` constructors rather than duplicate shims
+- `node:trace_events` creates independently enabled tracing handles while
+  reference-counting and reporting the process-wide sorted category set
 - Global `Headers` accepts records, header-pair iterables and clones; it
   validates and normalizes names/values, combines ordinary duplicates, retains
   individual `set-cookie` fields, and exposes sorted iteration, mutation and
