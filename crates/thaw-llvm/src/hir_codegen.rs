@@ -5090,7 +5090,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(element)
                 if matches!(
                     element.as_ref(),
-                    HirType::F64 | HirType::Str | HirType::JsValue
+                    HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
                 ) =>
             {
                 let i64_type = self.context.i64_type();
@@ -10719,6 +10719,169 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?
                 };
                 output.push(data.into());
+                output.push(length.into());
+            }
+            HirType::Array(element) if element.as_ref() == &HirType::Bool => {
+                let base = value.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                let length = self
+                    .builder
+                    .build_load(i64_type, base, "ffi_bool_vararg_array_length")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let byte_count = self
+                    .builder
+                    .build_int_mul(
+                        length,
+                        i64_type.const_int(4, false),
+                        "ffi_bool_vararg_byte_count",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let empty = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        length,
+                        i64_type.const_zero(),
+                        "ffi_bool_vararg_empty",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let allocation_size = self
+                    .builder
+                    .build_select(
+                        empty,
+                        i64_type.const_int(4, false),
+                        byte_count,
+                        "ffi_bool_vararg_allocation_size",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let packed = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_arena_alloc").unwrap(),
+                        &[allocation_size.into(), i64_type.const_int(4, false).into()],
+                        "ffi_bool_vararg_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_arena_alloc returned no boolean-array pointer")?
+                    .into_pointer_value();
+                let index_slot = self
+                    .builder
+                    .build_alloca(i64_type, "ffi_bool_vararg_index")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(index_slot, i64_type.const_zero())
+                    .map_err(|error| error.to_string())?;
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .ok_or("boolean vararg marshalling is outside a function")?;
+                let condition = self
+                    .context
+                    .append_basic_block(function, "ffi_bool_vararg_condition");
+                let body = self
+                    .context
+                    .append_basic_block(function, "ffi_bool_vararg_body");
+                let done = self
+                    .context
+                    .append_basic_block(function, "ffi_bool_vararg_done");
+                self.builder
+                    .build_unconditional_branch(condition)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(condition);
+                let index = self
+                    .builder
+                    .build_load(i64_type, index_slot, "ffi_bool_vararg_current")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let has_element = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::ULT,
+                        index,
+                        length,
+                        "ffi_bool_vararg_has_element",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(has_element, body, done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(body);
+                let source_offset = self
+                    .builder
+                    .build_int_mul(
+                        index,
+                        i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                        "ffi_bool_vararg_source_offset",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let source_offset = self
+                    .builder
+                    .build_int_add(
+                        source_offset,
+                        i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                        "ffi_bool_vararg_source_data_offset",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let source = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            base,
+                            &[source_offset],
+                            "ffi_bool_vararg_source",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                let boolean = self
+                    .builder
+                    .build_load(self.context.bool_type(), source, "ffi_bool_vararg_value")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let promoted = self
+                    .builder
+                    .build_int_z_extend(
+                        boolean,
+                        self.context.i32_type(),
+                        "ffi_bool_vararg_value_i32",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let target_offset = self
+                    .builder
+                    .build_int_mul(
+                        index,
+                        i64_type.const_int(4, false),
+                        "ffi_bool_vararg_target_offset",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let target = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            packed,
+                            &[target_offset],
+                            "ffi_bool_vararg_target",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                self.builder
+                    .build_store(target, promoted)
+                    .map_err(|error| error.to_string())?;
+                let next = self
+                    .builder
+                    .build_int_add(index, i64_type.const_int(1, false), "ffi_bool_vararg_next")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(index_slot, next)
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_unconditional_branch(condition)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+                output.push(packed.into());
                 output.push(length.into());
             }
             HirType::Optional(payload) | HirType::Nullable(payload) => {
@@ -19053,6 +19216,7 @@ mod tests {
             declare function native_handle_sum(count: number, ...values: JsValue[]): number;
             declare function native_array_total(count: number, ...values: number[][]): number;
             declare function native_string_array_total(count: number, ...values: string[][]): number;
+            declare function native_bool_array_total(count: number, ...values: boolean[][]): number;
             declare function native_handle_array_total(count: number, ...values: JsValue[][]): number;
             declare function native_object_total(
                 count: number,
@@ -19087,6 +19251,7 @@ mod tests {
                 console.log(native_handle_sum(2, native_handle(), native_handle()));
                 console.log(native_array_total(2, [1, 2], [3, 4, 5]));
                 console.log(native_string_array_total(2, ["a", "bc"], ["def"]));
+                console.log(native_bool_array_total(2, [true, false, true], [false, true]));
                 console.log(native_handle_array_total(
                     2,
                     [native_handle()],
@@ -19130,6 +19295,9 @@ mod tests {
         }));
         assert!(program.extern_functions.iter().any(|signature| {
             signature.variadic == Some(HirType::Array(Box::new(HirType::Str)))
+        }));
+        assert!(program.extern_functions.iter().any(|signature| {
+            signature.variadic == Some(HirType::Array(Box::new(HirType::Bool)))
         }));
         assert!(program.extern_functions.iter().any(|signature| {
             signature.variadic == Some(HirType::Array(Box::new(HirType::JsValue)))
@@ -19220,6 +19388,16 @@ mod tests {
                  const char *const *data = va_arg(args, const char *const *);\n\
                  long long length = va_arg(args, long long);\n\
                  for (long long j = 0; j < length; ++j) sum += strlen(data[j]);\n\
+               }\n\
+               va_end(args); return sum;\n\
+             }\n\
+             double native_bool_array_total(double raw_count, ...) {\n\
+               int count = (int)raw_count; double sum = 0; va_list args;\n\
+               va_start(args, raw_count);\n\
+               for (int i = 0; i < count; ++i) {\n\
+                 const int *data = va_arg(args, const int *);\n\
+                 long long length = va_arg(args, long long);\n\
+                 for (long long j = 0; j < length; ++j) sum += data[j] != 0;\n\
                }\n\
                va_end(args); return sum;\n\
              }\n\
@@ -19326,7 +19504,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "0\n10\n3\n9\n40\n15\n6\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
+            "0\n10\n3\n9\n40\n15\n6\n3\n60\n26\n3\n4\n7\n6\n3\n6\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

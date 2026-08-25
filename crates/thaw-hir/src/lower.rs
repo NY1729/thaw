@@ -468,7 +468,7 @@ fn supports_ffi_variadic_element(ty: &HirType) -> bool {
         HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
         HirType::Array(element) => matches!(
             element.as_ref(),
-            HirType::F64 | HirType::Str | HirType::JsValue
+            HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
         ),
         HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
             supports_ffi_variadic_element(payload)
@@ -13122,7 +13122,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_ambient_variadic_element_types() {
         let module = thaw_parser::parse_typescript(
-            r#"declare function native_merge(...values: boolean[][]): number;
+            r#"declare function native_merge(...values: (boolean | undefined)[][]): number;
                function main(): void { console.log(native_merge([true])); }"#,
         )
         .unwrap();

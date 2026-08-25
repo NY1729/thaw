@@ -1195,7 +1195,7 @@ fn supports_variadic_element(ty: &HirType) -> bool {
         HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue => true,
         HirType::Array(element) => matches!(
             element.as_ref(),
-            HirType::F64 | HirType::Str | HirType::JsValue
+            HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
         ),
         HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
             supports_variadic_element(payload)
@@ -1217,9 +1217,9 @@ fn classify_variadic_ts_type(
     }
     if let TsType::TsArrayType(array) = ty {
         return match classify_ts_type(&array.elem_type, interfaces, generic_interfaces) {
-            DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::JsValue)) => {
-                DtsType::Native(HirType::Array(Box::new(element)))
-            }
+            DtsType::Native(
+                element @ (HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue),
+            ) => DtsType::Native(HirType::Array(Box::new(element))),
             DtsType::Native(other) => DtsType::Unsupported(format!(
                 "variadic array element type {other:?} requires explicit marshalling"
             )),
@@ -1932,6 +1932,10 @@ mod tests {
             (
                 "export declare function strings(...values: string[][]): number;",
                 HirType::Array(Box::new(HirType::Str)),
+            ),
+            (
+                "export declare function booleans(...values: boolean[][]): number;",
+                HirType::Array(Box::new(HirType::Bool)),
             ),
             (
                 "export declare function handles(...values: JsValue[][]): number;",
