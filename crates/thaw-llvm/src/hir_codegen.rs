@@ -10599,6 +10599,77 @@ impl<'ctx> HirCompiler<'ctx> {
     /// (`build_call_with`), an `Array`/`Object` argument here must be
     /// unpacked into that same adapted shape before the call -- each match
     /// arm below has a matching arm in `ffi_param_types`'s doc comment.
+    fn append_ffi_aggregate_vararg(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+        output: &mut Vec<BasicMetadataValueEnum<'ctx>>,
+    ) -> Result<(), String> {
+        match ty {
+            HirType::F64 | HirType::Str | HirType::JsValue => output.push(value.into()),
+            HirType::Bool => {
+                let promoted = self
+                    .builder
+                    .build_int_z_extend(
+                        value.into_int_value(),
+                        self.context.i32_type(),
+                        "ffi_aggregate_vararg_bool",
+                    )
+                    .map_err(|error| error.to_string())?;
+                output.push(promoted.into());
+            }
+            HirType::Array(element) if element.as_ref() == &HirType::F64 => {
+                let base = value.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                let length = self
+                    .builder
+                    .build_load(i64_type, base, "ffi_aggregate_vararg_array_length")
+                    .map_err(|error| error.to_string())?;
+                let data = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            base,
+                            &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
+                            "ffi_aggregate_vararg_array_data",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                output.push(data.into());
+                output.push(length.into());
+            }
+            HirType::Object(fields) => {
+                let base = value.into_pointer_value();
+                for (index, (_, field_type)) in fields.iter().enumerate() {
+                    let field_pointer = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                self.context.i8_type(),
+                                base,
+                                &[self
+                                    .context
+                                    .i64_type()
+                                    .const_int(object_field_offset(fields, index), false)],
+                                "ffi_aggregate_vararg_field",
+                            )
+                            .map_err(|error| error.to_string())?
+                    };
+                    let field = self
+                        .builder
+                        .build_load(
+                            self.basic_type(field_type)?,
+                            field_pointer,
+                            "ffi_aggregate_vararg_value",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    self.append_ffi_aggregate_vararg(field, field_type, output)?;
+                }
+            }
+            other => return Err(format!("unsupported aggregate variadic type {other:?}")),
+        }
+        Ok(())
+    }
+
     fn compile_ffi_call(
         &mut self,
         sig: &FfiSignature,
@@ -10752,74 +10823,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         compiled_args.push(promoted.into());
                     }
                     HirType::Str | HirType::JsValue => compiled_args.push(value.into()),
-                    HirType::Array(element) if element.as_ref() == &HirType::F64 => {
-                        let base_ptr = value.into_pointer_value();
-                        let i64_type = self.context.i64_type();
-                        let length = self
-                            .builder
-                            .build_load(i64_type, base_ptr, "ffi_vararg_array_length")
-                            .map_err(|error| error.to_string())?;
-                        let data = unsafe {
-                            self.builder
-                                .build_in_bounds_gep(
-                                    self.context.i8_type(),
-                                    base_ptr,
-                                    &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
-                                    "ffi_vararg_array_data",
-                                )
-                                .map_err(|error| error.to_string())?
-                        };
-                        compiled_args.push(data.into());
-                        compiled_args.push(length.into());
-                    }
-                    HirType::Object(fields) => {
-                        let base_ptr = value.into_pointer_value();
-                        for (index, (_, field_type)) in fields.iter().enumerate() {
-                            if !matches!(
-                                field_type,
-                                HirType::F64 | HirType::Bool | HirType::Str | HirType::JsValue
-                            ) {
-                                return Err(format!(
-                                    "FFI function `{}` has unsupported object variadic field type {field_type:?}",
-                                    sig.symbol
-                                ));
-                            }
-                            let field_pointer = unsafe {
-                                self.builder
-                                    .build_in_bounds_gep(
-                                        self.context.i8_type(),
-                                        base_ptr,
-                                        &[self
-                                            .context
-                                            .i64_type()
-                                            .const_int(object_field_offset(fields, index), false)],
-                                        "ffi_vararg_object_field",
-                                    )
-                                    .map_err(|error| error.to_string())?
-                            };
-                            let field = self
-                                .builder
-                                .build_load(
-                                    self.basic_type(field_type)?,
-                                    field_pointer,
-                                    "ffi_vararg_object_value",
-                                )
-                                .map_err(|error| error.to_string())?;
-                            if *field_type == HirType::Bool {
-                                let promoted = self
-                                    .builder
-                                    .build_int_z_extend(
-                                        field.into_int_value(),
-                                        self.context.i32_type(),
-                                        "ffi_vararg_object_bool",
-                                    )
-                                    .map_err(|error| error.to_string())?;
-                                compiled_args.push(promoted.into());
-                            } else {
-                                compiled_args.push(field.into());
-                            }
-                        }
-                    }
+                    HirType::Array(_) | HirType::Object(_) => self
+                        .append_ffi_aggregate_vararg(value, variadic, &mut compiled_args)
+                        .map_err(|error| format!("FFI function `{}`: {error}", sig.symbol))?,
                     other => {
                         return Err(format!(
                             "FFI function `{}` has unsupported variadic element type {other:?}",
@@ -18917,7 +18923,11 @@ mod tests {
             declare function native_array_total(count: number, ...values: number[][]): number;
             declare function native_object_total(
                 count: number,
-                ...values: { value: number; enabled: boolean; label: string }[]
+                ...values: {
+                    value: number;
+                    meta: { enabled: boolean; label: string };
+                    samples: number[];
+                }[]
             ): number;
             declare function native_sum_i32(count: number, ...values: number[]): number;
             declare function native_sum_i64(count: number, ...values: number[]): number;
@@ -18933,8 +18943,8 @@ mod tests {
                 console.log(native_array_total(2, [1, 2], [3, 4, 5]));
                 console.log(native_object_total(
                     2,
-                    { value: 2, enabled: true, label: "abc" },
-                    { value: 4, enabled: false, label: "x" }
+                    { value: 2, meta: { enabled: true, label: "abc" }, samples: [1, 2] },
+                    { value: 4, meta: { enabled: false, label: "x" }, samples: [3, 4, 5] }
                 ));
                 console.log(native_sum_i32(2, 0 - 2, 5));
                 console.log(native_sum_i64(2, 0 - 4, 10));
@@ -19040,6 +19050,9 @@ mod tests {
                  sum += va_arg(args, double);\n\
                  sum += va_arg(args, int) != 0;\n\
                  sum += (double)strlen(va_arg(args, const char *));\n\
+                 const double *data = va_arg(args, const double *);\n\
+                 long long length = va_arg(args, long long);\n\
+                 for (long long j = 0; j < length; ++j) sum += data[j];\n\
                }\n\
                va_end(args); return sum;\n\
              }\n\
@@ -19091,7 +19104,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "0\n10\n3\n9\n40\n15\n11\n3\n6\n42\n42\n"
+            "0\n10\n3\n9\n40\n15\n26\n3\n6\n42\n42\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
