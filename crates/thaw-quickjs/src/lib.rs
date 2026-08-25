@@ -27,13 +27,47 @@
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::raw::c_char;
 use std::time::Duration;
 
 use rquickjs::function::Args;
 use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
 use sha2::{Digest, Sha256, Sha512};
+
+fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
+    use flate2::write::{DeflateEncoder, GzEncoder, ZlibEncoder};
+    use flate2::Compression;
+    let compression = Compression::default();
+    match format {
+        "gzip" => {
+            let mut encoder = GzEncoder::new(Vec::new(), compression);
+            encoder.write_all(value)?;
+            encoder.finish()
+        }
+        "deflateRaw" => {
+            let mut encoder = DeflateEncoder::new(Vec::new(), compression);
+            encoder.write_all(value)?;
+            encoder.finish()
+        }
+        _ => {
+            let mut encoder = ZlibEncoder::new(Vec::new(), compression);
+            encoder.write_all(value)?;
+            encoder.finish()
+        }
+    }
+}
+
+fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
+    use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+    let mut output = Vec::new();
+    match format {
+        "gzip" => GzDecoder::new(value).read_to_end(&mut output)?,
+        "deflateRaw" => DeflateDecoder::new(value).read_to_end(&mut output)?,
+        _ => ZlibDecoder::new(value).read_to_end(&mut output)?,
+    };
+    Ok(output)
+}
 
 thread_local! {
     static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
@@ -140,6 +174,28 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     },
                 )
                 .expect("failed to create JavaScript HMAC function");
+                let zlib_hex = Function::new(
+                    ctx.clone(),
+                    |operation: String,
+                     format: String,
+                     value: String|
+                     -> rquickjs::Result<String> {
+                        let input = hex_decode(&value);
+                        let result = if operation == "compress" {
+                            compress_bytes(&format, &input)
+                        } else {
+                            decompress_bytes(&format, &input)
+                        };
+                        result.map(|bytes| hex_encode(&bytes)).map_err(|error| {
+                            rquickjs::Error::new_from_js_message(
+                                "zlib",
+                                "Buffer",
+                                error.to_string(),
+                            )
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript compression function");
                 ctx.globals()
                     .set("__thaw_crypto_random_hex", random_hex)
                     .expect("failed to install JavaScript random source");
@@ -149,6 +205,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_crypto_hmac_hex", hmac_hex)
                     .expect("failed to install JavaScript HMAC function");
+                ctx.globals()
+                    .set("__thaw_zlib_hex", zlib_hex)
+                    .expect("failed to install JavaScript compression function");
                 ctx.eval::<(), _>(PLATFORM_GLOBALS)
                     .expect("failed to install JavaScript platform globals");
             });
