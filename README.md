@@ -380,6 +380,8 @@ The workspace crates have narrow responsibilities:
   subclass prototype `_read`, `_write`, `_writev`, `_final`, `_transform`,
   `_flush` and `_destroy` hooks remain visible instead of being shadowed by
   constructor defaults, with missing write/transform hooks diagnosed;
+  prototype `_construct` hooks also gate pulls, writes and finalization, and
+  enter normal error destruction when initialization fails;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
