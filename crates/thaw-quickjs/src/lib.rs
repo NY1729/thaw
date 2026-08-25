@@ -883,6 +883,95 @@ const PLATFORM_GLOBALS: &str = r#"
       }
     };
   }
+  if (typeof globalThis.MessageEvent !== 'function') {
+    globalThis.MessageEvent = class MessageEvent extends Event {
+      constructor(type, options = {}) {
+        super(type, options);
+        this.data = options.data === undefined ? null : options.data;
+        this.origin = options.origin === undefined ? '' : String(options.origin);
+        this.lastEventId = options.lastEventId === undefined ? '' : String(options.lastEventId);
+        this.source = options.source === undefined ? null : options.source;
+        this.ports = options.ports === undefined ? [] : Array.from(options.ports);
+      }
+    };
+  }
+  if (typeof globalThis.MessageChannel !== 'function') {
+    class MessagePort extends EventTarget {
+      constructor() {
+        super();
+        this.__thawPeer = null;
+        this.__thawQueue = [];
+        this.__thawScheduled = false;
+        this.__thawClosed = false;
+        this.__thawRefed = true;
+        this.__thawNodeListeners = new Map();
+        this.__thawOnMessage = null;
+        this.__thawOnMessageError = null;
+      }
+      postMessage(value, transfer = []) {
+        if (this.__thawClosed || !this.__thawPeer || this.__thawPeer.__thawClosed) return;
+        let copy;
+        try { copy = structuredClone(value, { transfer }); }
+        catch (error) {
+          const peer = this.__thawPeer;
+          queueMicrotask(() => peer.__thawDispatchError(error));
+          return;
+        }
+        this.__thawPeer.__thawQueue.push({ data: copy, ports: [] });
+        this.__thawPeer.__thawSchedule();
+      }
+      __thawSchedule() {
+        if (this.__thawScheduled || this.__thawClosed) return;
+        this.__thawScheduled = true;
+        queueMicrotask(() => {
+          this.__thawScheduled = false;
+          while (!this.__thawClosed && this.__thawQueue.length) {
+            const record = this.__thawQueue.shift();
+            const event = new MessageEvent('message', { data: record.data, ports: record.ports });
+            this.dispatchEvent(event);
+            if (typeof this.__thawOnMessage === 'function') this.__thawOnMessage.call(this, event);
+            for (const listener of (this.__thawNodeListeners.get('message') || []).slice()) listener.call(this, record.data);
+          }
+        });
+      }
+      __thawDispatchError(error) {
+        const event = new MessageEvent('messageerror', { data: error });
+        this.dispatchEvent(event);
+        if (typeof this.__thawOnMessageError === 'function') this.__thawOnMessageError.call(this, event);
+        for (const listener of (this.__thawNodeListeners.get('messageerror') || []).slice()) listener.call(this, error);
+      }
+      start() { this.__thawSchedule(); }
+      close() {
+        if (this.__thawClosed) return;
+        this.__thawClosed = true;
+        this.__thawQueue.length = 0;
+        this.dispatchEvent(new Event('close'));
+        for (const listener of (this.__thawNodeListeners.get('close') || []).slice()) listener.call(this);
+      }
+      ref() { this.__thawRefed = true; return this; }
+      unref() { this.__thawRefed = false; return this; }
+      hasRef() { return this.__thawRefed; }
+      on(name, listener) { const key = String(name); const list = this.__thawNodeListeners.get(key) || []; list.push(listener); this.__thawNodeListeners.set(key, list); if (key === 'message') this.start(); return this; }
+      once(name, listener) { const wrapped = (...args) => { this.off(name, wrapped); listener.apply(this, args); }; wrapped.listener = listener; return this.on(name, wrapped); }
+      off(name, listener) { const key = String(name); const list = this.__thawNodeListeners.get(key) || []; this.__thawNodeListeners.set(key, list.filter(entry => entry !== listener && entry.listener !== listener)); return this; }
+      addListener(name, listener) { return this.on(name, listener); }
+      removeListener(name, listener) { return this.off(name, listener); }
+      removeAllListeners(name) { if (name === undefined) this.__thawNodeListeners.clear(); else this.__thawNodeListeners.delete(String(name)); return this; }
+      set onmessage(listener) { this.__thawOnMessage = listener; if (listener) this.start(); }
+      get onmessage() { return this.__thawOnMessage; }
+      set onmessageerror(listener) { this.__thawOnMessageError = listener; }
+      get onmessageerror() { return this.__thawOnMessageError; }
+    }
+    globalThis.MessagePort = MessagePort;
+    globalThis.MessageChannel = class MessageChannel {
+      constructor() {
+        this.port1 = new MessagePort();
+        this.port2 = new MessagePort();
+        this.port1.__thawPeer = this.port2;
+        this.port2.__thawPeer = this.port1;
+      }
+    };
+  }
   if (typeof globalThis.AbortController !== 'function') {
     const abortError = message => {
       return new DOMException(message || 'This operation was aborted', 'AbortError');
