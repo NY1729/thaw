@@ -4198,13 +4198,16 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
               var responseHeaders = new Headers();
               if (Array.isArray(incoming.rawHeaders)) for (var index = 0; index + 1 < incoming.rawHeaders.length; index += 2) responseHeaders.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
               else if (incoming.headers) Object.keys(incoming.headers).forEach(function(name) { var value = incoming.headers[name]; if (Array.isArray(value)) value.forEach(function(item) { responseHeaders.append(name, item); }); else if (value !== undefined) responseHeaders.append(name, value); });
-              var noBody = method === 'HEAD' || status === 101 || status === 204 || status === 205 || status === 304, controller;
-              var stream = noBody ? null : new ReadableStream({ start: function(value) { controller = value; }, cancel: function(reason) { if (incoming.destroy) incoming.destroy(reason); } });
+              var noBody = method === 'HEAD' || status === 101 || status === 204 || status === 205 || status === 304, controller, bodyAbort;
+              function cleanupBody() { if (request.signal && bodyAbort) request.signal.removeEventListener('abort', bodyAbort); }
+              var stream = noBody ? null : new ReadableStream({ start: function(value) { controller = value; }, cancel: function(reason) { cleanupBody(); if (incoming.destroy) incoming.destroy(reason); } });
               if (stream) {
                 incoming.on('data', function(chunk) { if (controller) controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); });
-                incoming.on('end', function() { if (controller) controller.close(); });
-                incoming.on('error', function(error) { if (controller) controller.error(error); });
-                incoming.on('aborted', function() { if (controller) controller.error(new TypeError('terminated')); });
+                incoming.on('end', function() { cleanupBody(); if (controller) controller.close(); });
+                incoming.on('error', function(error) { cleanupBody(); if (controller) controller.error(error); });
+                incoming.on('aborted', function() { cleanupBody(); if (controller) controller.error(new TypeError('terminated')); });
+                bodyAbort = function() { cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
+                if (request.signal) request.signal.addEventListener('abort', bodyAbort, { once: true });
               }
               var response;
               try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }
@@ -10339,12 +10342,22 @@ mod tests {
             stream.flush().unwrap();
             std::thread::sleep(Duration::from_millis(100));
             stream.write_all(b"two").unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = stream.write_all(b"late");
         });
 
         let dir = temp_registry("global_fetch_streaming");
         fs::write(
             dir.join("index.js"),
-            "module.exports = async function (port) { var started = Date.now(), response = await fetch('http://127.0.0.1:' + port + '/slow'), headersElapsed = Date.now() - started, reader = response.body.getReader(), first = await reader.read(), firstElapsed = Date.now() - started, second = await reader.read(), done = await reader.read(); return [headersElapsed < 200, firstElapsed >= 200, new TextDecoder().decode(first.value), new TextDecoder().decode(second.value), done.done, response.bodyUsed]; };",
+            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port, started = Date.now(), response = await fetch(base + '/slow'), headersElapsed = Date.now() - started, reader = response.body.getReader(), first = await reader.read(), firstElapsed = Date.now() - started, second = await reader.read(), done = await reader.read(); var controller = new AbortController(), abortedResponse = await fetch(base + '/abort', { signal: controller.signal }), abortedReader = abortedResponse.body.getReader(), pending = abortedReader.read(), bodyReason; controller.abort('body-stop'); try { await pending; } catch (error) { bodyReason = error; } return [headersElapsed < 200, firstElapsed >= 200, new TextDecoder().decode(first.value), new TextDecoder().decode(second.value), done.done, response.bodyUsed, bodyReason]; };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("global_fetch_streaming_node_modules");
@@ -10357,7 +10370,7 @@ mod tests {
         let arguments = CString::new(format!("[{port}]")).unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-        assert_eq!(result, r#"[true,true,"one","two",true,true]"#);
+        assert_eq!(result, r#"[true,true,"one","two",true,true,"body-stop"]"#);
         server.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
