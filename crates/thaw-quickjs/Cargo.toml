@@ -7,6 +7,7 @@ edition.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+base64 = "0.22"
 flate2 = "1"
 getrandom = "0.2"
 rquickjs = "0.12.2"
