@@ -375,6 +375,9 @@ The workspace crates have narrow responsibilities:
   retain a polymorphic template when assigned a compatible generic arrow or
   named generic function; parameter/return shapes and constraints are checked
   modulo type-parameter names before call-site specialization
+- Pure callable interfaces with one generic call signature, such as
+  `interface Identity { <T>(value: T): T }`, use the same polymorphic template,
+  assignment checks and direct/callback specialization paths
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated

@@ -14245,6 +14245,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_callable_interfaces() {
+        let source = r#"
+            interface Identity { <T>(value: T): T; }
+            interface Numeric { <T extends number>(value: T): T; }
+            function named<T>(value: T): T { return value; }
+            function main(): void {
+                const local: Identity = <Value>(value: Value): Value => value;
+                const forwarded: Identity = named;
+                const numeric: Numeric = <Value extends number>(value: Value): Value => value;
+                console.log(local(29));
+                console.log(local("interface"));
+                console.log(forwarded(30));
+                console.log(forwarded<string>("named-interface"));
+                console.log(numeric(31));
+                console.log([32, 33].map(forwarded)[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_callable_interfaces"),
+            "29\ninterface\n30\nnamed-interface\n31\n33\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
