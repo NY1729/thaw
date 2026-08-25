@@ -1438,6 +1438,13 @@ impl GenericInterfaces<'_> {
     }
 }
 
+fn strip_parenthesized_ts_type(mut ty: &TsType) -> &TsType {
+    while let TsType::TsParenthesizedType(parenthesized) = ty {
+        ty = &parenthesized.type_ann;
+    }
+    ty
+}
+
 /// Resolves every top-level `interface` declaration, so `lower_ts_type` can
 /// treat a `TsTypeRef` naming one exactly like an inline `{ ... }` type
 /// literal. Interfaces may be declared in any order and may reference each
@@ -1473,11 +1480,11 @@ fn resolve_interfaces(
             ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
                 let name = alias.id.sym.to_string();
                 if matches!(
-                    alias.type_ann.as_ref(),
+                    strip_parenthesized_ts_type(&alias.type_ann),
                     TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function))
                         if function.type_params.is_some()
                 ) || matches!(
-                    alias.type_ann.as_ref(),
+                    strip_parenthesized_ts_type(&alias.type_ann),
                     TsType::TsTypeLit(literal)
                         if matches!(literal.members.as_slice(),
                             [TsTypeElement::TsCallSignatureDecl(call)]
@@ -1503,7 +1510,8 @@ fn resolve_interfaces(
         let callable_aliases = aliases
             .iter()
             .filter_map(|(name, alias)| {
-                let TsType::TsTypeRef(reference) = alias.type_ann.as_ref() else {
+                let TsType::TsTypeRef(reference) = strip_parenthesized_ts_type(&alias.type_ann)
+                else {
                     return None;
                 };
                 let swc_ecma_ast::TsEntityName::Ident(target) = &reference.type_name else {
@@ -13103,7 +13111,7 @@ impl<'a> FnLowerer<'a> {
         &self,
         ty: &TsType,
     ) -> Result<Option<(FnSignature, Symbol)>, String> {
-        let TsType::TsTypeRef(reference) = ty else {
+        let TsType::TsTypeRef(reference) = strip_parenthesized_ts_type(ty) else {
             return Ok(None);
         };
         let swc_ecma_ast::TsEntityName::Ident(identifier) = &reference.type_name else {
@@ -13233,7 +13241,8 @@ impl<'a> FnLowerer<'a> {
         &self,
         alias: &swc_ecma_ast::TsTypeAliasDecl,
     ) -> Result<FnSignature, String> {
-        let (type_params, params, return_type) = match alias.type_ann.as_ref() {
+        let (type_params, params, return_type) = match strip_parenthesized_ts_type(&alias.type_ann)
+        {
             TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => (
                 function.type_params.as_ref(),
                 function.params.as_slice(),

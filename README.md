@@ -384,7 +384,8 @@ The workspace crates have narrow responsibilities:
   compatible callable aliases and interfaces without losing polymorphism;
   subsequent unannotated local aliases infer and retain that template.
   Non-generic alias chains ending in either callable form are resolved across
-  multiple links and forward declarations
+  multiple links and forward declarations; parentheses around callable types,
+  alias targets and variable annotations do not change classification
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
