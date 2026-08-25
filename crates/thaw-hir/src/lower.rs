@@ -82,6 +82,7 @@ struct FnSignature {
     generic_type_constraints: Vec<Option<Box<TsType>>>,
     generic_type_defaults: Vec<Option<Box<TsType>>>,
     generic_param_patterns: Vec<GenericTypePattern>,
+    generic_param_optional: Vec<bool>,
     generic_return_type: Option<Box<TsType>>,
 }
 
@@ -501,6 +502,13 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                         generic_type_constraints,
                         generic_type_defaults,
                         generic_param_patterns,
+                        generic_param_optional: func
+                            .params
+                            .iter()
+                            .map(|parameter| {
+                                matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
+                            })
+                            .collect(),
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                     },
                 );
@@ -7622,6 +7630,13 @@ impl<'a> FnLowerer<'a> {
                     .map(|parameter| parameter.default.clone())
                     .collect(),
                 generic_param_patterns,
+                generic_param_optional: arrow
+                    .params
+                    .iter()
+                    .map(
+                        |parameter| matches!(parameter, Pat::Ident(binding) if binding.id.optional),
+                    )
+                    .collect(),
                 generic_return_type: arrow
                     .return_type
                     .as_ref()
@@ -13442,6 +13457,11 @@ impl<'a> FnLowerer<'a> {
                 .map(|parameter| parameter.default.clone())
                 .collect(),
             generic_param_patterns,
+            generic_param_optional: arrow
+                .params
+                .iter()
+                .map(|parameter| matches!(parameter, Pat::Ident(binding) if binding.id.optional))
+                .collect(),
             generic_return_type: arrow
                 .return_type
                 .as_ref()
@@ -13581,6 +13601,13 @@ impl<'a> FnLowerer<'a> {
                 .map(|parameter| parameter.default.clone())
                 .collect(),
             generic_param_patterns,
+            generic_param_optional: call
+                .params
+                .iter()
+                .map(|parameter| {
+                    matches!(parameter, TsFnParam::Ident(binding) if binding.id.optional)
+                })
+                .collect(),
             generic_return_type: Some(return_type.type_ann.clone()),
         })
     }
@@ -13678,6 +13705,12 @@ impl<'a> FnLowerer<'a> {
                 .map(|parameter| parameter.default.clone())
                 .collect(),
             generic_param_patterns,
+            generic_param_optional: params
+                .iter()
+                .map(|parameter| {
+                    matches!(parameter, TsFnParam::Ident(binding) if binding.id.optional)
+                })
+                .collect(),
             generic_return_type: Some(Box::new(
                 return_type
                     .ok_or_else(|| {
@@ -13707,6 +13740,11 @@ impl<'a> FnLowerer<'a> {
         {
             return Err(format!(
                 "generic arrow does not match function type alias `{alias_name}` arity"
+            ));
+        }
+        if expected.generic_param_optional != actual.generic_param_optional {
+            return Err(format!(
+                "generic callable optional parameters do not match function type alias `{alias_name}`"
             ));
         }
         let canonical = (0..expected.generic_type_params.len())
@@ -14498,6 +14536,10 @@ mod tests {
             (
                 "type Predicate = <T>(value: T, flag: boolean) => boolean; function main(): void { const invalid: Predicate = <T>(value: T, flag: boolean) => flag && \"wrong\"; }",
                 "needs an explicit return type",
+            ),
+            (
+                "type OptionalIdentity = <T>(value?: T) => T; function main(): void { const invalid: OptionalIdentity = <T>(value: T): T => value; }",
+                "optional parameters do not match function type alias `OptionalIdentity`",
             ),
             (
                 "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",

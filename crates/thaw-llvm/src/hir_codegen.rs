@@ -14236,6 +14236,7 @@ mod tests {
             type NumericValue = <T>(value: T) => number;
             type NumericOperation = <T extends number>(value: T) => number;
             type FlaggedPredicate = <T>(value: T, flag: boolean) => boolean;
+            type OptionalIdentity = <T>(value?: T) => T;
             function namedIdentity<T>(value: T): T { return value; }
             async function namedAsyncIdentity<T>(value: T): Promise<T> { return value; }
             async function main(): Promise<void> {
@@ -14267,6 +14268,7 @@ mod tests {
                 const decrement: NumericOperation = <T extends number>(value: T) => value - 1;
                 const prefixed: Stringify = <T>(value: T) => "value=" + String(value);
                 const logicalFlag: FlaggedPredicate = <T>(value: T, flag: boolean) => flag && true;
+                const optionalIdentity: OptionalIdentity = <T>(value?: T): T => value;
                 const asyncIdentity: AsyncIdentity = namedAsyncIdentity;
                 console.log(identity(24));
                 console.log(identity("alias"));
@@ -14302,11 +14304,12 @@ mod tests {
                 console.log(decrement(41));
                 console.log(prefixed(true));
                 console.log(logicalFlag("ignored", true));
+                console.log(optionalIdentity(41));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\nnull\nundefined\ntrue\n38\n39\n40\nvalue=true\ntrue\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\ntype-alias-chain\n30\ninferred-chain\ncall-literal-alias\n31\nfunction-expression\n32\n34\nnamed-expression\ndefault\ninferred-return\n35\nasync-alias\n36\nbranched-return\nconstant\nnull\nundefined\ntrue\n38\n39\n40\nvalue=true\ntrue\n41\n"
         );
     }
 
