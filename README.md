@@ -402,6 +402,9 @@ The workspace crates have narrow responsibilities:
   `unpipe(destination)` and `unpipe()` detach actual transfer/error/drain
   listeners, emit one `unpipe` event per destination and retain per-destination
   backpressure until every blocked writable drains;
+  repeated `pause()`/`resume()` calls are idempotent, `pause` is synchronous,
+  `resume` is microtask-delivered once per transition, and buffered chunks
+  drain immediately after flowing resumes;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
 - `node:diagnostics_channel` provides named shared channels, duplicate-safe
   subscriptions, store binding and sync/Promise/callback tracing lifecycles
