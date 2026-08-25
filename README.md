@@ -482,6 +482,11 @@ The workspace crates have narrow responsibilities:
   `execFileSync()` and `execSync()` with argument arrays, shell execution,
   stdin, cwd, replacement environments, Buffer/string output, exit status,
   stderr-bearing thrown errors, ENOENT and `maxBuffer` reporting
+- Asynchronous `spawn()` runs each child under a host management thread while
+  the QuickJS event loop polls ordered spawn/stdout/stderr/error/exit/close
+  events; writable stdin, readable output streams, kill/ref/unref and process
+  metadata are exposed. `exec()` and `execFile()` collect those streams for
+  Node-style success, nonzero-exit, ENOENT and max-buffer callbacks
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
