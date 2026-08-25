@@ -389,6 +389,8 @@ The workspace crates have narrow responsibilities:
   listening/connection/data/close events. Multi-client streaming remains later
 - `node:vm` supports context creation/detection, Script execution in current or
   sandboxed contexts, cached source data, function compilation and memory shapes
+- `node:punycode` implements RFC 3492 encode/decode, IDN domain conversion and
+  surrogate-safe UCS-2/code-point conversion
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
