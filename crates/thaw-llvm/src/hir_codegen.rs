@@ -13905,6 +13905,9 @@ mod tests {
                 left: string | number,
                 right: string | number
             ): boolean { return left !== right; }
+            function conditional(flag: boolean): string | number {
+                return flag ? "chosen" : 17;
+            }
             function kind(value: string | number): string { return typeof value; }
             function describe(value: string | number): string {
                 if (typeof value === "string") {
@@ -13960,6 +13963,10 @@ mod tests {
                 console.log(unionEqual(4, "4"));
                 console.log(unionEqual(NaN, NaN));
                 console.log(unionNotEqual(4, "4"));
+                console.log(conditional(true));
+                console.log(conditional(false));
+                const conditionalLocal: string | number = false ? "unused" : 18;
+                console.log(conditionalLocal);
                 console.log(describe("hello"));
                 console.log(describe(42));
                 console.log(describeReverse("ok"));
@@ -13979,7 +13986,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
-            "string\nnumber\ndirect\n12\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
+            "string\nnumber\ndirect\n12\ntrue\ntrue\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\nfalse\ntrue\nchosen\n17\n18\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
         );
     }
 
