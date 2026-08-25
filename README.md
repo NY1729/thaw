@@ -431,9 +431,9 @@ The workspace crates have narrow responsibilities:
   are available through synchronous, callback and Promise APIs
 - Recursive directory copying is available through `cpSync`, callback `cp`
   and `fs/promises.cp`, including force and existing-destination controls
-- `fs/promises.open()` returns FileHandle objects with repeated read/write/
-  append/stat/truncate operations, stream creation, close-state errors and
-  async-dispose support
+- `fs/promises.open()` returns FileHandle objects with whole-file and
+  position-aware buffer/string read/write operations, append/stat/truncate,
+  stream creation, close-state errors and async-dispose support
 - Hard links, symbolic links, link-target reads and Unix permission changes
   are exposed through synchronous, callback and Promise APIs
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
