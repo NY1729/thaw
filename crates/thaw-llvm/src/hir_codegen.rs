@@ -14165,6 +14165,38 @@ mod tests {
     }
 
     #[test]
+    fn compiles_local_generic_arrow_specializations() {
+        let source = r#"
+            async function main(): Promise<void> {
+                const identity = <T>(value: T): T => value;
+                const choose = <T, U>(left: T, right: U): T => left;
+                const prefix: string = "value=";
+                const describe = <T>(value: T): string => prefix + String(value);
+                console.log(typeof identity);
+                console.log(identity(17));
+                console.log(identity("local"));
+                console.log(identity(18));
+                console.log(identity<number>(19));
+                console.log(choose("selected", 4));
+                const tuple: [string, number] = ["spread", 9];
+                console.log(choose(...tuple));
+                console.log(choose(...["literal", 2]));
+                console.log(describe(5));
+                console.log(describe(true));
+                console.log([20, 21].map(identity)[1]);
+                const promised: string = await new Promise<string>((resolve, reject) => {
+                    resolve("promise-arrow");
+                }).then(identity);
+                console.log(promised);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "local_generic_arrows"),
+            "function\n17\nlocal\n18\n19\nselected\nspread\nliteral\nvalue=5\nvalue=true\n21\npromise-arrow\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };

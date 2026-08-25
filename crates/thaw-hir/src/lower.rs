@@ -3456,6 +3456,7 @@ struct FnLowerer<'a> {
     ret_type: HirType,
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     generic_call_returns: HashMap<Symbol, HirType>,
+    generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
 }
@@ -3498,6 +3499,7 @@ impl<'a> FnLowerer<'a> {
             ret_type,
             call_constraints,
             generic_call_returns: HashMap::new(),
+            generic_arrows: HashMap::new(),
             loop_depth: 0,
             labels: Vec::new(),
         }
@@ -3533,12 +3535,14 @@ impl<'a> FnLowerer<'a> {
         let saved_nullable_narrowings = self.nullable_narrowings.clone();
         let saved_nullish_narrowings = self.nullish_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
+        let saved_generic_arrows = self.generic_arrows.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
         self.narrowings = saved_narrowings;
         self.nullable_narrowings = saved_nullable_narrowings;
         self.nullish_narrowings = saved_nullish_narrowings;
         self.union_narrowings = saved_union_narrowings;
+        self.generic_arrows = saved_generic_arrows;
         lowered
     }
 
@@ -4577,6 +4581,21 @@ impl<'a> FnLowerer<'a> {
                         )
                     })
                     .transpose()?;
+                if annotated.is_none()
+                    && matches!(init, Expr::Arrow(arrow) if arrow.type_params.is_some())
+                {
+                    let Expr::Arrow(arrow) = init else {
+                        unreachable!()
+                    };
+                    if arrow.is_async || arrow.is_generator {
+                        return Err(
+                            "async and generator generic arrow variables are not supported".into(),
+                        );
+                    }
+                    let hir_name = self.bind_local(&name, HirType::Dynamic);
+                    self.generic_arrows.insert(hir_name, arrow.clone());
+                    continue;
+                }
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
@@ -6442,14 +6461,24 @@ impl<'a> FnLowerer<'a> {
                     }
                     UnaryOp::TypeOf => {
                         let operand_type = if let HirExpr::Var(name) = &value {
-                            self.signatures.get(name).map(|signature| {
-                                let ret = if signature.is_async {
-                                    HirType::Promise(Box::new(signature.ret.clone()))
-                                } else {
-                                    signature.ret.clone()
-                                };
-                                HirType::Function(signature.params.clone(), Box::new(ret))
-                            })
+                            self.generic_arrows
+                                .get(name)
+                                .map(|arrow| {
+                                    HirType::Function(
+                                        vec![HirType::Dynamic; arrow.params.len()],
+                                        Box::new(HirType::Dynamic),
+                                    )
+                                })
+                                .or_else(|| {
+                                    self.signatures.get(name).map(|signature| {
+                                        let ret = if signature.is_async {
+                                            HirType::Promise(Box::new(signature.ret.clone()))
+                                        } else {
+                                            signature.ret.clone()
+                                        };
+                                        HirType::Function(signature.params.clone(), Box::new(ret))
+                                    })
+                                })
                         } else {
                             None
                         }
@@ -7205,6 +7234,9 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
+                if let Some(arrow) = self.generic_arrows.get(&name).cloned() {
+                    return self.lower_contextual_arrow(&arrow, parameter_types, expected_return);
+                }
                 if self.scope.contains_key(&name) {
                     self.lower_expr(expr)?
                 } else {
@@ -8868,6 +8900,11 @@ impl<'a> FnLowerer<'a> {
                         _ => None,
                     })
                     .or_else(|| {
+                        self.generic_arrows
+                            .get(&name)
+                            .map(|arrow| arrow.params.len())
+                    })
+                    .or_else(|| {
                         self.signatures
                             .get(&name)
                             .map(|signature| signature.params.len())
@@ -8901,6 +8938,11 @@ impl<'a> FnLowerer<'a> {
                     .and_then(|ty| match ty {
                         HirType::Function(params, _) => Some(params.len()),
                         _ => None,
+                    })
+                    .or_else(|| {
+                        self.generic_arrows
+                            .get(&name)
+                            .map(|arrow| arrow.params.len())
                     })
                     .or_else(|| {
                         self.signatures
@@ -8942,6 +8984,11 @@ impl<'a> FnLowerer<'a> {
                         _ => None,
                     })
                     .or_else(|| {
+                        self.generic_arrows
+                            .get(&name)
+                            .map(|arrow| arrow.params.len())
+                    })
+                    .or_else(|| {
                         self.signatures
                             .get(&name)
                             .map(|signature| signature.params.len())
@@ -8973,6 +9020,11 @@ impl<'a> FnLowerer<'a> {
                     .and_then(|ty| match ty {
                         HirType::Function(params, _) => Some(params.len()),
                         _ => None,
+                    })
+                    .or_else(|| {
+                        self.generic_arrows
+                            .get(&name)
+                            .map(|arrow| arrow.params.len())
                     })
                     .or_else(|| {
                         self.signatures
@@ -12047,6 +12099,10 @@ impl<'a> FnLowerer<'a> {
             ),
         };
 
+        if let Some(arrow) = self.generic_arrows.get(&callee_name).cloned() {
+            return self.lower_generic_arrow_call(&callee_name, &arrow, call);
+        }
+
         if matches!(callee_name.as_str(), "isNaN" | "isFinite") {
             let [argument] = call.args.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
@@ -12655,6 +12711,161 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &argument_bindings)
     }
 
+    fn lower_generic_arrow_call(
+        &mut self,
+        name: &str,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let lowered = call
+            .args
+            .iter()
+            .map(|argument| self.lower_expr(&argument.expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        let preserve_order = call.args.iter().any(|argument| argument.spread.is_some())
+            || lowered.iter().any(contains_await);
+        let mut bindings = Vec::new();
+        let mut arguments = Vec::new();
+        for (source, value) in call.args.iter().zip(lowered) {
+            if source.spread.is_none() && !preserve_order {
+                arguments.push(value);
+                continue;
+            }
+            if source.spread.is_some() {
+                if let HirExpr::ArrayLit(elements) = value {
+                    for element in elements {
+                        let ty = self.infer_expr_type(&element)?;
+                        let temporary = format!("__thaw_generic_arrow_arg_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(temporary.clone(), ty.clone());
+                        bindings.push((temporary.clone(), ty, element));
+                        arguments.push(HirExpr::Var(temporary));
+                    }
+                    continue;
+                }
+                let source_type = self.infer_expr_type(&value)?;
+                let HirType::Tuple(elements) = &source_type else {
+                    return Err(format!(
+                        "generic arrow `{name}` spread source must have a statically known tuple length, got {source_type:?}"
+                    ));
+                };
+                let elements = elements.clone();
+                let temporary = format!("__thaw_generic_arrow_spread_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(temporary.clone(), source_type.clone());
+                bindings.push((temporary.clone(), source_type, value));
+                arguments.extend(elements.into_iter().enumerate().map(|(index, ty)| {
+                    HirExpr::TypedIndex(
+                        Box::new(HirExpr::Var(temporary.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ty,
+                    )
+                }));
+                continue;
+            }
+            let ty = self.infer_expr_type(&value)?;
+            let temporary = format!("__thaw_generic_arrow_arg_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(temporary.clone(), ty.clone());
+            bindings.push((temporary.clone(), ty, value));
+            arguments.push(HirExpr::Var(temporary));
+        }
+        if arrow.params.len() != arguments.len() {
+            return Err(format!(
+                "generic arrow `{name}` expects {} argument(s), got {} after spread expansion",
+                arrow.params.len(),
+                arguments.len()
+            ));
+        }
+        let parameter_types = arguments
+            .iter()
+            .map(|argument| self.infer_expr_type(argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(type_args) = &call.type_args {
+            let signature = self.generic_arrow_signature(arrow)?;
+            resolve_explicit_generic_type_tuple(
+                &signature,
+                &type_args.params,
+                &parameter_types,
+                self.interfaces,
+                self.generic_interfaces,
+            )
+            .map_err(|error| {
+                format!("cannot explicitly specialize generic arrow `{name}`: {error}")
+            })?;
+        }
+        let lambda = self
+            .lower_contextual_arrow(arrow, &parameter_types, None)
+            .map_err(|error| format!("cannot specialize generic arrow `{name}`: {error}"))?;
+        let result = HirExpr::Call(Box::new(lambda), arguments);
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
+    fn generic_arrow_signature(
+        &self,
+        arrow: &swc_ecma_ast::ArrowExpr,
+    ) -> Result<FnSignature, String> {
+        let type_params = arrow.type_params.as_ref().ok_or("arrow is not generic")?;
+        validate_trailing_type_parameter_defaults(
+            "generic arrow function",
+            "<anonymous>",
+            type_params,
+        )?;
+        let generic_type_params = type_params
+            .params
+            .iter()
+            .map(|parameter| parameter.name.sym.to_string())
+            .collect::<Vec<_>>();
+        let substitutions = generic_type_params
+            .iter()
+            .map(|name| (name.clone(), GenericTypePattern::Variable(name.clone())))
+            .collect::<HashMap<_, _>>();
+        let generic_param_patterns = arrow
+            .params
+            .iter()
+            .map(|parameter| {
+                let Pat::Ident(binding) = parameter else {
+                    return Err("generic arrows require identifier parameters".into());
+                };
+                let annotation = binding
+                    .type_ann
+                    .as_ref()
+                    .ok_or("generic arrow parameters need type annotations")?;
+                generic_type_pattern(
+                    &annotation.type_ann,
+                    &substitutions,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    &mut Vec::new(),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(FnSignature {
+            params: Vec::new(),
+            variadic: None,
+            ret: HirType::Dynamic,
+            is_async: false,
+            is_extern: false,
+            source_range: (arrow.span.lo.0, arrow.span.hi.0),
+            generic_type_params,
+            generic_type_constraints: type_params
+                .params
+                .iter()
+                .map(|parameter| parameter.constraint.clone())
+                .collect(),
+            generic_type_defaults: type_params
+                .params
+                .iter()
+                .map(|parameter| parameter.default.clone())
+                .collect(),
+            generic_param_patterns,
+            generic_return_type: arrow
+                .return_type
+                .as_ref()
+                .map(|annotation| annotation.type_ann.clone()),
+        })
+    }
+
     fn lower_optional_call(&mut self, call: &swc_ecma_ast::OptCall) -> Result<HirExpr, String> {
         let optional_member = match call.callee.as_ref() {
             Expr::Member(member) => Some(member),
@@ -13218,6 +13429,28 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("does not satisfy constraint F64"), "{error}");
+    }
+
+    #[test]
+    fn validates_local_generic_arrow_calls() {
+        for (source, expected) in [
+            (
+                "function main(): void { const numeric = <T extends number>(value: T): T => value; numeric(\"wrong\"); }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "function main(): void { const pair = <T, U>(left: T, right: U): T => left; pair(1); }",
+                "expects 2 argument(s), got 1",
+            ),
+            (
+                "function main(): void { const identity = <T>(value: T): T => value; identity<string>(1); }",
+                "explicit type is Str",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
