@@ -6192,6 +6192,35 @@ mod tests {
     }
 
     #[test]
+    fn readable_stream_from_adapts_sync_and_async_iterables() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_readable_stream_from");
+        fs::write(
+            dir.join("index.js"),
+            "var web = require('node:stream/web'); module.exports = async function () { var values = []; for await (var value of ReadableStream.from([Promise.resolve(1), 2])) values.push(value); var asyncCalls = 0, asyncIterable = { next: async function() { asyncCalls++; if (asyncCalls === 1) return { value: 'async', done: false }; return { done: true }; } }; asyncIterable[Symbol.asyncIterator] = function() { return this; }; var asyncValues = []; for await (var asyncValue of web.ReadableStream.from(asyncIterable)) asyncValues.push(asyncValue); var returned = [], endless = { next: function() { return { value: 7, done: false }; }, return: function(reason) { returned.push(reason); return { done: true }; } }; endless[Symbol.iterator] = function() { return this; }; var cancelled = ReadableStream.from(endless), cancelledReader = cancelled.getReader(); await cancelledReader.read(); await cancelledReader.cancel('stop'); var originalController, original = new ReadableStream({ start: function(controller) { originalController = controller; } }), adapted = ReadableStream.from(original), lockedImmediately = original.locked, adaptedReader = adapted.getReader(); originalController.enqueue('source'); originalController.close(); var adaptedValue = await adaptedReader.read(), adaptedDone = await adaptedReader.read(), calls = 0, failure = new Error('boom'), failing = { next: function() { calls++; if (calls === 1) return { value: 'first', done: false }; throw failure; } }; failing[Symbol.iterator] = function() { return this; }; var failingReader = ReadableStream.from(failing).getReader(), first = await failingReader.read(), received = await failingReader.read().catch(function(error) { return error; }), invalid; try { ReadableStream.from(1); } catch (error) { invalid = [error.name, error.code]; } return [values, asyncValues, asyncCalls, returned, lockedImmediately, adaptedValue.value, adaptedDone.done, first.value, received === failure, invalid, web.ReadableStream.from === globalThis.ReadableStream.from]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_readable_stream_from_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseReadableStreamFrom = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseReadableStreamFrom").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[1,2],["async"],2,["stop"],true,"source",true,"first",true,["TypeError","ERR_ARG_NOT_ITERABLE"],true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_pipe_to_propagates_completion_errors_and_abort() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_pipe_to_options");
