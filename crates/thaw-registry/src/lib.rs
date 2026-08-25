@@ -256,7 +256,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function stringify(argsArray: any): any;\nexport declare function encode(argsArray: any): any;\nexport declare function parse(argsArray: any): any;\nexport declare function decode(argsArray: any): any;\nexport declare function escape(argsArray: any): any;\nexport declare function unescape(argsArray: any): any;\n"
         }
         "events" => {
-            "export declare function EventEmitter(argsArray: any): any;\nexport declare function once(argsArray: any): any;\n"
+            "export declare function EventEmitter(argsArray: any): any;\nexport declare function once(argsArray: any): any;\nexport declare function on(argsArray: any): any;\nexport declare function getEventListeners(argsArray: any): any;\nexport declare function getMaxListeners(argsArray: any): number;\nexport declare function setMaxListeners(argsArray: any): void;\n"
         }
         "assert" | "assert/strict" => {
             "export declare function ok(argsArray: any): void;\nexport declare function equal(argsArray: any): void;\nexport declare function notEqual(argsArray: any): void;\nexport declare function strictEqual(argsArray: any): void;\nexport declare function notStrictEqual(argsArray: any): void;\nexport declare function deepEqual(argsArray: any): void;\nexport declare function notDeepEqual(argsArray: any): void;\nexport declare function deepStrictEqual(argsArray: any): void;\nexport declare function notDeepStrictEqual(argsArray: any): void;\nexport declare function fail(argsArray: any): void;\nexport declare function throws(argsArray: any): any;\nexport declare function doesNotThrow(argsArray: any): void;\n"
@@ -3322,11 +3322,11 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         "events" => Some(
             "function EventEmitter() {\n\
              \x20\x20if (!(this instanceof EventEmitter)) return new EventEmitter();\n\
-             \x20\x20this._events = Object.create(null);\n\
+             \x20\x20this._events = Object.create(null); this._maxListeners = undefined;\n\
              }\n\
              EventEmitter.prototype._add = function(event, listener, prepend, once) {\n\
              \x20\x20if (typeof listener !== 'function') throw new TypeError('listener must be a function');\n\
-             \x20\x20var name = String(event); var list = this._events[name] || (this._events[name] = []);\n\
+             \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name] || (this._events[name] = []);\n\
              \x20\x20var entry = { listener: listener, once: Boolean(once) };\n\
              \x20\x20if (prepend) list.unshift(entry); else list.push(entry);\n\
              \x20\x20return this;\n\
@@ -3336,7 +3336,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              EventEmitter.prototype.prependListener = function(event, listener) { return this._add(event, listener, true, false); };\n\
              EventEmitter.prototype.prependOnceListener = function(event, listener) { return this._add(event, listener, true, true); };\n\
              EventEmitter.prototype.emit = function(event) {\n\
-             \x20\x20var name = String(event); var list = this._events[name];\n\
+             \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name];\n\
              \x20\x20if (!list || list.length === 0) {\n\
              \x20\x20\x20\x20if (name === 'error') { var error = arguments[1]; throw error instanceof Error ? error : new Error('Unhandled error event'); }\n\
              \x20\x20\x20\x20return false;\n\
@@ -3349,27 +3349,32 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20return true;\n\
              };\n\
              EventEmitter.prototype.removeListener = EventEmitter.prototype.off = function(event, listener) {\n\
-             \x20\x20var name = String(event); var list = this._events[name]; if (!list) return this;\n\
+             \x20\x20var name = typeof event === 'symbol' ? event : String(event); var list = this._events[name]; if (!list) return this;\n\
              \x20\x20for (var index = list.length - 1; index >= 0; index--) if (list[index].listener === listener || list[index].listener.listener === listener) { list.splice(index, 1); break; }\n\
              \x20\x20if (list.length === 0) delete this._events[name]; return this;\n\
              };\n\
-             EventEmitter.prototype.removeAllListeners = function(event) { if (event === undefined) this._events = Object.create(null); else delete this._events[String(event)]; return this; };\n\
-             EventEmitter.prototype.listeners = function(event) { var list = this._events[String(event)] || []; return list.map(function(entry) { return entry.listener.listener || entry.listener; }); };\n\
-             EventEmitter.prototype.rawListeners = function(event) { var list = this._events[String(event)] || []; return list.map(function(entry) { return entry.listener; }); };\n\
-             EventEmitter.prototype.listenerCount = function(event) { var list = this._events[String(event)]; return list ? list.length : 0; };\n\
-             EventEmitter.prototype.eventNames = function() { return Object.keys(this._events); };\n\
+             EventEmitter.prototype.removeAllListeners = function(event) { if (event === undefined) this._events = Object.create(null); else delete this._events[typeof event === 'symbol' ? event : String(event)]; return this; };\n\
+             EventEmitter.prototype.listeners = function(event) { var list = this._events[typeof event === 'symbol' ? event : String(event)] || []; return list.map(function(entry) { return entry.listener.listener || entry.listener; }); };\n\
+             EventEmitter.prototype.rawListeners = function(event) { var list = this._events[typeof event === 'symbol' ? event : String(event)] || []; return list.map(function(entry) { return entry.listener; }); };\n\
+             EventEmitter.prototype.listenerCount = function(event) { var list = this._events[typeof event === 'symbol' ? event : String(event)]; return list ? list.length : 0; };\n\
+             EventEmitter.prototype.eventNames = function() { return Reflect.ownKeys(this._events); };\n\
+             EventEmitter.prototype.setMaxListeners = function(value) { value = Number(value); if (!Number.isFinite(value) || value < 0) throw new RangeError('The value of n is out of range'); this._maxListeners = value; return this; }; EventEmitter.prototype.getMaxListeners = function() { return this._maxListeners === undefined ? EventEmitter.defaultMaxListeners : this._maxListeners; }; EventEmitter.defaultMaxListeners = 10;\n\
              EventEmitter.listenerCount = function(emitter, event) { return emitter.listenerCount(event); };\n\
-             function once(emitter, event) {\n\
+             function once(emitter, event, options) {\n\
              \x20\x20return new Promise(function(resolve, reject) {\n\
-             \x20\x20\x20\x20function cleanup() { emitter.removeListener(event, done); emitter.removeListener('error', failed); }\n\
+             \x20\x20\x20\x20function cleanup() { emitter.removeListener(event, done); emitter.removeListener('error', failed); if (options && options.signal) options.signal.removeEventListener('abort', aborted); }\n\
              \x20\x20\x20\x20function done() { var values = Array.prototype.slice.call(arguments); cleanup(); resolve(values); }\n\
              \x20\x20\x20\x20function failed(error) { cleanup(); reject(error); }\n\
-             \x20\x20\x20\x20emitter.once(event, done); if (event !== 'error') emitter.once('error', failed);\n\
+             \x20\x20\x20\x20function aborted() { var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = options.signal.reason; cleanup(); reject(error); }\n\
+             \x20\x20\x20\x20if (options && options.signal && options.signal.aborted) { aborted(); return; } emitter.once(event, done); if (event !== 'error') emitter.once('error', failed); if (options && options.signal) options.signal.addEventListener('abort', aborted, { once: true });\n\
              \x20\x20});\n\
              }\n\
+             function on(emitter, event, options) { options = options || {}; var values = [], waiters = [], ended = false, failure; function received() { var value = Array.prototype.slice.call(arguments); if (waiters.length) waiters.shift().resolve({ value: value, done: false }); else values.push(value); } function fail(error) { failure = error; finish(); } function finish() { if (ended) return; ended = true; emitter.removeListener(event, received); if (event !== 'error') emitter.removeListener('error', fail); while (waiters.length) { var waiter = waiters.shift(); if (failure) waiter.reject(failure); else waiter.resolve({ value: undefined, done: true }); } } emitter.on(event, received); if (event !== 'error') emitter.on('error', fail); if (options.signal) { var abort = function() { var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = options.signal.reason; failure = error; finish(); }; if (options.signal.aborted) abort(); else options.signal.addEventListener('abort', abort, { once: true }); } return { next: function() { if (values.length) return Promise.resolve({ value: values.shift(), done: false }); if (failure) return Promise.reject(failure); if (ended) return Promise.resolve({ value: undefined, done: true }); return new Promise(function(resolve, reject) { waiters.push({ resolve: resolve, reject: reject }); }); }, return: function() { finish(); return Promise.resolve({ value: undefined, done: true }); }, throw: function(error) { failure = error; finish(); return Promise.reject(error); }, [Symbol.asyncIterator]: function() { return this; } }; }\n\
+             function getEventListeners(emitter, event) { return typeof emitter.listeners === 'function' ? emitter.listeners(event) : []; } function getMaxListeners(emitter) { return typeof emitter.getMaxListeners === 'function' ? emitter.getMaxListeners() : EventEmitter.defaultMaxListeners; } function setMaxListeners(value) { var emitters = Array.prototype.slice.call(arguments, 1); value = Number(value); if (!Number.isFinite(value) || value < 0) throw new RangeError('The value of n is out of range'); if (!emitters.length) EventEmitter.defaultMaxListeners = value; else emitters.forEach(function(emitter) { emitter.setMaxListeners(value); }); }\n\
              module.exports = EventEmitter;\n\
              module.exports.EventEmitter = EventEmitter;\n\
              module.exports.once = once;\n\
+             module.exports.on = on; module.exports.getEventListeners = getEventListeners; module.exports.getMaxListeners = getMaxListeners; module.exports.setMaxListeners = setMaxListeners; module.exports.errorMonitor = Symbol.for('events.errorMonitor'); module.exports.captureRejectionSymbol = Symbol.for('nodejs.rejection');\n\
              module.exports.default = EventEmitter;\n\
              module.exports.__esModule = true;\n",
         ),
@@ -5392,6 +5397,35 @@ mod tests {
             r#"["once:1,regular:1,regular:2",true,true,false,0,0]"#
         );
 
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn events_builtin_supports_symbols_async_iteration_and_abort() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_events_async");
+        fs::write(
+            dir.join("index.js"),
+            "var events = require('node:events'); module.exports = async function () { var emitter = new events.EventEmitter(), symbol = Symbol('value'), observed = []; emitter.on(symbol, function(value) { observed.push(value); }); emitter.emit(symbol, 1); var iterator = events.on(emitter, 'data'); emitter.emit('data', 'first', 2); emitter.emit('data', 'second', 3); var first = await iterator.next(), second = await iterator.next(), returned = await iterator.return(); var controller = new AbortController(), aborted = events.on(emitter, 'wait', { signal: controller.signal }), error; var pending = aborted.next().catch(function(value) { error = [value.name, value.code, value.cause]; }); controller.abort('reason'); await pending; var onceController = new AbortController(), onceError; var oncePending = events.once(emitter, 'never', { signal: onceController.signal }).catch(function(value) { onceError = [value.name, value.code, value.cause]; }); onceController.abort('once-reason'); await oncePending; events.setMaxListeners(4, emitter); var listener = function() {}; emitter.on('probe', listener); return [observed, first.value, second.value, returned.done, emitter.listenerCount('data'), emitter.eventNames().some(function(value) { return value === symbol; }), events.getEventListeners(emitter, 'probe')[0] === listener, emitter.getMaxListeners(), events.getMaxListeners(emitter), error, onceError, typeof events.errorMonitor, typeof events.captureRejectionSymbol]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_events_async_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseEventsAsync = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseEventsAsync").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[1],["first",2],["second",3],true,0,true,true,4,4,["AbortError","ABORT_ERR","reason"],["AbortError","ABORT_ERR","once-reason"],"symbol","symbol"]"#
+        );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
