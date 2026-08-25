@@ -100,6 +100,45 @@ const PLATFORM_GLOBALS: &str = r#"
     queueMicrotask(() => callback(...args));
   };
   if (typeof globalThis.process === 'undefined') globalThis.process = {};
+  const processStart = Date.now();
+  let processCwd = typeof globalThis.process.cwd === 'function'
+    ? globalThis.process.cwd() : '/';
+  const processListeners = new Map();
+  const processOn = (event, listener, once = false) => {
+    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    const name = String(event);
+    const listeners = processListeners.get(name) || [];
+    listeners.push({ listener, once });
+    processListeners.set(name, listeners);
+    return globalThis.process;
+  };
+  const processOff = (event, listener) => {
+    const name = String(event);
+    const listeners = processListeners.get(name) || [];
+    processListeners.set(name, listeners.filter(entry => entry.listener !== listener));
+    return globalThis.process;
+  };
+  const processEmit = (event, ...args) => {
+    const name = String(event);
+    const listeners = (processListeners.get(name) || []).slice();
+    for (const entry of listeners) {
+      if (entry.once) processOff(name, entry.listener);
+      entry.listener(...args);
+    }
+    return listeners.length !== 0;
+  };
+  const hrtime = previous => {
+    const nanoseconds = BigInt(Date.now() - processStart) * 1000000n;
+    let seconds = Number(nanoseconds / 1000000000n);
+    let remainder = Number(nanoseconds % 1000000000n);
+    if (previous !== undefined) {
+      seconds -= Number(previous[0]);
+      remainder -= Number(previous[1]);
+      if (remainder < 0) { seconds--; remainder += 1000000000; }
+    }
+    return [seconds, remainder];
+  };
+  hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || [],
     env: globalThis.process.env || {},
@@ -109,8 +148,31 @@ const PLATFORM_GLOBALS: &str = r#"
     config: globalThis.process.config || { variables: {} },
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
-    cwd: globalThis.process.cwd || (() => '/'),
-    nextTick
+    cwd: () => processCwd,
+    chdir: directory => {
+      const value = String(directory);
+      processCwd = value.charAt(0) === '/' ? value : processCwd.replace(/\/$/, '') + '/' + value;
+    },
+    nextTick,
+    uptime: () => (Date.now() - processStart) / 1000,
+    hrtime,
+    memoryUsage: () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }),
+    cpuUsage: () => ({ user: 0, system: 0 }),
+    on: (event, listener) => processOn(event, listener),
+    once: (event, listener) => processOn(event, listener, true),
+    off: processOff,
+    removeListener: processOff,
+    emit: processEmit,
+    listenerCount: event => (processListeners.get(String(event)) || []).length,
+    emitWarning: (warning, options) => {
+      const value = warning instanceof Error ? warning : new Error(String(warning));
+      value.name = options && options.type ? String(options.type) : 'Warning';
+      if (options && options.code) value.code = String(options.code);
+      if (!processEmit('warning', value) && globalThis.console
+          && typeof globalThis.console.warn === 'function') globalThis.console.warn(value);
+    },
+    exitCode: globalThis.process.exitCode,
+    title: globalThis.process.title || 'thaw'
   });
 
   if (typeof globalThis.DOMException !== 'function') {
@@ -1518,6 +1580,29 @@ mod tests {
             1
         );
         assert_eq!(call("tickOrder", "[]"), r#"["sync","after","nextTick"]"#);
+    }
+
+    #[test]
+    fn process_exposes_time_cwd_and_event_helpers() {
+        assert_eq!(
+            load(
+                "function processHelpers() {\n\
+                   const original = process.cwd(); process.chdir('/tmp/app'); const changed = process.cwd(); process.chdir(original);\n\
+                   const warnings = []; const removed = () => warnings.push('removed');\n\
+                   process.on('warning', removed); process.off('warning', removed);\n\
+                   process.once('warning', warning => warnings.push(warning.name + ':' + warning.code + ':' + warning.message));\n\
+                   process.emitWarning('careful', { type: 'ThawWarning', code: 'THAW001' });\n\
+                   process.emitWarning('ignored by once listener');\n\
+                   const start = process.hrtime(); const elapsed = process.hrtime(start); const memory = process.memoryUsage();\n\
+                   return [changed, process.cwd() === original, warnings.join(','), process.listenerCount('warning'), process.uptime() >= 0, start.length, elapsed[0] >= 0, elapsed[1] >= 0, typeof process.hrtime.bigint() === 'bigint', memory.rss, process.cpuUsage().user, process.title];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("processHelpers", "[]"),
+            r#"["/tmp/app",true,"ThawWarning:THAW001:careful",0,true,2,true,true,true,0,0,"thaw"]"#
+        );
     }
 
     #[test]
