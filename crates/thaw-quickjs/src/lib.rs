@@ -28,7 +28,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::os::raw::c_char;
 #[cfg(unix)]
@@ -368,7 +368,28 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "access" => fs_access(&path, value.parse::<i32>().unwrap_or(0)).map(|_| serde_json::json!({ "ok": true })),
         "statfs" => fs_statfs(&path),
         "read" => std::fs::read(&path).map(|bytes| serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })),
+        "read_range" => (|| -> io::Result<serde_json::Value> {
+            let (position, length) = value.split_once(',').unwrap_or(("0", "0"));
+            let mut file = std::fs::File::open(&path)?;
+            file.seek(SeekFrom::Start(position.parse::<u64>().unwrap_or(0)))?;
+            let mut bytes = vec![0; length.parse::<usize>().unwrap_or(0)];
+            let count = file.read(&mut bytes)?;
+            bytes.truncate(count);
+            Ok(serde_json::json!({ "ok": true, "data": hex_encode(&bytes), "length": count }))
+        })(),
         "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
+        "write_range" => (|| -> io::Result<serde_json::Value> {
+            let (position, encoded) = value.split_once(':').unwrap_or(("0", ""));
+            let bytes = hex_decode(encoded);
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)?;
+            file.seek(SeekFrom::Start(position.parse::<u64>().unwrap_or(0)))?;
+            file.write_all(&bytes)?;
+            Ok(serde_json::json!({ "ok": true, "length": bytes.len() }))
+        })(),
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
         "mkdir" => if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
