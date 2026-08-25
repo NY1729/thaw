@@ -386,6 +386,10 @@ The workspace crates have narrow responsibilities:
   `Readable.toWeb()` starts its Node source paused, resumes on Web pulls,
   pauses at the controller high-water mark, and resolves cancellation only
   after the Node source has emitted its error/close lifecycle.
+  Writable Web streams reject direct close/abort while writer-locked; the
+  owning writer serializes abort behind pending writes, calls the underlying
+  abort algorithm before settling the write, and rejects later writes and its
+  `closed` Promise with the original reason.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
