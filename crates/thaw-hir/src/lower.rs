@@ -485,9 +485,10 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             // Already consumed by `resolve_interfaces` above.
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {}
             ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(_))) => {}
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(_))) => {}
             ModuleItem::Stmt(_) => {
                 return Err(
-                    "Phase 0/1/2 only support top-level function, interface, and enum declarations; wrap other code in a function"
+                    "Phase 0/1/2 only support top-level function, interface, type-alias, and enum declarations; wrap other code in a function"
                         .into(),
                 )
             }
@@ -1111,6 +1112,46 @@ fn resolve_interfaces(
     let names: Vec<Symbol> = raw.keys().cloned().collect();
     for name in names {
         resolve_interface(&name, &raw, &mut resolved, &mut Vec::new())?;
+    }
+    let mut pending = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => Some(alias.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let previous_len = pending.len();
+        let mut next = Vec::new();
+        let mut errors = Vec::new();
+        for alias in pending {
+            let name = alias.id.sym.to_string();
+            if alias.type_params.is_some() {
+                return Err(format!("generic type alias `{name}` is not supported yet"));
+            }
+            if resolved.contains_key(&name) {
+                return Err(format!(
+                    "type alias `{name}` conflicts with another type declaration"
+                ));
+            }
+            match lower_ts_type(&alias.type_ann, &resolved, &generic) {
+                Ok(ty) => {
+                    resolved.insert(name, ty);
+                }
+                Err(error) => {
+                    next.push(alias);
+                    errors.push((name, error));
+                }
+            }
+        }
+        if next.len() == previous_len {
+            let (name, error) = errors.into_iter().next().unwrap();
+            return Err(format!(
+                "type alias `{name}` could not be resolved: {error}"
+            ));
+        }
+        pending = next;
     }
     Ok((resolved, generic))
 }
@@ -12412,6 +12453,34 @@ mod tests {
                     && members == &vec![HirType::Str, HirType::F64]
                     && matches!(value.as_ref(), HirExpr::Lit(HirLit::F64(2.0)))
         ));
+    }
+
+    #[test]
+    fn resolves_forward_type_aliases_and_rejects_cycles() {
+        let program = lower(
+            r#"type Later = Base & { count: number };
+               type Base = { name: string };
+               type Choice = string | number;
+               function choose(value: Choice): Later {
+                   return { count: 2, name: "alias" };
+               }"#,
+        );
+        assert_eq!(
+            program.functions[0].params[0].ty,
+            HirType::Union(vec![HirType::Str, HirType::F64])
+        );
+        assert_eq!(
+            program.functions[0].ret,
+            HirType::Object(vec![
+                ("name".into(), HirType::Str),
+                ("count".into(), HirType::F64),
+            ])
+        );
+
+        let module = thaw_parser::parse_typescript("type A = B; type B = A;").unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("type alias `A` could not be resolved"));
     }
 
     #[test]
