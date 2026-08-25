@@ -394,6 +394,11 @@ The workspace crates have narrow responsibilities:
   writer leaves already-queued writes alive while rejecting subsequent calls,
   `ready`, and `closed` with `ERR_INVALID_STATE`. Both streams can then be
   locked by a replacement reader or writer.
+  Web `pipeTo()` propagates source errors to destination abort, destination
+  errors to source cancel, and AbortSignal reasons to both sides while honoring
+  all three `prevent*` options and releasing both locks. `pipeThrough()`
+  validates locked endpoints synchronously and forwards transform failures to
+  both its returned readable and the original source cancellation.
   `Readable.from()` defaults to object mode, treats strings and binary views as
   single chunks, awaits promised iterable values, and rejects null values or
   non-iterables with Node-compatible error codes. Readable collection helpers
