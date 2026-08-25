@@ -371,6 +371,10 @@ The workspace crates have narrow responsibilities:
 - User-defined function parameters with a monomorphic function type provide
   the same contextual specialization for named generic functions, local
   generic arrows and inline generic arrows
+- Generic function type aliases such as `type Identity = <T>(value: T) => T`
+  retain a polymorphic template when assigned a compatible generic arrow or
+  named generic function; parameter/return shapes and constraints are checked
+  modulo type-parameter names before call-site specialization
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated

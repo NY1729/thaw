@@ -14217,6 +14217,34 @@ mod tests {
     }
 
     #[test]
+    fn compiles_generic_function_type_alias_arrows() {
+        let source = r#"
+            type Identity = <T>(value: T) => T;
+            type Choose = <T, U>(left: T, right: U) => T;
+            type Numeric = <T extends number>(value: T) => T;
+            function namedIdentity<T>(value: T): T { return value; }
+            function main(): void {
+                const identity: Identity = <Value>(value: Value): Value => value;
+                const choose: Choose = <Left, Right>(left: Left, right: Right): Left => left;
+                const numeric: Numeric = <Value extends number>(value: Value): Value => value;
+                const forwarded: Identity = namedIdentity;
+                console.log(identity(24));
+                console.log(identity("alias"));
+                console.log(choose("first", true));
+                console.log(numeric(25));
+                console.log(typeof forwarded);
+                console.log(forwarded(26));
+                console.log(forwarded<string>("forwarded"));
+                console.log([27, 28].map(forwarded)[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_function_alias_arrows"),
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\n"
+        );
+    }
+
+    #[test]
     fn compiles_generic_alias_defaults_and_constraints() {
         let source = r#"
             type Outcome<T, E = string> = { value: T; error: E };
