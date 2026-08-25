@@ -6074,6 +6074,37 @@ mod tests {
     }
 
     #[test]
+    fn web_writable_tracks_strategy_backpressure_and_ready() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_web_writable_backpressure");
+        fs::write(
+            dir.join("index.js"),
+            "module.exports = async function () { var releases = [], sized = [], stream = new WritableStream({ write: function() { return new Promise(function(resolve) { releases.push(resolve); }); } }, { highWaterMark: 2, size: function(value) { sized.push(value); return value; } }), writer = stream.getWriter(), initial = writer.desiredSize, first = writer.write(1), afterFirst = writer.desiredSize, firstReady = false; writer.ready.then(function() { firstReady = true; }); await Promise.resolve(); var firstHadCapacity = firstReady, second = writer.write(2), afterSecond = writer.desiredSize, secondReady = false, ready = writer.ready.then(function() { secondReady = true; }); await Promise.resolve(); await Promise.resolve(); var secondBackpressured = !secondReady; releases.shift()(); await first; await Promise.resolve(); var afterFirstCompletion = [writer.desiredSize, secondReady]; await Promise.resolve(); releases.shift()(); await second; await ready; var final = [writer.desiredSize, secondReady], zero = new WritableStream({}, { highWaterMark: 0 }), zeroWriter = zero.getWriter(), zeroReady = false; zeroWriter.ready.then(function() { zeroReady = true; }); await Promise.resolve(); var zeroInitiallyPending = !zeroReady; await zeroWriter.close(); await zeroWriter.ready; var invalidHighWaterMark, invalidSizeStream = new WritableStream({}, { size: function() { return -1; } }), invalidSizeWriter = invalidSizeStream.getWriter(), invalidSize = await invalidSizeWriter.write('x').catch(function(error) { return error; }), invalidClosed = await invalidSizeWriter.closed.catch(function(error) { return error; }), invalidReady = await invalidSizeWriter.ready.catch(function(error) { return error; }); try { new WritableStream({}, { highWaterMark: -1 }); } catch (error) { invalidHighWaterMark = error.code; } return [initial, afterFirst, firstHadCapacity, afterSecond, secondBackpressured, afterFirstCompletion, final, sized, zeroInitiallyPending, zeroWriter.desiredSize, invalidHighWaterMark, invalidSize.name, invalidSize.code, invalidClosed === invalidSize, invalidReady === invalidSize]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_web_writable_backpressure_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 1);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWebWritableBackpressure = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseWebWritableBackpressure")
+                .unwrap()
+                .as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[2,1,true,-1,true,[0,false],[2,true],[1,2],true,0,"ERR_INVALID_ARG_VALUE","RangeError","ERR_INVALID_ARG_VALUE",true,true]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
     fn web_stream_locks_can_be_released_and_reacquired() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_web_stream_release_locks");
