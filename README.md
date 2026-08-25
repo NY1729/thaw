@@ -375,7 +375,8 @@ The workspace crates have narrow responsibilities:
   and `package.json` `main` entries resolved from each file; bare package
   requests search ancestor `node_modules` directories from the Worker file and
   honor exact and single-wildcard root/subpath `exports` with
-  `require`/`node`/`default` conditions
+  `require`/`node`/`default` conditions; the nearest package scope also resolves
+  exact and single-wildcard `imports` aliases with the same conditions
   (embedding arbitrary runtime-selected files into one binary remains
   impossible without declaring their candidate set); `stdin`/`stdout`/`stderr`
   options connect parent Writable/Readable streams to the child `process`
