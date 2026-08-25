@@ -4068,8 +4068,25 @@ const PLATFORM_GLOBALS: &str = r#"
     };
     globalThis.CompressionStream = class CompressionStream { constructor(format) { const stream = compressionTransform('compress', format); this.readable = stream.readable; this.writable = stream.writable; } };
     globalThis.DecompressionStream = class DecompressionStream { constructor(format) { const stream = compressionTransform('decompress', format); this.readable = stream.readable; this.writable = stream.writable; } };
-    globalThis.ByteLengthQueuingStrategy = class ByteLengthQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size(chunk) { return chunk.byteLength; } };
-    globalThis.CountQueuingStrategy = class CountQueuingStrategy { constructor(options) { this.highWaterMark = Number(options.highWaterMark); } size() { return 1; } };
+    const queuingStrategyMarks = new WeakMap();
+    const queuingStrategyInit = options => {
+      if (options === null || (typeof options !== 'object' && typeof options !== 'function')) { const error = new TypeError('init must be an object'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; }
+      if (options.highWaterMark === undefined) { const error = new TypeError('init.highWaterMark is required'); error.code = 'ERR_MISSING_OPTION'; throw error; }
+      return Number(options.highWaterMark);
+    };
+    const strategyHighWaterMark = function() { if (!queuingStrategyMarks.has(this)) throw new TypeError('invalid queuing strategy receiver'); return queuingStrategyMarks.get(this); };
+    class ByteLengthQueuingStrategy { constructor(options) { queuingStrategyMarks.set(this, queuingStrategyInit(options)); } }
+    Object.defineProperties(ByteLengthQueuingStrategy.prototype, {
+      highWaterMark: { get: strategyHighWaterMark, enumerable: true, configurable: true },
+      size: { value(chunk) { return chunk.byteLength; }, writable: true, enumerable: true, configurable: true }
+    });
+    class CountQueuingStrategy { constructor(options) { queuingStrategyMarks.set(this, queuingStrategyInit(options)); } }
+    Object.defineProperties(CountQueuingStrategy.prototype, {
+      highWaterMark: { get: strategyHighWaterMark, enumerable: true, configurable: true },
+      size: { value() { return 1; }, writable: true, enumerable: true, configurable: true }
+    });
+    globalThis.ByteLengthQueuingStrategy = ByteLengthQueuingStrategy;
+    globalThis.CountQueuingStrategy = CountQueuingStrategy;
     globalThis.TextEncoderStream = class TextEncoderStream { constructor() { const encoder = new TextEncoder(); const transform = new TransformStream({ transform(chunk, controller) { controller.enqueue(encoder.encode(String(chunk))); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = 'utf-8'; } };
     globalThis.TextDecoderStream = class TextDecoderStream { constructor(label = 'utf-8', options = {}) { const decoder = new TextDecoder(label, options); const transform = new TransformStream({ transform(chunk, controller) { const text = decoder.decode(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), { stream: true }); if (text) controller.enqueue(text); }, flush(controller) { const text = decoder.decode(); if (text) controller.enqueue(text); } }); this.readable = transform.readable; this.writable = transform.writable; this.encoding = decoder.encoding || String(label).toLowerCase(); this.fatal = Boolean(options.fatal); this.ignoreBOM = Boolean(options.ignoreBOM); } };
   }
