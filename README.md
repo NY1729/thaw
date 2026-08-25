@@ -320,6 +320,8 @@ The workspace crates have narrow responsibilities:
   high-water-mark return values, queued length and `drain` notification.
   Nested `cork()`/`uncork()` defers writes and uses `_writev` batches when
   available; `end()` safely releases any remaining cork level.
+  Destroying a writable rejects queued and in-flight callbacks exactly once,
+  clears buffered length and prevents a later `finish` event.
   Readables track buffered length, support object mode and pause/resume their
   pipes until a backpressured destination drains;
   `node:stream/promises` exposes Promise-based pipeline and completion helpers
