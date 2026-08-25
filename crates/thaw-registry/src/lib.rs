@@ -153,7 +153,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function inspect(argsArray: any): any;\nexport declare function format(argsArray: any): any;\nexport declare function formatWithOptions(argsArray: any): any;\nexport declare function inherits(argsArray: any): void;\nexport declare function promisify(argsArray: any): any;\nexport declare function callbackify(argsArray: any): any;\nexport declare function deprecate(argsArray: any): any;\nexport declare function stripVTControlCharacters(argsArray: any): any;\nexport declare function toUSVString(argsArray: any): any;\n"
         }
         "path" => {
-            "export declare function resolve(argsArray: any): any;\nexport declare function join(argsArray: any): any;\nexport declare function dirname(argsArray: any): any;\nexport declare function basename(argsArray: any): any;\nexport declare function normalize(argsArray: any): any;\n"
+            "export declare function resolve(argsArray: any): any;\nexport declare function join(argsArray: any): any;\nexport declare function dirname(argsArray: any): any;\nexport declare function basename(argsArray: any): any;\nexport declare function extname(argsArray: any): any;\nexport declare function normalize(argsArray: any): any;\nexport declare function relative(argsArray: any): any;\nexport declare function isAbsolute(argsArray: any): any;\nexport declare function parse(argsArray: any): any;\nexport declare function format(argsArray: any): any;\nexport declare function toNamespacedPath(argsArray: any): any;\n"
         }
         "process" => {
             "export declare function cwd(argsArray: any): any;\nexport declare function chdir(argsArray: any): void;\nexport declare function uptime(argsArray: any): any;\nexport declare function hrtime(argsArray: any): any;\nexport declare function memoryUsage(argsArray: any): any;\nexport declare function cpuUsage(argsArray: any): any;\nexport declare function emitWarning(argsArray: any): void;\n"
@@ -2551,14 +2551,14 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         // either (that's what `fs` is for).
         "path" => Some(
             "function __thaw_path_normalize(p) {\n\
-             \x20\x20var parts = p.split('/'); var out = [];\n\
+             \x20\x20p = String(p); if (p === '') return '.'; var parts = p.split('/'); var out = []; var trailing = p.length > 1 && p.charAt(p.length - 1) === '/';\n\
+             \x20\x20var abs = p.charAt(0) === '/';\n\
              \x20\x20for (var i = 0; i < parts.length; i++) {\n\
              \x20\x20\x20\x20var part = parts[i];\n\
              \x20\x20\x20\x20if (part === '' || part === '.') continue;\n\
-             \x20\x20\x20\x20if (part === '..') { out.pop(); } else { out.push(part); }\n\
+             \x20\x20\x20\x20if (part === '..') { if (out.length && out[out.length - 1] !== '..') out.pop(); else if (!abs) out.push('..'); } else { out.push(part); }\n\
              \x20\x20}\n\
-             \x20\x20var abs = p.charAt(0) === '/';\n\
-             \x20\x20return (abs ? '/' : '') + out.join('/');\n\
+             \x20\x20var result = (abs ? '/' : '') + out.join('/'); if (result === '') result = abs ? '/' : '.'; if (trailing && result !== '/') result += '/'; return result;\n\
              }\n\
              function resolve() {\n\
              \x20\x20var p = '';\n\
@@ -2566,6 +2566,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20var seg = String(arguments[i]);\n\
              \x20\x20\x20\x20if (seg.charAt(0) === '/') { p = seg; } else { p = p ? p + '/' + seg : seg; }\n\
              \x20\x20}\n\
+             \x20\x20if (p.charAt(0) !== '/') p = (globalThis.process && process.cwd ? process.cwd() : '/') + '/' + p;\n\
              \x20\x20var n = __thaw_path_normalize(p);\n\
              \x20\x20return n.charAt(0) === '/' ? n : '/' + n;\n\
              }\n\
@@ -2578,12 +2579,22 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20if (idx <= 0) return n.charAt(0) === '/' ? '/' : '.';\n\
              \x20\x20return n.substring(0, idx);\n\
              }\n\
-             function basename(p) {\n\
+             function basename(p, suffix) {\n\
              \x20\x20var n = __thaw_path_normalize(p);\n\
              \x20\x20var idx = n.lastIndexOf('/');\n\
-             \x20\x20return idx === -1 ? n : n.substring(idx + 1);\n\
+             \x20\x20var base = idx === -1 ? n : n.substring(idx + 1); if (suffix && base.endsWith(String(suffix))) base = base.substring(0, base.length - String(suffix).length); return base;\n\
              }\n\
-             module.exports = { resolve: resolve, join: join, dirname: dirname, basename: basename, normalize: __thaw_path_normalize, sep: '/' };\n\
+             function extname(p) { var base = basename(p); var index = base.lastIndexOf('.'); return index <= 0 ? '' : base.substring(index); }\n\
+             function isAbsolute(p) { return String(p).charAt(0) === '/'; }\n\
+             function relative(from, to) { var left = resolve(from).split('/').filter(Boolean); var right = resolve(to).split('/').filter(Boolean); var shared = 0; while (shared < left.length && shared < right.length && left[shared] === right[shared]) shared++; return left.slice(shared).map(function() { return '..'; }).concat(right.slice(shared)).join('/') || ''; }\n\
+             function parse(p) { var root = isAbsolute(p) ? '/' : ''; var dir = dirname(p); var base = basename(p); var ext = extname(base); return { root: root, dir: dir, base: base, ext: ext, name: ext ? base.substring(0, base.length - ext.length) : base }; }\n\
+             function format(value) { var dir = value.dir || value.root || ''; var base = value.base || String(value.name || '') + String(value.ext || ''); return dir ? (dir === '/' ? '/' : dir + '/') + base : base; }\n\
+             function toNamespacedPath(p) { return p; }\n\
+             var posix = { resolve: resolve, join: join, dirname: dirname, basename: basename, extname: extname, normalize: __thaw_path_normalize, relative: relative, isAbsolute: isAbsolute, parse: parse, format: format, toNamespacedPath: toNamespacedPath, sep: '/', delimiter: ':' };\n\
+             function winInput(p) { return String(p).replace(/\\\\/g, '/').replace(/^([A-Za-z]):/, '/$1:'); }\n\
+             function winOutput(p) { return String(p).replace(/^\\/([A-Za-z]:)/, '$1').replace(/\\//g, '\\\\'); }\n\
+             var win32 = { resolve: function() { return winOutput(resolve.apply(null, Array.from(arguments, winInput))); }, join: function() { return winOutput(join.apply(null, Array.from(arguments, winInput))); }, dirname: function(p) { return winOutput(dirname(winInput(p))); }, basename: function(p, suffix) { return basename(winInput(p), suffix); }, extname: function(p) { return extname(winInput(p)); }, normalize: function(p) { return winOutput(__thaw_path_normalize(winInput(p))); }, relative: function(from, to) { return winOutput(relative(winInput(from), winInput(to))); }, isAbsolute: function(p) { return /^[A-Za-z]:[\\\\/]|^[\\\\/]{2}/.test(String(p)); }, parse: function(p) { var result = parse(winInput(p)); result.root = /^[A-Za-z]:/.test(String(p)) ? String(p).substring(0, 3) : result.root; result.dir = winOutput(result.dir); return result; }, format: function(value) { return winOutput(format(value)); }, toNamespacedPath: toNamespacedPath, sep: '\\\\', delimiter: ';' };\n\
+             module.exports = posix; module.exports.posix = posix; module.exports.win32 = win32;\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
@@ -4502,6 +4513,45 @@ mod tests {
         assert_eq!(
             result,
             r#"[true,"e99baa","6Zuq",3,true,false,true,"68006900"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn path_builtin_exposes_posix_and_win32_operations() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_path_operations");
+        fs::write(
+            dir.join("index.js"),
+            "var path = require('node:path');\n\
+             module.exports = function () {\n\
+             \x20 var parsed = path.parse('/tmp/archive.tar.gz');\n\
+             \x20 return [path.normalize('/a//b/../c/'), path.relative('/a/b', '/a/c/d'), path.extname('archive.tar.gz'), path.basename('archive.tar.gz', '.gz'), parsed, path.format(parsed), path.isAbsolute('/a'), path.posix === path, path.win32.normalize('C:\\\\a\\\\..\\\\b'), path.win32.isAbsolute('C:\\\\a'), path.delimiter, path.win32.delimiter];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_path_operations_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exercisePath = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exercisePath").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"["/a/c/","../c/d",".gz","archive.tar",{"root":"/","dir":"/tmp","base":"archive.tar.gz","ext":".gz","name":"archive.tar"},"/tmp/archive.tar.gz",true,true,"C:\\b",true,":",";"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
