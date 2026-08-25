@@ -326,6 +326,9 @@ The workspace crates have narrow responsibilities:
 - QuickJS packages receive a stdout/stderr-backed global `console`, shared by
   `node:console`, with Node-style formatting, grouping, counts, timers,
   assertions, traces and custom Console stream targets
+- An OS-random-backed Web Crypto global and `node:crypto` provide UUID v4,
+  random bytes/fill/integers, SHA-256/SHA-512 streaming hashes and HMAC,
+  timing-safe equality, async callbacks and `subtle.digest` ArrayBuffers
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
