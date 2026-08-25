@@ -349,10 +349,11 @@ The workspace crates have narrow responsibilities:
   environment data and lifecycle APIs; `Worker` supports isolated eval scopes,
   JavaScript `data:` URLs, statically referenced workers written as
   `new URL("./worker.js", import.meta.url)`, a literal `"./worker.js"`, or a
-  constant-foldable string/template expression, and their bundled `require()`
-  dependencies, CommonJS or ESM worker entry syntax, cloned `workerData`,
-  `parentPort` message exchange, lifecycle events and termination (runtime-
-  computed worker paths and parallel OS threads remain later)
+  constant-foldable string/template expression (including an unshadowed
+  top-level `const`), and their bundled `require()` dependencies, CommonJS or
+  ESM worker entry syntax, cloned `workerData`, `parentPort` message exchange,
+  lifecycle events and termination (runtime-computed worker paths and parallel
+  OS threads remain later)
 - The shared `process` global and `node:process` module provide asynchronous
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
