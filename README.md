@@ -306,6 +306,9 @@ The workspace crates have narrow responsibilities:
   forward callback arguments. `TextEncoder`/`TextDecoder` provide UTF-8
   `Uint8Array` conversion, including `encodeInto`, replacement decoding, BOM
   removal, and fatal decoding errors
+- `node:timers` shares those global timer functions, while
+  `node:timers/promises` provides abortable timeout/immediate Promises,
+  scheduler wait/yield helpers and an async interval iterator
 - QuickJS bundles provide validating Latin-1 `btoa` and Base64 `atob`
   globals, including standard padding and ASCII-whitespace decoding
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
