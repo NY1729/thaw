@@ -300,6 +300,8 @@ The workspace crates have narrow responsibilities:
   `performance.now()` values scoped to the shared JavaScript context
 - QuickJS bundles provide cycle-preserving `structuredClone` support for
   objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views
+- QuickJS bundles provide iterable `URLSearchParams` values with form
+  encoding, duplicate keys, record/pair initialization, mutation and sorting
 - QuickJS bundles expose minimal `Event`/`EventTarget` globals with function
   and listener-object callbacks, removal, one-shot listeners, cancellation,
   and immediate-propagation stopping
