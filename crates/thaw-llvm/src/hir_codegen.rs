@@ -105,6 +105,14 @@ fn object_field_storage_bytes(ty: &HirType) -> u64 {
     }
 }
 
+fn array_element_storage_bytes(ty: &HirType) -> u64 {
+    if matches!(ty, HirType::Union(_)) {
+        ASYNC_SLOT_BYTES
+    } else {
+        ARRAY_ELEM_BYTES
+    }
+}
+
 fn object_field_offset(fields: &[(String, HirType)], index: usize) -> u64 {
     fields[..index]
         .iter()
@@ -4865,8 +4873,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::DynamicCall(sig, args) => self.compile_typed_dynamic_call(sig, args),
 
             HirExpr::ArrayLit(elems) => self.compile_array_lit(elems),
-            HirExpr::ArrayConcat(parts, _) => self.compile_array_concat(parts),
-            HirExpr::ArrayAlloc(length, _) => self.compile_array_alloc(length),
+            HirExpr::ArrayConcat(parts, element) => self.compile_array_concat(parts, element),
+            HirExpr::ArrayAlloc(length, element) => self.compile_array_alloc(length, element),
             HirExpr::ArraySetLen(array, length, _) => {
                 let array = self.compile_expr(array)?.into_pointer_value();
                 let length = self.compile_expr(length)?.into_float_value();
@@ -5662,15 +5670,20 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Allocates `[i64 length][f64 elem0]...[f64 elemN-1]` from the arena
     /// and returns a pointer to the start of the buffer (the array value).
     fn compile_array_lit(&mut self, elems: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let element_bytes = elems
+            .first()
+            .and_then(|element| self.expr_hir_type(element))
+            .map(|element| array_element_storage_bytes(&element))
+            .unwrap_or(ARRAY_ELEM_BYTES);
         let elem_vals = elems
             .iter()
             .map(|e| self.compile_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let size = ARRAY_HEADER_BYTES + ARRAY_ELEM_BYTES * elem_vals.len() as u64;
+        let size = ARRAY_HEADER_BYTES + element_bytes * elem_vals.len() as u64;
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size, false);
-        let align_val = i64_type.const_int(ARRAY_ELEM_BYTES, false);
+        let align_val = i64_type.const_int(element_bytes.min(8), false);
 
         let alloc_fn = self.module.get_function("thaw_arena_alloc").unwrap();
         let call = self
@@ -5688,8 +5701,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         for (i, val) in elem_vals.into_iter().enumerate() {
-            let offset =
-                i64_type.const_int(ARRAY_HEADER_BYTES + ARRAY_ELEM_BYTES * i as u64, false);
+            let offset = i64_type.const_int(ARRAY_HEADER_BYTES + element_bytes * i as u64, false);
             let elem_ptr = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "elem_ptr")
@@ -5703,7 +5715,11 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(base_ptr.into())
     }
 
-    fn compile_array_alloc(&mut self, length: &HirExpr) -> Result<BasicValueEnum<'ctx>, String> {
+    fn compile_array_alloc(
+        &mut self,
+        length: &HirExpr,
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let length = self.compile_expr(length)?.into_float_value();
         let length = self
@@ -5714,7 +5730,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_int_mul(
                 length,
-                i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                i64_type.const_int(array_element_storage_bytes(element), false),
                 "array_alloc_payload_size",
             )
             .map_err(|error| error.to_string())?;
@@ -5732,7 +5748,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.module.get_function("thaw_arena_alloc").unwrap(),
                 &[
                     allocation_size.into(),
-                    i64_type.const_int(ARRAY_ELEM_BYTES, false).into(),
+                    i64_type
+                        .const_int(array_element_storage_bytes(element).min(8), false)
+                        .into(),
                 ],
                 "array_alloc",
             )
@@ -5749,7 +5767,11 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Evaluates each array part once from left to right and copies their
     /// uniform eight-byte element slots into one arena-owned result array.
-    fn compile_array_concat(&mut self, parts: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+    fn compile_array_concat(
+        &mut self,
+        parts: &[HirExpr],
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_type = self.context.i64_type();
         let mut arrays = Vec::with_capacity(parts.len());
         let mut total = i64_type.const_zero();
@@ -5767,7 +5789,8 @@ impl<'ctx> HirCompiler<'ctx> {
             arrays.push((array, length));
         }
 
-        let element_bytes = i64_type.const_int(ARRAY_ELEM_BYTES, false);
+        let element_width = array_element_storage_bytes(element);
+        let element_bytes = i64_type.const_int(element_width, false);
         let payload_size = self
             .builder
             .build_int_mul(total, element_bytes, "spread_payload_size")
@@ -5786,7 +5809,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.module.get_function("thaw_arena_alloc").unwrap(),
                 &[
                     allocation_size.into(),
-                    i64_type.const_int(ARRAY_ELEM_BYTES, false).into(),
+                    i64_type.const_int(element_width.min(8), false).into(),
                 ],
                 "spread_array_alloc",
             )
@@ -5854,7 +5877,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_float_to_signed_int(idx_val, i64_type, "idx")
             .map_err(|e| e.to_string())?;
-        let elem_size = i64_type.const_int(ARRAY_ELEM_BYTES, false);
+        let element_bytes = match self.expr_hir_type(array) {
+            Some(HirType::Array(element)) => array_element_storage_bytes(&element),
+            _ => ARRAY_ELEM_BYTES,
+        };
+        let elem_size = i64_type.const_int(element_bytes, false);
         let byte_offset = self
             .builder
             .build_int_mul(idx_int, elem_size, "byteoff")
@@ -8456,6 +8483,9 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::NullishIsUndefined(_, _)
             | HirExpr::NullishIsNone(_, _) => Some(HirType::Bool),
             HirExpr::NullishValue(_, payload) => Some(payload.clone()),
+            HirExpr::UnionInject(_, _, elements) => Some(HirType::Union(elements.clone())),
+            HirExpr::UnionTag(_, _) => Some(HirType::F64),
+            HirExpr::UnionValue(_, index, elements) => elements.get(*index).cloned(),
             HirExpr::TypedIndex(_, _, element) => Some(element.clone()),
             HirExpr::PropAccess(_, HirType::Object(fields), field) => fields
                 .iter()
@@ -13521,6 +13551,33 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
             "string\nnumber\nhello!\n43\nok?\n10\nstring\nnumber\nstring\nnumber\n"
+        );
+    }
+
+    #[test]
+    fn compiles_heterogeneous_union_arrays_with_wide_elements() {
+        let source = r#"
+            function kind(value: string | number): string { return typeof value; }
+            function main(): void {
+                const values: (string | number)[] = ["a", 2, "b", 4];
+                console.log(values.length);
+                console.log(kind(values[0]));
+                console.log(kind(values[1]));
+                console.log(kind(values[2]));
+                const combined: (string | number)[] = [...values, "end", 5];
+                console.log(combined.length);
+                console.log(kind(combined[4]));
+                console.log(kind(combined[5]));
+                console.log(kind(values[3]));
+                values[1] = "two";
+                values[2] = 3;
+                console.log(kind(values[1]));
+                console.log(kind(values[2]));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "heterogeneous_union_arrays"),
+            "4\nstring\nnumber\nstring\n6\nstring\nnumber\nnumber\nstring\nnumber\n"
         );
     }
 
