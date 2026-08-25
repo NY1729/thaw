@@ -427,6 +427,8 @@ The workspace crates have narrow responsibilities:
   Buffer/string reads and writes, append, directory creation/enumeration,
   Stats/Dirent predicates, rename, unlink and recursive removal with
   Node-shaped host errors
+- Copying, canonical path resolution and unique temporary-directory creation
+  are available through synchronous, callback and Promise APIs
 - `fs.createReadStream()` and `createWriteStream()` use the shared Node stream
   classes with ranged/chunked reads, append mode, byte counters and
   open/ready/finish/end/close lifecycle events

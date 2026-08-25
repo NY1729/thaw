@@ -173,6 +173,9 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool) -> S
         "unlink" => std::fs::remove_file(&path).map(|_| serde_json::json!({ "ok": true })),
         "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
         "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
+        "copy" => std::fs::copy(&path, &value).map(|bytes| serde_json::json!({ "ok": true, "length": bytes })),
+        "realpath" => std::fs::canonicalize(&path).map(|resolved| serde_json::json!({ "ok": true, "path": resolved.to_string_lossy() })),
+        "mkdtemp" => (|| -> io::Result<serde_json::Value> { let mut random = [0u8; 6]; getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?; let created = format!("{}{}", path, hex_encode(&random)); std::fs::create_dir(&created)?; Ok(serde_json::json!({ "ok": true, "path": created })) })(),
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),
     };
     result
