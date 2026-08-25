@@ -186,9 +186,11 @@ The workspace crates have narrow responsibilities:
   `(pointer, length)`, object parameters become scalar fields, and metadata-
   selected portable array/object return structs are copied into the Thaw arena
 - Ambient and `.d.ts` Fast-path declarations ending in number, boolean, string,
-  or `JsValue` array rest parameters lower to real C varargs. Extras are passed
-  as `double`, C-promoted `int`, NUL-terminated `const char *`, or opaque
-  64-bit handles, respectively.
+  `JsValue`, `number[]`, or scalar fixed-object array rest parameters lower to
+  real C varargs. Scalar extras are passed as `double`, C-promoted `int`,
+  NUL-terminated `const char *`, or opaque 64-bit handles. Each `number[]`
+  expands to `(const double *, int64_t)` and each fixed object expands to its
+  declaration-ordered scalar fields with C default promotions.
   FFI metadata v4 can instead convert number extras to `i32`, `i64`, `u32`, or
   `u64` with `variadicAbi`
 - Direct `void` FFI calls execute as statements; `thaw-result` void functions
@@ -729,7 +731,7 @@ The workspace crates have narrow responsibilities:
   and recursively nested object-return field offsets/alignment, including
   boolean and signed/unsigned integer bitfields, explicit direct register
   classes for aggregates up to 16 bytes, and integer representations for
-  number varargs. Aggregate rest element types are not yet described
+  number varargs. Nested aggregate rest element types are not yet described
 - Full Node/V8/libuv behavioral compatibility behind the N-API ABI. Thaw now
   exports the complete Node-API v10 symbol surface used by the current headers,
   plus the implemented experimental SharedArrayBuffer/finalizer/module-file
