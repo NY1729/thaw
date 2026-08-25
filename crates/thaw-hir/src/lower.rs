@@ -1514,6 +1514,16 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
         let alternate = inferred_generic_return(&conditional.alt, params)?;
         return (consequent == alternate).then_some(consequent);
     }
+    if let Expr::Bin(binary) = returned {
+        if matches!(
+            binary.op,
+            BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing
+        ) {
+            let left = inferred_generic_return(&binary.left, params)?;
+            let right = inferred_generic_return(&binary.right, params)?;
+            return (left == right).then_some(left);
+        }
+    }
     let keyword = match returned {
         Expr::Lit(Lit::Num(_)) => Some(TsKeywordTypeKind::TsNumberKeyword),
         Expr::Lit(Lit::Str(_)) => Some(TsKeywordTypeKind::TsStringKeyword),
@@ -1594,15 +1604,26 @@ fn inferred_generic_return(expr: &Expr, params: &[Pat]) -> Option<InferredGeneri
     let Expr::Ident(returned) = returned else {
         return None;
     };
-    let parameter = params
-        .iter()
-        .position(|parameter| {
-            let Pat::Ident(binding) = parameter else {
-                return false;
+    let parameter = params.iter().enumerate().find_map(|(index, parameter)| {
+        let Pat::Ident(binding) = parameter else {
+            return None;
+        };
+        if binding.id.sym != returned.sym {
+            return None;
+        }
+        let keyword = binding.type_ann.as_ref().and_then(|annotation| {
+            let TsType::TsKeywordType(keyword) = strip_parenthesized_ts_type(&annotation.type_ann)
+            else {
+                return None;
             };
-            binding.id.sym == returned.sym
-        })
-        .map(InferredGenericReturn::Parameter);
+            Some(keyword.kind)
+        });
+        Some(
+            keyword
+                .map(InferredGenericReturn::Keyword)
+                .unwrap_or(InferredGenericReturn::Parameter(index)),
+        )
+    });
     parameter.or_else(|| {
         (returned.sym == *"undefined").then_some(InferredGenericReturn::Keyword(
             TsKeywordTypeKind::TsUndefinedKeyword,
@@ -14473,6 +14494,10 @@ mod tests {
             (
                 "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"value=\" + String(value); }",
                 "incompatible with function type alias `Identity`",
+            ),
+            (
+                "type Predicate = <T>(value: T, flag: boolean) => boolean; function main(): void { const invalid: Predicate = <T>(value: T, flag: boolean) => flag && \"wrong\"; }",
+                "needs an explicit return type",
             ),
             (
                 "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",
