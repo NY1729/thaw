@@ -14228,6 +14228,8 @@ mod tests {
                 const choose: Choose = <Left, Right>(left: Left, right: Right): Left => left;
                 const numeric: Numeric = <Value extends number>(value: Value): Value => value;
                 const forwarded: Identity = namedIdentity;
+                const chained: Identity = identity;
+                const namedChain: Identity = forwarded;
                 console.log(identity(24));
                 console.log(identity("alias"));
                 console.log(choose("first", true));
@@ -14236,11 +14238,13 @@ mod tests {
                 console.log(forwarded(26));
                 console.log(forwarded<string>("forwarded"));
                 console.log([27, 28].map(forwarded)[0]);
+                console.log(chained<string>("arrow-chain"));
+                console.log(namedChain(29));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_function_alias_arrows"),
-            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\n"
+            "24\nalias\nfirst\n25\nfunction\n26\nforwarded\n27\narrow-chain\n29\n"
         );
     }
 
@@ -14253,6 +14257,8 @@ mod tests {
             function main(): void {
                 const local: Identity = <Value>(value: Value): Value => value;
                 const forwarded: Identity = named;
+                const arrowChain: Identity = local;
+                const namedChain: Identity = forwarded;
                 const numeric: Numeric = <Value extends number>(value: Value): Value => value;
                 console.log(local(29));
                 console.log(local("interface"));
@@ -14260,11 +14266,13 @@ mod tests {
                 console.log(forwarded<string>("named-interface"));
                 console.log(numeric(31));
                 console.log([32, 33].map(forwarded)[1]);
+                console.log(arrowChain<string>("interface-chain"));
+                console.log(namedChain(34));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "generic_callable_interfaces"),
-            "29\ninterface\n30\nnamed-interface\n31\n33\n"
+            "29\ninterface\n30\nnamed-interface\n31\n33\ninterface-chain\n34\n"
         );
     }
 

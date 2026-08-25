@@ -377,7 +377,9 @@ The workspace crates have narrow responsibilities:
   modulo type-parameter names before call-site specialization
 - Pure callable interfaces with one generic call signature, such as
   `interface Identity { <T>(value: T): T }`, use the same polymorphic template,
-  assignment checks and direct/callback specialization paths
+  assignment checks and direct/callback specialization paths; annotated local
+  variables can forward either arrow or named-function templates through
+  compatible callable aliases and interfaces without losing polymorphism
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
