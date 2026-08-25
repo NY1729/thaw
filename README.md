@@ -439,6 +439,8 @@ The workspace crates have narrow responsibilities:
 - Numeric descriptors support sync and callback open/close/read/write,
   fstat/truncate/metadata updates and sync/data-sync operations, sharing the
   same lifecycle table as Promise FileHandles
+- Scatter/gather `readv` and `writev` operations preserve vector buffers and
+  positional semantics across sync, callback and Promise FileHandle APIs
 - Hard links, symbolic links, link-target reads and Unix permission changes
   are exposed through synchronous, callback and Promise APIs
 - Stats timestamps come from host metadata, and `utimes` updates access and
