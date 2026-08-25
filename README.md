@@ -291,9 +291,11 @@ The workspace crates have narrow responsibilities:
   modules backed by the same QuickJS polyfills used by npm dependencies. The
   `node:util` surface includes formatting, custom inspection, inheritance,
   type predicates, Promise/callback conversion and string cleanup. The CommonJS
-  `EventEmitter` supports ordered, one-shot and prepended listeners, removal
-  and introspection; native `new EventEmitter()` class bridging remains outside
-  this import surface. The URL module shares the global constructors and
+  `EventEmitter` supports ordered, one-shot and prepended listeners, Symbol
+  events, removal, maximum-listener controls and introspection. `events.on()`
+  exposes queued async iteration with AbortSignal cancellation; native
+  `new EventEmitter()` class bridging remains outside this import surface. The
+  URL module shares the global constructors and
   provides file-URL conversion plus HTTP-option projection
 - `node:path` covers POSIX resolve/join/normalize, relative paths, component
   parsing/formatting, extensions and suffix removal, with a matching minimal
