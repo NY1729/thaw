@@ -224,6 +224,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "fs" => {
             "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
         }
+        "fs/promises" => {
+            "export declare function access(argsArray: any): any;\nexport declare function readFile(argsArray: any): any;\nexport declare function readdir(argsArray: any): any;\nexport declare function stat(argsArray: any): any;\nexport declare function writeFile(argsArray: any): any;\nexport declare function mkdir(argsArray: any): any;\n"
+        }
         "http" => {
             "export interface IncomingMessage { method: string; url: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => boolean): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => boolean): Server;\n"
         }
@@ -2900,15 +2903,26 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              \x20\x20e.code = 'ENOENT';\n\
              \x20\x20throw e;\n\
              }\n\
+             function __thaw_fs_erofs(op, p) { var e = new Error('EROFS: read-only file system, ' + op + ' ' + p); e.code = 'EROFS'; throw e; }\n\
              var __thaw_fs = {\n\
              \x20\x20existsSync: function(p) { return false; },\n\
              \x20\x20readdirSync: function(p) { __thaw_fs_enoent('scandir', p); },\n\
              \x20\x20statSync: function(p) { __thaw_fs_enoent('stat', p); },\n\
              \x20\x20readFileSync: function(p) { __thaw_fs_enoent('open', p); },\n\
+             \x20\x20writeFileSync: function(p) { __thaw_fs_erofs('open', p); },\n\
+             \x20\x20mkdirSync: function(p) { __thaw_fs_erofs('mkdir', p); },\n\
              };\n\
+             function __thaw_fs_reject(op, p) { try { __thaw_fs_enoent(op, p); } catch (error) { return Promise.reject(error); } }\n\
+             function __thaw_fs_readonly(op, p) { try { __thaw_fs_erofs(op, p); } catch (error) { return Promise.reject(error); } }\n\
+             __thaw_fs.promises = { access: function(p) { return __thaw_fs_reject('access', p); }, readFile: function(p) { return __thaw_fs_reject('open', p); }, readdir: function(p) { return __thaw_fs_reject('scandir', p); }, stat: function(p) { return __thaw_fs_reject('stat', p); }, writeFile: function(p) { return __thaw_fs_readonly('open', p); }, mkdir: function(p) { return __thaw_fs_readonly('mkdir', p); } };\n\
              module.exports = __thaw_fs;\n\
              module.exports.default = __thaw_fs;\n\
              module.exports.__esModule = true;\n",
+        ),
+        "fs/promises" => Some(
+            "function failure(code, op, path) { var error = new Error(code + ': ' + (code === 'EROFS' ? 'read-only file system' : 'no such file or directory') + ', ' + op + ' ' + path); error.code = code; error.path = String(path); error.syscall = op; return Promise.reject(error); }\n\
+             var promises = { access: function(path) { return failure('ENOENT', 'access', path); }, readFile: function(path) { return failure('ENOENT', 'open', path); }, readdir: function(path) { return failure('ENOENT', 'scandir', path); }, stat: function(path) { return failure('ENOENT', 'stat', path); }, writeFile: function(path) { return failure('EROFS', 'open', path); }, mkdir: function(path) { return failure('EROFS', 'mkdir', path); } };\n\
+             module.exports = promises; module.exports.default = promises; module.exports.__esModule = true;\n",
         ),
         // Native compilation resolves the typed `node:http` surface through
         // thaw-std. Keep an empty CommonJS module here so dependency discovery
@@ -3073,7 +3087,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['assert','assert/strict','async_hooks','buffer','console','crypto','diagnostics_channel','events','fs','fs/promises','http','module','os','path','perf_hooks','process','querystring','stream','stream/promises','string_decoder','timers','timers/promises','tty','url','util','v8','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -5373,6 +5387,34 @@ mod tests {
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(result, r#"[8,4,false,true,"room",true,true]"#);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn fs_promises_reports_sandboxed_read_and_write_failures() {
+        use std::ffi::{CStr, CString};
+        let dir = temp_registry("builtin_fs_promises");
+        fs::write(
+            dir.join("index.js"),
+            "var fs = require('node:fs'); var promises = require('node:fs/promises'); module.exports = async function () { var codes = []; for (var operation of [function() { return promises.readFile('/missing'); }, function() { return promises.readdir('/missing'); }, function() { return promises.writeFile('/output', 'x'); }, function() { return fs.promises.mkdir('/output'); }]) { try { await operation(); } catch (error) { codes.push([error.code, typeof error.message === 'string']); } } var syncCode; try { fs.writeFileSync('/output', 'x'); } catch (error) { syncCode = error.code; } return [codes, syncCode, fs.existsSync('/missing')]; };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_fs_promises_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 3);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPromises = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseFsPromises").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[[["ENOENT",true],["ENOENT",true],["EROFS",true],["EROFS",true]],"EROFS",false]"#
+        );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
     }
