@@ -468,7 +468,9 @@ The workspace crates have narrow responsibilities:
   events, request headers and bodies, `IncomingMessage` status/header fields,
   duplicate `set-cookie` preservation and chunked response decoding. Builtin
   CommonJS dependencies are collected recursively rather than through
-  per-module special cases
+  per-module special cases. `http.createServer()` parses real HTTP/1.1 requests
+  into streamed `IncomingMessage` values and emits `ServerResponse` status,
+  headers, repeated cookies and buffered body writes over the same TCP server
 - The Node-shaped `createServer(callback).listen(port)` slice passes typed
   request/response objects and supports `method`, `url`, `statusCode`,
   `setHeader`, `write`, and `end`; `listen` registers its socket and returns,
