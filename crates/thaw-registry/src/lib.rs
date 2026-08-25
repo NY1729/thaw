@@ -262,10 +262,10 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
             "export declare function ok(argsArray: any): void;\nexport declare function equal(argsArray: any): void;\nexport declare function notEqual(argsArray: any): void;\nexport declare function strictEqual(argsArray: any): void;\nexport declare function notStrictEqual(argsArray: any): void;\nexport declare function deepEqual(argsArray: any): void;\nexport declare function notDeepEqual(argsArray: any): void;\nexport declare function deepStrictEqual(argsArray: any): void;\nexport declare function notDeepStrictEqual(argsArray: any): void;\nexport declare function fail(argsArray: any): void;\nexport declare function throws(argsArray: any): any;\nexport declare function doesNotThrow(argsArray: any): void;\n"
         }
         "fs" => {
-            "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function mkdirSync(path: string): boolean;\n"
+            "export declare function existsSync(path: string): boolean;\nexport declare function readFileSync(path: string, encoding: string): string;\nexport declare function writeFileSync(path: string, data: string): boolean;\nexport declare function appendFileSync(path: string, data: string): any;\nexport declare function mkdirSync(path: string): boolean;\nexport declare function readdirSync(path: string): any;\nexport declare function statSync(path: string): any;\nexport declare function lstatSync(path: string): any;\nexport declare function unlinkSync(path: string): any;\nexport declare function rmSync(path: string): any;\nexport declare function rmdirSync(path: string): any;\nexport declare function renameSync(path: string, destination: string): any;\n"
         }
         "fs/promises" => {
-            "export declare function access(argsArray: any): any;\nexport declare function readFile(argsArray: any): any;\nexport declare function readdir(argsArray: any): any;\nexport declare function stat(argsArray: any): any;\nexport declare function writeFile(argsArray: any): any;\nexport declare function mkdir(argsArray: any): any;\n"
+            "export declare function access(argsArray: any): any;\nexport declare function readFile(argsArray: any): any;\nexport declare function readdir(argsArray: any): any;\nexport declare function stat(argsArray: any): any;\nexport declare function lstat(argsArray: any): any;\nexport declare function writeFile(argsArray: any): any;\nexport declare function appendFile(argsArray: any): any;\nexport declare function mkdir(argsArray: any): any;\nexport declare function unlink(argsArray: any): any;\nexport declare function rm(argsArray: any): any;\nexport declare function rmdir(argsArray: any): any;\nexport declare function rename(argsArray: any): any;\n"
         }
         "http" => {
             "export interface IncomingMessage { method: string; url: string; }\nexport interface ServerResponse { statusCode: number; setHeader: (name: string, value: string) => boolean; write: (chunk: string) => boolean; end: (chunk: string) => boolean; }\nexport interface Server { listen: (port: number) => string; __listenWithCallback: (port: number, callback: () => void) => string; listenMany: (port: number, count: number) => string; close: () => boolean; __closeWithCallback: (callback: () => void) => boolean; on: (event: string, callback: () => void) => boolean; __onError: (event: string, callback: (error: { message: string; code: string; syscall: string; address: string; port: number }) => void) => boolean; }\nexport declare function serveOnce(port: number, body: string): string;\nexport declare function serveOnceWith(port: number, callback: (target: string) => string): string;\nexport declare function createServerOnce(port: number, callback: (request: IncomingMessage, response: ServerResponse) => boolean): string;\nexport declare function createServer(callback: (request: IncomingMessage, response: ServerResponse) => boolean): Server;\n"
@@ -3438,32 +3438,16 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         // would be, without Thaw needing to know anything about native
         // addons itself.
         "fs" => Some(
-            "function __thaw_fs_enoent(op, p) {\n\
-             \x20\x20var e = new Error('ENOENT: no such file or directory, ' + op + ' \\'' + p + '\\'');\n\
-             \x20\x20e.code = 'ENOENT';\n\
-             \x20\x20throw e;\n\
-             }\n\
-             function __thaw_fs_erofs(op, p) { var e = new Error('EROFS: read-only file system, ' + op + ' ' + p); e.code = 'EROFS'; throw e; }\n\
-             var __thaw_fs = {\n\
-             \x20\x20existsSync: function(p) { return false; },\n\
-             \x20\x20readdirSync: function(p) { __thaw_fs_enoent('scandir', p); },\n\
-             \x20\x20statSync: function(p) { __thaw_fs_enoent('stat', p); },\n\
-             \x20\x20readFileSync: function(p) { __thaw_fs_enoent('open', p); },\n\
-             \x20\x20writeFileSync: function(p) { __thaw_fs_erofs('open', p); },\n\
-             \x20\x20mkdirSync: function(p) { __thaw_fs_erofs('mkdir', p); },\n\
-             };\n\
+            "function pathValue(path) { return path instanceof URL ? decodeURIComponent(path.pathname) : String(path); } function invoke(operation, path, value, recursive) { path = pathValue(path); var record = JSON.parse(globalThis.__thaw_fs(operation, path, value || '', Boolean(recursive))); if (!record.ok) { var error = new Error(record.code + ': ' + record.message + ', ' + operation + ' ' + path); error.code = record.code; error.errno = -1; error.path = path; error.syscall = operation; throw error; } return record; } function encoding(options) { return typeof options === 'string' ? options : options && options.encoding; } function data(value, options) { return Buffer.isBuffer(value) || value instanceof Uint8Array ? Buffer.from(value) : Buffer.from(String(value), encoding(options)); } function Stats(record) { this.size = Number(record.length); this.mode = record.directory ? 16877 : 33188; this.birthtimeMs = this.mtimeMs = this.ctimeMs = this.atimeMs = 0; this.birthtime = this.mtime = this.ctime = this.atime = new Date(0); this._file = record.file; this._directory = record.directory; } Stats.prototype.isFile = function() { return this._file; }; Stats.prototype.isDirectory = function() { return this._directory; }; Stats.prototype.isSymbolicLink = Stats.prototype.isSocket = Stats.prototype.isFIFO = Stats.prototype.isCharacterDevice = Stats.prototype.isBlockDevice = function() { return false; };\n\
+             var __thaw_fs = { existsSync: function(path) { return invoke('exists', path).exists; }, readFileSync: function(path, options) { var output = Buffer.from(invoke('read', path).data, 'hex'), target = encoding(options); return target ? output.toString(target) : output; }, writeFileSync: function(path, value, options) { invoke('write', path, data(value, options).toString('hex')); }, appendFileSync: function(path, value, options) { invoke('append', path, data(value, options).toString('hex')); }, mkdirSync: function(path, options) { invoke('mkdir', path, '', options && options.recursive); }, readdirSync: function(path, options) { var entries = invoke('readdir', path).entries; if (options && options.withFileTypes) return entries.map(function(name) { var full = pathValue(path).replace(/\\/$/, '') + '/' + name, stat = invoke('stat', full); return { name: name, parentPath: pathValue(path), path: pathValue(path), isFile: function() { return stat.file; }, isDirectory: function() { return stat.directory; }, isSymbolicLink: function() { return false; } }; }); return entries; }, statSync: function(path) { return new Stats(invoke('stat', path)); }, lstatSync: function(path) { return new Stats(invoke('stat', path)); }, unlinkSync: function(path) { invoke('unlink', path); }, rmSync: function(path, options) { var stat = invoke('stat', path); invoke(stat.directory ? 'rmdir' : 'unlink', path, '', options && options.recursive); }, rmdirSync: function(path, options) { invoke('rmdir', path, '', options && options.recursive); }, renameSync: function(oldPath, newPath) { invoke('rename', oldPath, pathValue(newPath)); } };\n\
              __thaw_fs.constants = globalThis.__thaw_fs_constants || (globalThis.__thaw_fs_constants = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4, O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_SYNC: 1052672, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192, S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 });\n\
-             function __thaw_fs_reject(op, p) { try { __thaw_fs_enoent(op, p); } catch (error) { return Promise.reject(error); } }\n\
-             function __thaw_fs_readonly(op, p) { try { __thaw_fs_erofs(op, p); } catch (error) { return Promise.reject(error); } }\n\
-             __thaw_fs.promises = { access: function(p) { return __thaw_fs_reject('access', p); }, readFile: function(p) { return __thaw_fs_reject('open', p); }, readdir: function(p) { return __thaw_fs_reject('scandir', p); }, stat: function(p) { return __thaw_fs_reject('stat', p); }, writeFile: function(p) { return __thaw_fs_readonly('open', p); }, mkdir: function(p) { return __thaw_fs_readonly('mkdir', p); } };\n\
+             function promised(method) { return function() { var args = arguments; return new Promise(function(resolve, reject) { queueMicrotask(function() { try { resolve(method.apply(__thaw_fs, args)); } catch (error) { reject(error); } }); }); }; } __thaw_fs.promises = { access: function(path) { return promised(function(value) { invoke('stat', value); })(path); }, readFile: promised(__thaw_fs.readFileSync), readdir: promised(__thaw_fs.readdirSync), stat: promised(__thaw_fs.statSync), lstat: promised(__thaw_fs.lstatSync), writeFile: promised(__thaw_fs.writeFileSync), appendFile: promised(__thaw_fs.appendFileSync), mkdir: promised(__thaw_fs.mkdirSync), unlink: promised(__thaw_fs.unlinkSync), rm: promised(__thaw_fs.rmSync), rmdir: promised(__thaw_fs.rmdirSync), rename: promised(__thaw_fs.renameSync) };\n\
              module.exports = __thaw_fs;\n\
              module.exports.default = __thaw_fs;\n\
              module.exports.__esModule = true;\n",
         ),
         "fs/promises" => Some(
-            "function failure(code, op, path) { var error = new Error(code + ': ' + (code === 'EROFS' ? 'read-only file system' : 'no such file or directory') + ', ' + op + ' ' + path); error.code = code; error.path = String(path); error.syscall = op; return Promise.reject(error); }\n\
-             var promises = { access: function(path) { return failure('ENOENT', 'access', path); }, readFile: function(path) { return failure('ENOENT', 'open', path); }, readdir: function(path) { return failure('ENOENT', 'scandir', path); }, stat: function(path) { return failure('ENOENT', 'stat', path); }, writeFile: function(path) { return failure('EROFS', 'open', path); }, mkdir: function(path) { return failure('EROFS', 'mkdir', path); } };\n\
-             module.exports = promises; module.exports.default = promises; module.exports.__esModule = true;\n",
+            "var promises = require('node:fs').promises; module.exports = promises; module.exports.default = promises; module.exports.__esModule = true;\n",
         ),
         "http" => Some(
             r#"var net = require('node:net'), EventEmitter = require('node:events');
@@ -6685,12 +6669,12 @@ mod tests {
     }
 
     #[test]
-    fn fs_promises_reports_sandboxed_read_and_write_failures() {
+    fn fs_sync_and_promise_apis_operate_on_the_host_filesystem() {
         use std::ffi::{CStr, CString};
         let dir = temp_registry("builtin_fs_promises");
         fs::write(
             dir.join("index.js"),
-            "var fs = require('node:fs'); var promises = require('node:fs/promises'); module.exports = async function () { var codes = []; for (var operation of [function() { return promises.readFile('/missing'); }, function() { return promises.readdir('/missing'); }, function() { return promises.writeFile('/output', 'x'); }, function() { return fs.promises.mkdir('/output'); }]) { try { await operation(); } catch (error) { codes.push([error.code, typeof error.message === 'string']); } } var syncCode; try { fs.writeFileSync('/output', 'x'); } catch (error) { syncCode = error.code; } return [codes, syncCode, fs.existsSync('/missing')]; };",
+            "var fs = require('node:fs'); var promises = require('node:fs/promises'); module.exports = async function (root) { var stage = 'start'; try { var work = root + '/work', original = work + '/value.txt', renamed = work + '/renamed.txt'; stage='mkdir'; fs.mkdirSync(work, { recursive: true }); stage='write'; fs.writeFileSync(original, 'one'); stage='append'; await promises.appendFile(original, Buffer.from('two')); stage='read'; var text = await promises.readFile(original, 'utf8'); stage='stat'; var stat = fs.statSync(original); stage='readdir'; var entries = fs.readdirSync(work, { withFileTypes: true }); stage='rename'; await promises.rename(original, renamed); var renamedExists = fs.existsSync(renamed), missingCode; try { await promises.readFile(work + '/missing'); } catch (error) { missingCode = [error.code, error.path, error.syscall]; } stage='unlink'; await promises.unlink(renamed); stage='rm'; await promises.rm(work, { recursive: true }); stage='return'; return [text, stat.isFile(), stat.isDirectory(), stat.size, entries[0].name, entries[0].isFile(), renamedExists, fs.existsSync(renamed), fs.existsSync(work), missingCode]; } catch(error) { return [stage, error.message, error.stack]; } };",
         )
         .unwrap();
         let empty_node_modules = temp_registry("builtin_fs_promises_node_modules");
@@ -6701,12 +6685,17 @@ mod tests {
         let source = CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
         let function = CString::new("exerciseFsPromises").unwrap();
-        let arguments = CString::new("[]").unwrap();
+        let arguments =
+            CString::new(serde_json::to_string(&[dir.to_string_lossy().into_owned()]).unwrap())
+                .unwrap();
         let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
         let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
         assert_eq!(
             result,
-            r#"[[["ENOENT",true],["ENOENT",true],["EROFS",true],["EROFS",true]],"EROFS",false]"#
+            format!(
+                r#"["onetwo",true,false,6,"value.txt",true,true,false,false,["ENOENT","{}/work/missing","read"]]"#,
+                dir.to_string_lossy()
+            )
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);

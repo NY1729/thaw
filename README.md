@@ -421,10 +421,11 @@ The workspace crates have narrow responsibilities:
 - The ambient `process` global and importable `node:process`/`process` module
   share a microtask-backed `nextTick` that is asynchronous and forwards
   callback arguments
-- `node:fs` exposes native synchronous UTF-8 `existsSync`, `readFileSync`,
+- `node:fs` exposes host-backed synchronous `existsSync`, `readFileSync`,
   `writeFileSync`, and recursive `mkdirSync`, including fully static builds
-- Sandboxed QuickJS bundles resolve both `node:fs/promises` and `fs.promises`,
-  returning Node-shaped `ENOENT`/`EROFS` rejections instead of leaking host files
+- `node:fs` and `node:fs/promises` support Buffer/string reads and writes,
+  append, directory creation/enumeration, Stats/Dirent predicates, rename,
+  unlink and recursive removal with Node-shaped host errors
 - `node:util/types` identifies standard collections, boxed primitives,
   promises, errors, ArrayBuffer views and individual typed-array classes
 - `node:constants` and `fs.constants` share Linux-compatible access, open,

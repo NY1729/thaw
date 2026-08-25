@@ -148,6 +148,38 @@ fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
+fn fs_error(operation: &str, path: &str, error: io::Error) -> String {
+    let code = match error.kind() {
+        io::ErrorKind::NotFound => "ENOENT",
+        io::ErrorKind::PermissionDenied => "EACCES",
+        io::ErrorKind::AlreadyExists => "EEXIST",
+        io::ErrorKind::InvalidInput => "EINVAL",
+        io::ErrorKind::IsADirectory => "EISDIR",
+        io::ErrorKind::NotADirectory => "ENOTDIR",
+        _ => "EIO",
+    };
+    serde_json::json!({ "ok": false, "code": code, "operation": operation, "path": path, "message": error.to_string() }).to_string()
+}
+
+fn host_fs(operation: String, path: String, value: String, recursive: bool) -> String {
+    let result = match operation.as_str() {
+        "exists" => return serde_json::json!({ "ok": true, "exists": std::path::Path::new(&path).exists() }).to_string(),
+        "read" => std::fs::read(&path).map(|bytes| serde_json::json!({ "ok": true, "data": hex_encode(&bytes) })),
+        "write" => std::fs::write(&path, hex_decode(&value)).map(|_| serde_json::json!({ "ok": true })),
+        "append" => std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
+        "mkdir" => if recursive { std::fs::create_dir_all(&path) } else { std::fs::create_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
+        "readdir" => std::fs::read_dir(&path).and_then(|entries| entries.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<io::Result<Vec<_>>>()).map(|entries| serde_json::json!({ "ok": true, "entries": entries })),
+        "stat" => std::fs::metadata(&path).map(|metadata| serde_json::json!({ "ok": true, "length": metadata.len(), "file": metadata.is_file(), "directory": metadata.is_dir(), "readonly": metadata.permissions().readonly() })),
+        "unlink" => std::fs::remove_file(&path).map(|_| serde_json::json!({ "ok": true })),
+        "rmdir" => if recursive { std::fs::remove_dir_all(&path) } else { std::fs::remove_dir(&path) }.map(|_| serde_json::json!({ "ok": true })),
+        "rename" => std::fs::rename(&path, &value).map(|_| serde_json::json!({ "ok": true })),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown filesystem operation")),
+    };
+    result
+        .map(|value| value.to_string())
+        .unwrap_or_else(|error| fs_error(&operation, &path, error))
+}
+
 thread_local! {
     static JS: RefCell<Option<(Runtime, Context)>> = const { RefCell::new(None) };
     static NET_STREAMS: RefCell<(u32, HashMap<u32, TcpStream>)> = RefCell::new((1, HashMap::new()));
@@ -2260,6 +2292,13 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     },
                 )
                 .expect("failed to create JavaScript compression function");
+                let fs_function = Function::new(
+                    ctx.clone(),
+                    |operation: String, path: String, value: String, recursive: bool| {
+                        host_fs(operation, path, value, recursive)
+                    },
+                )
+                .expect("failed to create JavaScript filesystem function");
                 let tcp_connect = Function::new(ctx.clone(), |host: String, port: u32| {
                     net_connect(&host, port as u16)
                 })
@@ -2481,6 +2520,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");
+                ctx.globals()
+                    .set("__thaw_fs", fs_function)
+                    .expect("failed to install JavaScript filesystem function");
                 ctx.globals()
                     .set("__thaw_net_connect", tcp_connect)
                     .expect("failed to install JavaScript TCP connector");
