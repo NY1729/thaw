@@ -11521,6 +11521,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_console_tagged(value.into_struct_value(), &payload, "null")?;
         } else if let Some(HirType::Nullish(payload)) = hir_type {
             self.compile_console_nullish(value.into_struct_value(), &payload)?;
+        } else if let Some(HirType::Union(elements)) = hir_type {
+            self.compile_console_union(value.into_struct_value(), &elements)?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
@@ -11608,6 +11610,144 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    fn compile_console_union(
+        &mut self,
+        value: StructValue<'ctx>,
+        elements: &[HirType],
+    ) -> Result<(), String> {
+        if elements.is_empty() {
+            return Err("console.log cannot print an empty union".into());
+        }
+        let tag = self
+            .builder
+            .build_extract_value(value, 0, "console_union_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(value, 1, "console_union_payload")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let function = self.current_function();
+        let merge = self.context.append_basic_block(function, "union_printed");
+        for (index, member) in elements.iter().enumerate() {
+            let matched = self
+                .context
+                .append_basic_block(function, "union_print_member");
+            if index + 1 == elements.len() {
+                self.builder
+                    .build_unconditional_branch(matched)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let next = self
+                    .context
+                    .append_basic_block(function, "union_print_next");
+                let is_match = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_int(index as u64, false),
+                        "union_print_tag_match",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_conditional_branch(is_match, matched, next)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(next);
+            }
+            self.builder.position_at_end(matched);
+            let member_value = self.unpack_union_payload(payload, member)?;
+            self.compile_console_union_member(member_value, member)?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(|error| error.to_string())?;
+            if index + 1 != elements.len() {
+                let next = matched
+                    .get_next_basic_block()
+                    .ok_or("union console dispatch lost its next comparison block")?;
+                self.builder.position_at_end(next);
+            }
+        }
+        self.builder.position_at_end(merge);
+        Ok(())
+    }
+
+    fn compile_console_union_member(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        member: &HirType,
+    ) -> Result<(), String> {
+        match member {
+            HirType::F64 => {
+                let format = self
+                    .builder
+                    .build_global_string_ptr("%g\n", "union_numfmt")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("printf").unwrap(),
+                        &[
+                            format.as_pointer_value().into(),
+                            value.into_float_value().into(),
+                        ],
+                        "printf_union_number",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            HirType::Bool => {
+                let yes = self
+                    .builder
+                    .build_global_string_ptr("true", "union_true")
+                    .map_err(|error| error.to_string())?;
+                let no = self
+                    .builder
+                    .build_global_string_ptr("false", "union_false")
+                    .map_err(|error| error.to_string())?;
+                let selected = self
+                    .builder
+                    .build_select(
+                        value.into_int_value(),
+                        yes.as_pointer_value(),
+                        no.as_pointer_value(),
+                        "union_bool_string",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[selected.into()],
+                        "puts_union_bool",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            HirType::Str => {
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[value.into_pointer_value().into()],
+                        "puts_union_string",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            HirType::Object(_) | HirType::Json | HirType::Array(_) | HirType::Function(_, _) => {
+                let object = self
+                    .builder
+                    .build_global_string_ptr("[object Object]", "union_object")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[object.as_pointer_value().into()],
+                        "puts_union_object",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            other => return Err(format!("console.log cannot print union member {other:?}")),
+        }
+        Ok(())
     }
 
     fn compile_console_tagged(
@@ -13513,6 +13653,9 @@ mod tests {
     fn compiles_tagged_heterogeneous_unions_across_function_and_async_boundaries() {
         let source = r#"
             function identity(value: string | number): string | number { return value; }
+            function triple(value: string | number | boolean): string | number | boolean {
+                return value;
+            }
             function kind(value: string | number): string { return typeof value; }
             function describe(value: string | number): string {
                 if (typeof value === "string") {
@@ -13556,6 +13699,9 @@ mod tests {
             async function main(): Promise<void> {
                 console.log(kind(identity("hello")));
                 console.log(kind(identity(42)));
+                console.log(identity("direct"));
+                console.log(identity(12));
+                console.log(triple(true));
                 console.log(describe("hello"));
                 console.log(describe(42));
                 console.log(describeReverse("ok"));
@@ -13575,7 +13721,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "tagged_heterogeneous_unions"),
-            "string\nnumber\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
+            "string\nnumber\ndirect\n12\ntrue\nhello!\n43\nok?\n10\n5\nthree!\n3\nfalse\nnested?\n6\nyes\nstring\nnumber\nstring\nnumber\n"
         );
     }
 

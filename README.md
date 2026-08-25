@@ -139,7 +139,8 @@ The workspace crates have narrow responsibilities:
   async frames, and homogeneous arrays (including index updates and spread
   concatenation). `typeof` observes the runtime member and narrows two-member
   and larger unions through nested equality/inequality branches, terminating
-  guard clauses, residual tag sets, and assignment to a known member
+  guard clauses, residual tag sets, and assignment to a known member. Union
+  values can be logged directly with runtime dispatch for primitive members
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
