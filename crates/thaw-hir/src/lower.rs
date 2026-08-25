@@ -13577,6 +13577,41 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
         }
+        for (expected_default, actual_default) in expected
+            .generic_type_defaults
+            .iter()
+            .zip(&actual.generic_type_defaults)
+        {
+            let expected_default = expected_default
+                .as_ref()
+                .map(|default| {
+                    resolve_ts_type_with_substitution(
+                        default,
+                        &expected_substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .transpose()?;
+            let actual_default = actual_default
+                .as_ref()
+                .map(|default| {
+                    resolve_ts_type_with_substitution(
+                        default,
+                        &actual_substitution,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .transpose()?;
+            if expected_default != actual_default {
+                return Err(format!(
+                    "generic arrow defaults do not match function type alias `{alias_name}`"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -14217,6 +14252,10 @@ mod tests {
             (
                 "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = function<T>(value: T): string { return String(value); }; }",
                 "incompatible with function type alias `Identity`",
+            ),
+            (
+                "type Factory = <T = string>() => T; function main(): void { const invalid: Factory = <T = number>(): T => 1; }",
+                "defaults do not match function type alias `Factory`",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
