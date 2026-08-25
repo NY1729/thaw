@@ -155,6 +155,24 @@ const PLATFORM_GLOBALS: &str = r#"
     }
     return output;
   };
+  const performanceTimeOrigin = Date.now();
+  let lastPerformanceNow = 0;
+  const performanceNow = () => {
+    lastPerformanceNow = Math.max(lastPerformanceNow,
+                                  Date.now() - performanceTimeOrigin);
+    return lastPerformanceNow;
+  };
+  if (typeof globalThis.performance === 'undefined') {
+    globalThis.performance = { timeOrigin: performanceTimeOrigin,
+                               now: performanceNow };
+  } else {
+    if (typeof globalThis.performance.now !== 'function') {
+      globalThis.performance.now = performanceNow;
+    }
+    if (typeof globalThis.performance.timeOrigin !== 'number') {
+      globalThis.performance.timeOrigin = performanceTimeOrigin;
+    }
+  }
   globalThis.__thaw_next_timer_delay = () => {
     let due = Infinity;
     for (const timer of timers.values()) due = Math.min(due, timer.due);
@@ -1117,6 +1135,21 @@ mod tests {
             1
         );
         assert_eq!(call("base64", "[]"), r#"["aGVsbG//","helloÿ",true,true]"#);
+    }
+
+    #[test]
+    fn performance_exposes_time_origin_and_monotonic_elapsed_time() {
+        assert_eq!(
+            load(
+                "function timing() {\n\
+                   const first = performance.now();\n\
+                   const second = performance.now();\n\
+                   return [typeof performance.timeOrigin, first >= 0, second >= first];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("timing", "[]"), r#"["number",true,true]"#);
     }
 
     #[test]

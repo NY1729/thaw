@@ -3770,7 +3770,7 @@ mod tests {
                             clearInterval(interval);
                             const bytes = new TextEncoder().encode('雪');
                             const text = new TextDecoder().decode(bytes);
-                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text + ':' + btoa('hi') + ':' + atob('aGk=')), 0);
+                            setTimeout(() => resolve(events.join(',') + ':' + ticks + ':' + text + ':' + btoa('hi') + ':' + atob('aGk=') + ':' + (performance.now() >= 0)), 0);
                         }
                     }, 1);
                 });
@@ -3798,7 +3798,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "nextTick,microtask,immediate:2:雪:aGk=:hi\n"
+            "nextTick,microtask,immediate:2:雪:aGk=:hi:true\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
