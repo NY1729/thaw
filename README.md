@@ -354,7 +354,9 @@ The workspace crates have narrow responsibilities:
   Duplex interface, while `Duplex.from()` adapts readable/writable pairs,
   Promises, sync and async iterables, and async-generator transforms. Both APIs
   reject missing, directionally invalid or unsupported inputs synchronously
-  with Node-compatible error codes. Stream
+  with Node-compatible error codes. `Duplex.from()` uses object-mode readable
+  output, preserves strings and Buffers as single chunks, and rejects null
+  iterable values with `ERR_STREAM_NULL_VALUES`. Stream
   lifecycle predicates expose readable, writable, destroyed, disturbed and
   errored state, with the original destruction error retained on the stream.
   Default byte/object high-water marks are queryable and configurable for new
