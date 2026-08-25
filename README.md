@@ -355,7 +355,7 @@ The workspace crates have narrow responsibilities:
   constant-foldable string/template expression (including an unshadowed
   top-level `const` and `path.join/resolve(__dirname, ...)`), and their bundled
   `require()` dependencies, CommonJS or ESM worker entry syntax, cloned
-  `workerData`, `parentPort` message exchange,
+  `workerData` with `transferList` ownership transfer, `parentPort` message exchange,
   per-worker `argv`/`execArgv` and thread names, copied or `SHARE_ENV` process
   environments, reported resource limits, protected transfer/clone markers,
   lifecycle events and
@@ -365,7 +365,8 @@ The workspace crates have narrow responsibilities:
   options connect parent Writable/Readable streams to the child `process`
   streams, including redirected console output; `postMessageToThread()` routes
   structured-cloned values by thread ID to isolated `process` `workerMessage`
-  listeners with Node-style failure codes; Worker diagnostics expose running-
+  listeners with Node-style failure codes and keep process-only receivers alive;
+  Worker diagnostics expose running-
   state CPU usage, heap statistics, readable heap snapshots and stoppable CPU
   profile shapes
 - The shared `process` global and `node:process` module provide asynchronous
