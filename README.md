@@ -391,6 +391,8 @@ The workspace crates have narrow responsibilities:
   sandboxed contexts, cached source data, function compilation and memory shapes
 - `node:punycode` implements RFC 3492 encode/decode, IDN domain conversion and
   surrogate-safe UCS-2/code-point conversion
+- `node:dgram` binds real UDP4/UDP6 sockets and exposes message/send/listening/
+  close events, connected destinations, address metadata and buffer controls
 - `node:http` exposes native `serveOnce(port, body)` and
   `serveOnceWith(port, callback)` server slices. Typed arrow functions compile
   to arena-backed closures, including captured values and nested closures, and
