@@ -158,7 +158,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "process" => {
             "export declare function cwd(argsArray: any): any;\nexport declare function chdir(argsArray: any): void;\nexport declare function uptime(argsArray: any): any;\nexport declare function hrtime(argsArray: any): any;\nexport declare function memoryUsage(argsArray: any): any;\nexport declare function cpuUsage(argsArray: any): any;\nexport declare function emitWarning(argsArray: any): void;\n"
         }
-        "buffer" => "export declare function byteLength(argsArray: any): any;\n",
+        "buffer" => {
+            "export declare const Buffer: any;\nexport declare const SlowBuffer: any;\nexport declare function byteLength(argsArray: any): any;\nexport declare function isUtf8(argsArray: any): any;\nexport declare function isAscii(argsArray: any): any;\nexport declare function transcode(argsArray: any): any;\n"
+        }
         "os" => {
             "export declare function arch(argsArray: any): any;\nexport declare function platform(argsArray: any): any;\nexport declare function type(argsArray: any): any;\nexport declare function tmpdir(argsArray: any): any;\nexport declare const EOL: string;\n"
         }
@@ -2784,8 +2786,11 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
         // can still complete before the native Fast Path is selected.
         "http" => Some("module.exports = {};\n"),
         "buffer" => Some(
-            "function byteLength(value) { return String(value).length; }\n\
-             module.exports = { byteLength: byteLength };\n\
+            "function byteLength(value, encoding) { return globalThis.Buffer.byteLength(value, encoding); }\n\
+             function isUtf8(value) { try { new TextDecoder('utf-8', { fatal: true }).decode(value); return true; } catch (_) { return false; } }\n\
+             function isAscii(value) { return Array.from(value).every(function(byte) { return byte <= 127; }); }\n\
+             function transcode(value, fromEncoding, toEncoding) { return globalThis.Buffer.from(globalThis.Buffer.from(value).toString(fromEncoding), toEncoding); }\n\
+             module.exports = { Buffer: globalThis.Buffer, SlowBuffer: globalThis.SlowBuffer, byteLength: byteLength, isUtf8: isUtf8, isAscii: isAscii, transcode: transcode, atob: globalThis.atob, btoa: globalThis.btoa, constants: { MAX_LENGTH: 4294967296, MAX_STRING_LENGTH: 536870888 } };\n\
              module.exports.default = module.exports;\n\
              module.exports.__esModule = true;\n",
         ),
@@ -4430,6 +4435,45 @@ mod tests {
         assert_eq!(
             result,
             r#"["value:4:{\"ok\":true}:%","custom",true,true,true,true,true,true,5,8,"red","x�y"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn buffer_builtin_shares_the_global_buffer_implementation() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_buffer");
+        fs::write(
+            dir.join("index.js"),
+            "var buffer = require('node:buffer');\n\
+             module.exports = function () {\n\
+             \x20 var value = buffer.Buffer.from('雪', 'utf8'); var invalid = buffer.Buffer.from([0xff]);\n\
+             \x20 return [buffer.Buffer === globalThis.Buffer, value.toString('hex'), value.toString('base64'), buffer.byteLength('雪'), buffer.isUtf8(value), buffer.isUtf8(invalid), buffer.isAscii(buffer.Buffer.from('abc')), buffer.transcode(buffer.Buffer.from('hi'), 'utf8', 'utf16le').toString('hex')];\n\
+             };",
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_buffer_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseBuffer = module.exports;\n"
+        );
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let func = CString::new("exerciseBuffer").unwrap();
+        let args = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[true,"e99baa","6Zuq",3,true,false,true,"68006900"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
