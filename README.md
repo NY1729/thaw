@@ -375,7 +375,9 @@ The workspace crates have narrow responsibilities:
   `nextTick`, virtual cwd changes, uptime/high-resolution time, resource-usage
   shapes, warning/event listeners, exit codes and standard identity fields
 - QuickJS bundles provide cycle-preserving `structuredClone` support for
-  objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views
+  objects, arrays, Map, Set, Date, RegExp, ArrayBuffer and typed-array views;
+  ArrayBuffer transfers detach their sources and invalid or duplicate transfer
+  list entries raise `DataCloneError`
 - QuickJS bundles provide iterable `URLSearchParams` values with form
   encoding, duplicate keys, record/pair initialization, mutation and sorting
 - QuickJS bundles expose `URL` parsing for hierarchical URLs and relative

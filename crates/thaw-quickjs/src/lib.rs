@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use rquickjs::function::Args;
-use rquickjs::{Array, Context, Ctx, Function, Object, Runtime, Value};
+use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Runtime, Value};
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
@@ -1019,6 +1019,14 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                let detach_array_buffer =
+                    Function::new(ctx.clone(), |mut value: ArrayBuffer<'_>| {
+                        value.detach();
+                    })
+                    .expect("failed to create ArrayBuffer detacher");
+                ctx.globals()
+                    .set("__thaw_detach_array_buffer", detach_array_buffer)
+                    .expect("failed to install ArrayBuffer detacher");
                 let random_hex = Function::new(ctx.clone(), |size: u32| {
                     let mut bytes = vec![0u8; size as usize];
                     getrandom::getrandom(&mut bytes).expect("OS random source failed");
@@ -1779,7 +1787,19 @@ const PLATFORM_GLOBALS: &str = r#"
   if (typeof globalThis.structuredClone !== 'function') {
     globalThis.structuredClone = (value, options = {}) => {
       const seen = new Map();
-      const transfer = new Set(options.transfer || []);
+      const transfer = new Set();
+      for (const item of options.transfer || []) {
+        if (transfer.has(item)) {
+          throw new DOMException('transfer list contains duplicate values',
+                                 'DataCloneError');
+        }
+        if (!(item instanceof ArrayBuffer)
+            && !(typeof globalThis.MessagePort === 'function'
+                 && item instanceof globalThis.MessagePort)) {
+          throw new DOMException('value is not transferable', 'DataCloneError');
+        }
+        transfer.add(item);
+      }
       const clone = input => {
         if (input === null || typeof input !== 'object') {
           if (typeof input === 'function' || typeof input === 'symbol') {
@@ -1834,7 +1854,11 @@ const PLATFORM_GLOBALS: &str = r#"
         }
         return output;
       };
-      return clone(value);
+      const output = clone(value);
+      for (const item of transfer) {
+        if (item instanceof ArrayBuffer) __thaw_detach_array_buffer(item);
+      }
+      return output;
     };
   }
   if (typeof globalThis.URLSearchParams !== 'function') {
@@ -3735,6 +3759,24 @@ mod tests {
             1
         );
         assert_eq!(call("cloneValues", "[]"), "[true,true,1,2,4,true,6,true]");
+    }
+
+    #[test]
+    fn structured_clone_transfer_detaches_array_buffers() {
+        assert_eq!(
+            load(
+                "function transferBuffer() {\n\
+                   const source = new ArrayBuffer(4); new Uint8Array(source).set([1, 2, 3, 4]);\n\
+                   const copy = structuredClone(source, { transfer: [source] });\n\
+                   let duplicate = false, invalid = false; const other = new ArrayBuffer(1);\n\
+                   try { structuredClone(other, { transfer: [other, other] }); } catch (error) { duplicate = error.name === 'DataCloneError'; }\n\
+                   try { structuredClone({}, { transfer: [{}] }); } catch (error) { invalid = error.name === 'DataCloneError'; }\n\
+                   return [source.byteLength, copy.byteLength, Array.from(new Uint8Array(copy)), duplicate, invalid, other.byteLength];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("transferBuffer", "[]"), "[0,4,[1,2,3,4],true,true,1]");
     }
 
     #[test]
