@@ -4899,8 +4899,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_load(llvm_ty, field_ptr, "field")
                     .map_err(|e| e.to_string())
             }
-            HirExpr::DynamicPropAccess(obj, key, fields, payload) => {
-                self.compile_dynamic_prop_access(obj, key, fields, payload)
+            HirExpr::DynamicPropAccess(obj, key, fields, result) => {
+                self.compile_dynamic_prop_access(obj, key, fields, result)
             }
             HirExpr::PropAssign(obj, object_ty, field, value) => {
                 let field_ptr = self.compile_field_ptr(obj, object_ty, field)?;
@@ -4920,7 +4920,7 @@ impl<'ctx> HirCompiler<'ctx> {
         object: &HirExpr,
         key: &HirExpr,
         fields: &[(String, HirType)],
-        payload: &HirType,
+        result: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let object = self.compile_expr(object)?.into_pointer_value();
         let key = self.compile_expr(key)?.into_pointer_value();
@@ -4929,12 +4929,20 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_insert_block()
             .and_then(|block| block.get_parent())
             .ok_or("dynamic property access is outside a function")?;
-        let optional_type = self.basic_type(&HirType::Optional(Box::new(payload.clone())))?;
+        let source = fields
+            .first()
+            .map(|(_, ty)| ty)
+            .ok_or("dynamic property access requires at least one field")?;
+        let result_type = self.basic_type(result)?;
         let result_slot = self
             .builder
-            .build_alloca(optional_type, "dynamic_property_result")
+            .build_alloca(result_type, "dynamic_property_result")
             .map_err(|error| error.to_string())?;
-        let none = self.compile_optional_none(payload)?;
+        let none = match result {
+            HirType::Optional(payload) => self.compile_optional_none(payload)?,
+            HirType::Nullish(payload) => self.compile_nullish_none(payload, 2)?,
+            _ => return Err("dynamic property access requires an optional result".into()),
+        };
         self.builder
             .build_store(result_slot, none)
             .map_err(|error| error.to_string())?;
@@ -4993,12 +5001,58 @@ impl<'ctx> HirCompiler<'ctx> {
             let value = self
                 .builder
                 .build_load(
-                    self.basic_type(payload)?,
+                    self.basic_type(source)?,
                     field_pointer,
                     "dynamic_property_value",
                 )
                 .map_err(|error| error.to_string())?;
-            let some = self.build_optional_value(value, payload, true)?;
+            let some = match (source, result) {
+                (HirType::Optional(source_payload), HirType::Optional(result_payload))
+                    if source_payload == result_payload =>
+                {
+                    value
+                }
+                (HirType::Nullish(source_payload), HirType::Nullish(result_payload))
+                    if source_payload == result_payload =>
+                {
+                    value
+                }
+                (HirType::Nullable(source_payload), HirType::Nullish(result_payload))
+                    if source_payload == result_payload =>
+                {
+                    let nullable = value.into_struct_value();
+                    let present = self
+                        .builder
+                        .build_extract_value(nullable, 0, "dynamic_property_nullable_tag")
+                        .map_err(|error| error.to_string())?
+                        .into_int_value();
+                    let payload = self
+                        .builder
+                        .build_extract_value(nullable, 1, "dynamic_property_nullable_payload")
+                        .map_err(|error| error.to_string())?;
+                    let tag = self
+                        .builder
+                        .build_select(
+                            present,
+                            self.context.i8_type().const_zero(),
+                            self.context.i8_type().const_int(1, false),
+                            "dynamic_property_nullish_tag",
+                        )
+                        .map_err(|error| error.to_string())?
+                        .into_int_value();
+                    self.build_nullish_tagged_value(payload, source_payload, tag)?
+                }
+                (source, HirType::Optional(result_payload))
+                    if source == result_payload.as_ref() =>
+                {
+                    self.build_optional_value(value, source, true)?
+                }
+                _ => {
+                    return Err(
+                        "dynamic property access has incompatible field and result types".into(),
+                    )
+                }
+            };
             self.builder
                 .build_store(result_slot, some)
                 .map_err(|error| error.to_string())?;
@@ -5012,7 +5066,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(merge);
         self.builder
-            .build_load(optional_type, result_slot, "dynamic_property_optional")
+            .build_load(result_type, result_slot, "dynamic_property_optional")
             .map_err(|error| error.to_string())
     }
 
@@ -5073,17 +5127,25 @@ impl<'ctx> HirCompiler<'ctx> {
         payload: &HirType,
         tag: u64,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.build_nullish_tagged_value(
+            value,
+            payload,
+            self.context.i8_type().const_int(tag, false),
+        )
+    }
+
+    fn build_nullish_tagged_value(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        payload: &HirType,
+        tag: IntValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let nullish_type = self
             .basic_type(&HirType::Nullish(Box::new(payload.clone())))?
             .into_struct_type();
         let tagged = self
             .builder
-            .build_insert_value(
-                nullish_type.get_undef(),
-                self.context.i8_type().const_int(tag, false),
-                0,
-                "nullish_with_tag",
-            )
+            .build_insert_value(nullish_type.get_undef(), tag, 0, "nullish_with_tag")
             .map_err(|error| error.to_string())?
             .into_struct_value();
         self.builder
@@ -8132,9 +8194,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .iter()
                 .find(|(name, _)| name == field)
                 .map(|(_, ty)| ty.clone()),
-            HirExpr::DynamicPropAccess(_, _, _, payload) => {
-                Some(HirType::Optional(Box::new(payload.clone())))
-            }
+            HirExpr::DynamicPropAccess(_, _, _, result) => Some(result.clone()),
             HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::Lambda(_, params, ret, _) => Some(HirType::Function(
@@ -12723,6 +12783,48 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "dynamic_computed_properties"),
             "object\nkey\n2\nundefined\nasync-key\n1\n"
+        );
+    }
+
+    #[test]
+    fn compiles_dynamic_uniform_tagged_object_reads_without_nested_tags() {
+        let source = r#"
+            function key(value: string): string { return value; }
+            async function delayedKey(): Promise<string> {
+                await sleep(1);
+                return "nullValue";
+            }
+            async function main(): Promise<void> {
+                const optional: {
+                    value: number | undefined;
+                    absent: number | undefined;
+                } = { value: 1, absent: undefined };
+                console.log(optional[key("value")]);
+                console.log(optional[key("absent")]);
+                console.log(optional[key("missing")]);
+
+                const nullable: {
+                    value: number | null;
+                    nullValue: number | null;
+                } = { value: 2, nullValue: null };
+                console.log(nullable[key("value")]);
+                console.log(nullable[await delayedKey()]);
+                console.log(nullable[key("missing")]);
+
+                const nullish: {
+                    value: number | null | undefined;
+                    nullValue: number | null | undefined;
+                    absent: number | null | undefined;
+                } = { value: 3, nullValue: null, absent: undefined };
+                console.log(nullish[key("value")]);
+                console.log(nullish[key("nullValue")]);
+                console.log(nullish[key("absent")]);
+                console.log(nullish[key("missing")]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "dynamic_tagged_computed_properties"),
+            "1\nundefined\nundefined\n2\nnull\nundefined\n3\nnull\nundefined\nundefined\n"
         );
     }
 
