@@ -1414,7 +1414,10 @@ The workspace crates have narrow responsibilities:
   specialized after the enclosing generic method, so inferred and explicit nested type
   arguments resolve against the concrete outer specialization. Explicit generic method
   instantiation expressions can be followed by `.bind(thisArg)` to produce a typed native
-  closure; the lookup target and bound receiver are each evaluated once in JavaScript order.
+  closure. Fixed-arity leading arguments may be partially applied after `thisArg`; the
+  lookup target, receiver and bound arguments are each evaluated once in JavaScript order.
+  Bound async generic methods retain their single `Promise<T>` result layer and can be
+  awaited like other typed function values.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
