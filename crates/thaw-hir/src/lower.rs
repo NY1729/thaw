@@ -9815,20 +9815,23 @@ impl<'a> FnLowerer<'a> {
                 "native class method `{class_name}.{method_name}.bind` expects a `thisArg`"
             ));
         };
-        if call.args.iter().any(|argument| argument.spread.is_some()) {
-            return Err("native class method `.bind()` does not support spread arguments".into());
-        }
-        if leading_arguments.len() > signature.params.len().saturating_sub(1) {
-            return Err(format!(
-                "native class method `{class_name}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
-                leading_arguments.len(),
-                signature.params.len().saturating_sub(1)
-            ));
+        if this_argument.spread.is_some() {
+            return Err("native class method `.bind()` cannot spread its `thisArg`".into());
         }
         let target = self.lower_expr(&method.obj)?;
         self.expect_type(&target_type, &target, "method bind target")?;
         let bound = self.lower_expr(&this_argument.expr)?;
         self.expect_type(&target_type, &bound, "method bind `thisArg`")?;
+        let label = format!("native class method `{class_name}.{method_name}.bind`");
+        let (leading_values, leading_bindings) =
+            self.lower_native_spread_values(leading_arguments, &label)?;
+        if leading_values.len() > signature.params.len().saturating_sub(1) {
+            return Err(format!(
+                "native class method `{class_name}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
+                leading_values.len(),
+                signature.params.len().saturating_sub(1)
+            ));
+        }
 
         let target_name = format!("__thaw_bind_target_{}", self.next_binding);
         self.next_binding += 1;
@@ -9840,26 +9843,28 @@ impl<'a> FnLowerer<'a> {
             (target_name, target_type.clone(), target),
             (bound_name.clone(), target_type.clone(), bound),
         ];
+        bindings.extend(leading_bindings);
         let mut bound_argument_names = Vec::new();
-        for (index, (argument, expected)) in leading_arguments
+        for (index, (value, expected)) in leading_values
             .iter()
             .zip(signature.params[1..].iter())
             .enumerate()
         {
-            let value = self.lower_expr(&argument.expr)?;
-            let value = self.coerce_to_declared(expected, value).map_err(|error| {
-                format!(
-                    "bound argument {} of `{class_name}.{method_name}` is invalid: {error}",
-                    index + 1
-                )
-            })?;
+            let value = self
+                .coerce_to_declared(expected, value.clone())
+                .map_err(|error| {
+                    format!(
+                        "bound argument {} of `{class_name}.{method_name}` is invalid: {error}",
+                        index + 1
+                    )
+                })?;
             let name = format!("__thaw_bound_leading_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(name.clone(), expected.clone());
             bound_argument_names.push(name.clone());
             bindings.push((name, expected.clone(), value));
         }
-        let parameters = signature.params[1 + leading_arguments.len()..]
+        let parameters = signature.params[1 + leading_values.len()..]
             .iter()
             .enumerate()
             .map(|(index, ty)| HirParam {
@@ -9883,7 +9888,7 @@ impl<'a> FnLowerer<'a> {
                 .iter()
                 .cloned()
                 .zip(
-                    signature.params[1..1 + leading_arguments.len()]
+                    signature.params[1..1 + leading_values.len()]
                         .iter()
                         .cloned(),
                 )
@@ -9934,38 +9939,43 @@ impl<'a> FnLowerer<'a> {
                 class.sym
             ));
         };
-        if call.args.iter().any(|argument| argument.spread.is_some()) {
-            return Err("native static method `.bind()` does not support spread arguments".into());
-        }
-        if leading_arguments.len() > signature.params.len() {
-            return Err(format!(
-                "native static method `{}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
-                class.sym,
-                leading_arguments.len(),
-                signature.params.len()
-            ));
+        if this_argument.spread.is_some() {
+            return Err("native static method `.bind()` cannot spread its `thisArg`".into());
         }
         let this_value = self.lower_expr(&this_argument.expr)?;
         let this_type = self.infer_expr_type(&this_value)?;
+        let label = format!("native static method `{}.{method_name}.bind`", class.sym);
+        let (leading_values, leading_bindings) =
+            self.lower_native_spread_values(leading_arguments, &label)?;
+        if leading_values.len() > signature.params.len() {
+            return Err(format!(
+                "native static method `{}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
+                class.sym,
+                leading_values.len(),
+                signature.params.len()
+            ));
+        }
         let this_name = format!("__thaw_static_bind_this_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(this_name.clone(), this_type.clone());
         let mut bindings = vec![(this_name, this_type, this_value)];
+        bindings.extend(leading_bindings);
         let mut captures = Vec::new();
         let mut arguments = Vec::new();
-        for (index, (argument, expected)) in leading_arguments
+        for (index, (value, expected)) in leading_values
             .iter()
             .zip(signature.params.iter())
             .enumerate()
         {
-            let value = self.lower_expr(&argument.expr)?;
-            let value = self.coerce_to_declared(expected, value).map_err(|error| {
-                format!(
-                    "bound argument {} of `{}.{method_name}` is invalid: {error}",
-                    index + 1,
-                    class.sym
-                )
-            })?;
+            let value = self
+                .coerce_to_declared(expected, value.clone())
+                .map_err(|error| {
+                    format!(
+                        "bound argument {} of `{}.{method_name}` is invalid: {error}",
+                        index + 1,
+                        class.sym
+                    )
+                })?;
             let name = format!("__thaw_static_bound_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(name.clone(), expected.clone());
@@ -9976,7 +9986,7 @@ impl<'a> FnLowerer<'a> {
             });
             arguments.push(HirExpr::Var(name));
         }
-        let parameters = signature.params[leading_arguments.len()..]
+        let parameters = signature.params[leading_values.len()..]
             .iter()
             .enumerate()
             .map(|(index, ty)| HirParam {
@@ -25919,6 +25929,49 @@ mod tests {
         assert!(body.contains("__thaw_class_Calculator_constructor"));
         assert!(body.contains("__thaw_class_Calculator_method_sum"));
         assert!(body.contains("__thaw_class_Calculator_static_sum"));
+    }
+
+    #[test]
+    fn lowers_typed_tuple_spreads_for_native_method_bind() {
+        let program = lower(
+            r#"class Binder {
+                join(left: string, right: string): string { return left + right; }
+                static join(left: string, right: string): string { return left + right; }
+            }
+            function main(): void {
+                const binder = new Binder();
+                const first: [string] = ["left"];
+                const both: [string, string] = ["left", "right"];
+                const instanceBound = binder.join.bind(binder, ...first);
+                const staticBound = Binder.join.bind(binder, ...both);
+                console.log(instanceBound("right"));
+                console.log(staticBound());
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("__thaw_class_Binder_method_join"));
+        assert!(body.contains("__thaw_class_Binder_static_join"));
+        assert_eq!(body.matches("__thaw_native_spread_").count(), 6);
+
+        let module = thaw_parser::parse_typescript(
+            r#"class Binder { join(value: string): string { return value; } }
+            function main(): void {
+                const binder = new Binder();
+                const values: string[] = ["value"];
+                binder.join.bind(binder, ...values);
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("spread source must have statically known tuple length"),
+            "{error}"
+        );
     }
 
     #[test]
