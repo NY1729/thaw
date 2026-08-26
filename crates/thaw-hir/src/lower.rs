@@ -3946,6 +3946,20 @@ fn member_property_name(name: &MemberProp) -> Option<Symbol> {
     }
 }
 
+fn ordinary_optional_chain_expression(chain: &swc_ecma_ast::OptChainExpr) -> Expr {
+    match chain.base.as_ref() {
+        OptChainBase::Member(member) => Expr::Member(member.clone()),
+        OptChainBase::Call(call) => Expr::Call(CallExpr::from(call.clone())),
+    }
+}
+
+fn ordinary_optional_expression(expression: &Expr) -> Expr {
+    match expression {
+        Expr::OptChain(chain) => ordinary_optional_chain_expression(chain),
+        expression => expression.clone(),
+    }
+}
+
 fn class_constructor_symbol(name: &str) -> Symbol {
     format!("__thaw_class_{name}_constructor")
 }
@@ -12619,6 +12633,9 @@ impl<'a> FnLowerer<'a> {
                 (!metadata.is_empty()).then_some(metadata)
             }
             Expr::Await(awaited) => self.expression_union_discriminants(&awaited.arg),
+            Expr::OptChain(chain) => {
+                self.expression_union_discriminants(&ordinary_optional_chain_expression(chain))
+            }
             Expr::Member(member) if matches!(member.prop, MemberProp::Computed(_)) => {
                 self.expression_array_element_discriminants(&member.obj)
             }
@@ -12626,7 +12643,8 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
-                let Expr::Ident(callee) = callee.as_ref() else {
+                let callee = ordinary_optional_expression(callee);
+                let Expr::Ident(callee) = &callee else {
                     return None;
                 };
                 self.function_value_discriminants
@@ -12673,6 +12691,8 @@ impl<'a> FnLowerer<'a> {
                 self.expression_array_element_discriminants(&assertion.expr)
             }
             Expr::Await(awaited) => self.expression_array_element_discriminants(&awaited.arg),
+            Expr::OptChain(chain) => self
+                .expression_array_element_discriminants(&ordinary_optional_chain_expression(chain)),
             Expr::Member(member) => {
                 let property = member_property_name(&member.prop)?;
                 self.expression_object_array_property_discriminants(&member.obj)?
@@ -12683,9 +12703,10 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
-                if let Expr::Member(member) = callee.as_ref() {
+                let callee = ordinary_optional_expression(callee);
+                if let Expr::Member(member) = &callee {
                     if let Some(discriminants) = self
-                        .expression_called_function_property_discriminants(callee)
+                        .expression_called_function_property_discriminants(&callee)
                         .and_then(|metadata| metadata.array)
                     {
                         return Some(discriminants);
@@ -12705,7 +12726,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     return None;
                 }
-                let Expr::Ident(callee) = callee.as_ref() else {
+                let Expr::Ident(callee) = &callee else {
                     return None;
                 };
                 self.function_value_array_discriminants
@@ -12758,6 +12779,9 @@ impl<'a> FnLowerer<'a> {
             Expr::Await(awaited) => {
                 self.expression_object_array_property_discriminants(&awaited.arg)
             }
+            Expr::OptChain(chain) => self.expression_object_array_property_discriminants(
+                &ordinary_optional_chain_expression(chain),
+            ),
             Expr::Member(member) => {
                 let property = member_property_name(&member.prop)?;
                 let nested = self
@@ -12774,13 +12798,14 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
-                if matches!(callee.as_ref(), Expr::Member(_)) {
+                let callee = ordinary_optional_expression(callee);
+                if matches!(&callee, Expr::Member(_)) {
                     let metadata = self
-                        .expression_called_function_property_discriminants(callee)?
+                        .expression_called_function_property_discriminants(&callee)?
                         .object;
                     return (!metadata.is_empty()).then_some(metadata);
                 }
-                let Expr::Ident(callee) = callee.as_ref() else {
+                let Expr::Ident(callee) = &callee else {
                     return None;
                 };
                 self.function_value_object_array_property_discriminants
@@ -12905,6 +12930,9 @@ impl<'a> FnLowerer<'a> {
             Expr::Await(awaited) => {
                 self.expression_object_function_property_discriminants(&awaited.arg)
             }
+            Expr::OptChain(chain) => self.expression_object_function_property_discriminants(
+                &ordinary_optional_chain_expression(chain),
+            ),
             Expr::Member(member) => {
                 let property = member_property_name(&member.prop)?;
                 let nested = self
@@ -12922,7 +12950,8 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
-                let Expr::Ident(callee) = callee.as_ref() else {
+                let callee = ordinary_optional_expression(callee);
+                let Expr::Ident(callee) = &callee else {
                     return None;
                 };
                 self.function_value_object_function_property_discriminants
@@ -13163,6 +13192,9 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_function_discriminants(&parenthesized.expr)
             }
+            Expr::OptChain(chain) => {
+                self.expression_function_discriminants(&ordinary_optional_chain_expression(chain))
+            }
             Expr::TsAs(assertion) => {
                 let metadata =
                     function_return_discriminants(&assertion.type_ann, self.generic_interfaces);
@@ -13213,6 +13245,9 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_function_array_discriminants(&parenthesized.expr)
             }
+            Expr::OptChain(chain) => self.expression_function_array_discriminants(
+                &ordinary_optional_chain_expression(chain),
+            ),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_array_discriminants(
                     &assertion.type_ann,
@@ -13271,6 +13306,9 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_function_object_array_property_discriminants(&parenthesized.expr)
             }
+            Expr::OptChain(chain) => self.expression_function_object_array_property_discriminants(
+                &ordinary_optional_chain_expression(chain),
+            ),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_object_array_property_discriminants(
                     &assertion.type_ann,
@@ -13331,6 +13369,10 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_function_object_function_property_discriminants(&parenthesized.expr)
             }
+            Expr::OptChain(chain) => self
+                .expression_function_object_function_property_discriminants(
+                    &ordinary_optional_chain_expression(chain),
+                ),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_object_function_property_discriminants(
                     &assertion.type_ann,
@@ -27495,6 +27537,9 @@ impl<'a> FnLowerer<'a> {
                 return self
                     .wrap_call_argument_bindings(result, &[(name, receiver_type, receiver)]);
             }
+            let mut ordinary = CallExpr::from(call.clone());
+            ordinary.callee = Callee::Expr(Box::new(Expr::Member(member.clone())));
+            return self.lower_call(&ordinary);
         }
 
         let callee = self.lower_expr(&call.callee)?;
