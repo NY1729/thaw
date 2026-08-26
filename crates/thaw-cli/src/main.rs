@@ -3491,6 +3491,101 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_runs_classes_across_user_modules() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-user-module-classes-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("base.ts"),
+            r#"
+                export class Base {
+                    constructor(public value: number) {}
+                    answer(): number { return this.value; }
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("derived.ts"),
+            r#"
+                import { Base } from "./base";
+                export default class Derived extends Base {
+                    constructor(value: number, public label: string) { super(value); }
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("label.ts"),
+            r#"
+                export default class {
+                    constructor(public text: string) {}
+                }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.ts"),
+            r#"
+                export { default as Derived } from "./derived";
+                export { default as Label } from "./label";
+                export { Box as LeftBox } from "./left";
+                export { Box as RightBox } from "./right";
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("left.ts"),
+            "export class Box { constructor(public value: number) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("right.ts"),
+            "export class Box { constructor(public value: string) {} }\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { Derived, Label, LeftBox, RightBox } from "./index";
+                import * as models from "./index";
+                function read(value: Derived): number { return value.answer(); }
+                function main(): void {
+                    const value = new Derived(42, "ready");
+                    const label = new Label("module class");
+                    const namespaced = new models.Derived(7, "namespace");
+                    const left = new LeftBox(8);
+                    const right = new RightBox("separate");
+                    console.log(read(value));
+                    console.log(value.label);
+                    console.log(label.text);
+                    console.log(namespaced.answer());
+                    console.log(namespaced.label);
+                    console.log(left.value);
+                    console.log(right.value);
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "42\nready\nmodule class\n7\nnamespace\n8\nseparate\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn builds_multifile_top_level_bindings_into_one_executable() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-top-level-bindings-{}",

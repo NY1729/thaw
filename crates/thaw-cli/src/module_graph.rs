@@ -294,6 +294,10 @@ impl Visit for LocalBindingCollector {
         self.names.insert(declaration.ident.sym.to_string());
     }
 
+    fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+        self.names.insert(declaration.ident.sym.to_string());
+    }
+
     fn visit_catch_clause(&mut self, clause: &thaw_parser::ast::CatchClause) {
         if let Some(parameter) = &clause.param {
             parameter.visit_with(&mut PatternBindingCollector(&mut self.names));
@@ -372,6 +376,23 @@ impl VisitMut for RenameReferences<'_> {
         let Expr::Member(member) = expr else {
             return;
         };
+        if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(property)) =
+            (member.obj.as_ref(), &member.prop)
+        {
+            if !self.shadowed.contains(namespace.sym.as_ref()) {
+                if let Some(target) = self
+                    .namespaces
+                    .get(namespace.sym.as_ref())
+                    .and_then(|exports| exports.get(property.sym.as_ref()))
+                {
+                    *expr = Expr::Ident(thaw_parser::ast::Ident::new_no_ctxt(
+                        target.clone().into(),
+                        member.span,
+                    ));
+                    return;
+                }
+            }
+        }
         let Expr::MetaProp(meta) = member.obj.as_ref() else {
             return;
         };
@@ -475,6 +496,15 @@ impl VisitMut for RenameReferences<'_> {
         }
     }
 
+    fn visit_mut_class_decl(&mut self, declaration: &mut thaw_parser::ast::ClassDecl) {
+        declaration.class.visit_mut_with(self);
+        if self.function_depth == 0 {
+            if let Some(replacement) = self.names.get(declaration.ident.sym.as_ref()) {
+                declaration.ident.sym = replacement.clone().into();
+            }
+        }
+    }
+
     fn visit_mut_var_declarator(&mut self, declaration: &mut thaw_parser::ast::VarDeclarator) {
         declaration.visit_mut_children_with(self);
         if self.function_depth == 0 {
@@ -520,6 +550,7 @@ fn declaration_names(declaration: &Decl) -> Vec<String> {
         Decl::Fn(declaration) if declaration.function.body.is_some() => {
             vec![declaration.ident.sym.to_string()]
         }
+        Decl::Class(declaration) => vec![declaration.ident.sym.to_string()],
         Decl::TsInterface(declaration) => vec![declaration.id.sym.to_string()],
         Decl::Var(declaration) => declaration
             .decls
@@ -550,10 +581,14 @@ fn declared_names(module: &Module) -> Vec<String> {
                     .as_ref()
                     .map(|ident| vec![ident.sym.to_string()])
                     .unwrap_or_default(),
+                thaw_parser::ast::DefaultDecl::Class(class) => class
+                    .ident
+                    .as_ref()
+                    .map(|ident| vec![ident.sym.to_string()])
+                    .unwrap_or_default(),
                 thaw_parser::ast::DefaultDecl::TsInterfaceDecl(interface) => {
                     vec![interface.id.sym.to_string()]
                 }
-                _ => Vec::new(),
             },
             _ => Vec::new(),
         })
@@ -847,6 +882,36 @@ pub fn bundle(
                                 },
                             ))));
                         }
+                        thaw_parser::ast::DefaultDecl::Class(class) => {
+                            class.class.visit_mut_with(&mut RenameReferences {
+                                names: &names,
+                                namespaces: &namespaces,
+                                import_meta_url: &import_meta_url,
+                                import_meta_main: is_entry,
+                                module_path: &modules[index].path,
+                                external_resolutions,
+                                shadowed: HashSet::new(),
+                                function_depth: 0,
+                            });
+                            let mut ident = class.ident.take().unwrap_or_else(|| {
+                                thaw_parser::ast::Ident::new_no_ctxt(
+                                    format!("__thawmod{index}_default").into(),
+                                    class.class.span,
+                                )
+                            });
+                            if let Some(replacement) = names.get(ident.sym.as_ref()) {
+                                ident.sym = replacement.clone().into();
+                            }
+                            public.insert("default".to_string(), ident.sym.to_string());
+                            explicit_exports.insert("default".to_string());
+                            items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(
+                                Decl::Class(thaw_parser::ast::ClassDecl {
+                                    ident,
+                                    declare: false,
+                                    class: class.class.clone(),
+                                }),
+                            )));
+                        }
                         thaw_parser::ast::DefaultDecl::TsInterfaceDecl(interface) => {
                             let original = interface.id.sym.to_string();
                             interface.visit_mut_with(&mut RenameReferences {
@@ -866,7 +931,6 @@ pub fn bundle(
                             )));
                             let _ = original;
                         }
-                        _ => return Err("default class exports are not supported yet".to_string()),
                     }
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(mut export)) => {
