@@ -18624,6 +18624,32 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_native_static_class_fields() {
+        let source = r#"
+            class Counter {
+                static base: number = 40;
+                static value: number = Counter.base + 2;
+                static readonly label: string = "ready";
+                static next(): number {
+                    Counter.value += 1;
+                    return Counter.value;
+                }
+            }
+            const initial: number = Counter.value;
+            function main(): void {
+                console.log(initial);
+                console.log(Counter.value);
+                console.log(Counter.next());
+                console.log(Counter.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_static_class_fields"),
+            "42\n42\n43\nready\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {

@@ -728,6 +728,14 @@ fn class_static_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_static_{method}")
 }
 
+fn class_static_field_symbol(class: &str, field: &str) -> Symbol {
+    format!("__thaw_class_{class}_static_field_{field}")
+}
+
+fn is_class_static_field_symbol(symbol: &str) -> bool {
+    symbol.starts_with("__thaw_class_") && symbol.contains("_static_field_")
+}
+
 fn class_getter_symbol(class: &str, property: &str, is_static: bool) -> Symbol {
     format!(
         "__thaw_class_{class}_{}_getter_{property}",
@@ -1530,6 +1538,58 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             }
         }
     }
+    for declaration in &class_decls {
+        let class_name = declaration.ident.sym.as_ref();
+        let mut fields = HashSet::new();
+        for member in &declaration.class.body {
+            let ClassMember::ClassProp(property) = member else {
+                continue;
+            };
+            if !property.is_static {
+                continue;
+            }
+            let field = class_property_name(&property.key)?;
+            if property.is_abstract || property.declare {
+                return Err(format!(
+                    "class `{class_name}` static field `{field}` cannot be abstract or ambient"
+                ));
+            }
+            if !fields.insert(field.clone()) {
+                return Err(format!(
+                    "class `{class_name}` has duplicate static field `{field}`"
+                ));
+            }
+            for member_symbol in [
+                class_static_method_symbol(class_name, &field),
+                class_getter_symbol(class_name, &field, true),
+                class_setter_symbol(class_name, &field, true),
+            ] {
+                if signatures.contains_key(&member_symbol) {
+                    return Err(format!(
+                        "class `{class_name}` static field `{field}` collides with a static method or accessor"
+                    ));
+                }
+            }
+            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                format!("class `{class_name}` static field `{field}` needs a type annotation")
+            })?;
+            if property.value.is_none() {
+                return Err(format!(
+                    "class `{class_name}` static field `{field}` needs an initializer"
+                ));
+            }
+            let symbol = class_static_field_symbol(class_name, &field);
+            let ty = lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)?;
+            if global_types.insert(symbol.clone(), ty).is_some() {
+                return Err(format!(
+                    "class `{class_name}` static field `{field}` conflicts with an existing generated binding"
+                ));
+            }
+            if property.readonly {
+                immutable_globals.insert(symbol);
+            }
+        }
+    }
 
     // Missing parameter/return annotations and global initializer types are type
     // variables. Re-lower them together until forward references reach a fixed point.
@@ -1558,6 +1618,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         let _ = lower_top_level_initializers(
             module,
             &global_types,
+            &immutable_globals,
             &signatures,
             &interfaces,
             &generic_interfaces,
@@ -1653,7 +1714,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         ));
     }
 
-    let globals = lower_global_decls(
+    let mut globals = lower_global_decls(
         &global_decls,
         &global_types,
         &signatures,
@@ -1663,9 +1724,20 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         &enum_reverse_values,
         None,
     )?;
+    globals.extend(lower_static_class_globals(
+        &class_decls,
+        &global_types,
+        &immutable_globals,
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+    )?);
     let initializers = lower_top_level_initializers(
         module,
         &global_types,
+        &immutable_globals,
         &signatures,
         &interfaces,
         &generic_interfaces,
@@ -1797,6 +1869,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
 fn lower_top_level_initializers(
     module: &Module,
     global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
@@ -1813,6 +1886,19 @@ fn lower_top_level_initializers(
         HirType::Void,
         call_constraints,
     );
+    for (name, ty) in global_types {
+        if is_class_static_field_symbol(name) {
+            lowerer.scope.insert(name.clone(), ty.clone());
+            lowerer
+                .bindings
+                .entry(name.clone())
+                .or_default()
+                .push(name.clone());
+            if immutable_globals.contains(name) {
+                lowerer.immutable_bindings.insert(name.clone());
+            }
+        }
+    }
     let mut steps = Vec::new();
     for item in &module.body {
         match item {
@@ -1851,12 +1937,30 @@ fn lower_top_level_initializers(
                     }
                 }
             }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
+                let class_name = declaration.ident.sym.as_ref();
+                for member in &declaration.class.body {
+                    let ClassMember::ClassProp(property) = member else {
+                        continue;
+                    };
+                    if !property.is_static {
+                        continue;
+                    }
+                    let field = class_property_name(&property.key)?;
+                    let symbol = class_static_field_symbol(class_name, &field);
+                    let expected = global_types[&symbol].clone();
+                    let init = lowerer.lower_expr(
+                        property
+                            .value
+                            .as_deref()
+                            .expect("static fields were validated above"),
+                    )?;
+                    let init = lowerer.coerce_to_declared(&expected, init)?;
+                    steps.push(HirInitStep::StoreGlobal(symbol, init));
+                }
+            }
             ModuleItem::Stmt(Stmt::Decl(
-                Decl::Fn(_)
-                | Decl::Class(_)
-                | Decl::TsInterface(_)
-                | Decl::TsEnum(_)
-                | Decl::TsTypeAlias(_),
+                Decl::Fn(_) | Decl::TsInterface(_) | Decl::TsEnum(_) | Decl::TsTypeAlias(_),
             )) => {}
             ModuleItem::Stmt(statement) => {
                 steps.extend(
@@ -1894,6 +1998,16 @@ fn lower_global_decls(
         HirType::Void,
         call_constraints,
     );
+    for (name, ty) in global_types {
+        if is_class_static_field_symbol(name) {
+            lowerer.scope.insert(name.clone(), ty.clone());
+            lowerer
+                .bindings
+                .entry(name.clone())
+                .or_default()
+                .push(name.clone());
+        }
+    }
     let mut globals = Vec::new();
     for declaration in declarations {
         for declarator in &declaration.decls {
@@ -1935,6 +2049,58 @@ fn lower_global_decls(
             if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
                 lowerer.immutable_bindings.insert(name);
             }
+        }
+    }
+    Ok(globals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_static_class_globals(
+    declarations: &[&ClassDecl],
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+) -> Result<Vec<crate::HirGlobal>, String> {
+    let mut lowerer = FnLowerer::new(
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        HirType::Void,
+        None,
+    );
+    seed_global_scope(&mut lowerer, global_types, immutable_globals);
+    let mut globals = Vec::new();
+    for declaration in declarations {
+        let class_name = declaration.ident.sym.as_ref();
+        for member in &declaration.class.body {
+            let ClassMember::ClassProp(property) = member else {
+                continue;
+            };
+            if !property.is_static {
+                continue;
+            }
+            let field = class_property_name(&property.key)?;
+            let symbol = class_static_field_symbol(class_name, &field);
+            let ty = global_types[&symbol].clone();
+            let init = lowerer.lower_expr(
+                property
+                    .value
+                    .as_deref()
+                    .expect("static fields were validated above"),
+            )?;
+            let init = lowerer.coerce_to_declared(&ty, init)?;
+            globals.push(crate::HirGlobal {
+                name: symbol.clone(),
+                ty,
+                init,
+                mutable: !immutable_globals.contains(&symbol),
+            });
         }
     }
     Ok(globals)
@@ -9991,6 +10157,11 @@ impl<'a> FnLowerer<'a> {
         }
         if let MemberProp::Ident(property) = &member.prop {
             if let Expr::Ident(receiver) = member.obj.as_ref() {
+                let field_symbol =
+                    class_static_field_symbol(receiver.sym.as_ref(), property.sym.as_ref());
+                if self.scope.contains_key(&field_symbol) {
+                    return Ok(HirExpr::Var(field_symbol));
+                }
                 let static_symbol =
                     class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
                 if self.signatures.contains_key(&static_symbol) {
@@ -10339,6 +10510,13 @@ impl<'a> FnLowerer<'a> {
             SimpleAssignTarget::Member(member) => match &member.prop {
                 MemberProp::Computed(computed) => self.lower_computed_target(member, computed),
                 MemberProp::Ident(prop) => {
+                    if let Expr::Ident(class) = member.obj.as_ref() {
+                        let symbol =
+                            class_static_field_symbol(class.sym.as_ref(), prop.sym.as_ref());
+                        if self.scope.contains_key(&symbol) {
+                            return Ok(Target::Var(symbol));
+                        }
+                    }
                     let obj = self.lower_expr(&member.obj)?;
                     let obj_ty = self.infer_expr_type(&obj)?;
                     match &obj_ty {
@@ -20123,5 +20301,40 @@ mod tests {
             error.contains("field `value` has type Str, but `Required` requires F64"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn lowers_initialized_native_static_fields_as_globals() {
+        let program = lower(
+            r#"class Counter {
+                static base: number = 40;
+                static value: number = Counter.base + 2;
+                static readonly label: string = "ready";
+                static next(): number { Counter.value += 1; return Counter.value; }
+            }
+            function main(): number { console.log(Counter.label); return Counter.next(); }"#,
+        );
+        for field in ["base", "value", "label"] {
+            assert!(program
+                .globals
+                .iter()
+                .any(|global| { global.name == class_static_field_symbol("Counter", field) }));
+        }
+        assert!(program.initializers.iter().any(|step| matches!(
+            step,
+            HirInitStep::StoreGlobal(name, _)
+                if name == &class_static_field_symbol("Counter", "value")
+        )));
+    }
+
+    #[test]
+    fn rejects_assignment_to_readonly_native_static_field() {
+        let module = thaw_parser::parse_typescript(
+            r#"class Constants { static readonly answer: number = 42; }
+            function main(): void { Constants.answer = 0; }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("cannot assign to constant"), "{error}");
     }
 }
