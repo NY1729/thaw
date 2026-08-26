@@ -9001,6 +9001,7 @@ fn lower_ts_type(
                             | HirType::Object(_)
                             | HirType::Function(_, _)
                             | HirType::Undefined
+                            | HirType::Null
                     )
                 })
             {
