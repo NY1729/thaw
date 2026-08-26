@@ -132,6 +132,8 @@ const ASYNC_COMPLETION_OFFSET: u64 = 0;
 const ASYNC_STATE_OFFSET: u64 = 8;
 const ASYNC_WAITING_OFFSET: u64 = 16;
 const ASYNC_RESULT_OFFSET: u64 = ASYNC_FRAME_BYTES;
+const CLOSURE_THIS_ENTRY_OFFSET: u64 = 8;
+const CLOSURE_CAPTURE_BASE: u64 = 16;
 
 struct AsyncSegment {
     stmts: Vec<HirStmt>,
@@ -5891,7 +5893,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
 
-        // Closure layout: `[code pointer][capture 0][capture 1]...`, with
+        // Closure layout: `[ordinary entry][this-aware entry][capture 0][capture 1]...`, with
         // one machine word per entry. The arena gives the environment a
         // lifetime long enough for callbacks that outlive their creator.
         let i64_type = self.context.i64_type();
@@ -5902,7 +5904,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 alloc,
                 &[
                     i64_type
-                        .const_int(((captures.len() + 1) * 8) as u64, false)
+                        .const_int(CLOSURE_CAPTURE_BASE + (captures.len() as u64 * 8), false)
                         .into(),
                     i64_type.const_int(8, false).into(),
                 ],
@@ -5916,13 +5918,29 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(closure, function.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
+        let this_entry = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[i64_type.const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
+                    "closure_this_entry",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(
+                this_entry,
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(|error| error.to_string())?;
         for (index, capture) in captures.iter().enumerate() {
             let (variable_cell, _) = self
                 .variables
                 .get(&capture.name)
                 .copied()
                 .ok_or_else(|| format!("missing captured variable `{}`", capture.name))?;
-            let offset = i64_type.const_int(((index + 1) * 8) as u64, false);
+            let offset = i64_type.const_int(CLOSURE_CAPTURE_BASE + (index as u64 * 8), false);
             let slot = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), closure, &[offset], "capture_slot")
@@ -5946,7 +5964,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .into_pointer_value();
             for (index, capture) in captures.iter().enumerate() {
                 let ty = self.basic_type(&capture.ty)?;
-                let offset = i64_type.const_int(((index + 1) * 8) as u64, false);
+                let offset = i64_type.const_int(CLOSURE_CAPTURE_BASE + (index as u64 * 8), false);
                 let capture_slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(
@@ -6069,7 +6087,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_call(
                 self.module.get_function("thaw_arena_alloc").unwrap(),
                 &[
-                    self.context.i64_type().const_int(8, false).into(),
+                    self.context
+                        .i64_type()
+                        .const_int(CLOSURE_CAPTURE_BASE, false)
+                        .into(),
                     self.context.i64_type().const_int(8, false).into(),
                 ],
                 "function_ref_closure",
@@ -6081,6 +6102,25 @@ impl<'ctx> HirCompiler<'ctx> {
             .into_pointer_value();
         self.builder
             .build_store(closure, adapter.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        let this_entry = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[self
+                        .context
+                        .i64_type()
+                        .const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
+                    "function_ref_this_entry",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(
+                this_entry,
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
             .map_err(|error| error.to_string())?;
         Ok(closure.into())
     }
@@ -9849,7 +9889,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_call(
                 self.module.get_function("thaw_arena_alloc").unwrap(),
                 &[
-                    i64_type.const_int(16, false).into(),
+                    i64_type.const_int(CLOSURE_CAPTURE_BASE + 8, false).into(),
                     i64_type.const_int(8, false).into(),
                 ],
                 name,
@@ -9862,12 +9902,28 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(closure, code.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
+        let this_entry = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[i64_type.const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
+                    "special_closure_this_entry",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(
+                this_entry,
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(|error| error.to_string())?;
         let promise_slot = unsafe {
             self.builder
                 .build_in_bounds_gep(
                     self.context.i8_type(),
                     closure,
-                    &[i64_type.const_int(8, false)],
+                    &[i64_type.const_int(CLOSURE_CAPTURE_BASE, false)],
                     "promise_capture",
                 )
                 .map_err(|error| error.to_string())?
@@ -9910,7 +9966,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         let environment = function.get_nth_param(0).unwrap().into_pointer_value();
-        let offset = self.context.i64_type().const_int(8, false);
+        let offset = self
+            .context
+            .i64_type()
+            .const_int(CLOSURE_CAPTURE_BASE, false);
         let promise_slot = unsafe {
             self.builder
                 .build_in_bounds_gep(
