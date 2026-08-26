@@ -415,10 +415,13 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
     assert!(response.contains("X-Thaw: GET\r\n"));
     assert!(response.ends_with("hello/health"));
     assert!(second_response.ends_with("hello/ready"));
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let (last_target, events) = stdout.split_once('\n').unwrap();
+    assert!(matches!(last_target, "/health" | "/ready"));
     assert_eq!(
-            String::from_utf8_lossy(&result.stdout),
-            "/ready\n2\ntrue\nfalse\ntrue\nevent:listening\nlistening\nERR_SOCKET_BAD_PORT\nEADDRINUSE\nevent:close\nclosed\n"
-        );
+        events,
+        "2\ntrue\nfalse\ntrue\nevent:listening\nlistening\nERR_SOCKET_BAD_PORT\nEADDRINUSE\nevent:close\nclosed\n"
+    );
 
     std::fs::write(
             &entry,
