@@ -375,7 +375,7 @@ fn compiles_and_runs_native_static_class_fields() {
             static base: number = 40;
             static value: number = Counter.base + 2;
             static readonly label: string = "ready";
-            static self: () => Counter = this;
+            static self: new () => Counter = this;
             static next(): number {
                 Counter.value += 1;
                 return Counter.value;
