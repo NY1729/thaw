@@ -2554,6 +2554,7 @@ struct GenericClassMethodTemplate {
     constraints: Vec<Option<Box<TsType>>>,
     defaults: Vec<Option<Box<TsType>>>,
     parameter_patterns: Vec<GenericTypePattern>,
+    rest_pattern: Option<GenericTypePattern>,
 }
 
 struct GenericClassMethodUse {
@@ -2796,10 +2797,28 @@ fn resolve_explicit_generic_class_method_types(
     let mut ast_substitution = HashMap::new();
     let mut inferred = HashMap::new();
     if let Some(actual_params) = actual_params.filter(|_| arguments.is_none()) {
-        for (pattern, actual) in template.parameter_patterns.iter().zip(actual_params) {
+        let fixed_count = template
+            .parameter_patterns
+            .len()
+            .saturating_sub(usize::from(template.rest_pattern.is_some()));
+        for (pattern, actual) in template
+            .parameter_patterns
+            .iter()
+            .take(fixed_count)
+            .zip(actual_params)
+        {
             match_generic_pattern(pattern, actual, &mut inferred).map_err(|error| {
                 format!("cannot infer generic method `{class}.{method}`: {error}")
             })?;
+        }
+        if let Some(rest_pattern) = template.rest_pattern.as_ref() {
+            for actual in actual_params.iter().skip(fixed_count) {
+                match_generic_pattern(rest_pattern, actual, &mut inferred).map_err(|error| {
+                    format!(
+                        "cannot infer generic method `{class}.{method}` rest arguments: {error}"
+                    )
+                })?;
+            }
         }
     }
     for (index, parameter) in template.parameters.iter().enumerate() {
@@ -2924,16 +2943,18 @@ fn specialize_generic_class_methods(
                 .params
                 .iter()
                 .map(|parameter| {
-                    let Pat::Ident(binding) = &parameter.pat else {
-                        return Err(format!(
-                            "generic method `{}.{}` inference requires identifier parameters",
-                            declaration.ident.sym,
-                            class_property_name(&method.key)?
-                        ));
+                    let annotation = match &parameter.pat {
+                        Pat::Ident(binding) => binding.type_ann.as_ref(),
+                        Pat::Assign(assignment) => match assignment.left.as_ref() {
+                            Pat::Ident(binding) => binding.type_ann.as_ref(),
+                            _ => None,
+                        },
+                        Pat::Rest(rest) => rest.type_ann.as_ref(),
+                        _ => None,
                     };
-                    let annotation = binding.type_ann.as_ref().ok_or_else(|| {
+                    let annotation = annotation.ok_or_else(|| {
                         format!(
-                            "generic method `{}.{}` inference requires parameter annotations",
+                            "generic method `{}.{}` inference requires annotated identifier parameters",
                             declaration.ident.sym,
                             class_property_name(&method.key).unwrap_or_default()
                         )
@@ -2947,6 +2968,16 @@ fn specialize_generic_class_methods(
                     )
                 })
                 .collect::<Result<Vec<_>, String>>()?;
+            let rest_pattern = method
+                .function
+                .params
+                .last()
+                .and_then(|parameter| matches!(parameter.pat, Pat::Rest(_)).then_some(()))
+                .and_then(|()| parameter_patterns.last())
+                .and_then(|pattern| match pattern {
+                    GenericTypePattern::Array(element) => Some(element.as_ref().clone()),
+                    _ => None,
+                });
             templates.insert(
                 (
                     declaration.ident.sym.to_string(),
@@ -2966,6 +2997,7 @@ fn specialize_generic_class_methods(
                         .map(|parameter| parameter.default.clone())
                         .collect(),
                     parameter_patterns,
+                    rest_pattern,
                 },
             );
         }
@@ -23973,6 +24005,10 @@ mod tests {
             (
                 "class Box { numeric<T extends number>(value: T): T { return value; } } function main(): void { const box = new Box(); box.numeric(\"bad\"); }",
                 "does not satisfy constraint F64",
+            ),
+            (
+                "class Box { collect<T>(first: T, ...rest: T[]): T { return first; } } function main(): void { const box = new Box(); box.collect(1, \"bad\"); }",
+                "conflicting call-site types",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();

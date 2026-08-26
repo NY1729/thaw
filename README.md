@@ -1403,7 +1403,9 @@ The workspace crates have narrow responsibilities:
   type assertion. Instance and static generic methods are monomorphized once per
   method-local type tuple from explicit arguments or call-site inference, including
   nested parameter patterns, constraints, trailing defaults, inherited instance
-  receivers, shared generic static owners and bundled-module receivers.
+  receivers, shared generic static owners and bundled-module receivers. Typed rest
+  parameters unify every variadic argument, omitted default parameters use the ordinary
+  class wrappers, and async generic methods preserve specialized `Promise<T>` results.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
