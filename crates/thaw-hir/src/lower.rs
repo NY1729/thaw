@@ -6973,6 +6973,7 @@ type ObjectArrayPropertyDiscriminants = HashMap<Vec<Symbol>, UnionDiscriminants>
 #[derive(Clone, PartialEq)]
 struct FunctionPropertyDiscriminants {
     array: Option<UnionDiscriminants>,
+    nested_array: NestedArrayDiscriminants,
     object: ObjectArrayPropertyDiscriminants,
     functions: ObjectFunctionPropertyDiscriminants,
 }
@@ -7609,6 +7610,8 @@ fn object_function_property_discriminants(
             };
             prefix.push(name);
             let array = function_return_array_discriminants(&annotation.type_ann, generic);
+            let nested_array =
+                function_return_nested_array_discriminants(&annotation.type_ann, generic);
             let object =
                 function_return_object_array_property_discriminants(&annotation.type_ann, generic);
             let mut functions = ObjectFunctionPropertyDiscriminants::new();
@@ -7623,11 +7626,16 @@ fn object_function_property_discriminants(
                     &mut functions,
                 );
             }
-            if !array.is_empty() || !object.is_empty() || !functions.is_empty() {
+            if !array.is_empty()
+                || !nested_array.is_empty()
+                || !object.is_empty()
+                || !functions.is_empty()
+            {
                 result.insert(
                     prefix.clone(),
                     FunctionPropertyDiscriminants {
                         array: (!array.is_empty()).then_some(array),
+                        nested_array,
                         object,
                         functions,
                     },
@@ -13093,7 +13101,10 @@ impl<'a> FnLowerer<'a> {
                 ) {
                     return self.expression_nested_array_discriminants(&member.obj);
                 }
-                None
+                self.expression_called_function_property_discriminants(&callee)
+                    .and_then(|metadata| {
+                        (!metadata.nested_array.is_empty()).then_some(metadata.nested_array)
+                    })
             }
             _ => None,
         }
@@ -13398,19 +13409,22 @@ impl<'a> FnLowerer<'a> {
         expression: &Expr,
     ) -> Option<FunctionPropertyDiscriminants> {
         let array = self.expression_function_array_discriminants(expression);
+        let nested_array = self
+            .expression_function_nested_array_discriminants(expression)
+            .unwrap_or_default();
         let object = self
             .expression_function_object_array_property_discriminants(expression)
             .unwrap_or_default();
         let functions = self
             .expression_function_object_function_property_discriminants(expression)
             .unwrap_or_default();
-        (array.is_some() || !object.is_empty() || !functions.is_empty()).then_some(
-            FunctionPropertyDiscriminants {
+        (array.is_some() || !nested_array.is_empty() || !object.is_empty() || !functions.is_empty())
+            .then_some(FunctionPropertyDiscriminants {
                 array,
+                nested_array,
                 object,
                 functions,
-            },
-        )
+            })
     }
 
     fn insert_object_literal_function_property(
