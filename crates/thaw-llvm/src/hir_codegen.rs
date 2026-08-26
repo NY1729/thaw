@@ -19087,6 +19087,42 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_abstract_classes_and_implementations() {
+        let source = r#"
+            abstract class Shape {
+                constructor(public scale: number = 2) {}
+                abstract area(multiplier?: number): number;
+                abstract get label(): string;
+            }
+            abstract class Deferred extends Shape {}
+            class Square extends Shape {
+                constructor(public side: number = 3) { super(); }
+                area(multiplier?: number): number {
+                    return this.side * this.side * this.scale * (multiplier ?? 1);
+                }
+                get label(): string { return "square"; }
+                describe(): string { return this.label + ":" + String(this.area()); }
+            }
+            class Concrete extends Deferred {
+                area(multiplier?: number): number { return this.scale * (multiplier ?? 1); }
+                get label(): string { return "concrete"; }
+                describe(): string { return this.label + ":" + String(this.area()); }
+            }
+            function main(): void {
+                const square = new Square();
+                const concrete = new Concrete();
+                console.log(square.describe());
+                console.log(square.area(2));
+                console.log(concrete.describe());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_abstract_classes"),
+            "square:18\n36\nconcrete:2\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {

@@ -1345,7 +1345,7 @@ The workspace crates have narrow responsibilities:
 
 ### Not yet compatible
 
-- Contextual/generic TypeScript inference, overload resolution, generic/abstract
+- Contextual/generic TypeScript inference, overload resolution, generic
   classes, decorators, non-top-level or differently internally named class
   expressions, constructor-valued
   `this` in static initialization, incompatible/non-object intersections, multi-capture export keys and the
@@ -1373,6 +1373,10 @@ The workspace crates have narrow responsibilities:
   static members use the same fixed-layout dispatch through dot or bracket access.
   Owner-mangled private instance/static fields, methods and accessors support reads,
   writes, calls, private brand checks and same-spelling members in base/derived classes.
+  Abstract classes provide non-constructible base layouts and require compatible
+  concrete implementations for inherited abstract methods/accessors across multiple
+  levels. Abstract fields and fully virtual override dispatch from inherited concrete
+  method bodies remain outside the fixed-dispatch subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
