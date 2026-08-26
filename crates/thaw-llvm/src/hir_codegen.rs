@@ -16059,6 +16059,14 @@ mod tests {
             function reorder(value: string | null | number): number | string | null {
                 return value;
             }
+            function afterGuards(
+                value: number | string | null | undefined
+            ): string {
+                if (value === null) return "null";
+                if (undefined === value) return "undefined";
+                if (typeof value === "string") return value + "!";
+                return String(value + 1);
+            }
             async function delayed(kind: number): Promise<number | string | null> {
                 await sleep(1);
                 return choose(kind);
@@ -16081,11 +16089,15 @@ mod tests {
                 console.log(describe(await delayedReorder(10)));
                 console.log(describe(await delayedReorder("async")));
                 console.log(describe(await delayedReorder(null)));
+                console.log(afterGuards(12));
+                console.log(afterGuards("guard"));
+                console.log(afterGuards(null));
+                console.log(afterGuards(undefined));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "general_union_null_members"),
-            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n"
+            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n13\nguard!\nnull\nundefined\n"
         );
     }
 
