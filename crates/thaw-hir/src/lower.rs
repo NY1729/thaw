@@ -6798,22 +6798,26 @@ fn lower_generic_instance(
             .entry(param.name.clone())
             .or_default()
             .push(param.name.clone());
-        if let Pat::Ident(binding) = &source.pat {
-            if let Some(annotation) = &binding.type_ann {
-                let discriminants =
-                    object_union_discriminants(&annotation.type_ann, generic_interfaces);
-                if !discriminants.is_empty() {
-                    lowerer
-                        .union_discriminants
-                        .insert(param.name.clone(), discriminants);
-                }
-                let return_discriminants =
-                    function_return_discriminants(&annotation.type_ann, generic_interfaces);
-                if !return_discriminants.is_empty() {
-                    lowerer
-                        .function_value_discriminants
-                        .insert(param.name.clone(), return_discriminants);
-                }
+        let annotation = match &source.pat {
+            Pat::Ident(binding) => binding.type_ann.as_ref(),
+            Pat::Object(pattern) => pattern.type_ann.as_ref(),
+            Pat::Array(pattern) => pattern.type_ann.as_ref(),
+            _ => None,
+        };
+        if let Some(annotation) = annotation {
+            let discriminants =
+                object_union_discriminants(&annotation.type_ann, generic_interfaces);
+            if !discriminants.is_empty() {
+                lowerer
+                    .union_discriminants
+                    .insert(param.name.clone(), discriminants);
+            }
+            let return_discriminants =
+                function_return_discriminants(&annotation.type_ann, generic_interfaces);
+            if !return_discriminants.is_empty() {
+                lowerer
+                    .function_value_discriminants
+                    .insert(param.name.clone(), return_discriminants);
             }
         }
     }
@@ -8904,22 +8908,26 @@ fn lower_fn_decl(
             .entry(param.name.clone())
             .or_default()
             .push(param.name.clone());
-        if let Pat::Ident(binding) = &source.pat {
-            if let Some(annotation) = &binding.type_ann {
-                let discriminants =
-                    object_union_discriminants(&annotation.type_ann, generic_interfaces);
-                if !discriminants.is_empty() {
-                    lowerer
-                        .union_discriminants
-                        .insert(param.name.clone(), discriminants);
-                }
-                let return_discriminants =
-                    function_return_discriminants(&annotation.type_ann, generic_interfaces);
-                if !return_discriminants.is_empty() {
-                    lowerer
-                        .function_value_discriminants
-                        .insert(param.name.clone(), return_discriminants);
-                }
+        let annotation = match &source.pat {
+            Pat::Ident(binding) => binding.type_ann.as_ref(),
+            Pat::Object(pattern) => pattern.type_ann.as_ref(),
+            Pat::Array(pattern) => pattern.type_ann.as_ref(),
+            _ => None,
+        };
+        if let Some(annotation) = annotation {
+            let discriminants =
+                object_union_discriminants(&annotation.type_ann, generic_interfaces);
+            if !discriminants.is_empty() {
+                lowerer
+                    .union_discriminants
+                    .insert(param.name.clone(), discriminants);
+            }
+            let return_discriminants =
+                function_return_discriminants(&annotation.type_ann, generic_interfaces);
+            if !return_discriminants.is_empty() {
+                lowerer
+                    .function_value_discriminants
+                    .insert(param.name.clone(), return_discriminants);
             }
         }
     }
@@ -10560,6 +10568,7 @@ struct FnLowerer<'a> {
     nullish_narrowings: HashMap<Symbol, HirType>,
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
@@ -10583,7 +10592,28 @@ struct FnLowerer<'a> {
     unbound_this_context: bool,
 }
 
-type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool, bool);
+#[derive(Clone)]
+struct UnionNarrowingTarget {
+    name: Symbol,
+    matching: Vec<usize>,
+    allowed: Vec<usize>,
+    elements: Vec<HirType>,
+}
+
+type UnionTypeofNarrowing = (Vec<UnionNarrowingTarget>, bool, bool);
+
+#[derive(Clone)]
+struct CorrelatedUnionTarget {
+    name: Symbol,
+    elements: Vec<HirType>,
+    source_members: Vec<Vec<usize>>,
+}
+
+#[derive(Clone)]
+struct DestructuredUnionCorrelation {
+    literals: Vec<Option<HirLit>>,
+    targets: Vec<CorrelatedUnionTarget>,
+}
 
 impl<'a> FnLowerer<'a> {
     fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
@@ -11911,6 +11941,7 @@ impl<'a> FnLowerer<'a> {
             nullish_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
+            destructured_union_correlations: HashMap::new(),
             function_value_discriminants: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
@@ -12097,23 +12128,27 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                     }
-                    if let Some((name, matching, allowed, elements, equal_when_true, complement)) =
+                    if let Some((targets, equal_when_true, complement)) =
                         self.union_narrowing(&if_stmt.test)
                     {
-                        let continuing = if equal_when_true {
-                            if complement {
-                                allowed
-                                    .into_iter()
-                                    .filter(|index| !matching.contains(index))
-                                    .collect::<Vec<_>>()
+                        for target in targets {
+                            let continuing = if equal_when_true {
+                                if complement {
+                                    target
+                                        .allowed
+                                        .into_iter()
+                                        .filter(|index| !target.matching.contains(index))
+                                        .collect::<Vec<_>>()
+                                } else {
+                                    target.allowed
+                                }
                             } else {
-                                allowed
+                                target.matching
+                            };
+                            if !continuing.is_empty() {
+                                self.union_narrowings
+                                    .insert(target.name, (continuing, target.elements));
                             }
-                        } else {
-                            matching
-                        };
-                        if !continuing.is_empty() {
-                            self.union_narrowings.insert(name, (continuing, elements));
                         }
                     }
                 }
@@ -12268,13 +12303,17 @@ impl<'a> FnLowerer<'a> {
     fn lower_expr_with_union_narrowing(
         &mut self,
         expr: &Expr,
-        union: Option<&(Symbol, Vec<usize>, Vec<HirType>)>,
+        union: Option<&[UnionNarrowingTarget]>,
         optional: Option<&(Symbol, HirType, u8)>,
     ) -> Result<HirExpr, String> {
         let saved = self.union_narrowings.clone();
-        if let Some((name, allowed, elements)) = union {
-            self.union_narrowings
-                .insert(name.clone(), (allowed.clone(), elements.clone()));
+        if let Some(targets) = union {
+            for target in targets {
+                self.union_narrowings.insert(
+                    target.name.clone(),
+                    (target.matching.clone(), target.elements.clone()),
+                );
+            }
         }
         let lowered = self.lower_expr_with_optional_narrowing(expr, optional);
         self.union_narrowings = saved;
@@ -12427,10 +12466,12 @@ impl<'a> FnLowerer<'a> {
             .collect::<Vec<_>>();
         (!matching.is_empty()).then(|| {
             (
-                name,
-                matching,
-                allowed,
-                elements.clone(),
+                vec![UnionNarrowingTarget {
+                    name,
+                    matching,
+                    allowed,
+                    elements: elements.clone(),
+                }],
                 equal_when_true,
                 true,
             )
@@ -12443,11 +12484,9 @@ impl<'a> FnLowerer<'a> {
         }
         if let Expr::Unary(unary) = expr {
             if unary.op == UnaryOp::Bang {
-                return self.union_member_equality_narrowing(&unary.arg).map(
-                    |(name, matching, allowed, elements, equal, complement)| {
-                        (name, matching, allowed, elements, !equal, complement)
-                    },
-                );
+                return self
+                    .union_member_equality_narrowing(&unary.arg)
+                    .map(|(targets, equal, complement)| (targets, !equal, complement));
             }
             return None;
         }
@@ -12503,10 +12542,12 @@ impl<'a> FnLowerer<'a> {
                 .collect::<Vec<_>>();
             return (!matching.is_empty()).then(|| {
                 (
-                    name,
-                    matching,
-                    allowed,
-                    elements.clone(),
+                    vec![UnionNarrowingTarget {
+                        name,
+                        matching,
+                        allowed,
+                        elements: elements.clone(),
+                    }],
                     equal_when_true,
                     true,
                 )
@@ -12539,6 +12580,48 @@ impl<'a> FnLowerer<'a> {
                 return None;
             };
         let name = self.resolve_binding(identifier.sym.as_ref());
+        if let Some(correlation) = self.destructured_union_correlations.get(&name) {
+            let literal = literal_value(if binary.left.as_ident() == Some(identifier) {
+                binary.right.as_ref()
+            } else {
+                binary.left.as_ref()
+            })?;
+            let matching_sources = correlation
+                .literals
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| (value.as_ref() == Some(&literal)).then_some(index))
+                .collect::<Vec<_>>();
+            if matching_sources.is_empty() {
+                return None;
+            }
+            let targets = correlation
+                .targets
+                .iter()
+                .filter_map(|target| {
+                    let allowed = self
+                        .union_narrowings
+                        .get(&target.name)
+                        .map(|(allowed, _)| allowed.clone())
+                        .unwrap_or_else(|| (0..target.elements.len()).collect());
+                    let mut matching = Vec::new();
+                    for source in &matching_sources {
+                        for index in &target.source_members[*source] {
+                            if allowed.contains(index) && !matching.contains(index) {
+                                matching.push(*index);
+                            }
+                        }
+                    }
+                    (!matching.is_empty()).then(|| UnionNarrowingTarget {
+                        name: target.name.clone(),
+                        matching,
+                        allowed,
+                        elements: target.elements.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            return (!targets.is_empty()).then_some((targets, equal_when_true, true));
+        }
         let HirType::Union(elements) = self.scope.get(&name)? else {
             return None;
         };
@@ -12552,10 +12635,12 @@ impl<'a> FnLowerer<'a> {
             return None;
         }
         Some((
-            name,
-            vec![index],
-            allowed,
-            elements.clone(),
+            vec![UnionNarrowingTarget {
+                name,
+                matching: vec![index],
+                allowed,
+                elements: elements.clone(),
+            }],
             equal_when_true,
             complement,
         ))
@@ -12567,41 +12652,40 @@ impl<'a> FnLowerer<'a> {
         }
         if let Expr::Unary(unary) = expr {
             if unary.op == UnaryOp::Bang {
-                return self.union_narrowing(&unary.arg).map(
-                    |(name, matching, allowed, elements, equal, complement)| {
-                        (name, matching, allowed, elements, !equal, complement)
-                    },
-                );
+                return self
+                    .union_narrowing(&unary.arg)
+                    .map(|(targets, equal, complement)| (targets, !equal, complement));
             }
         }
         if let Expr::Bin(binary) = expr {
             if matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
-                let (name, matching, allowed, elements, equal, complement) =
-                    self.union_narrowing(&binary.left)?;
-                let branch_when_true = |truth: bool| {
-                    if truth == equal {
-                        matching.clone()
-                    } else if complement {
-                        allowed
-                            .iter()
-                            .filter(|index| !matching.contains(index))
-                            .copied()
-                            .collect()
-                    } else {
-                        allowed.clone()
-                    }
+                let (targets, equal, complement) = self.union_narrowing(&binary.left)?;
+                let branch_targets = |truth: bool| {
+                    targets
+                        .iter()
+                        .map(|target| UnionNarrowingTarget {
+                            name: target.name.clone(),
+                            matching: if truth == equal {
+                                target.matching.clone()
+                            } else if complement {
+                                target
+                                    .allowed
+                                    .iter()
+                                    .filter(|index| !target.matching.contains(index))
+                                    .copied()
+                                    .collect()
+                            } else {
+                                target.allowed.clone()
+                            },
+                            allowed: target.allowed.clone(),
+                            elements: target.elements.clone(),
+                        })
+                        .collect()
                 };
                 return if binary.op == BinaryOp::LogicalAnd {
-                    Some((name, branch_when_true(true), allowed, elements, true, false))
+                    Some((branch_targets(true), true, false))
                 } else {
-                    Some((
-                        name,
-                        branch_when_true(false),
-                        allowed,
-                        elements,
-                        false,
-                        false,
-                    ))
+                    Some((branch_targets(false), false, false))
                 };
             }
         }
@@ -12612,13 +12696,17 @@ impl<'a> FnLowerer<'a> {
     fn lower_body_with_union_narrowing(
         &mut self,
         stmt: &Stmt,
-        narrowing: Option<&(Symbol, Vec<usize>, Vec<HirType>)>,
+        narrowing: Option<&[UnionNarrowingTarget]>,
         optional: Option<&(Symbol, HirType, u8)>,
     ) -> Result<Vec<HirStmt>, String> {
         let saved = self.union_narrowings.clone();
-        if let Some((name, allowed, elements)) = narrowing {
-            self.union_narrowings
-                .insert(name.clone(), (allowed.clone(), elements.clone()));
+        if let Some(targets) = narrowing {
+            for target in targets {
+                self.union_narrowings.insert(
+                    target.name.clone(),
+                    (target.matching.clone(), target.elements.clone()),
+                );
+            }
         }
         let lowered = self.lower_body_with_optional_narrowing(stmt, optional);
         self.union_narrowings = saved;
@@ -12673,48 +12761,42 @@ impl<'a> FnLowerer<'a> {
                     .map(|(name, payload, _, nullable)| {
                         (name.clone(), payload.clone(), *nullable)
                     });
-                let then_union = union_narrowing.as_ref().map(
-                    |(name, matching, allowed, elements, equal, complement)| {
-                        let narrowed = if *equal {
-                            matching.clone()
-                        } else if !complement {
-                            allowed.clone()
-                        } else {
-                            allowed
-                                .iter()
-                                .filter(|index| !matching.contains(index))
-                                .copied()
-                                .collect()
-                        };
-                        (name.clone(), narrowed, elements.clone())
-                    },
-                );
-                let else_union = union_narrowing.as_ref().map(
-                    |(name, matching, allowed, elements, equal, complement)| {
-                        let narrowed = if !*equal {
-                            matching.clone()
-                        } else if !complement {
-                            allowed.clone()
-                        } else {
-                            allowed
-                                .iter()
-                                .filter(|index| !matching.contains(index))
-                                .copied()
-                                .collect()
-                        };
-                        (name.clone(), narrowed, elements.clone())
-                    },
-                );
+                let branch_union = |truth: bool| {
+                    union_narrowing.as_ref().map(|(targets, equal, complement)| {
+                        targets
+                            .iter()
+                            .map(|target| UnionNarrowingTarget {
+                                name: target.name.clone(),
+                                matching: if truth == *equal {
+                                    target.matching.clone()
+                                } else if !complement {
+                                    target.allowed.clone()
+                                } else {
+                                    target
+                                        .allowed
+                                        .iter()
+                                        .filter(|index| !target.matching.contains(index))
+                                        .copied()
+                                        .collect()
+                                },
+                                allowed: target.allowed.clone(),
+                                elements: target.elements.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                };
+                let then_union = branch_union(true);
+                let else_union = branch_union(false);
                 let then_branch = self
                     .lower_body_with_union_narrowing(
                         &if_stmt.cons,
-                        then_union.as_ref(),
+                        then_union.as_deref(),
                         then_narrowing.as_ref(),
                     )?;
                 let else_branch = match &if_stmt.alt {
                     Some(alt) => self.lower_body_with_union_narrowing(
                         alt,
-                        else_union.as_ref(),
+                        else_union.as_deref(),
                         else_narrowing.as_ref(),
                     )?,
                     None => Vec::new(),
@@ -13598,6 +13680,7 @@ impl<'a> FnLowerer<'a> {
                 .init
                 .as_deref()
                 .ok_or("destructuring declarations need an initializer")?;
+            let propagated_discriminants = self.expression_union_discriminants(init);
             let mut value = self.lower_expr(init)?;
             let annotation = match &decl.name {
                 Pat::Array(pattern) => pattern.type_ann.as_ref(),
@@ -13640,6 +13723,15 @@ impl<'a> FnLowerer<'a> {
             let temporary = format!("__thaw_destructure_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(temporary.clone(), ty.clone());
+            let declared_discriminants = annotation.and_then(|annotation| {
+                let discriminants =
+                    object_union_discriminants(&annotation.type_ann, self.generic_interfaces);
+                (!discriminants.is_empty()).then_some(discriminants)
+            });
+            if let Some(discriminants) = declared_discriminants.or(propagated_discriminants) {
+                self.union_discriminants
+                    .insert(temporary.clone(), discriminants);
+            }
             statements.push(HirStmt::Let(temporary.clone(), ty.clone(), value));
             self.lower_binding_pattern(&decl.name, HirExpr::Var(temporary), &ty, &mut statements)?;
         }
@@ -13841,6 +13933,11 @@ impl<'a> FnLowerer<'a> {
         elements: &[HirType],
         statements: &mut Vec<HirStmt>,
     ) -> Result<(), String> {
+        let discriminants = match &value {
+            HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
+            _ => None,
+        };
+        let mut extracted = Vec::new();
         let mut used = BTreeSet::new();
         for property in &pattern.props {
             match property {
@@ -13849,7 +13946,7 @@ impl<'a> FnLowerer<'a> {
                     let mut field_value =
                         self.lower_union_property_read(value.clone(), elements, &key)?;
                     let mut field_type = self.infer_expr_type(&field_value)?;
-                    used.insert(key);
+                    used.insert(key.clone());
                     if let Some(default) = &property.value {
                         let default = self.lower_expr(default)?;
                         field_value = self.lower_nullish_coalescing(field_value, default)?;
@@ -13861,6 +13958,13 @@ impl<'a> FnLowerer<'a> {
                         &field_type,
                         statements,
                     )?;
+                    if property.value.is_none() {
+                        extracted.push((
+                            key,
+                            self.resolve_binding(property.key.id.sym.as_ref()),
+                            field_type,
+                        ));
+                    }
                 }
                 ObjectPatProp::KeyValue(property) => {
                     let key = match &property.key {
@@ -13879,13 +13983,20 @@ impl<'a> FnLowerer<'a> {
                     let field_value =
                         self.lower_union_property_read(value.clone(), elements, &key)?;
                     let field_type = self.infer_expr_type(&field_value)?;
-                    used.insert(key);
+                    used.insert(key.clone());
                     self.lower_binding_pattern(
                         &property.value,
                         field_value,
                         &field_type,
                         statements,
                     )?;
+                    if let Pat::Ident(binding) = property.value.as_ref() {
+                        extracted.push((
+                            key,
+                            self.resolve_binding(binding.id.sym.as_ref()),
+                            field_type,
+                        ));
+                    }
                 }
                 ObjectPatProp::Rest(rest) => {
                     let (rest_value, rest_type) =
@@ -13894,7 +14005,85 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
+        if let Some(discriminants) = discriminants {
+            self.register_destructured_union_correlations(elements, &discriminants, &extracted)?;
+        }
         Ok(())
+    }
+
+    fn register_destructured_union_correlations(
+        &mut self,
+        source_elements: &[HirType],
+        discriminants: &HashMap<Symbol, Vec<Option<HirLit>>>,
+        extracted: &[(Symbol, Symbol, HirType)],
+    ) -> Result<(), String> {
+        let targets = extracted
+            .iter()
+            .filter_map(|(property, name, ty)| {
+                let HirType::Union(result_elements) = ty else {
+                    return None;
+                };
+                let source_members = source_elements
+                    .iter()
+                    .map(|source| {
+                        let HirType::Object(fields) = source else {
+                            return Err("correlated destructuring requires object members".into());
+                        };
+                        let field = fields
+                            .iter()
+                            .find(|(field, _)| field == property)
+                            .map(|(_, ty)| ty)
+                            .ok_or_else(|| format!("object has no field `{property}`"))?;
+                        let mut flattened = Vec::new();
+                        Self::flatten_property_union_members(field, &mut flattened)?;
+                        flattened
+                            .iter()
+                            .map(|member| {
+                                result_elements.iter().position(|result| result == member).ok_or_else(
+                                    || format!("correlated field `{property}` lost union member {member:?}"),
+                                )
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                    })
+                    .collect::<Result<Vec<_>, String>>();
+                Some(source_members.map(|source_members| CorrelatedUnionTarget {
+                    name: name.clone(),
+                    elements: result_elements.clone(),
+                    source_members,
+                }))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if targets.is_empty() {
+            return Ok(());
+        }
+        for (property, name, _) in extracted {
+            let Some(literals) = discriminants.get(property) else {
+                continue;
+            };
+            if literals.len() == source_elements.len()
+                && literals.iter().all(Option::is_some)
+                && literals
+                    .iter()
+                    .skip(1)
+                    .any(|literal| literal != &literals[0])
+            {
+                self.destructured_union_correlations.insert(
+                    name.clone(),
+                    DestructuredUnionCorrelation {
+                        literals: literals.clone(),
+                        targets: targets.clone(),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn invalidate_destructured_union_correlation(&mut self, name: &str) {
+        self.destructured_union_correlations.remove(name);
+        for correlation in self.destructured_union_correlations.values_mut() {
+            correlation.targets.retain(|target| target.name != name);
+        }
     }
 
     fn lower_union_object_rest(
@@ -16091,30 +16280,38 @@ impl<'a> FnLowerer<'a> {
                     })
                     .map(|(name, payload, _, nullable)| (name, payload, nullable));
                 let rhs_union_narrowing = self.union_narrowing(&bin.left).and_then(
-                    |(name, matching, allowed, elements, equal, complement)| {
+                    |(targets, equal, complement)| {
                         let required_truth = match bin.op {
                             BinaryOp::LogicalAnd => true,
                             BinaryOp::LogicalOr => false,
                             _ => return None,
                         };
-                        let narrowed = if required_truth == equal {
-                            matching
-                        } else if complement {
-                            allowed
-                                .iter()
-                                .filter(|index| !matching.contains(index))
-                                .copied()
-                                .collect()
-                        } else {
-                            allowed.clone()
-                        };
-                        Some((name, narrowed, elements))
+                        Some(
+                            targets
+                                .into_iter()
+                                .map(|target| UnionNarrowingTarget {
+                                    matching: if required_truth == equal {
+                                        target.matching.clone()
+                                    } else if complement {
+                                        target
+                                            .allowed
+                                            .iter()
+                                            .filter(|index| !target.matching.contains(index))
+                                            .copied()
+                                            .collect()
+                                    } else {
+                                        target.allowed.clone()
+                                    },
+                                    ..target
+                                })
+                                .collect::<Vec<_>>(),
+                        )
                     },
                 );
                 let mut rhs = self
                     .lower_expr_with_union_narrowing(
                         &bin.right,
-                        rhs_union_narrowing.as_ref(),
+                        rhs_union_narrowing.as_deref(),
                         rhs_narrowing.as_ref(),
                     )?;
                 let mut bindings = Vec::new();
@@ -18882,6 +19079,9 @@ impl<'a> FnLowerer<'a> {
                     self.native_method_values.remove(name);
                 }
             }
+        }
+        if let Some(name) = assigned_variable.as_ref() {
+            self.invalidate_destructured_union_correlation(name);
         }
         if let Some(name) = assigned_variable {
             if let Some(HirType::Optional(payload)) = self.scope.get(&name) {
@@ -26380,6 +26580,28 @@ mod tests {
                 .contains(&format!("UnionValue(Var(\"result\"), {expected_index},")));
         }
         assert!(format!("{:?}", function.body[2]).contains("UnionValue(Var(\"result\"), 2,"));
+    }
+
+    #[test]
+    fn correlates_destructured_discriminants_with_sibling_unions() {
+        let program = lower(
+            r#"type Result =
+                   { kind: "success"; value: number; detail: number } |
+                   { kind: "failure"; value: string; detail: string };
+               function describe(result: Result): string {
+                   const { kind: tag, value, detail } = result;
+                   if (tag === "success" && value > 0) {
+                       return String(value + detail);
+                   }
+                   if ("failure" === tag) return value + detail;
+                   return "zero";
+               }"#,
+        );
+        let body = format!("{:?}", program.functions[0].body);
+        assert!(body.contains("UnionValue(Var(\"value\"), 0,"));
+        assert!(body.contains("UnionValue(Var(\"detail\"), 0,"));
+        assert!(body.contains("UnionValue(Var(\"value\"), 1,"));
+        assert!(body.contains("UnionValue(Var(\"detail\"), 1,"));
     }
 
     #[test]
