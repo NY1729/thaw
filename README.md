@@ -1576,7 +1576,9 @@ The workspace crates have narrow responsibilities:
   asynchronous function returns, typed function values and callback parameters
   into `for...of` or `for await...of`, including direct item variables and
   object destructuring in declaration, loop assignment and ordinary assignment
-  forms. Indexed reads from a tracked array retain the same metadata.
+  forms. Ordinary assignment preserves correlation for renamed and nested
+  bindings, undefined-only defaults and object rest. Indexed reads from a
+  tracked array retain the same metadata.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
