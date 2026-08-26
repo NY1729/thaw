@@ -12696,6 +12696,7 @@ impl<'a> FnLowerer<'a> {
                     .collect::<ObjectFunctionPropertyDiscriminants>();
                 (!nested.is_empty()).then_some(nested)
             }
+            Expr::Object(object) => self.object_literal_function_property_discriminants(object),
             Expr::Cond(conditional) => {
                 let consequent =
                     self.expression_object_function_property_discriminants(&conditional.cons)?;
@@ -12705,6 +12706,79 @@ impl<'a> FnLowerer<'a> {
             }
             _ => None,
         }
+    }
+
+    fn expression_function_property_result_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<FunctionPropertyDiscriminants> {
+        let array = self.expression_function_array_discriminants(expression);
+        let object = self
+            .expression_function_object_array_property_discriminants(expression)
+            .unwrap_or_default();
+        (array.is_some() || !object.is_empty())
+            .then_some(FunctionPropertyDiscriminants { array, object })
+    }
+
+    fn insert_object_literal_function_property(
+        &self,
+        metadata: &mut ObjectFunctionPropertyDiscriminants,
+        name: Symbol,
+        value: &Expr,
+    ) {
+        metadata.retain(|path, _| path.first() != Some(&name));
+        if let Some(discriminants) = self.expression_function_property_result_discriminants(value) {
+            metadata.insert(vec![name.clone()], discriminants);
+        }
+        if let Some(nested) = self.expression_object_function_property_discriminants(value) {
+            metadata.extend(nested.into_iter().map(|(mut path, discriminants)| {
+                path.insert(0, name.clone());
+                (path, discriminants)
+            }));
+        }
+    }
+
+    fn object_literal_function_property_discriminants(
+        &self,
+        object: &SwcObjectLit,
+    ) -> Option<ObjectFunctionPropertyDiscriminants> {
+        let mut metadata = ObjectFunctionPropertyDiscriminants::new();
+        for property in &object.props {
+            match property {
+                PropOrSpread::Spread(spread) => {
+                    let Some(incoming) =
+                        self.expression_object_function_property_discriminants(&spread.expr)
+                    else {
+                        continue;
+                    };
+                    for first in incoming.keys().filter_map(|path| path.first()) {
+                        metadata.retain(|path, _| path.first() != Some(first));
+                    }
+                    metadata.extend(incoming);
+                }
+                PropOrSpread::Prop(property) => match property.as_ref() {
+                    Prop::KeyValue(property) => {
+                        let Ok(name) = class_property_name(&property.key) else {
+                            continue;
+                        };
+                        self.insert_object_literal_function_property(
+                            &mut metadata,
+                            name,
+                            &property.value,
+                        );
+                    }
+                    Prop::Shorthand(identifier) => {
+                        self.insert_object_literal_function_property(
+                            &mut metadata,
+                            identifier.sym.to_string(),
+                            &Expr::Ident(identifier.clone()),
+                        );
+                    }
+                    _ => {}
+                },
+            }
+        }
+        (!metadata.is_empty()).then_some(metadata)
     }
 
     fn expression_called_function_property_discriminants(
