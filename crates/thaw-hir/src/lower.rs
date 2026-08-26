@@ -27,12 +27,12 @@ use std::fmt;
 
 use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
-    ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee,
-    ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp,
-    Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat,
-    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam,
-    TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp,
-    UpdateOp, VarDecl, VarDeclOrExpr,
+    ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee, ClassDecl,
+    ClassMember, ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr,
+    MemberProp, Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp,
+    OptChainBase, ParamOrTsParamProp, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
+    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement,
+    TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -703,6 +703,82 @@ fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     collector.0
 }
 
+fn class_property_name(name: &PropName) -> Result<Symbol, String> {
+    match name {
+        PropName::Ident(name) => Ok(name.sym.to_string()),
+        PropName::Str(name) => Ok(name.value.to_string_lossy().into_owned()),
+        _ => Err("native class members require an identifier or string-literal name".into()),
+    }
+}
+
+fn class_constructor_symbol(name: &str) -> Symbol {
+    format!("__thaw_class_{name}_constructor")
+}
+
+fn collect_native_classes<'a>(
+    module: &'a Module,
+    interfaces: &mut HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Vec<&'a ClassDecl>, String> {
+    let mut classes = Vec::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let name = declaration.ident.sym.to_string();
+        if declaration.declare {
+            return Err(format!(
+                "ambient class `{name}` cannot use the native class path"
+            ));
+        }
+        if declaration.class.is_abstract
+            || declaration.class.type_params.is_some()
+            || declaration.class.super_class.is_some()
+            || !declaration.class.implements.is_empty()
+        {
+            return Err(format!(
+                "class `{name}` currently requires a concrete, non-generic class without extends/implements"
+            ));
+        }
+        let mut fields = vec![(format!("__thaw_class_identity_{name}"), HirType::Bool)];
+        for member in &declaration.class.body {
+            let ClassMember::ClassProp(property) = member else {
+                continue;
+            };
+            if property.is_static {
+                continue;
+            }
+            if property.is_abstract || property.declare {
+                return Err(format!(
+                    "class `{name}` field `{}` cannot be abstract or ambient",
+                    class_property_name(&property.key)?
+                ));
+            }
+            let field_name = class_property_name(&property.key)?;
+            if fields.iter().any(|(existing, _)| existing == &field_name) {
+                return Err(format!("class `{name}` has duplicate field `{field_name}`"));
+            }
+            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                format!("class `{name}` field `{field_name}` needs a type annotation")
+            })?;
+            fields.push((
+                field_name,
+                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?,
+            ));
+        }
+        if interfaces
+            .insert(name.clone(), HirType::Object(fields))
+            .is_some()
+        {
+            return Err(format!(
+                "class `{name}` conflicts with an interface or type declaration"
+            ));
+        }
+        classes.push(declaration);
+    }
+    Ok(classes)
+}
+
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_top_level_destructuring(module)?;
     lower_normalized_module(&normalized)
@@ -718,6 +794,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             ));
         }
     }
+    let class_decls = collect_native_classes(module, &mut interfaces, &generic_interfaces)?;
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
@@ -867,6 +944,64 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 if !is_extern {
                     fn_decls.push(fn_decl);
                 }
+            }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class_decl))) => {
+                let name = class_decl.ident.sym.to_string();
+                let instance_type = interfaces[&name].clone();
+                let constructors = class_decl
+                    .class
+                    .body
+                    .iter()
+                    .filter_map(|member| match member {
+                        ClassMember::Constructor(constructor) => Some(constructor),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if constructors.len() > 1 {
+                    return Err(format!(
+                        "class `{name}` has multiple constructor implementations"
+                    ));
+                }
+                let params = constructors
+                    .first()
+                    .map(|constructor| {
+                        constructor
+                            .params
+                            .iter()
+                            .map(|parameter| match parameter {
+                                ParamOrTsParamProp::Param(parameter) => lower_param(
+                                    &parameter.pat,
+                                    &interfaces,
+                                    &generic_interfaces,
+                                    false,
+                                    &HashMap::new(),
+                                )
+                                .map(|parameter| parameter.ty),
+                                ParamOrTsParamProp::TsParamProp(_) => Err(format!(
+                                    "class `{name}` constructor parameter properties are not supported yet"
+                                )),
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                signatures.insert(
+                    class_constructor_symbol(&name),
+                    FnSignature {
+                        params,
+                        variadic: None,
+                        ret: instance_type,
+                        is_async: false,
+                        is_extern: false,
+                        source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
+                        generic_type_params: Vec::new(),
+                        generic_type_constraints: Vec::new(),
+                        generic_type_defaults: Vec::new(),
+                        generic_param_patterns: Vec::new(),
+                        generic_param_optional: Vec::new(),
+                        generic_return_type: None,
+                    },
+                );
             }
             // Already consumed by `resolve_interfaces` above.
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {}
@@ -1104,6 +1239,23 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         .into_iter()
         .filter(|function| signatures[&function.name].generic_type_params.is_empty())
         .collect::<Vec<_>>();
+    specialized.extend(
+        class_decls
+            .into_iter()
+            .map(|declaration| {
+                lower_class_constructor(
+                    declaration,
+                    &signatures,
+                    &interfaces,
+                    &generic_interfaces,
+                    &enum_values,
+                    &enum_reverse_values,
+                    &global_types,
+                    &immutable_globals,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     let mut pending = generic_instantiations
         .iter()
         .flat_map(|(name, instances)| instances.iter().cloned().map(|types| (name.clone(), types)))
@@ -1217,7 +1369,11 @@ fn lower_top_level_initializers(
                 }
             }
             ModuleItem::Stmt(Stmt::Decl(
-                Decl::Fn(_) | Decl::TsInterface(_) | Decl::TsEnum(_) | Decl::TsTypeAlias(_),
+                Decl::Fn(_)
+                | Decl::Class(_)
+                | Decl::TsInterface(_)
+                | Decl::TsEnum(_)
+                | Decl::TsTypeAlias(_),
             )) => {}
             ModuleItem::Stmt(statement) => {
                 steps.extend(
@@ -2953,6 +3109,126 @@ fn resolve_type_dependencies(
         _ => {}
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_class_constructor(
+    declaration: &ClassDecl,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
+) -> Result<HirFunction, String> {
+    let class_name = declaration.ident.sym.to_string();
+    let symbol = class_constructor_symbol(&class_name);
+    let instance_type = interfaces[&class_name].clone();
+    let constructor = declaration
+        .class
+        .body
+        .iter()
+        .find_map(|member| match member {
+            ClassMember::Constructor(constructor) => Some(constructor),
+            _ => None,
+        });
+    let source_params = constructor
+        .map(|constructor| constructor.params.as_slice())
+        .unwrap_or_default();
+    let mut params = Vec::with_capacity(source_params.len());
+    for (index, parameter) in source_params.iter().enumerate() {
+        let ParamOrTsParamProp::Param(parameter) = parameter else {
+            return Err(format!(
+                "class `{class_name}` constructor parameter properties are not supported yet"
+            ));
+        };
+        let mut parameter = lower_param(
+            &parameter.pat,
+            interfaces,
+            generic_interfaces,
+            false,
+            &HashMap::new(),
+        )?;
+        parameter.ty = signatures[&symbol].params[index].clone();
+        params.push(parameter);
+    }
+
+    let mut lowerer = FnLowerer::new(
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        instance_type.clone(),
+        None,
+    );
+    seed_global_scope(&mut lowerer, global_types, immutable_globals);
+    let this_name = "__thaw_this".to_string();
+    lowerer
+        .scope
+        .insert(this_name.clone(), instance_type.clone());
+    lowerer
+        .bindings
+        .entry("this".into())
+        .or_default()
+        .push(this_name.clone());
+    for parameter in &params {
+        lowerer
+            .scope
+            .insert(parameter.name.clone(), parameter.ty.clone());
+        lowerer
+            .bindings
+            .entry(parameter.name.clone())
+            .or_default()
+            .push(parameter.name.clone());
+    }
+
+    let mut body = vec![HirStmt::Let(
+        this_name.clone(),
+        instance_type.clone(),
+        HirExpr::ObjectAlloc(instance_type.clone()),
+    )];
+    for member in &declaration.class.body {
+        let ClassMember::ClassProp(property) = member else {
+            continue;
+        };
+        if property.is_static {
+            continue;
+        }
+        if let Some(initializer) = &property.value {
+            let field = class_property_name(&property.key)?;
+            let HirType::Object(fields) = &instance_type else {
+                unreachable!("native class layouts are fixed objects")
+            };
+            let expected = fields
+                .iter()
+                .find_map(|(name, ty)| (name == &field).then(|| ty.clone()))
+                .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
+            let value = lowerer.lower_expr(initializer)?;
+            let value = lowerer.coerce_to_declared(&expected, value)?;
+            body.push(HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(HirExpr::Var(this_name.clone())),
+                instance_type.clone(),
+                field,
+                Box::new(value),
+            )));
+        }
+    }
+    if let Some(constructor) = constructor {
+        let block = constructor.body.as_ref().ok_or_else(|| {
+            format!("class `{class_name}` constructor needs an implementation body")
+        })?;
+        body.extend(lowerer.lower_stmts(&block.stmts)?);
+    }
+    body.push(HirStmt::Return(Some(HirExpr::Var(this_name))));
+    Ok(HirFunction {
+        name: symbol,
+        params,
+        ret: instance_type,
+        is_async: false,
+        body,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7397,6 +7673,15 @@ impl<'a> FnLowerer<'a> {
                     None => Ok(HirExpr::Var(name)),
                 }
             }
+
+            Expr::This(_) => {
+                let name = self.resolve_binding("this");
+                if self.scope.contains_key(&name) {
+                    Ok(HirExpr::Var(name))
+                } else {
+                    Err("`this` is only available inside a native class constructor or method".into())
+                }
+            }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
             Expr::TsInstantiation(instantiation) => {
                 self.lower_generic_instantiation_expression(instantiation)
@@ -8047,7 +8332,23 @@ impl<'a> FnLowerer<'a> {
                 }
             }
 
-            Expr::New(new_expr) => self.lower_promise_new(new_expr),
+            Expr::New(new_expr) => {
+                if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                    let constructor = class_constructor_symbol(class.sym.as_ref());
+                    if self.signatures.contains_key(&constructor) {
+                        let mut callee = class.clone();
+                        callee.sym = constructor.into();
+                        return self.lower_call(&CallExpr {
+                            span: new_expr.span,
+                            ctxt: new_expr.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Ident(callee))),
+                            args: new_expr.args.clone().unwrap_or_default(),
+                            type_args: new_expr.type_args.clone(),
+                        });
+                    }
+                }
+                self.lower_promise_new(new_expr)
+            }
 
             other => Err(format!(
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
@@ -18270,6 +18571,55 @@ mod tests {
             HirStmt::Expr(HirExpr::Call(_, args))
                 if matches!(&args[0], HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::PropAccess(_, _, field) if field == "apply"))
+        ));
+    }
+
+    #[test]
+    fn lowers_native_class_construction_and_this_field_initialization() {
+        let program = lower(
+            r#"class Counter {
+                value: number = 1;
+                label: string;
+                constructor(value: number, label: string) {
+                    this.value = value;
+                    this.label = label;
+                }
+            }
+            function main(): number {
+                const counter = new Counter(42, "ready");
+                return counter.value;
+            }"#,
+        );
+        let constructor = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Counter_constructor")
+            .expect("native class constructor");
+        assert_eq!(constructor.params.len(), 2);
+        assert!(matches!(
+            &constructor.body[0],
+            HirStmt::Let(name, HirType::Object(fields), HirExpr::ObjectAlloc(_))
+                if name == "__thaw_this"
+                    && fields.iter().any(|(name, ty)| name == "value" && ty == &HirType::F64)
+                    && fields.iter().any(|(name, ty)| name == "label" && ty == &HirType::Str)
+        ));
+        assert_eq!(
+            constructor
+                .body
+                .iter()
+                .filter(|statement| matches!(statement, HirStmt::Expr(HirExpr::PropAssign(..))))
+                .count(),
+            3
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(matches!(
+            &main.body[0],
+            HirStmt::Let(_, HirType::Object(_), HirExpr::Call(callee, _))
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Counter_constructor")
         ));
     }
 }

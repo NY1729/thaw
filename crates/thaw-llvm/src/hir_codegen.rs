@@ -18578,6 +18578,29 @@ mod tests {
         assert!(ir.contains("store double 4.200000e+01"));
     }
 
+    #[test]
+    fn compiles_and_runs_native_class_constructor_fields() {
+        let source = r#"
+            class Counter {
+                value: number = 1;
+                label: string;
+                constructor(value: number, label: string) {
+                    this.value = value;
+                    this.label = label;
+                }
+            }
+            function main(): void {
+                const counter = new Counter(42, "ready");
+                console.log(counter.value);
+                console.log(counter.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_constructor_fields"),
+            "42\nready\n"
+        );
+    }
+
     /// Same mechanism, but through the Lambda `handler` entry point instead
     /// of `main` (`emit_lambda_entry` has its own copy of the
     /// `call_module_init_if_present` call, see hir_codegen.rs).
