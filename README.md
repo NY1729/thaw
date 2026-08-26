@@ -1450,6 +1450,9 @@ The workspace crates have narrow responsibilities:
   an enclosing generic method after its outer type tuple has become concrete.
   Static methods resolve `this.field`, `this.getter` and `this.method(...)` against their
   declaring native class, including nested inference into generic static methods.
+  Bare `this` in a static method is represented by the class constructor function value, so truthiness,
+  equality with `null`/`undefined` and `typeof this === "function"` retain their JavaScript behavior; an
+  extracted unbound static method instead observes `this === undefined`.
   Static methods and blocks also route `this` field/accessor assignment, compound updates
   and prefix/postfix updates through shared static storage with readonly checks.
   Static field initializers use the same declaring-class resolution for source-ordered
