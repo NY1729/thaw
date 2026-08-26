@@ -2063,6 +2063,15 @@ fn lower_top_level_initializers(
             ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
                 let class_name = declaration.ident.sym.as_ref();
                 for member in &declaration.class.body {
+                    if let ClassMember::StaticBlock(block) = member {
+                        steps.extend(
+                            lowerer
+                                .lower_stmts(&block.body.stmts)?
+                                .into_iter()
+                                .map(HirInitStep::Statement),
+                        );
+                        continue;
+                    }
                     let ClassMember::ClassProp(property) = member else {
                         continue;
                     };
@@ -20594,5 +20603,32 @@ mod tests {
             error.contains("cannot assign to readonly static member `Derived.label`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn lowers_native_static_blocks_in_class_body_order() {
+        let program = lower(
+            r#"let trace: string = "";
+            class Counter {
+                static value: number = 1;
+                static { Counter.value += 40; trace += "A"; }
+                static result: number = Counter.value + 1;
+                static { trace += "B"; }
+            }
+            function main(): number { console.log(trace); return Counter.result; }"#,
+        );
+        let value = class_static_field_symbol("Counter", "value");
+        let result = class_static_field_symbol("Counter", "result");
+        let value_index = program
+            .initializers
+            .iter()
+            .position(|step| matches!(step, HirInitStep::StoreGlobal(name, _) if name == &value))
+            .unwrap();
+        let result_index = program
+            .initializers
+            .iter()
+            .position(|step| matches!(step, HirInitStep::StoreGlobal(name, _) if name == &result))
+            .unwrap();
+        assert!(result_index > value_index + 1);
     }
 }
