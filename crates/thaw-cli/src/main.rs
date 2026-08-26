@@ -3530,15 +3530,29 @@ mod tests {
             "#,
         )
         .unwrap();
+        std::fs::write(
+            dir.join("left.ts"),
+            "import value from './value'; export const leftAtInit = value.answer + 1;",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("right.ts"),
+            "import value from './value'; export const rightAtInit = value.answer + 2;",
+        )
+        .unwrap();
         let entry = dir.join("main.ts");
         std::fs::write(
             &entry,
             r#"
                 import value, { getCalls } from "./value";
+                import { leftAtInit } from "./left";
+                import { rightAtInit } from "./right";
                 function main(): void {
                     console.log(value.label);
                     console.log(value.answer);
                     console.log(value.answer);
+                    console.log(leftAtInit);
+                    console.log(rightAtInit);
                     console.log(getCalls());
                 }
             "#,
@@ -3554,7 +3568,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "ready\n42\n42\n1\n"
+            "ready\n42\n42\n43\n44\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -79,7 +79,9 @@ directory resolution, named/default/aliased imports, re-exports, duplicate
 imports, same-named declarations in different modules, forward references and
 multi-argument generic specialization. Another executable graph covers exported
 `const`/`let` initialization, a forward function call from an initializer and
-shared mutation through an imported function. A separate test compiles and invokes a
+shared mutation through an imported function. Default-expression coverage uses a
+diamond import graph to verify dependency-before-importer ordering and exactly-once
+initialization of the shared dependency. A separate test compiles and invokes a
 multi-file resumable async `Json` Lambda handler against a mock Runtime API.
 Further E2E coverage imports two registry packages with colliding export names
 from that Lambda and verifies package initialization, async execution and the
