@@ -853,6 +853,40 @@ fn wasm_reference_stats() -> String {
     .to_string()
 }
 
+fn wasm_sweep_inactive_values() {
+    let active_values = WASM.with(|table| {
+        table
+            .borrow()
+            .instances
+            .values()
+            .flat_map(|instance| instance.store.data().externrefs.keys().copied())
+            .collect::<std::collections::HashSet<_>>()
+    });
+    WASM_JS_VALUES.with(|values| {
+        values
+            .borrow_mut()
+            .1
+            .retain(|handle, _| active_values.contains(handle));
+    });
+}
+
+fn wasm_release_pending(import_handles: String) {
+    let handles = serde_json::from_str::<Vec<u32>>(&import_handles).unwrap_or_default();
+    WASM_JS_IMPORTS.with(|imports| {
+        let mut imports = imports.borrow_mut();
+        for handle in handles {
+            if imports
+                .1
+                .get(&handle)
+                .is_some_and(|import| import.owner.is_none())
+            {
+                imports.1.remove(&handle);
+            }
+        }
+    });
+    wasm_sweep_inactive_values();
+}
+
 fn wasm_release(kind: String, handle: u32) -> bool {
     if kind == "module" {
         return WASM.with(|table| table.borrow_mut().modules.remove(&handle).is_some());
@@ -860,15 +894,9 @@ fn wasm_release(kind: String, handle: u32) -> bool {
     if kind != "instance" {
         return false;
     }
-    let (removed, active_values) = WASM.with(|table| {
+    let removed = WASM.with(|table| {
         let mut table = table.borrow_mut();
-        let removed = table.instances.remove(&handle).is_some();
-        let active_values = table
-            .instances
-            .values()
-            .flat_map(|instance| instance.store.data().externrefs.keys().copied())
-            .collect::<std::collections::HashSet<_>>();
-        (removed, active_values)
+        table.instances.remove(&handle).is_some()
     });
     if !removed {
         return false;
@@ -879,12 +907,7 @@ fn wasm_release(kind: String, handle: u32) -> bool {
             .1
             .retain(|_, import| import.owner != Some(handle));
     });
-    WASM_JS_VALUES.with(|values| {
-        values
-            .borrow_mut()
-            .1
-            .retain(|value_handle, _| active_values.contains(value_handle));
-    });
+    wasm_sweep_inactive_values();
     true
 }
 
@@ -3802,6 +3825,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                         .expect("failed to create WebAssembly reference statistics reader");
                 let wasm_release_function = Function::new(ctx.clone(), wasm_release)
                     .expect("failed to create WebAssembly resource releaser");
+                let wasm_release_pending_function =
+                    Function::new(ctx.clone(), wasm_release_pending)
+                        .expect("failed to create WebAssembly pending-resource releaser");
                 let quickjs_gc_function = Function::new(ctx.clone(), run_quickjs_gc)
                     .expect("failed to create QuickJS garbage collector trigger");
                 let wasm_call_function = Function::new(ctx.clone(), wasm_call)
@@ -3851,6 +3877,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_wasm_release", wasm_release_function)
                     .expect("failed to install WebAssembly resource releaser");
+                ctx.globals()
+                    .set("__thaw_wasm_release_pending", wasm_release_pending_function)
+                    .expect("failed to install WebAssembly pending-resource releaser");
                 ctx.globals()
                     .set("__thaw_gc", quickjs_gc_function)
                     .expect("failed to install QuickJS garbage collector trigger");
@@ -4767,21 +4796,25 @@ const PLATFORM_GLOBALS: &str = r#"
         const namespace = imports[item.module];
         if (namespace === null || (typeof namespace !== 'object' && typeof namespace !== 'function')) throw new WebAssembly.LinkError(`WebAssembly import namespace '${item.module}' is not provided`);
         const value = namespace[item.name];
-        if (item.kind === 'function') {
-          if (typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
-          linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
-        } else if (item.kind === 'memory') {
-          if (!(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
-          value.__thawSync(); linkage.memories.push({ module: item.module, name: item.name, value: { data: wasmHex(value.buffer), maximum: value.__thawMaximum } }); pendingResources.push({ value, item });
-        } else if (item.kind === 'global') {
-          if (!(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
-          linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeValue(value.value) }); pendingResources.push({ value, item });
-        } else if (item.kind === 'table') {
-          if (!(value instanceof WasmTable) || value.__thawInstance !== undefined) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a standalone Table`);
-          linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(wasmEncodeValue), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item });
-        } else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
+        if (item.kind === 'function' && typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
+        if (item.kind === 'memory' && !(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
+        if (item.kind === 'global' && !(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
+        if (item.kind === 'table' && (!(value instanceof WasmTable) || value.__thawInstance !== undefined)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a standalone Table`);
       }
-      const result = wasmResult(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)), WebAssembly.LinkError);
+      try {
+        for (const item of module.__thawImports) {
+          if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
+          const value = imports[item.module][item.name];
+          if (item.kind === 'function') linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
+          else if (item.kind === 'memory') { value.__thawSync(); linkage.memories.push({ module: item.module, name: item.name, value: { data: wasmHex(value.buffer), maximum: value.__thawMaximum } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeValue(value.value) }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(wasmEncodeValue), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
+          else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
+        }
+      } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
+      const rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)));
+      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw new WebAssembly.LinkError(rawResult.error); }
+      const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = {}, resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
       for (const item of result.exports) {
@@ -8303,6 +8336,25 @@ mod tests {
         );
         assert_eq!(call("wasmCreateGarbage", "[]"), "true");
         assert_eq!(call("wasmGcRelease", "[]"), r#"[true,true]"#);
+    }
+
+    #[test]
+    fn webassembly_link_failures_release_pending_imports_and_externrefs() {
+        assert_eq!(
+            load(
+                "function wasmFailedLinks() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (import \"host\" \"callback\" (func))\n\
+                     (import \"host\" \"value\" (global externref))\n\
+                     (import \"host\" \"memory\" (memory 2 2)))`), module = new WebAssembly.Module(source);\n\
+                   const callback = () => {}, object = { pending: true }, value = new WebAssembly.Global({ value: 'externref' }, object), memory = new WebAssembly.Memory({ initial: 1, maximum: 2 }), before = JSON.parse(__thaw_wasm_reference_stats());\n\
+                   let failures = 0; for (let index = 0; index < 20; index++) { try { new WebAssembly.Instance(module, { host: { callback, value, memory } }); } catch (error) { if (error instanceof WebAssembly.LinkError) failures++; } }\n\
+                   const after = JSON.parse(__thaw_wasm_reference_stats()); module.dispose(); return [failures, after.imports === before.imports, after.values === before.values, after.instances === before.instances];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("wasmFailedLinks", "[]"), r#"[20,true,true,true]"#);
     }
 
     #[test]
