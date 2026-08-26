@@ -956,8 +956,9 @@ The workspace crates have narrow responsibilities:
   template, callable-assignment validation and contextual callback paths
 - Named function expressions support both non-recursive and recursively referenced internal
   names. Recursive monomorphic closures preallocate a private self cell, retain outer mutable
-  captures, and remain recursive after typed parameter/return boundaries, `.call()` and `.bind()`;
-  recursive generic local function values remain an explicit gap
+  captures, and remain recursive after typed parameter/return boundaries, `.call()` and `.bind()`.
+  Generic named expressions retain that internal self name through inferred or explicit
+  per-call type-tuple specialization, aliases, generic function-type annotations and contextual callbacks
 - User-defined function parameters with a monomorphic function type provide
   the same contextual specialization for named generic functions, local
   generic arrows and inline generic arrows

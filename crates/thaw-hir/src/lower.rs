@@ -10231,6 +10231,7 @@ struct FnLowerer<'a> {
     call_constraints: Option<&'a RefCell<Vec<CallConstraint>>>,
     generic_call_returns: HashMap<Symbol, HirType>,
     generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,
+    generic_arrow_self_names: HashMap<Symbol, Symbol>,
     generic_named_templates: HashMap<Symbol, Symbol>,
     native_method_values: HashMap<Symbol, NativeMethodValue>,
     loop_depth: usize,
@@ -11380,6 +11381,7 @@ impl<'a> FnLowerer<'a> {
             call_constraints,
             generic_call_returns: HashMap::new(),
             generic_arrows: HashMap::new(),
+            generic_arrow_self_names: HashMap::new(),
             generic_named_templates: HashMap::new(),
             native_method_values: HashMap::new(),
             loop_depth: 0,
@@ -11422,6 +11424,7 @@ impl<'a> FnLowerer<'a> {
         let saved_nullish_narrowings = self.nullish_narrowings.clone();
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
+        let saved_generic_arrow_self_names = self.generic_arrow_self_names.clone();
         let saved_generic_named_templates = self.generic_named_templates.clone();
         let saved_native_method_values = self.native_method_values.clone();
         let lowered = self.lower_stmts(stmts);
@@ -11431,6 +11434,7 @@ impl<'a> FnLowerer<'a> {
         self.nullish_narrowings = saved_nullish_narrowings;
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
+        self.generic_arrow_self_names = saved_generic_arrow_self_names;
         self.generic_named_templates = saved_generic_named_templates;
         self.native_method_values = saved_native_method_values;
         lowered
@@ -12490,7 +12494,13 @@ impl<'a> FnLowerer<'a> {
                                 &callable_name,
                             )?;
                             let hir_name = self.bind_local(&name, HirType::Dynamic);
-                            self.generic_arrows.insert(hir_name, arrow);
+                            self.generic_arrows.insert(hir_name.clone(), arrow);
+                            if named_function_is_recursive(function) {
+                                self.generic_arrow_self_names.insert(
+                                    hir_name,
+                                    function.ident.as_ref().unwrap().sym.to_string(),
+                                );
+                            }
                             continue;
                         }
                     }
@@ -12531,7 +12541,12 @@ impl<'a> FnLowerer<'a> {
                                 &callable_name,
                             )?;
                             let hir_name = self.bind_local(&name, HirType::Dynamic);
-                            self.generic_arrows.insert(hir_name, arrow);
+                            self.generic_arrows.insert(hir_name.clone(), arrow);
+                            if let Some(self_name) =
+                                self.generic_arrow_self_names.get(&source_name).cloned()
+                            {
+                                self.generic_arrow_self_names.insert(hir_name, self_name);
+                            }
                             continue;
                         }
                         if let Some(target) =
@@ -12556,7 +12571,12 @@ impl<'a> FnLowerer<'a> {
                     let source_name = self.resolve_binding(identifier.sym.as_ref());
                     if let Some(arrow) = self.generic_arrows.get(&source_name).cloned() {
                         let hir_name = self.bind_local(&name, HirType::Dynamic);
-                        self.generic_arrows.insert(hir_name, arrow);
+                        self.generic_arrows.insert(hir_name.clone(), arrow);
+                        if let Some(self_name) =
+                            self.generic_arrow_self_names.get(&source_name).cloned()
+                        {
+                            self.generic_arrow_self_names.insert(hir_name, self_name);
+                        }
                         continue;
                     }
                     if let Some(target) = self.generic_named_templates.get(&source_name).cloned() {
@@ -12590,6 +12610,12 @@ impl<'a> FnLowerer<'a> {
                     && (matches!(init, Expr::Arrow(arrow) if arrow.type_params.is_some())
                         || matches!(init, Expr::Fn(function) if function.function.type_params.is_some()))
                 {
+                    let recursive_self = match init {
+                        Expr::Fn(function) if named_function_is_recursive(function) => {
+                            function.ident.as_ref().map(|name| name.sym.to_string())
+                        }
+                        _ => None,
+                    };
                     let arrow = match init {
                         Expr::Arrow(arrow) => arrow.clone(),
                         Expr::Fn(function) => function_expression_as_arrow(function)?,
@@ -12601,7 +12627,10 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                     let hir_name = self.bind_local(&name, HirType::Dynamic);
-                    self.generic_arrows.insert(hir_name, arrow);
+                    self.generic_arrows.insert(hir_name.clone(), arrow);
+                    if let Some(self_name) = recursive_self {
+                        self.generic_arrow_self_names.insert(hir_name, self_name);
+                    }
                     continue;
                 }
                 let native_method_value = self.native_instance_method_value(init).or_else(|| {
@@ -15054,7 +15083,7 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         }
         if expression.function.type_params.is_some() {
-            return Err("recursive generic local function values are not supported yet".into());
+            return Ok(None);
         }
         let internal = expression
             .ident
@@ -15278,6 +15307,63 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::FunctionRef(specialized, params, ret))
     }
 
+    fn lower_stored_generic_arrow(
+        &mut self,
+        name: &str,
+        arrow: &swc_ecma_ast::ArrowExpr,
+        parameter_types: &[HirType],
+        expected_return: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let Some(internal) = self.generic_arrow_self_names.get(name).cloned() else {
+            return self.lower_contextual_arrow(arrow, parameter_types, expected_return);
+        };
+        let signature = self.generic_arrow_signature(arrow)?;
+        let concrete_types = infer_generic_type_tuple(
+            &signature,
+            parameter_types,
+            self.interfaces,
+            self.generic_interfaces,
+        )?;
+        let return_type =
+            if let Some(expected) = expected_return.filter(|ty| **ty != HirType::Dynamic) {
+                expected.clone()
+            } else {
+                let declared = signature.generic_return_type.as_ref().ok_or_else(|| {
+                    format!("recursive generic local function `{name}` needs a return annotation")
+                })?;
+                let substitution = signature
+                    .generic_type_params
+                    .iter()
+                    .cloned()
+                    .zip(concrete_types)
+                    .collect::<HashMap<_, _>>();
+                resolve_ts_type_with_substitution(
+                    declared,
+                    &substitution,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    &mut Vec::new(),
+                )?
+            };
+        let self_type = HirType::Function(parameter_types.to_vec(), Box::new(return_type));
+        let self_name = format!("__thaw_recursive_generic_{}", self.next_binding);
+        self.next_binding += 1;
+        let saved_binding = self.bindings.get(&internal).cloned();
+        self.scope.insert(self_name.clone(), self_type.clone());
+        self.bindings
+            .entry(internal.clone())
+            .or_default()
+            .push(self_name.clone());
+        let lowered = self.lower_contextual_arrow(arrow, parameter_types, expected_return);
+        self.scope.remove(&self_name);
+        if let Some(saved) = saved_binding {
+            self.bindings.insert(internal.clone(), saved);
+        } else {
+            self.bindings.remove(&internal);
+        }
+        lowered.map(|closure| HirExpr::RecursiveClosure(self_name, self_type, Box::new(closure)))
+    }
+
     fn lower_contextual_arrow(
         &mut self,
         arrow: &swc_ecma_ast::ArrowExpr,
@@ -15494,7 +15580,12 @@ impl<'a> FnLowerer<'a> {
             Expr::Ident(ident) => {
                 let mut name = self.resolve_binding(ident.sym.as_ref());
                 if let Some(arrow) = self.generic_arrows.get(&name).cloned() {
-                    return self.lower_contextual_arrow(&arrow, parameter_types, expected_return);
+                    return self.lower_stored_generic_arrow(
+                        &name,
+                        &arrow,
+                        parameter_types,
+                        expected_return,
+                    );
                 }
                 if let Some(target) = self.generic_named_templates.get(&name) {
                     name = target.clone();
@@ -22115,8 +22206,8 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|argument| self.infer_expr_type(argument))
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(type_args) = &call.type_args {
-            let signature = self.generic_arrow_signature(arrow)?;
+        let signature = self.generic_arrow_signature(arrow)?;
+        let concrete_types = if let Some(type_args) = &call.type_args {
             resolve_explicit_generic_type_tuple(
                 &signature,
                 &type_args.params,
@@ -22126,11 +22217,60 @@ impl<'a> FnLowerer<'a> {
             )
             .map_err(|error| {
                 format!("cannot explicitly specialize generic arrow `{name}`: {error}")
+            })?
+        } else {
+            infer_generic_type_tuple(
+                &signature,
+                &parameter_types,
+                self.interfaces,
+                self.generic_interfaces,
+            )
+            .map_err(|error| format!("cannot specialize generic arrow `{name}`: {error}"))?
+        };
+        let recursive = self.generic_arrow_self_names.get(name).cloned();
+        let mut recursive_state = None;
+        if let Some(internal) = recursive {
+            let return_type = signature.generic_return_type.as_ref().ok_or_else(|| {
+                format!("recursive generic local function `{name}` needs a return annotation")
             })?;
+            let substitution = signature
+                .generic_type_params
+                .iter()
+                .cloned()
+                .zip(concrete_types.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let return_type = resolve_ts_type_with_substitution(
+                return_type,
+                &substitution,
+                self.interfaces,
+                self.generic_interfaces,
+                &mut Vec::new(),
+            )?;
+            let self_type = HirType::Function(parameter_types.clone(), Box::new(return_type));
+            let self_name = format!("__thaw_recursive_generic_{}", self.next_binding);
+            self.next_binding += 1;
+            let saved_binding = self.bindings.get(&internal).cloned();
+            self.scope.insert(self_name.clone(), self_type.clone());
+            self.bindings
+                .entry(internal.clone())
+                .or_default()
+                .push(self_name.clone());
+            recursive_state = Some((internal, self_name, self_type, saved_binding));
         }
-        let lambda = self
-            .lower_contextual_arrow(arrow, &parameter_types, None)
+        let lowered = self.lower_contextual_arrow(arrow, &parameter_types, None);
+        if let Some((internal, self_name, _, saved_binding)) = &recursive_state {
+            self.scope.remove(self_name);
+            if let Some(saved) = saved_binding {
+                self.bindings.insert(internal.clone(), saved.clone());
+            } else {
+                self.bindings.remove(internal);
+            }
+        }
+        let mut lambda = lowered
             .map_err(|error| format!("cannot specialize generic arrow `{name}`: {error}"))?;
+        if let Some((_, self_name, self_type, _)) = recursive_state {
+            lambda = HirExpr::RecursiveClosure(self_name, self_type, Box::new(lambda));
+        }
         let result = HirExpr::Call(Box::new(lambda), arguments);
         self.wrap_call_argument_bindings(result, &bindings)
     }
