@@ -1569,8 +1569,10 @@ The workspace crates have narrow responsibilities:
   both discriminant and payload correlation forward. Assigning either side
   invalidates the affected correlation. `switch` applies the same narrowing to
   isolated literal cases and computes the remaining members for `default`,
-  while conservatively dropping it across reachable fallthrough. Untyped or
-  dynamically callable boundaries remain outside this subset
+  while conservatively dropping it across reachable fallthrough. Annotated
+  arrays preserve element discriminants through aliases and into `for...of` or
+  `for await...of`, including direct item variables and object destructuring.
+  Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global

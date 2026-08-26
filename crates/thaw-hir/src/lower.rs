@@ -6852,6 +6852,13 @@ fn lower_generic_instance(
                     .union_discriminants
                     .insert(param.name.clone(), discriminants);
             }
+            let element_discriminants =
+                array_element_union_discriminants(&annotation.type_ann, generic_interfaces);
+            if !element_discriminants.is_empty() {
+                lowerer
+                    .array_element_discriminants
+                    .insert(param.name.clone(), element_discriminants);
+            }
             let return_discriminants =
                 function_return_discriminants(&annotation.type_ann, generic_interfaces);
             if !return_discriminants.is_empty() {
@@ -7010,6 +7017,32 @@ fn object_union_discriminants(
                 .all(|(index, value)| values[..index].iter().all(|previous| previous != value))
     });
     by_property
+}
+
+fn array_element_union_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> HashMap<Symbol, Vec<Option<HirLit>>> {
+    let Some(resolved) = resolve_plain_alias_type(ty, generic) else {
+        return HashMap::new();
+    };
+    let element = match resolved {
+        TsType::TsArrayType(array) => Some(array.elem_type.as_ref()),
+        TsType::TsTypeRef(reference)
+            if matches!(&reference.type_name, swc_ecma_ast::TsEntityName::Ident(name)
+                if name.sym == *"Array" || name.sym == *"ReadonlyArray") =>
+        {
+            reference
+                .type_params
+                .as_ref()
+                .and_then(|arguments| arguments.params.first())
+                .map(AsRef::as_ref)
+        }
+        _ => None,
+    };
+    element
+        .map(|element| object_union_discriminants(element, generic))
+        .unwrap_or_default()
 }
 
 fn function_return_discriminants(
@@ -8962,6 +8995,13 @@ fn lower_fn_decl(
                     .union_discriminants
                     .insert(param.name.clone(), discriminants);
             }
+            let element_discriminants =
+                array_element_union_discriminants(&annotation.type_ann, generic_interfaces);
+            if !element_discriminants.is_empty() {
+                lowerer
+                    .array_element_discriminants
+                    .insert(param.name.clone(), element_discriminants);
+            }
             let return_discriminants =
                 function_return_discriminants(&annotation.type_ann, generic_interfaces);
             if !return_discriminants.is_empty() {
@@ -10608,10 +10648,12 @@ struct FnLowerer<'a> {
     nullish_narrowings: HashMap<Symbol, HirType>,
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    array_element_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
+    used_hir_bindings: HashSet<Symbol>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
     interfaces: &'a HashMap<Symbol, HirType>,
@@ -11988,10 +12030,12 @@ impl<'a> FnLowerer<'a> {
             nullish_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
+            array_element_discriminants: HashMap::new(),
             destructured_union_correlations: HashMap::new(),
             destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
             bindings: HashMap::new(),
+            used_hir_bindings: HashSet::new(),
             next_binding: 0,
             signatures,
             interfaces,
@@ -12068,6 +12112,40 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn expression_array_element_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<HashMap<Symbol, Vec<Option<HirLit>>>> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .array_element_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::Paren(parenthesized) => {
+                self.expression_array_element_discriminants(&parenthesized.expr)
+            }
+            Expr::TsAs(assertion) => {
+                let metadata =
+                    array_element_union_discriminants(&assertion.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata =
+                    array_element_union_discriminants(&assertion.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsConstAssertion(assertion) => {
+                self.expression_array_element_discriminants(&assertion.expr)
+            }
+            Expr::Cond(conditional) => {
+                let consequent = self.expression_array_element_discriminants(&conditional.cons)?;
+                (self.expression_array_element_discriminants(&conditional.alt)? == consequent)
+                    .then_some(consequent)
+            }
+            _ => None,
+        }
+    }
+
     fn expression_identifier_alias_source(&self, expression: &Expr) -> Option<Symbol> {
         match expression {
             Expr::Ident(identifier) => Some(self.resolve_binding(identifier.sym.as_ref())),
@@ -12131,14 +12209,21 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn bind_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
-        let hir_name = if self.scope.contains_key(source_name) {
-            let name = format!("{source_name}__thaw_{}", self.next_binding);
-            self.next_binding += 1;
-            name
+        let hir_name = if self.scope.contains_key(source_name)
+            || self.used_hir_bindings.contains(source_name)
+        {
+            loop {
+                let name = format!("{source_name}__thaw_{}", self.next_binding);
+                self.next_binding += 1;
+                if !self.scope.contains_key(&name) && !self.used_hir_bindings.contains(&name) {
+                    break name;
+                }
+            }
         } else {
             source_name.to_string()
         };
         self.scope.insert(hir_name.clone(), ty);
+        self.used_hir_bindings.insert(hir_name.clone());
         self.bindings
             .entry(source_name.to_string())
             .or_default()
@@ -13003,6 +13088,8 @@ impl<'a> FnLowerer<'a> {
                 let saved = self.bindings.clone();
                 let saved_scope = self.scope.clone();
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let item_discriminants =
+                        self.expression_array_element_discriminants(&for_of.right);
                     let values = self.lower_expr(&for_of.right)?;
                     let HirType::Array(element) = self.infer_expr_type(&values)? else {
                         return Err("`for...of` currently requires a typed array".into());
@@ -13073,12 +13160,45 @@ impl<'a> FnLowerer<'a> {
                                     .entry(source_name)
                                     .or_default()
                                     .push(item_name.clone());
+                                let declared_discriminants = binding.type_ann.as_ref().map(
+                                    |annotation| {
+                                        object_union_discriminants(
+                                            &annotation.type_ann,
+                                            self.generic_interfaces,
+                                        )
+                                    },
+                                );
+                                let discriminants = declared_discriminants
+                                    .filter(|metadata| !metadata.is_empty())
+                                    .or_else(|| item_discriminants.clone());
+                                if let Some(discriminants) = discriminants {
+                                    self.union_discriminants
+                                        .insert(item_name.clone(), discriminants);
+                                }
                                 vec![HirStmt::Let(item_name, item_ty, item_value())]
                             } else if matches!(declarator.name, Pat::Object(_) | Pat::Array(_)) {
                                 let temporary =
                                     format!("__thaw_for_of_item_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(temporary.clone(), item_type.clone());
+                                let annotation = match &declarator.name {
+                                    Pat::Object(pattern) => pattern.type_ann.as_ref(),
+                                    Pat::Array(pattern) => pattern.type_ann.as_ref(),
+                                    _ => None,
+                                };
+                                let declared_discriminants = annotation.map(|annotation| {
+                                    object_union_discriminants(
+                                        &annotation.type_ann,
+                                        self.generic_interfaces,
+                                    )
+                                });
+                                let discriminants = declared_discriminants
+                                    .filter(|metadata| !metadata.is_empty())
+                                    .or_else(|| item_discriminants.clone());
+                                if let Some(discriminants) = discriminants {
+                                    self.union_discriminants
+                                        .insert(temporary.clone(), discriminants);
+                                }
                                 let mut statements = vec![HirStmt::Let(
                                     temporary.clone(),
                                     item_type.clone(),
@@ -13760,6 +13880,8 @@ impl<'a> FnLowerer<'a> {
                         .cloned()
                 });
                 let propagated_discriminants = self.expression_union_discriminants(init);
+                let propagated_array_discriminants =
+                    self.expression_array_element_discriminants(init);
                 let propagated_function_discriminants =
                     self.expression_function_discriminants(init);
                 let value = match (init, annotated.as_ref()) {
@@ -13835,6 +13957,14 @@ impl<'a> FnLowerer<'a> {
                         self.union_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
+                    let element_discriminants = array_element_union_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    if !element_discriminants.is_empty() {
+                        self.array_element_discriminants
+                            .insert(hir_name.clone(), element_discriminants);
+                    }
                     let return_discriminants = function_return_discriminants(
                         &annotation.type_ann,
                         self.generic_interfaces,
@@ -13846,6 +13976,12 @@ impl<'a> FnLowerer<'a> {
                 } else if let Some(discriminants) = propagated_discriminants {
                     self.union_discriminants
                         .insert(hir_name.clone(), discriminants);
+                }
+                if binding.type_ann.is_none() {
+                    if let Some(discriminants) = propagated_array_discriminants {
+                        self.array_element_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
                 }
                 if binding.type_ann.is_none() {
                     if let Some(discriminants) = propagated_function_discriminants {
