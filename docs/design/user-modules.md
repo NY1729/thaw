@@ -84,7 +84,9 @@ Typed fixed-layout class declarations, including inheritance and named or anonym
 exports, can be imported, namespace-imported and re-exported across user modules. Their
 `implements` clauses structurally validate inherited and local fields, including specialized
 generic interfaces. Typed static fields with initializers are module-scoped globals initialized
-in source order; static blocks and inherited static-field lookup remain explicit gaps. Cyclic
+in source order. Derived classes share the declaring class's static storage through generated
+accessors, including assignment, compound updates, prefix/postfix updates, readonly enforcement
+and shadowing by a derived declaration. Static blocks remain an explicit gap. Cyclic
 user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
 are explicit compatibility limits, not silently rewritten semantics.
