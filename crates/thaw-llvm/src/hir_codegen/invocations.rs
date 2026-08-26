@@ -703,6 +703,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_keys" => {
+                return self.compile_single_arg_call("thaw_json_keys", args, "Object.keys")
+            }
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
             "getDynamicValue" => return self.compile_get_dynamic_value(args),
