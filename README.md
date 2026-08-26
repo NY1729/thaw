@@ -1386,8 +1386,10 @@ The workspace crates have narrow responsibilities:
   specialization. Constructor calls without explicit type arguments infer parameters
   from typed literals, array/object aggregates and type assertions, prefer inferred
   types over defaults, and share specializations with equivalent explicit calls.
-  Inference through unannotated identifier/data-flow chains and runtime sharing of
-  generic static state remain outside the native subset.
+  Function parameters, annotated or initializer-inferred local bindings, lexical
+  shadowing, member access and common unary/binary expressions propagate the same
+  inference. Inference through arbitrary call results and runtime sharing of generic
+  static state remain outside the native subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
