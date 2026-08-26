@@ -1866,6 +1866,10 @@ fn compiles_optional_function_calls() {
             await sleep(1);
             return (value: number) => value + 1;
         }
+        function spreadArguments(): [number] {
+            console.log("spread arguments");
+            return [9];
+        }
         async function main(): Promise<void> {
             console.log(callback(true)?.(argument()));
             console.log(callback(false)?.(argument()));
@@ -1873,11 +1877,14 @@ fn compiles_optional_function_calls() {
             console.log((await delayedCallback())?.(7));
             console.log(action(false)?.(argument()));
             console.log(action(true)?.(8));
+            console.log(callback(false)?.(...spreadArguments()));
+            console.log(callback(true)?.(...spreadArguments()));
+            console.log(callback(true)?.(...[10]));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "optional_function_calls"),
-        "argument\n10\nundefined\ndelayed argument\n12\n8\nundefined\n8\nundefined\n"
+        "argument\n10\nundefined\ndelayed argument\n12\n8\nundefined\n8\nundefined\nundefined\nspread arguments\n18\n20\n"
     );
 }
 
@@ -2604,4 +2611,3 @@ fn frame_split_supports_fixed_object_for_in() {
         "source\nfirst\nlast\nomega\n"
     );
 }
-
