@@ -12175,6 +12175,22 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
+    fn lower_expr_with_union_narrowing(
+        &mut self,
+        expr: &Expr,
+        union: Option<&(Symbol, Vec<usize>, Vec<HirType>)>,
+        optional: Option<&(Symbol, HirType, u8)>,
+    ) -> Result<HirExpr, String> {
+        let saved = self.union_narrowings.clone();
+        if let Some((name, allowed, elements)) = union {
+            self.union_narrowings
+                .insert(name.clone(), (allowed.clone(), elements.clone()));
+        }
+        let lowered = self.lower_expr_with_optional_narrowing(expr, optional);
+        self.union_narrowings = saved;
+        lowered
+    }
+
     /// Returns the optional binding tested by an undefined comparison and
     /// whether its payload is present in the true branch.
     fn optional_undefined_narrowing(&self, expr: &Expr) -> Option<(Symbol, HirType, bool, u8)> {
@@ -12456,6 +12472,49 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn union_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        if let Expr::Paren(parenthesized) = expr {
+            return self.union_narrowing(&parenthesized.expr);
+        }
+        if let Expr::Unary(unary) = expr {
+            if unary.op == UnaryOp::Bang {
+                return self.union_narrowing(&unary.arg).map(
+                    |(name, matching, allowed, elements, equal, complement)| {
+                        (name, matching, allowed, elements, !equal, complement)
+                    },
+                );
+            }
+        }
+        if let Expr::Bin(binary) = expr {
+            if matches!(binary.op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr) {
+                let (name, matching, allowed, elements, equal, complement) =
+                    self.union_narrowing(&binary.left)?;
+                let branch_when_true = |truth: bool| {
+                    if truth == equal {
+                        matching.clone()
+                    } else if complement {
+                        allowed
+                            .iter()
+                            .filter(|index| !matching.contains(index))
+                            .copied()
+                            .collect()
+                    } else {
+                        allowed.clone()
+                    }
+                };
+                return if binary.op == BinaryOp::LogicalAnd {
+                    Some((name, branch_when_true(true), allowed, elements, true, false))
+                } else {
+                    Some((
+                        name,
+                        branch_when_true(false),
+                        allowed,
+                        elements,
+                        false,
+                        false,
+                    ))
+                };
+            }
+        }
         self.union_typeof_narrowing(expr)
             .or_else(|| self.union_member_equality_narrowing(expr))
     }
@@ -15713,8 +15772,33 @@ impl<'a> FnLowerer<'a> {
                             || (bin.op == BinaryOp::LogicalOr && !*present)
                     })
                     .map(|(name, payload, _, nullable)| (name, payload, nullable));
+                let rhs_union_narrowing = self.union_narrowing(&bin.left).and_then(
+                    |(name, matching, allowed, elements, equal, complement)| {
+                        let required_truth = match bin.op {
+                            BinaryOp::LogicalAnd => true,
+                            BinaryOp::LogicalOr => false,
+                            _ => return None,
+                        };
+                        let narrowed = if required_truth == equal {
+                            matching
+                        } else if complement {
+                            allowed
+                                .iter()
+                                .filter(|index| !matching.contains(index))
+                                .copied()
+                                .collect()
+                        } else {
+                            allowed.clone()
+                        };
+                        Some((name, narrowed, elements))
+                    },
+                );
                 let mut rhs = self
-                    .lower_expr_with_optional_narrowing(&bin.right, rhs_narrowing.as_ref())?;
+                    .lower_expr_with_union_narrowing(
+                        &bin.right,
+                        rhs_union_narrowing.as_ref(),
+                        rhs_narrowing.as_ref(),
+                    )?;
                 let mut bindings = Vec::new();
                 if !matches!(
                     bin.op,
