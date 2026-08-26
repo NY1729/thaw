@@ -88,7 +88,8 @@ in source order. Derived classes share the declaring class's static storage thro
 accessors, including assignment, compound updates, prefix/postfix updates, readonly enforcement
 and shadowing by a derived declaration. Static blocks execute in class-body order and can use
 explicit class references; runtime constructor-valued `this`/`super` inside those blocks remains
-an explicit gap. Cyclic
+an explicit gap. Constructors, instance/static methods, `super(...)` and super methods expand
+tuple spreads with source-order preservation before their fixed ABI call. Cyclic
 user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
 are explicit compatibility limits, not silently rewritten semantics.
