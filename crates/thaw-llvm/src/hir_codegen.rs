@@ -4049,6 +4049,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.variables.clear();
             self.variable_hir_types.clear();
             self.catch_stack.clear();
+            self.seed_global_variables();
             self.bind_async_frame_locals(resume_frame, plan)?;
             self.emit_async_segment(
                 &segments[index + 1],
@@ -19506,6 +19507,7 @@ mod tests {
                 static identity<U>(value: U): U { return value; }
                 static async identityAsync<U>(value: U): Promise<U> { return value; }
                 static label: string = "static-this-field";
+                static initialized: string = this.identity<string>(this.label);
                 static count: number = 1;
                 static stored: number = 0;
                 static get currentLabel(): string { return this.label; }
@@ -19597,11 +19599,12 @@ mod tests {
                 console.log(Box.viaStaticThis());
                 console.log(Box.forwardStaticThis("nested-static-this-call"));
                 console.log(Box.mutateStaticThis());
+                console.log(Box.initialized);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\nstatic-this-field\nnested-static-this-call\n14\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\nstatic-this-field\nnested-static-this-call\n14\nstatic-this-field\n"
         );
     }
 
