@@ -9374,6 +9374,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::Call(callee, _) => {
                 if let HirExpr::Var(name) = callee.as_ref() {
+                    if let Some(ret) = self.frame_async_functions.get(name) {
+                        return Some(HirType::Promise(Box::new(ret.clone())));
+                    }
                     if let Some(ret) = self.function_return_types.get(name) {
                         return Some(ret.clone());
                     }
@@ -16722,13 +16725,8 @@ mod tests {
                     else console.log(item.value + " item");
                 }
                 console.log(consumeResults([{ kind: "text", value: "loop" }]));
-                const pendingNumbers: Promise<Result>[] = [result(true)];
-                for await (const { kind, value } of pendingNumbers) {
-                    if (kind === "number") console.log(value + 3);
-                    else console.log(value + "!");
-                }
-                const pendingTexts: Promise<Result>[] = [result(false)];
-                for await (const { kind, value } of pendingTexts) {
+                const pendingResults: Promise<Result>[] = [result(true), result(false)];
+                for await (const { kind, value } of pendingResults) {
                     if (kind === "number") console.log(value + 3);
                     else console.log(value + "!");
                 }
