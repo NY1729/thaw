@@ -2547,6 +2547,413 @@ fn specialize_generic_classes(
     Ok(Some(specialized))
 }
 
+#[derive(Clone)]
+struct GenericClassMethodTemplate {
+    method: ClassMethod,
+    parameters: Vec<Symbol>,
+    constraints: Vec<Option<Box<TsType>>>,
+    defaults: Vec<Option<Box<TsType>>>,
+}
+
+struct GenericClassMethodUse {
+    span: swc_common::Span,
+    class: Symbol,
+    method: Symbol,
+    arguments: Vec<TsType>,
+}
+
+struct GenericClassMethodUseCollector<'a, 'ast> {
+    templates: &'a HashMap<(Symbol, Symbol), GenericClassMethodTemplate>,
+    interfaces: &'a HashMap<Symbol, HirType>,
+    generic_interfaces: &'a GenericInterfaces<'ast>,
+    scopes: Vec<HashMap<Symbol, HirType>>,
+    uses: Vec<GenericClassMethodUse>,
+}
+
+impl GenericClassMethodUseCollector<'_, '_> {
+    fn bind_pattern(&mut self, pattern: &Pat) {
+        let Pat::Ident(binding) = pattern else {
+            return;
+        };
+        let Some(annotation) = binding.type_ann.as_ref() else {
+            return;
+        };
+        if let Ok(ty) = lower_ts_type(
+            &annotation.type_ann,
+            self.interfaces,
+            self.generic_interfaces,
+        ) {
+            self.scopes
+                .last_mut()
+                .expect("generic method collector always has a scope")
+                .insert(binding.id.sym.to_string(), ty);
+        }
+    }
+
+    fn receiver_class(&self, expression: &Expr) -> Option<Symbol> {
+        match expression {
+            Expr::Ident(identifier) => {
+                if self
+                    .templates
+                    .keys()
+                    .any(|(class, _)| class == identifier.sym.as_ref())
+                {
+                    return Some(identifier.sym.to_string());
+                }
+                self.scopes
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(identifier.sym.as_ref()))
+                    .and_then(class_name_from_type)
+                    .map(str::to_owned)
+            }
+            Expr::New(construction) => construction.callee.as_ident().and_then(|class| {
+                self.interfaces
+                    .get(class.sym.as_ref())
+                    .and_then(class_name_from_type)
+                    .map(str::to_owned)
+            }),
+            Expr::Paren(parenthesized) => self.receiver_class(&parenthesized.expr),
+            Expr::TsAs(assertion) => self.receiver_class(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => self.receiver_class(&assertion.expr),
+            _ => None,
+        }
+    }
+}
+
+impl Visit for GenericClassMethodUseCollector<'_, '_> {
+    fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+        self.scopes.push(HashMap::new());
+        for parameter in &function.params {
+            self.bind_pattern(&parameter.pat);
+        }
+        function.visit_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+        self.scopes.push(HashMap::new());
+        for parameter in &arrow.params {
+            self.bind_pattern(parameter);
+        }
+        arrow.visit_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
+        self.scopes.push(HashMap::new());
+        block.visit_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_var_decl(&mut self, declaration: &swc_ecma_ast::VarDecl) {
+        for declarator in &declaration.decls {
+            declarator.name.visit_with(self);
+            if let Some(initializer) = declarator.init.as_deref() {
+                initializer.visit_with(self);
+            }
+            let Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            let ty = binding
+                .type_ann
+                .as_ref()
+                .and_then(|annotation| {
+                    lower_ts_type(
+                        &annotation.type_ann,
+                        self.interfaces,
+                        self.generic_interfaces,
+                    )
+                    .ok()
+                })
+                .or_else(|| {
+                    let initializer = declarator.init.as_deref()?;
+                    match initializer {
+                        Expr::New(construction) => {
+                            let class = construction.callee.as_ident()?;
+                            self.interfaces.get(class.sym.as_ref()).cloned()
+                        }
+                        Expr::Ident(identifier) => self
+                            .scopes
+                            .iter()
+                            .rev()
+                            .find_map(|scope| scope.get(identifier.sym.as_ref()).cloned()),
+                        _ => None,
+                    }
+                });
+            if let Some(ty) = ty {
+                self.scopes
+                    .last_mut()
+                    .expect("generic method collector always has a scope")
+                    .insert(binding.id.sym.to_string(), ty);
+            }
+        }
+    }
+
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if let (Callee::Expr(callee), Some(arguments)) = (&call.callee, call.type_args.as_ref()) {
+            if let Expr::Member(member) = callee.as_ref() {
+                if let (Some(class), Some(method)) = (
+                    self.receiver_class(&member.obj),
+                    member_property_name(&member.prop),
+                ) {
+                    if self
+                        .templates
+                        .contains_key(&(class.clone(), method.clone()))
+                    {
+                        self.uses.push(GenericClassMethodUse {
+                            span: call.span,
+                            class,
+                            method,
+                            arguments: unbox_types(&arguments.params),
+                        });
+                    }
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+}
+
+fn resolve_explicit_generic_class_method_types(
+    class: &str,
+    method: &str,
+    template: &GenericClassMethodTemplate,
+    arguments: &[TsType],
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<(Vec<HirType>, Vec<TsType>), String> {
+    let required = template
+        .defaults
+        .iter()
+        .filter(|default| default.is_none())
+        .count();
+    if arguments.len() < required || arguments.len() > template.parameters.len() {
+        let expected = if required == template.parameters.len() {
+            required.to_string()
+        } else {
+            format!("{required}..={}", template.parameters.len())
+        };
+        return Err(format!(
+            "generic method `{class}.{method}` expects {expected} type argument(s), got {}",
+            arguments.len()
+        ));
+    }
+    let mut types = Vec::with_capacity(template.parameters.len());
+    let mut concrete_arguments = Vec::with_capacity(template.parameters.len());
+    let mut hir_substitution = HashMap::new();
+    let mut ast_substitution = HashMap::new();
+    for (index, parameter) in template.parameters.iter().enumerate() {
+        let mut argument = arguments
+            .get(index)
+            .cloned()
+            .or_else(|| template.defaults[index].as_deref().cloned())
+            .expect("validated generic method arity requires a default");
+        argument.visit_mut_with(&mut GenericClassTypeSubstituter {
+            substitutions: &ast_substitution,
+        });
+        let ty = lower_ts_type(&argument, interfaces, generic_interfaces)?;
+        ast_substitution.insert(parameter.clone(), Box::new(argument.clone()));
+        hir_substitution.insert(parameter.clone(), ty.clone());
+        concrete_arguments.push(argument);
+        types.push(ty);
+    }
+    for ((parameter, actual), constraint) in template
+        .parameters
+        .iter()
+        .zip(&types)
+        .zip(&template.constraints)
+    {
+        let Some(constraint) = constraint else {
+            continue;
+        };
+        let constraint = resolve_ts_type_with_substitution(
+            constraint,
+            &hir_substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        if !type_satisfies_constraint(actual, &constraint) {
+            return Err(format!(
+                "generic method `{class}.{method}` type {actual:?} does not satisfy constraint {constraint:?} for `{parameter}`"
+            ));
+        }
+    }
+    Ok((types, concrete_arguments))
+}
+
+struct GenericClassMethodCallRewriter<'a> {
+    calls: &'a HashMap<swc_common::Span, Symbol>,
+}
+
+impl VisitMut for GenericClassMethodCallRewriter<'_> {
+    fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+        call.visit_mut_children_with(self);
+        let Some(method) = self.calls.get(&call.span) else {
+            return;
+        };
+        let Callee::Expr(callee) = &mut call.callee else {
+            return;
+        };
+        let Expr::Member(member) = callee.as_mut() else {
+            return;
+        };
+        member.prop = MemberProp::Ident(IdentName::new(method.clone().into(), call.span));
+        call.type_args = None;
+    }
+}
+
+fn specialize_generic_class_methods(
+    module: &Module,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Option<Module>, String> {
+    let mut templates = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        for member in &declaration.class.body {
+            let ClassMember::Method(method) = member else {
+                continue;
+            };
+            let Some(parameters) = method.function.type_params.as_ref() else {
+                continue;
+            };
+            if method.kind != MethodKind::Method {
+                return Err(format!(
+                    "generic class accessor `{}.{}` is not supported",
+                    declaration.ident.sym,
+                    class_property_name(&method.key)?
+                ));
+            }
+            validate_trailing_type_parameter_defaults(
+                "generic method",
+                &format!(
+                    "{}.{}",
+                    declaration.ident.sym,
+                    class_property_name(&method.key)?
+                ),
+                parameters,
+            )?;
+            templates.insert(
+                (
+                    declaration.ident.sym.to_string(),
+                    class_property_name(&method.key)?,
+                ),
+                GenericClassMethodTemplate {
+                    method: method.clone(),
+                    parameters: parameters
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.name.sym.to_string())
+                        .collect(),
+                    constraints: parameters
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.constraint.clone())
+                        .collect(),
+                    defaults: parameters
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.default.clone())
+                        .collect(),
+                },
+            );
+        }
+    }
+    if templates.is_empty() {
+        return Ok(None);
+    }
+
+    let mut collector = GenericClassMethodUseCollector {
+        templates: &templates,
+        interfaces,
+        generic_interfaces,
+        scopes: vec![HashMap::new()],
+        uses: Vec::new(),
+    };
+    module.visit_with(&mut collector);
+    let mut instances = Vec::<(Symbol, Symbol, Vec<HirType>, Symbol)>::new();
+    let mut calls = HashMap::new();
+    let mut generated = HashMap::<Symbol, Vec<ClassMethod>>::new();
+    for usage in collector.uses {
+        let template = &templates[&(usage.class.clone(), usage.method.clone())];
+        let (types, arguments) = resolve_explicit_generic_class_method_types(
+            &usage.class,
+            &usage.method,
+            template,
+            &usage.arguments,
+            interfaces,
+            generic_interfaces,
+        )?;
+        if let Some(unsupported) = types.iter().find(|ty| !supports_generic_native_layout(ty)) {
+            return Err(format!(
+                "generic method `{}.{}` cannot specialize for native layout {unsupported:?}",
+                usage.class, usage.method
+            ));
+        }
+        let specialized_name = if let Some(existing) =
+            instances
+                .iter()
+                .find_map(|(class, method, candidate_types, symbol)| {
+                    (class == &usage.class && method == &usage.method && candidate_types == &types)
+                        .then(|| symbol.clone())
+                }) {
+            existing
+        } else {
+            let specialized_name = specialized_generic_name(&usage.method, &types);
+            let substitutions = template
+                .parameters
+                .iter()
+                .cloned()
+                .zip(arguments.into_iter().map(Box::new))
+                .collect::<HashMap<_, _>>();
+            let mut method = template.method.clone();
+            method.key =
+                PropName::Ident(IdentName::new(specialized_name.clone().into(), method.span));
+            method.function.type_params = None;
+            method
+                .function
+                .visit_mut_with(&mut GenericClassTypeSubstituter {
+                    substitutions: &substitutions,
+                });
+            generated
+                .entry(usage.class.clone())
+                .or_default()
+                .push(method);
+            instances.push((
+                usage.class.clone(),
+                usage.method.clone(),
+                types,
+                specialized_name.clone(),
+            ));
+            specialized_name
+        };
+        calls.insert(usage.span, specialized_name);
+    }
+
+    let mut specialized = module.clone();
+    for item in &mut specialized.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let class = declaration.ident.sym.to_string();
+        declaration.class.body.retain(|member| {
+            !matches!(member, ClassMember::Method(method) if method.function.type_params.is_some())
+        });
+        if let Some(methods) = generated.remove(&class) {
+            declaration
+                .class
+                .body
+                .extend(methods.into_iter().map(ClassMember::Method));
+        }
+    }
+    specialized.visit_mut_with(&mut GenericClassMethodCallRewriter { calls: &calls });
+    Ok(Some(specialized))
+}
+
 fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     struct Collector(Vec<String>);
     impl Visit for Collector {
@@ -3132,6 +3539,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
     let class_decls = collect_native_classes(module, &mut interfaces, &generic_interfaces)?;
+    if let Some(specialized) =
+        specialize_generic_class_methods(module, &interfaces, &generic_interfaces)?
+    {
+        return lower_normalized_module(&specialized);
+    }
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
@@ -23385,6 +23797,55 @@ mod tests {
             error.contains("static members cannot reference class type parameter `T`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn specializes_explicit_generic_class_methods_once_per_type_tuple() {
+        let program = lower(
+            r#"
+            class Box {
+                convert<T>(value: T): T { return value; }
+            }
+            function main(): void {
+                const box = new Box();
+                console.log(box.convert<string>("first"));
+                console.log(box.convert<string>("second"));
+                console.log(box.convert<number>(42));
+            }
+            "#,
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| {
+                    function.name == class_method_symbol("Box", "convert__thaw_str")
+                })
+                .count(),
+            1
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| { function.name == class_method_symbol("Box", "convert__thaw_f64") }));
+    }
+
+    #[test]
+    fn validates_explicit_generic_class_method_arguments() {
+        for (source, expected) in [
+            (
+                "class Box { numeric<T extends number>(value: T): T { return value; } } function main(): void { const box = new Box(); box.numeric<string>(\"bad\"); }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "class Box { pair<T, U>(left: T, right: U): T { return left; } } function main(): void { const box = new Box(); box.pair<number>(1, 2); }",
+                "expects 2 type argument(s), got 1",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

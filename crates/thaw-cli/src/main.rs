@@ -3601,6 +3601,8 @@ mod tests {
                     static { Box.count += 1; }
                     constructor(public value: T) { Box.count += 1; }
                     get(): T { return this.value; }
+                    convert<U>(value: U): U { return value; }
+                    static identity<U>(value: U): U { return value; }
                 }
                 export class Pair<T, U> {
                     constructor(public first: T, public second: U) {}
@@ -3636,6 +3638,8 @@ mod tests {
                     console.log(pair.second);
                     console.log(nestedBox.get());
                     console.log(inferredNestedBox.get());
+                    console.log(first.convert<string>("method"));
+                    console.log(Box.identity<boolean>(true));
                     console.log(fromCall.get());
                     console.log(Box.count);
                     console.log(derived.double());
@@ -3654,7 +3658,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "module\n42\n40\n40\n6\n6\n42\n21\n"
+            "module\n42\n40\n40\nmethod\ntrue\n6\n6\n42\n21\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

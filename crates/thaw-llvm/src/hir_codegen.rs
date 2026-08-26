@@ -19486,6 +19486,32 @@ mod tests {
     }
 
     #[test]
+    fn compiles_explicit_native_generic_class_methods() {
+        let source = r#"
+            class Box<T> {
+                constructor(public value: T) {}
+                convert<U>(value: U): U { return value; }
+                second<U, V = string>(first: U, second: V): V { return second; }
+                numeric<U extends number>(value: U): U { return value; }
+                static identity<U>(value: U): U { return value; }
+            }
+            function main(): void {
+                const box = new Box(40);
+                console.log(box.convert<string>("converted"));
+                console.log(box.convert<number>(42));
+                console.log(box.second<number>(1, "defaulted"));
+                console.log(box.numeric<number>(43));
+                console.log(Box.identity<boolean>(true));
+                console.log(Box.identity<string>("static"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_class_methods"),
+            "converted\n42\ndefaulted\n43\ntrue\nstatic\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
