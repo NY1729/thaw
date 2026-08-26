@@ -2422,20 +2422,41 @@ impl<'a> FnLowerer<'a> {
                     let [callback] = call.args.as_slice() else {
                         return Err("`.finally` expects exactly one callback".into());
                     };
-                    if callback.spread.is_some() {
-                        return Err("Promise callback spread is not supported".into());
-                    }
-                    let callback = self.lower_promise_callback(&callback.expr, &[], None)?;
+                    let (source, callback, bindings) = if callback.spread.is_some() {
+                        let source_name = format!("__thaw_promise_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let source_type = HirType::Promise(input.clone());
+                        self.scope
+                            .insert(source_name.clone(), source_type.clone());
+                        let (callbacks, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Promise callback")?;
+                        let [callback] = callbacks.as_slice() else {
+                            return Err(
+                                "`.finally` expects exactly one callback after spread expansion"
+                                    .into(),
+                            );
+                        };
+                        self.validate_promise_callback_value(callback, &[], None)?;
+                        bindings.insert(0, (source_name.clone(), source_type, source));
+                        (HirExpr::Var(source_name), callback.clone(), bindings)
+                    } else {
+                        (
+                            source,
+                            self.lower_promise_callback(&callback.expr, &[], None)?,
+                            Vec::new(),
+                        )
+                    };
                     let HirType::Function(_, callback_return) = self.infer_expr_type(&callback)?
                     else {
                         unreachable!()
                     };
-                    return Ok(HirExpr::PromiseFinally(
+                    let result = HirExpr::PromiseFinally(
                         Box::new(source),
                         Box::new(callback),
                         *input,
                         *callback_return,
-                    ));
+                    );
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"then" || property.sym == *"catch" {
                     let source = self.lower_expr(&member.obj)?;
