@@ -18720,7 +18720,7 @@ mod tests {
             }
             class NamedBox {
                 [labelName]: string = "static-computed";
-                [readName](): string { return this.label; }
+                [readName](): string { return this[labelName]; }
             }
             function main(): void {
                 const value = new Box(40);
@@ -18729,7 +18729,7 @@ mod tests {
                 console.log(value["current"]);
                 console.log(Box["next"]());
                 console.log(Box["count"]);
-                console.log(new NamedBox().read());
+                console.log(new NamedBox()[readName]());
             }
         "#;
         assert_eq!(

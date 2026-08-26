@@ -774,8 +774,6 @@ fn static_class_member_name(
 ) -> Option<String> {
     match expression {
         Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
-        Expr::Lit(Lit::Num(value)) => Some(value.value.to_string()),
-        Expr::Lit(Lit::Bool(value)) => Some(value.value.to_string()),
         Expr::Ident(identifier) => constants.get(identifier.sym.as_ref()).cloned(),
         Expr::Bin(binary) if binary.op == BinaryOp::Add => Some(format!(
             "{}{}",
@@ -890,6 +888,92 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             _ => {}
         }
     }
+    struct ComputedAccessNormalizer<'a> {
+        constants: &'a HashMap<Symbol, String>,
+        shadowed: Vec<HashSet<Symbol>>,
+    }
+    impl ComputedAccessNormalizer<'_> {
+        fn local_constant_shadows<T: VisitWith<BindingCollector>>(
+            &self,
+            node: &T,
+        ) -> HashSet<Symbol> {
+            let mut collector = BindingCollector::default();
+            node.visit_with(&mut collector);
+            collector
+                .names
+                .into_iter()
+                .filter(|name| self.constants.contains_key(name))
+                .collect()
+        }
+
+        fn expression_is_shadowed(&self, expression: &Expr) -> bool {
+            let mut collector = IdentifierCollector::default();
+            expression.visit_with(&mut collector);
+            collector.names.into_iter().any(|name| {
+                self.shadowed
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.contains(&name))
+            })
+        }
+    }
+    #[derive(Default)]
+    struct BindingCollector {
+        names: HashSet<Symbol>,
+    }
+    impl Visit for BindingCollector {
+        fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+            self.names.insert(binding.id.sym.to_string());
+        }
+    }
+    #[derive(Default)]
+    struct IdentifierCollector {
+        names: HashSet<Symbol>,
+    }
+    impl Visit for IdentifierCollector {
+        fn visit_ident(&mut self, identifier: &swc_ecma_ast::Ident) {
+            self.names.insert(identifier.sym.to_string());
+        }
+    }
+    impl VisitMut for ComputedAccessNormalizer<'_> {
+        fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
+            let shadowed = self.local_constant_shadows(function);
+            self.shadowed.push(shadowed);
+            function.visit_mut_children_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut swc_ecma_ast::ArrowExpr) {
+            let shadowed = self.local_constant_shadows(arrow);
+            self.shadowed.push(shadowed);
+            arrow.visit_mut_children_with(self);
+            self.shadowed.pop();
+        }
+
+        fn visit_mut_member_prop(&mut self, property: &mut MemberProp) {
+            let MemberProp::Computed(computed) = property else {
+                property.visit_mut_children_with(self);
+                return;
+            };
+            if self.expression_is_shadowed(&computed.expr) {
+                computed.visit_mut_children_with(self);
+                return;
+            }
+            let Some(value) = static_class_member_name(&computed.expr, self.constants) else {
+                computed.visit_mut_children_with(self);
+                return;
+            };
+            *computed.expr = Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                span: computed.span,
+                value: value.into(),
+                raw: None,
+            }));
+        }
+    }
+    normalized.visit_mut_with(&mut ComputedAccessNormalizer {
+        constants: &constants,
+        shadowed: Vec::new(),
+    });
     normalized
 }
 
@@ -26140,9 +26224,9 @@ mod tests {
             const method = ("re" + "ad") as string;
             class Box {
                 [field]: number = 42;
-                [method](): number { return this.value; }
+                [method](): number { return this[field]; }
             }
-            function main(): number { return new Box().read(); }"#,
+            function main(): number { return new Box()[method](); }"#,
         );
         assert!(program
             .functions
