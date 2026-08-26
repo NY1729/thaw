@@ -19478,6 +19478,32 @@ mod tests {
     }
 
     #[test]
+    fn supports_generic_interface_method_signatures() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            interface Service<T> {
+                load(): T[][];
+            }
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            function main(): void {
+                const service: Service<Result> = {
+                    load: (): Result[][] => [[{ kind: "text", value: "generic" }]],
+                };
+                print(service.load().flat()[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_interface_method_signature"),
+            "generic!\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
