@@ -608,10 +608,10 @@ The workspace crates have narrow responsibilities:
   JavaScript identity through exported functions and mutable globals. Imported
   and exported `externref` Tables share values and growth across instances.
   Exported `funcref` Tables expose stable callable WebAssembly functions and
-  accept same-instance exported functions in `set()` and `grow()`. Standalone
-  function Tables can be imported into one instance and synchronize both
-  exported and module-internal functions bidirectionally; forwarding one
-  function Table across separate WebAssembly stores remains the next layer
+  accept exported functions in `set()` and `grow()`. Standalone function
+  Tables can be imported into one or several instances, preserve function
+  identity, synchronize module-internal references bidirectionally and use
+  typed host thunks to forward calls between separate WebAssembly stores
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command
