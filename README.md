@@ -1395,8 +1395,11 @@ The workspace crates have narrow responsibilities:
   native layout. Static fields, methods, private members and blocks are emitted once on
   a shared non-generic owner, retain source initialization order and share inherited
   base storage across every specialization; class type parameters in static members are
-  rejected as in TypeScript. Inference through arbitrary call results remains outside
-  the native subset.
+  rejected as in TypeScript. Constructor inference also follows annotated functions,
+  unannotated forward return-call chains, conditional returns, local initializer chains,
+  typed arrows/function values and function-valued object properties. Calls whose
+  result remains dynamically typed still require an explicit class type argument or
+  type assertion.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model

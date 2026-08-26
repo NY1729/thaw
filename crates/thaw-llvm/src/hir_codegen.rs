@@ -19443,6 +19443,47 @@ mod tests {
     }
 
     #[test]
+    fn infers_native_generic_classes_from_function_call_results() {
+        let source = r#"
+            class Box<T> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            function annotated(): number { return 40; }
+            function forwarded() { return annotated(); }
+            function branched(flag: boolean) { return flag ? forwarded() : 41; }
+            function label() { return String(42); }
+            function localInitializer() {
+                const base = 40;
+                const offset = 2;
+                return base + offset;
+            }
+            function main(): void {
+                const makeText = (value: number): string => "value=" + String(value);
+                const factory = { positive: (value: number): boolean => value > 0 };
+                const direct = new Box(annotated());
+                const throughForward = new Box(forwarded());
+                const throughBranch = new Box(branched(true));
+                const text = new Box(label());
+                const local = new Box(localInitializer());
+                const arrow = new Box(makeText(42));
+                const method = new Box(factory.positive(1));
+                console.log(direct.get());
+                console.log(throughForward.get());
+                console.log(throughBranch.get());
+                console.log(text.get());
+                console.log(local.get());
+                console.log(arrow.get());
+                console.log(method.get());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_class_call_inference"),
+            "40\n40\n40\n42\n42\nvalue=42\ntrue\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
