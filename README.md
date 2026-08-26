@@ -606,8 +606,10 @@ The workspace crates have narrow responsibilities:
   synchronized before and after calls, including growth and sharing the same
   JavaScript object across multiple instances. `externref` values preserve
   JavaScript identity through exported functions and mutable globals. Imported
-  and exported `externref` Tables share values and growth across instances;
-  function-reference Tables remain the next interoperability layer
+  and exported `externref` Tables share values and growth across instances.
+  Exported `funcref` Tables expose stable callable WebAssembly functions and
+  accept same-instance exported functions in `set()` and `grow()`; importing
+  function-reference Tables across instances remains the next layer
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command

@@ -610,11 +610,15 @@ struct WasmJsValue {
 }
 
 struct WasmInstance {
+    handle: u32,
     store: WasmStore<WasmStoreData>,
     instance: wasmi::Instance,
     imported_memories: HashMap<String, WasmMemory>,
     imported_globals: HashMap<String, wasmi::Global>,
     imported_tables: HashMap<String, wasmi::Table>,
+    next_funcref: u32,
+    funcrefs: HashMap<u32, wasmi::Func>,
+    funcref_ids: HashMap<String, u32>,
 }
 
 struct StandaloneWasmMemory {
@@ -1024,7 +1028,17 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
             .collect::<Vec<_>>();
         let handle = table.next_instance;
         table.next_instance += 1;
-        table.instances.insert(handle, WasmInstance { store, instance, imported_memories, imported_globals, imported_tables });
+        table.instances.insert(handle, WasmInstance {
+            handle,
+            store,
+            instance,
+            imported_memories,
+            imported_globals,
+            imported_tables,
+            next_funcref: 1,
+            funcrefs: HashMap::new(),
+            funcref_ids: HashMap::new(),
+        });
         serde_json::json!({ "ok": true, "handle": handle, "exports": exports }).to_string()
     })
 }
@@ -1126,6 +1140,17 @@ fn wasm_runtime_value(
     ty: WasmValType,
     store: &mut WasmStore<WasmStoreData>,
 ) -> Result<WasmVal, String> {
+    if ty == WasmValType::FuncRef {
+        let handle = value
+            .get("v")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        return if handle == 0 {
+            Ok(WasmVal::FuncRef(wasmi::Ref::Null))
+        } else {
+            Err("WebAssembly funcref belongs to a different instance".to_string())
+        };
+    }
     if ty != WasmValType::ExternRef {
         return wasm_number(value, ty);
     }
@@ -1141,10 +1166,38 @@ fn wasm_runtime_value(
     Ok(wasmi::ExternRef::new(store, handle).into())
 }
 
-fn wasm_value(
-    value: WasmVal,
-    store: &WasmStore<WasmStoreData>,
-) -> Result<serde_json::Value, String> {
+fn wasm_instance_runtime_value(
+    value: &serde_json::Value,
+    ty: WasmValType,
+    record: &mut WasmInstance,
+) -> Result<WasmVal, String> {
+    if ty != WasmValType::FuncRef {
+        return wasm_runtime_value(value, ty, &mut record.store);
+    }
+    let handle = value
+        .get("v")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if handle == 0 {
+        return Ok(WasmVal::FuncRef(wasmi::Ref::Null));
+    }
+    let owner = value
+        .get("instance")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    if owner != Some(record.handle) {
+        return Err("WebAssembly funcref belongs to a different instance".to_string());
+    }
+    let handle = u32::try_from(handle).map_err(|_| "invalid WebAssembly funcref handle")?;
+    record
+        .funcrefs
+        .get(&handle)
+        .copied()
+        .map(WasmVal::from)
+        .ok_or_else(|| "WebAssembly funcref belongs to a different instance".to_string())
+}
+
+fn wasm_value(value: WasmVal, record: &mut WasmInstance) -> Result<serde_json::Value, String> {
     match value {
         WasmVal::I32(value) => Ok(serde_json::json!({ "t": "number", "v": value })),
         WasmVal::I64(value) => Ok(serde_json::json!({ "t": "bigint", "v": value.to_string() })),
@@ -1154,17 +1207,74 @@ fn wasm_value(
             let handle = match reference.val() {
                 None => 0,
                 Some(reference) => *reference
-                    .data(store)
+                    .data(&record.store)
                     .downcast_ref::<u32>()
                     .ok_or_else(|| "invalid WebAssembly externref payload".to_string())?,
             };
             Ok(serde_json::json!({ "t": "externref", "v": handle }))
+        }
+        WasmVal::FuncRef(reference) => {
+            let Some(function) = reference.val().copied() else {
+                return Ok(serde_json::json!({ "t": "funcref", "v": 0 }));
+            };
+            let key = format!("{function:?}");
+            let handle = match record.funcref_ids.get(&key).copied() {
+                Some(handle) => handle,
+                None => {
+                    let handle = record.next_funcref;
+                    record.next_funcref += 1;
+                    record.funcrefs.insert(handle, function);
+                    record.funcref_ids.insert(key, handle);
+                    handle
+                }
+            };
+            Ok(serde_json::json!({ "t": "funcref", "v": handle }))
         }
         other => Err(format!(
             "unsupported WebAssembly result type {:?}",
             other.ty()
         )),
     }
+}
+
+fn wasm_call_function(record: &mut WasmInstance, function: wasmi::Func, arguments: &str) -> String {
+    let ty = function.ty(&record.store);
+    let raw: Vec<serde_json::Value> = match serde_json::from_str(arguments) {
+        Ok(values) => values,
+        Err(error) => {
+            return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string()
+        }
+    };
+    if raw.len() != ty.params().len() {
+        return serde_json::json!({ "ok": false, "error": format!("expected {} arguments, received {}", ty.params().len(), raw.len()) }).to_string();
+    }
+    let mut inputs = Vec::with_capacity(raw.len());
+    for (value, ty) in raw.iter().zip(ty.params()) {
+        match wasm_instance_runtime_value(value, *ty, record) {
+            Ok(value) => inputs.push(value),
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    }
+    let mut outputs = ty
+        .results()
+        .iter()
+        .copied()
+        .map(WasmVal::default)
+        .collect::<Vec<_>>();
+    if let Err(error) = function.call(&mut record.store, &inputs, &mut outputs) {
+        if let Some(exit) = error.i32_exit_status() {
+            return serde_json::json!({ "ok": false, "exit": exit }).to_string();
+        }
+        return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+    }
+    let mut values = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        match wasm_value(output, record) {
+            Ok(value) => values.push(value),
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    }
+    serde_json::json!({ "ok": true, "values": values }).to_string()
 }
 
 fn wasm_call(instance_handle: u32, name: String, arguments: String) -> String {
@@ -1176,37 +1286,37 @@ fn wasm_call(instance_handle: u32, name: String, arguments: String) -> String {
         let Some(function) = record.instance.get_func(&record.store, &name) else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a function") }).to_string();
         };
-        let ty = function.ty(&record.store);
-        let raw: Vec<serde_json::Value> = match serde_json::from_str(&arguments) {
-            Ok(values) => values,
-            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+        wasm_call_function(record, function, &arguments)
+    })
+}
+
+fn wasm_call_funcref(instance_handle: u32, handle: u32, arguments: String) -> String {
+    WASM.with(|table| {
+        let mut table = table.borrow_mut();
+        let Some(record) = table.instances.get_mut(&instance_handle) else {
+            return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
         };
-        if raw.len() != ty.params().len() {
-            return serde_json::json!({ "ok": false, "error": format!("expected {} arguments, received {}", ty.params().len(), raw.len()) }).to_string();
-        }
-        let mut inputs = Vec::with_capacity(raw.len());
-        for (value, ty) in raw.iter().zip(ty.params()) {
-            match wasm_runtime_value(value, *ty, &mut record.store) {
-                Ok(value) => inputs.push(value),
-                Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
-            }
-        }
-        let mut outputs = ty.results().iter().copied().map(WasmVal::default).collect::<Vec<_>>();
-        if let Err(error) = function.call(&mut record.store, &inputs, &mut outputs) {
-            if let Some(exit) = error.i32_exit_status() {
-                return serde_json::json!({ "ok": false, "exit": exit }).to_string();
-            }
-            return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
-        }
-        let values = match outputs
-            .into_iter()
-            .map(|value| wasm_value(value, &record.store))
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(values) => values,
-            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        let Some(function) = record.funcrefs.get(&handle).copied() else {
+            return serde_json::json!({ "ok": false, "error": "released WebAssembly function reference" }).to_string();
         };
-        serde_json::json!({ "ok": true, "values": values }).to_string()
+        wasm_call_function(record, function, &arguments)
+    })
+}
+
+fn wasm_export_funcref(instance_handle: u32, name: String) -> String {
+    WASM.with(|table| {
+        let mut table = table.borrow_mut();
+        let Some(record) = table.instances.get_mut(&instance_handle) else {
+            return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" })
+                .to_string();
+        };
+        let Some(function) = record.instance.get_func(&record.store, &name) else {
+            return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a function") }).to_string();
+        };
+        match wasm_value(WasmVal::from(function), record) {
+            Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
     })
 }
 
@@ -1230,7 +1340,7 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
                 Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
             };
             let ty = global.ty(&record.store).content();
-            let value = match wasm_runtime_value(&encoded, ty, &mut record.store) {
+            let value = match wasm_instance_runtime_value(&encoded, ty, record) {
                 Ok(value) => value,
                 Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
             };
@@ -1238,7 +1348,8 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
                 return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
             }
         }
-        match wasm_value(global.get(&record.store), &record.store) {
+        let value = global.get(&record.store);
+        match wasm_value(value, record) {
             Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
             Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
         }
@@ -1344,7 +1455,7 @@ fn wasm_table(
         match operation.as_str() {
             "size" => serde_json::json!({ "ok": true, "value": table_value.size(&record.store) }).to_string(),
             "get" => match table_value.get(&record.store, index) {
-                Some(value) => match wasm_value(value, &record.store) {
+                Some(value) => match wasm_value(value, record) {
                     Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
                     Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
                 },
@@ -1356,7 +1467,7 @@ fn wasm_table(
                     .and_then(|value| serde_json::from_str(value).ok())
                     .unwrap_or_else(|| serde_json::json!({ "t": "externref", "v": 0 }));
                 let element = table_value.ty(&record.store).element();
-                let value = match wasm_runtime_value(&encoded, element, &mut record.store) {
+                let value = match wasm_instance_runtime_value(&encoded, element, record) {
                     Ok(value) => value,
                     Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
                 };
@@ -3423,6 +3534,10 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .expect("failed to create WebAssembly externref restorer");
                 let wasm_call_function = Function::new(ctx.clone(), wasm_call)
                     .expect("failed to create WebAssembly function caller");
+                let wasm_call_funcref_function = Function::new(ctx.clone(), wasm_call_funcref)
+                    .expect("failed to create WebAssembly function-reference caller");
+                let wasm_export_funcref_function = Function::new(ctx.clone(), wasm_export_funcref)
+                    .expect("failed to create WebAssembly exported function-reference reader");
                 let wasm_global_function = Function::new(ctx.clone(), wasm_global)
                     .expect("failed to create WebAssembly global accessor");
                 let wasm_memory_create_function = Function::new(ctx.clone(), wasm_memory_create)
@@ -3452,6 +3567,12 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_wasm_call", wasm_call_function)
                     .expect("failed to install WebAssembly function caller");
+                ctx.globals()
+                    .set("__thaw_wasm_call_funcref", wasm_call_funcref_function)
+                    .expect("failed to install WebAssembly function-reference caller");
+                ctx.globals()
+                    .set("__thaw_wasm_export_funcref", wasm_export_funcref_function)
+                    .expect("failed to install WebAssembly exported function-reference reader");
                 ctx.globals()
                     .set("__thaw_wasm_global", wasm_global_function)
                     .expect("failed to install WebAssembly global accessor");
@@ -4171,11 +4292,31 @@ const PLATFORM_GLOBALS: &str = r#"
     if (!result.ok) throw new ErrorType(result.error);
     return result;
   };
-  const wasmEncodeValue = value => typeof value === 'bigint'
+  const wasmFuncrefs = new Map();
+  const wasmEncodeValue = value => typeof value === 'function' && value.__thawWasmFuncref !== undefined
+    ? { t: 'funcref', v: value.__thawWasmFuncref, instance: value.__thawWasmInstance }
+    : typeof value === 'bigint'
     ? { t: 'bigint', v: String(value) }
     : typeof value === 'number' ? { t: 'number', v: Number.isFinite(value) ? value : null }
     : { t: 'externref', v: value === null ? 0 : __thaw_wasm_retain_value(value) };
-  const wasmDecodeValue = value => value.t === 'bigint' ? BigInt(value.v) : value.t === 'externref' ? __thaw_wasm_restore_value(Number(value.v)) : (value.v === null ? NaN : value.v);
+  const wasmDecodeValue = (value, instance) => {
+    if (value.t === 'bigint') return BigInt(value.v);
+    if (value.t === 'externref') return __thaw_wasm_restore_value(Number(value.v));
+    if (value.t !== 'funcref') return value.v === null ? NaN : value.v;
+    if (!value.v) return null;
+    const key = instance + ':' + value.v;
+    if (!wasmFuncrefs.has(key)) {
+      const callable = (...args) => {
+        const called = wasmResult(__thaw_wasm_call_funcref(instance, value.v, JSON.stringify(args.map(wasmEncodeValue))), WebAssembly.RuntimeError);
+        const values = called.values.map(item => wasmDecodeValue(item, instance));
+        return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
+      };
+      Object.defineProperty(callable, '__thawWasmInstance', { value: instance });
+      Object.defineProperty(callable, '__thawWasmFuncref', { value: value.v });
+      wasmFuncrefs.set(key, callable);
+    }
+    return wasmFuncrefs.get(key);
+  };
   class WasmModule {
     constructor(bytes) {
       const result = wasmResult(__thaw_wasm_compile(wasmHex(bytes)), WebAssembly.CompileError);
@@ -4282,7 +4423,7 @@ const PLATFORM_GLOBALS: &str = r#"
       this.__thawValues = Array(initial).fill(value); this.__thawBindings = [];
     }
     get length() { return this.__thawInstance === undefined ? this.__thawValues.length : wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).value; }
-    get(index) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return this.__thawInstance === undefined ? this.__thawValues[index] : wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value); }
+    get(index) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return this.__thawInstance === undefined ? this.__thawValues[index] : wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value, this.__thawInstance); }
     set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeValue(value)))); }
     grow(delta, value = null) { delta = Number(delta); const previous = this.length; if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError); return previous; }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
@@ -4325,10 +4466,14 @@ const PLATFORM_GLOBALS: &str = r#"
             for (const resource of resources) resource.value.__thawRefresh(resource.binding);
             if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
             const called = raw.ok ? raw : (() => { throw new WebAssembly.RuntimeError(raw.error); })();
-            const values = called.values.map(wasmDecodeValue);
+            const values = called.values.map(value => wasmDecodeValue(value, this.__thawHandle));
             return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
           };
           Object.defineProperty(callable, 'length', { value: item.parameters || 0 });
+          const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;
+          Object.defineProperty(callable, '__thawWasmInstance', { value: this.__thawHandle });
+          Object.defineProperty(callable, '__thawWasmFuncref', { value: reference.v });
+          wasmFuncrefs.set(this.__thawHandle + ':' + reference.v, callable);
           exports[item.name] = callable;
         } else if (item.kind === 'memory') {
           const memory = new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
@@ -7762,6 +7907,37 @@ mod tests {
         assert_eq!(
             call("wasmTables", "[]"),
             r#"[true,true,true,2,true,true,true]"#
+        );
+    }
+
+    #[test]
+    fn webassembly_funcref_tables_return_and_accept_exported_functions() {
+        assert_eq!(
+            load(
+                "function wasmFunctionTables() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (type $unary (func (param i32) (result i32)))\n\
+                     (func $increment (export \"increment\") (type $unary) local.get 0 i32.const 1 i32.add)\n\
+                     (func $double (export \"double\") (type $unary) local.get 0 i32.const 2 i32.mul)\n\
+                     (table (export \"functions\") 2 4 funcref)\n\
+                     (elem (i32.const 0) $increment $double)\n\
+                     (func (export \"invoke\") (param i32 i32) (result i32) local.get 1 local.get 0 call_indirect (type $unary)))`);\n\
+                   const instance = new WebAssembly.Instance(new WebAssembly.Module(source)), table = instance.exports.functions;\n\
+                   const first = table.get(0), stable = first === table.get(0), direct = first(9);\n\
+                   table.set(0, instance.exports.double); const replaced = instance.exports.invoke(0, 6);\n\
+                   const previous = table.grow(1, instance.exports.increment), grown = instance.exports.invoke(2, 8);\n\
+                   table.set(1, null); const empty = table.get(1) === null; let trapped = false;\n\
+                   try { instance.exports.invoke(1, 1); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }\n\
+                   const sibling = new WebAssembly.Instance(new WebAssembly.Module(source)); let foreignRejected = false;\n\
+                   try { table.set(0, sibling.exports.double); } catch (error) { foreignRejected = error.message.includes('different instance'); }\n\
+                   return [table instanceof WebAssembly.Table, stable, direct, replaced, previous, table.length, grown, empty, trapped, foreignRejected];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("wasmFunctionTables", "[]"),
+            r#"[true,true,10,12,2,3,9,true,true,true]"#
         );
     }
 
