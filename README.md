@@ -1432,6 +1432,8 @@ The workspace crates have narrow responsibilities:
   source once in JavaScript order, and evaluates but does not retain its ignored static `thisArg`.
   Instance and static methods that do not observe `this` can also be extracted directly as
   synchronous or async typed function values. Extraction evaluates an instance receiver once;
+  receiver typing follows annotated function/method results, native object field chains,
+  parentheses, assertions, sequences and same-typed conditional branches.
   saved instance and static methods that observe `this` retain their method identity through local aliases and
   support synchronous or async `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)` without
   retaining the extraction receiver. They can also be converted after extraction with
