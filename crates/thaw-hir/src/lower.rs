@@ -12100,18 +12100,22 @@ impl<'a> FnLowerer<'a> {
             BinaryOp::NotEqEq | BinaryOp::NotEq => false,
             _ => return None,
         };
-        let (ident, type_name) = match (binary.left.as_ref(), binary.right.as_ref()) {
+        let (target, type_name) = match (binary.left.as_ref(), binary.right.as_ref()) {
             (Expr::Unary(unary), Expr::Lit(Lit::Str(name))) if unary.op == UnaryOp::TypeOf => {
-                let Expr::Ident(ident) = unary.arg.as_ref() else {
-                    return None;
-                };
-                (ident, name.value.to_string_lossy())
+                (unary.arg.as_ref(), name.value.to_string_lossy())
             }
             (Expr::Lit(Lit::Str(name)), Expr::Unary(unary)) if unary.op == UnaryOp::TypeOf => {
-                let Expr::Ident(ident) = unary.arg.as_ref() else {
+                (unary.arg.as_ref(), name.value.to_string_lossy())
+            }
+            _ => return None,
+        };
+        let (ident, property) = match target {
+            Expr::Ident(ident) => (ident, None),
+            Expr::Member(member) => {
+                let Expr::Ident(ident) = member.obj.as_ref() else {
                     return None;
                 };
-                (ident, name.value.to_string_lossy())
+                (ident, Some(member_property_name(&member.prop)?))
             }
             _ => return None,
         };
@@ -12127,7 +12131,20 @@ impl<'a> FnLowerer<'a> {
         let matching = allowed
             .iter()
             .copied()
-            .filter(|index| native_typeof_name(&elements[*index]) == Some(type_name.as_ref()))
+            .filter(|index| {
+                let narrowed = match (&elements[*index], property.as_deref()) {
+                    (element, None) => element,
+                    (HirType::Object(fields), Some(property)) => {
+                        let Some((_, field)) = fields.iter().find(|(name, _)| name == property)
+                        else {
+                            return false;
+                        };
+                        field
+                    }
+                    (_, Some(_)) => return false,
+                };
+                native_typeof_name(narrowed) == Some(type_name.as_ref())
+            })
             .collect::<Vec<_>>();
         (!matching.is_empty()).then(|| {
             (
@@ -13578,6 +13595,80 @@ impl<'a> FnLowerer<'a> {
             .collect::<Result<Vec<_>, String>>()?;
 
         Ok(HirExpr::ObjectLit(reordered))
+    }
+
+    fn lower_union_property_read(
+        &self,
+        object: HirExpr,
+        elements: &[HirType],
+        property: &str,
+    ) -> Result<HirExpr, String> {
+        let mut field_types = Vec::with_capacity(elements.len());
+        for element in elements {
+            let HirType::Object(fields) = element else {
+                return Err(format!(
+                    "cannot access `.{property}` because union member {element:?} is not an object"
+                ));
+            };
+            let field = fields
+                .iter()
+                .find(|(name, _)| name == property)
+                .map(|(_, ty)| ty.clone())
+                .ok_or_else(|| {
+                    format!("cannot access `.{property}` because a union member has no such field")
+                })?;
+            if !field_types.contains(&field) {
+                field_types.push(field);
+            }
+        }
+        let result_type = match field_types.as_slice() {
+            [] => return Err("cannot read a property from an empty union".into()),
+            [field] => field.clone(),
+            fields => HirType::Union(fields.to_vec()),
+        };
+        let source_type = HirType::Union(elements.to_vec());
+        let parameter = "__thaw_union_property_value".to_string();
+        let mut statements = Vec::with_capacity(elements.len());
+        for (index, element) in elements.iter().enumerate() {
+            let field = HirExpr::PropAccess(
+                Box::new(HirExpr::UnionValue(
+                    Box::new(HirExpr::Var(parameter.clone())),
+                    index,
+                    elements.to_vec(),
+                )),
+                element.clone(),
+                property.to_string(),
+            );
+            let field = self.coerce_to_declared(&result_type, field)?;
+            if index + 1 == elements.len() {
+                statements.push(HirStmt::Return(Some(field)));
+            } else {
+                statements.push(HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(
+                            Box::new(HirExpr::Var(parameter.clone())),
+                            elements.to_vec(),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    ),
+                    vec![HirStmt::Return(Some(field))],
+                    Vec::new(),
+                ));
+            }
+        }
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: parameter,
+                    ty: source_type,
+                }],
+                result_type,
+                Box::new(HirExpr::Block(statements)),
+            )),
+            vec![object],
+        ))
     }
 
     fn adapt_named_function_to_callable(
@@ -17284,6 +17375,9 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             Err(format!("object has no field `{}`", prop.sym))
                         }
+                    }
+                    HirType::Union(elements) => {
+                        self.lower_union_property_read(obj, elements, prop.sym.as_ref())
                     }
                     HirType::Json => Ok(HirExpr::JsonGet(Box::new(obj), prop.sym.to_string())),
                     other => Err(format!(
@@ -25356,6 +25450,61 @@ mod tests {
                     && members == &vec![HirType::Str, HirType::F64]
                     && matches!(value.as_ref(), HirExpr::Lit(HirLit::F64(2.0)))
         ));
+    }
+
+    #[test]
+    fn lowers_common_object_union_properties_and_discriminant_type_narrowing() {
+        let program = lower(
+            r#"type Result =
+                   { kind: number; value: number; shared: string } |
+                   { kind: string; value: string; shared: string };
+               function describe(result: Result): string {
+                   console.log(result.shared);
+                   if (typeof result.kind === "number") {
+                       return String(result.value + 1);
+                   }
+                   return result.value + "!";
+               }"#,
+        );
+        let function = &program.functions[0];
+        assert!(matches!(
+            &function.body[0],
+            HirStmt::Expr(HirExpr::Call(callee, arguments))
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "console.log")
+                && matches!(arguments.as_slice(), [HirExpr::Call(lambda, _)]
+                    if matches!(lambda.as_ref(), HirExpr::Lambda(_, _, HirType::Str, _)))
+        ));
+        let HirStmt::If(_, then_body, _) = &function.body[1] else {
+            panic!("expected the discriminant guard")
+        };
+        assert!(matches!(
+            &then_body[0],
+            HirStmt::Return(Some(HirExpr::Call(_, arguments)))
+                if matches!(arguments.as_slice(), [HirExpr::BinOp(BinOp::Add, value, _) ]
+                    if matches!(value.as_ref(), HirExpr::PropAccess(object, _, field)
+                        if field == "value" && matches!(object.as_ref(), HirExpr::UnionValue(_, 0, _))))
+        ));
+        assert!(matches!(
+            &function.body[2],
+            HirStmt::Return(Some(HirExpr::Call(_, arguments)))
+                if matches!(arguments.as_slice(), [HirExpr::PropAccess(object, _, field), _]
+                    if field == "value" && matches!(object.as_ref(), HirExpr::UnionValue(_, 1, _)))
+        ));
+    }
+
+    #[test]
+    fn rejects_properties_missing_from_an_object_union_member() {
+        let module = thaw_parser::parse_typescript(
+            r#"function read(value: { common: number } | { other: number }): number {
+                   return value.common;
+               }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("a union member has no such field"),
+            "{error}"
+        );
     }
 
     #[test]

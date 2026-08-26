@@ -1535,8 +1535,15 @@ The workspace crates have narrow responsibilities:
 - Native, user-created and foreign thenable values work across locals,
   parameters, fields, chains, named callbacks, `.finally`, and the four
   implemented static combinators. Promise constructor inference follows
-  executor-local initializer chains. Full discriminated-union narrowing
-  remains unsupported
+  executor-local initializer chains. Tagged unions of fixed objects can read
+  a property shared by every member; the read dispatches through the runtime
+  union tag, preserves a common field type or constructs the corresponding
+  field union, and evaluates the receiver once. A `typeof value.property`
+  comparison narrows the original object union when the member field types
+  have distinct JavaScript runtime categories, including through terminating
+  guards and async callers. Literal-valued discriminants such as
+  `value.kind === "success"` still require preservation of literal types and
+  remain outside the current narrowing subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
