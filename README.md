@@ -1434,8 +1434,9 @@ The workspace crates have narrow responsibilities:
   synchronous or async typed function values. Extraction evaluates an instance receiver once;
   saved instance methods that observe `this` retain their method identity through local aliases and
   support synchronous or async `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)` without
-  retaining the extraction receiver. A plain invocation is an explicit error; `.bind()` must be
-  applied before extraction until the native function-value ABI carries JavaScript's unbound `this` state.
+  retaining the extraction receiver. They can also be converted after extraction with
+  `.bind(thisArg, ...typedTuple)`, including partial application and async results. A plain invocation
+  remains an explicit error until the native function-value ABI carries JavaScript's unbound `this` state.
   Instance calls through `this` are specialized directly, including calls nested inside
   an enclosing generic method after its outer type tuple has become concrete.
   Static methods resolve `this.field`, `this.getter` and `this.method(...)` against their
