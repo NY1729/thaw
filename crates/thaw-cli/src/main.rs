@@ -3527,17 +3527,18 @@ mod tests {
                 }
                 export function getCalls(): number { return calls; }
                 export default { answer: compute(), label: "ready" };
+                console.log("value init");
             "#,
         )
         .unwrap();
         std::fs::write(
             dir.join("left.ts"),
-            "import value from './value'; export const leftAtInit = value.answer + 1;",
+            "import value from './value'; export const leftAtInit = value.answer + 1; console.log('left init');",
         )
         .unwrap();
         std::fs::write(
             dir.join("right.ts"),
-            "import value from './value'; export const rightAtInit = value.answer + 2;",
+            "import value from './value'; export const rightAtInit = value.answer + 2; console.log('right init');",
         )
         .unwrap();
         let entry = dir.join("main.ts");
@@ -3547,6 +3548,7 @@ mod tests {
                 import value, { getCalls } from "./value";
                 import { leftAtInit } from "./left";
                 import { rightAtInit } from "./right";
+                console.log("entry init");
                 function main(): void {
                     console.log(value.label);
                     console.log(value.answer);
@@ -3568,7 +3570,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "ready\n42\n42\n43\n44\n1\n"
+            "value init\nleft init\nright init\nentry init\nready\n42\n42\n43\n44\n1\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

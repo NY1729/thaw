@@ -53,8 +53,8 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 use thaw_hir::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiAggregateLayout,
     FfiBitFieldLayout, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiRegisterClass,
-    FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram,
-    HirStmt, HirType,
+    FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirInitStep, HirLit,
+    HirParam, HirProgram, HirStmt, HirType,
 };
 
 #[derive(Clone)]
@@ -288,7 +288,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn emit_top_level_init(&mut self, program: &HirProgram) -> Result<(), String> {
-        if program.globals.is_empty() {
+        if program.initializers.is_empty() {
             return Ok(());
         }
         let bool_type = self.context.bool_type();
@@ -324,12 +324,21 @@ impl<'ctx> HirCompiler<'ctx> {
         self.variable_hir_types.clear();
         self.catch_stack.clear();
         self.seed_global_variables();
-        for global in &program.globals {
-            let value = self.compile_expr(&global.init)?;
-            let (pointer, _, _) = self.global_variables[&global.name];
-            self.builder
-                .build_store(pointer, value)
-                .map_err(|error| error.to_string())?;
+        for step in &program.initializers {
+            match step {
+                HirInitStep::StoreGlobal(name, expression) => {
+                    let value = self.compile_expr(expression)?;
+                    let (pointer, _, _) = self.global_variables[name];
+                    self.builder
+                        .build_store(pointer, value)
+                        .map_err(|error| error.to_string())?;
+                }
+                HirInitStep::Statement(statement) => {
+                    if self.compile_stmt(statement)? {
+                        break;
+                    }
+                }
+            }
         }
         if self
             .builder
@@ -18347,6 +18356,21 @@ mod tests {
         assert!(ir.contains("@__thaw_top_level_initialized = internal global i1 false"));
         assert!(ir.contains("define internal void @__thaw_top_level_init()"));
         assert!(ir.contains("br i1 %top_level_initialized"));
+    }
+
+    #[test]
+    fn executes_top_level_statements_before_main() {
+        let source = r#"
+            let answer = 40;
+            console.log("module init");
+            answer = answer + 1;
+            if (true) { answer++; }
+            function main(): void { console.log(answer); }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "top_level_statements"),
+            "module init\n42\n"
+        );
     }
 
     /// Same mechanism, but through the Lambda `handler` entry point instead
