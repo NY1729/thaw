@@ -10374,6 +10374,12 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
     }
 }
 
+fn equivalent_union_members(left: &[HirType], right: &[HirType]) -> bool {
+    left.len() == right.len()
+        && left.iter().all(|member| right.contains(member))
+        && right.iter().all(|member| left.contains(member))
+}
+
 /// Lowers one function body. Holds the type scope (params + `let`s seen so
 /// far) and the whole module's function signatures, needed to resolve
 /// member access (`arr.length` vs `obj.field`) and to type-check/reorder
@@ -13394,10 +13400,7 @@ impl<'a> FnLowerer<'a> {
                 return Ok(value);
             }
             if let HirType::Union(source) = &actual {
-                if source.len() == elements.len()
-                    && source.iter().all(|member| elements.contains(member))
-                    && elements.iter().all(|member| source.contains(member))
-                {
+                if equivalent_union_members(source, elements) {
                     let parameter = "__thaw_union_retag_value".to_string();
                     let mut statements = Vec::with_capacity(source.len());
                     for (source_index, member) in source.iter().enumerate() {
@@ -14931,6 +14934,16 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Union(left), HirType::Union(right)) if left == right => Some(
                     HirExpr::UnionIsEqual(Box::new(lhs), Box::new(rhs), left.clone()),
                 ),
+                (HirType::Union(left), HirType::Union(right))
+                    if equivalent_union_members(left, right) =>
+                {
+                    let rhs = self.coerce_to_declared(&HirType::Union(left.clone()), rhs)?;
+                    Some(HirExpr::UnionIsEqual(
+                        Box::new(lhs),
+                        Box::new(rhs),
+                        left.clone(),
+                    ))
+                }
                 (HirType::Union(elements), member) => elements
                     .iter()
                     .position(|element| element == member)

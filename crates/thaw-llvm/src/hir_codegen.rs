@@ -16077,6 +16077,19 @@ mod tests {
                 await sleep(1);
                 return value;
             }
+            function equalAcrossOrders(
+                left: number | string | null,
+                right: null | string | number
+            ): boolean {
+                return left === right;
+            }
+            async function equalAcrossOrdersAsync(
+                left: string | null | number,
+                right: number | string | null
+            ): Promise<boolean> {
+                await sleep(1);
+                return left === right;
+            }
             async function main(): Promise<void> {
                 console.log(describe(choose(0)));
                 console.log(describe(choose(1)));
@@ -16093,11 +16106,18 @@ mod tests {
                 console.log(afterGuards("guard"));
                 console.log(afterGuards(null));
                 console.log(afterGuards(undefined));
+                console.log(equalAcrossOrders(4, 4));
+                console.log(equalAcrossOrders("same", "same"));
+                console.log(equalAcrossOrders(null, null));
+                console.log(equalAcrossOrders(4, "4"));
+                console.log(equalAcrossOrders(NaN, NaN));
+                console.log(await equalAcrossOrdersAsync("async", "async"));
+                console.log(await equalAcrossOrdersAsync(null, null));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "general_union_null_members"),
-            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n13\nguard!\nnull\nundefined\n"
+            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n13\nguard!\nnull\nundefined\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\n"
         );
     }
 
