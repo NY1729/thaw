@@ -14935,6 +14935,18 @@ impl<'a> FnLowerer<'a> {
                 Ok(Target::Var(self.resolve_binding(binding.id.sym.as_ref())))
             }
             SimpleAssignTarget::Member(member) => {
+                if matches!(member.obj.as_ref(), Expr::This(_)) && self.class_static_context {
+                    if let Some(property) = member_property_name(&member.prop) {
+                        let class = self
+                            .class_context
+                            .as_deref()
+                            .expect("static assignment retains its class context");
+                        let symbol = class_static_field_symbol(class, &property);
+                        if self.scope.contains_key(&symbol) {
+                            return Ok(Target::Var(symbol));
+                        }
+                    }
+                }
                 if let (Expr::Ident(class), Some(property)) =
                     (member.obj.as_ref(), member_property_name(&member.prop))
                 {
@@ -15023,17 +15035,22 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
-            if let (Expr::Ident(receiver), Some(property)) =
-                (member.obj.as_ref(), member_property_name(&member.prop))
+            let static_class = match member.obj.as_ref() {
+                Expr::Ident(receiver) => Some(receiver.sym.to_string()),
+                Expr::This(_) if self.class_static_context => self.class_context.clone(),
+                _ => None,
+            };
+            if let (Some(receiver), Some(property)) =
+                (static_class, member_property_name(&member.prop))
             {
-                let getter = class_getter_symbol(receiver.sym.as_ref(), &property, true);
-                let setter = class_setter_symbol(receiver.sym.as_ref(), &property, true);
+                let getter = class_getter_symbol(&receiver, &property, true);
+                let setter = class_setter_symbol(&receiver, &property, true);
                 let has_getter = self.signatures.contains_key(&getter);
                 let has_setter = self.signatures.contains_key(&setter);
                 if has_getter && !has_setter {
                     return Err(format!(
                         "cannot assign to readonly static member `{}.{}`",
-                        receiver.sym, property
+                        receiver, property
                     ));
                 }
                 if assign.op != AssignOp::Assign && has_setter {
@@ -15126,6 +15143,18 @@ impl<'a> FnLowerer<'a> {
                 if let (Expr::This(_), Some(property)) =
                     (member.obj.as_ref(), member_property_name(&member.prop))
                 {
+                    if self.class_static_context {
+                        let class = self
+                            .class_context
+                            .as_deref()
+                            .expect("static setter retains its class context");
+                        let symbol = class_setter_symbol(class, &property, true);
+                        if let Some(signature) = self.signatures.get(&symbol).cloned() {
+                            let rhs = self.lower_expr(&assign.right)?;
+                            let rhs = self.coerce_to_declared(&signature.params[0], rhs)?;
+                            return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![rhs]));
+                        }
+                    }
                     let binding = self.resolve_binding("this");
                     let symbol = self.scope.get(&binding).and_then(|ty| {
                         class_name_from_type(ty)
@@ -15591,22 +15620,27 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
         if let Expr::Member(member) = update.arg.as_ref() {
-            if let (Expr::Ident(receiver), Some(property)) =
-                (member.obj.as_ref(), member_property_name(&member.prop))
+            let static_class = match member.obj.as_ref() {
+                Expr::Ident(receiver) => Some(receiver.sym.to_string()),
+                Expr::This(_) if self.class_static_context => self.class_context.clone(),
+                _ => None,
+            };
+            if let (Some(receiver), Some(property)) =
+                (static_class, member_property_name(&member.prop))
             {
-                let getter = class_getter_symbol(receiver.sym.as_ref(), &property, true);
+                let getter = class_getter_symbol(&receiver, &property, true);
                 if let Some(getter_signature) = self.signatures.get(&getter).cloned() {
-                    let setter = class_setter_symbol(receiver.sym.as_ref(), &property, true);
+                    let setter = class_setter_symbol(&receiver, &property, true);
                     if !self.signatures.contains_key(&setter) {
                         return Err(format!(
                             "cannot update readonly static member `{}.{}`",
-                            receiver.sym, property
+                            receiver, property
                         ));
                     }
                     if getter_signature.ret != HirType::F64 {
                         return Err(format!(
                             "cannot apply ++/-- to non-number static member `{}.{}`",
-                            receiver.sym, property
+                            receiver, property
                         ));
                     }
                     let operator = match update.op {
@@ -15636,7 +15670,21 @@ impl<'a> FnLowerer<'a> {
         let target = match update.arg.as_ref() {
             Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
             Expr::Member(member) => {
-                if let (Expr::Ident(class), Some(property)) =
+                let static_this_target = (matches!(member.obj.as_ref(), Expr::This(_))
+                    && self.class_static_context)
+                    .then(|| {
+                        let class = self
+                            .class_context
+                            .as_deref()
+                            .expect("static update retains its class context");
+                        member_property_name(&member.prop)
+                            .map(|property| class_static_field_symbol(class, &property))
+                    })
+                    .flatten()
+                    .filter(|symbol| self.scope.contains_key(symbol));
+                if let Some(symbol) = static_this_target {
+                    Target::Var(symbol)
+                } else if let (Expr::Ident(class), Some(property)) =
                     (member.obj.as_ref(), member_property_name(&member.prop))
                 {
                     let symbol = class_static_field_symbol(class.sym.as_ref(), &property);
@@ -25459,6 +25507,16 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("cannot assign to constant"), "{error}");
+
+        let through_this = thaw_parser::parse_typescript(
+            r#"class Constants {
+                static readonly answer: number = 42;
+                static invalid(): number { return this.answer++; }
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&through_this).unwrap_err();
+        assert!(error.contains("cannot update constant"), "{error}");
     }
 
     #[test]
