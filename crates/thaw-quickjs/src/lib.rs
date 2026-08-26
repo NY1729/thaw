@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use rquickjs::function::Args;
-use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Runtime, Value};
+use rquickjs::{Array, ArrayBuffer, Context, Ctx, Function, Object, Persistent, Runtime, Value};
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
 };
@@ -592,6 +592,13 @@ thread_local! {
     static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new(), shared_env: Arc::new(Mutex::new(HashMap::new())) });
     static HOST_CHILDREN: RefCell<HostChildTable> = RefCell::new(HostChildTable { next_handle: 1, children: HashMap::new() });
     static WASM: RefCell<WasmTable> = RefCell::new(WasmTable::default());
+    static WASM_JS_IMPORTS: RefCell<(u32, HashMap<u32, WasmJsImport>)> = RefCell::new((1, HashMap::new()));
+}
+
+#[derive(Clone)]
+struct WasmJsImport {
+    context: Ctx<'static>,
+    function: Persistent<Function<'static>>,
 }
 
 struct WasmInstance {
@@ -681,19 +688,138 @@ fn wasm_custom_sections(module_handle: u32, name: String) -> String {
     })
 }
 
-fn wasm_instantiate(module_handle: u32, wasi_options: Option<String>) -> String {
+fn wasm_retain_import<'js>(ctx: Ctx<'js>, function: Function<'js>) -> u32 {
+    let persistent = Persistent::save(&ctx, function);
+    // The cloned context owns a QuickJS context reference and the import table
+    // is thread-local. It is dropped before the thread-local JS runtime that
+    // created it, so extending only its Rust lifetime brand is sound.
+    let context = unsafe { std::mem::transmute::<Ctx<'js>, Ctx<'static>>(ctx.clone()) };
+    WASM_JS_IMPORTS.with(|imports| {
+        let mut imports = imports.borrow_mut();
+        let handle = imports.0;
+        imports.0 += 1;
+        imports.1.insert(
+            handle,
+            WasmJsImport {
+                context,
+                function: persistent,
+            },
+        );
+        handle
+    })
+}
+
+fn wasm_js_value<'js>(value: &WasmVal, ctx: Ctx<'js>) -> Result<Value<'js>, wasmi::Error> {
+    match value {
+        WasmVal::I32(value) => Ok(Value::new_int(ctx, *value)),
+        WasmVal::I64(value) => {
+            Value::new_big_int(ctx, *value).map_err(|error| wasmi::Error::new(error.to_string()))
+        }
+        WasmVal::F32(value) => Ok(Value::new_float(ctx, f32::from(*value).into())),
+        WasmVal::F64(value) => Ok(Value::new_float(ctx, f64::from(*value))),
+        other => Err(wasmi::Error::new(format!(
+            "unsupported JavaScript WebAssembly import value {:?}",
+            other.ty()
+        ))),
+    }
+}
+
+fn wasm_from_js_value(value: Value<'_>, ty: WasmValType) -> Result<WasmVal, wasmi::Error> {
+    match ty {
+        WasmValType::I32 => value
+            .as_number()
+            .map(|value| WasmVal::I32(value as i32))
+            .ok_or_else(|| wasmi::Error::new("WebAssembly i32 import result must be a number")),
+        WasmValType::I64 => value
+            .into_big_int()
+            .ok_or_else(|| wasmi::Error::new("WebAssembly i64 import result must be a BigInt"))?
+            .to_i64()
+            .map(WasmVal::I64)
+            .map_err(|error| wasmi::Error::new(error.to_string())),
+        WasmValType::F32 => value
+            .as_number()
+            .map(|value| WasmVal::F32((value as f32).into()))
+            .ok_or_else(|| wasmi::Error::new("WebAssembly f32 import result must be a number")),
+        WasmValType::F64 => value
+            .as_number()
+            .map(|value| WasmVal::F64(value.into()))
+            .ok_or_else(|| wasmi::Error::new("WebAssembly f64 import result must be a number")),
+        other => Err(wasmi::Error::new(format!(
+            "unsupported JavaScript WebAssembly import result {other:?}"
+        ))),
+    }
+}
+
+fn wasm_call_js_import(
+    handle: u32,
+    inputs: &[WasmVal],
+    outputs: &mut [WasmVal],
+) -> Result<(), wasmi::Error> {
+    let import = WASM_JS_IMPORTS.with(|imports| imports.borrow().1.get(&handle).cloned());
+    let import =
+        import.ok_or_else(|| wasmi::Error::new("released JavaScript WebAssembly import"))?;
+    let ctx = import.context.clone();
+    let function = import
+        .function
+        .restore(&ctx)
+        .map_err(|error| wasmi::Error::new(error.to_string()))?;
+    let mut arguments = Args::new_unsized(ctx.clone());
+    for input in inputs {
+        arguments
+            .push_arg(wasm_js_value(input, ctx.clone())?)
+            .map_err(|error| wasmi::Error::new(error.to_string()))?;
+    }
+    let result: Value = function.call_arg(arguments).map_err(|error| {
+        let message = match error {
+            rquickjs::Error::Exception => describe_exception(&ctx),
+            other => other.to_string(),
+        };
+        wasmi::Error::new(message)
+    })?;
+    if outputs.len() == 1 {
+        outputs[0] = wasm_from_js_value(result, outputs[0].ty())?;
+    } else if outputs.len() > 1 {
+        let array = result.into_array().ok_or_else(|| {
+            wasmi::Error::new("multi-value WebAssembly import result must be an array")
+        })?;
+        if array.len() != outputs.len() {
+            return Err(wasmi::Error::new(format!(
+                "WebAssembly import returned {} values, expected {}",
+                array.len(),
+                outputs.len()
+            )));
+        }
+        for (index, output) in outputs.iter_mut().enumerate() {
+            let value = array
+                .get(index)
+                .map_err(|error| wasmi::Error::new(error.to_string()))?;
+            *output = wasm_from_js_value(value, output.ty())?;
+        }
+    }
+    Ok(())
+}
+
+fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
     WASM.with(|table| {
         let mut table = table.borrow_mut();
         let Some(module) = table.modules.get(&module_handle).cloned() else {
             return serde_json::json!({ "ok": false, "error": "WebAssembly.Module belongs to a released runtime" }).to_string();
         };
-        if let Some(import) = module
-            .imports()
-            .find(|import| wasi_options.is_none() || import.module() != "wasi_snapshot_preview1")
-        {
-            return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not yet linked", import.module(), import.name()) }).to_string();
-        }
-        let wasi = match wasi_options.as_deref().map(wasm_wasi_context).transpose() {
+        let linkage = match linkage.as_deref().map(serde_json::from_str::<serde_json::Value>).transpose() {
+            Ok(linkage) => linkage.unwrap_or_default(),
+            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+        };
+        let wasi_options = linkage.get("wasi").and_then(serde_json::Value::as_str);
+        let function_imports = linkage
+            .get("functions")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| {
+                Some(((value.get("module")?.as_str()?.to_string(), value.get("name")?.as_str()?.to_string()), u32::try_from(value.get("handle")?.as_u64()?).ok()?))
+            })
+            .collect::<HashMap<_, _>>();
+        let wasi = match wasi_options.map(wasm_wasi_context).transpose() {
             Ok(wasi) => wasi,
             Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
         };
@@ -704,6 +830,25 @@ fn wasm_instantiate(module_handle: u32, wasi_options: Option<String>) -> String 
                 data.wasi.as_mut().expect("WASI context must exist")
             })
             {
+                return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+            }
+        }
+        for import in module.imports() {
+            if import.module() == "wasi_snapshot_preview1" && store.data().wasi.is_some() {
+                continue;
+            }
+            let Some(handle) = function_imports.get(&(import.module().to_string(), import.name().to_string())).copied() else {
+                return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not provided", import.module(), import.name()) }).to_string();
+            };
+            let wasmi::ExternType::Func(function_type) = import.ty() else {
+                return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not a function", import.module(), import.name()) }).to_string();
+            };
+            if let Err(error) = linker.func_new(
+                import.module(),
+                import.name(),
+                function_type.clone(),
+                move |_caller, inputs, outputs| wasm_call_js_import(handle, inputs, outputs),
+            ) {
                 return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
             }
         }
@@ -2991,6 +3136,8 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 let wasm_custom_sections_function =
                     Function::new(ctx.clone(), wasm_custom_sections)
                         .expect("failed to create WebAssembly custom-section reader");
+                let wasm_retain_import_function = Function::new(ctx.clone(), wasm_retain_import)
+                    .expect("failed to create WebAssembly import retainer");
                 let wasm_call_function = Function::new(ctx.clone(), wasm_call)
                     .expect("failed to create WebAssembly function caller");
                 let wasm_global_function = Function::new(ctx.clone(), wasm_global)
@@ -3008,6 +3155,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_wasm_custom_sections", wasm_custom_sections_function)
                     .expect("failed to install WebAssembly custom-section reader");
+                ctx.globals()
+                    .set("__thaw_wasm_retain_import", wasm_retain_import_function)
+                    .expect("failed to install WebAssembly import retainer");
                 ctx.globals()
                     .set("__thaw_wasm_call", wasm_call_function)
                     .expect("failed to install WebAssembly function caller");
@@ -3827,7 +3977,16 @@ const PLATFORM_GLOBALS: &str = r#"
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Instance(): argument 0 must be a WebAssembly.Module');
       if (imports === null || (typeof imports !== 'object' && typeof imports !== 'function')) throw new TypeError('WebAssembly.Instance(): imports must be an object');
       const wasi = imports && imports.wasi_snapshot_preview1 && imports.wasi_snapshot_preview1.__thawWasiOptions;
-      const result = wasmResult(__thaw_wasm_instantiate(module.__thawHandle, wasi), WebAssembly.LinkError);
+      const linkage = { wasi: wasi, functions: [] };
+      for (const item of module.__thawImports) {
+        if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
+        const namespace = imports[item.module];
+        if (namespace === null || (typeof namespace !== 'object' && typeof namespace !== 'function')) throw new WebAssembly.LinkError(`WebAssembly import namespace '${item.module}' is not provided`);
+        const value = namespace[item.name];
+        if (item.kind !== 'function' || typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
+        linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
+      }
+      const result = wasmResult(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)), WebAssembly.LinkError);
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = {}, memories = [];
       for (const item of result.exports) {
@@ -7132,6 +7291,36 @@ mod tests {
         assert_eq!(
             call("wasmFoundation", "[]"),
             r#"[true,false,["add","add64","counter","memory","pair","read0","write0"],[],2,42,"42",[3,4],41,99,5,12,1,0,131072,"9",1,2,"b",true,3,["one","two"],true,true,true]"#
+        );
+    }
+
+    #[test]
+    fn webassembly_calls_javascript_function_imports_with_scalar_and_multi_values() {
+        assert_eq!(
+            load(
+                "function wasmImports() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (import \"host\" \"twice\" (func $twice (param i32) (result i32)))\n\
+                     (import \"host\" \"add64\" (func $add64 (param i64 i64) (result i64)))\n\
+                     (import \"host\" \"pair\" (func $pair (param f64) (result f64 f64)))\n\
+                     (import \"host\" \"notify\" (func $notify (param i32)))\n\
+                     (import \"host\" \"fail\" (func $fail))\n\
+                     (func (export \"run\") (param i32) (result i32) local.get 0 call $notify local.get 0 call $twice)\n\
+                     (func (export \"wide\") (result i64) i64.const 20 i64.const 22 call $add64)\n\
+                     (func (export \"many\") (result f64 f64) f64.const 3.5 call $pair)\n\
+                     (func (export \"explode\") call $fail))`);\n\
+                   const calls = []; const module = new WebAssembly.Module(source);\n\
+                   const instance = new WebAssembly.Instance(module, { host: { twice(value) { return value * 2; }, add64(left, right) { return left + right; }, pair(value) { return [value, value + 0.5]; }, notify(value) { calls.push(value); }, fail() { throw new Error('import boom'); } } });\n\
+                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError && error.message.includes('import boom'); }\n\
+                   let missing = false; try { new WebAssembly.Instance(module, {}); } catch (error) { missing = error instanceof WebAssembly.LinkError; }\n\
+                   return [instance.exports.run(21), calls, instance.exports.wide().toString(), instance.exports.many(), trapped, missing, WebAssembly.Module.imports(module).length];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("wasmImports", "[]"),
+            r#"[42,[21],"42",[3.5,4],true,true,5]"#
         );
     }
 
