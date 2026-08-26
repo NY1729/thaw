@@ -17053,7 +17053,7 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 150);
                     else console.log(item.value + " array method");
                 }
-                const copiedResults = results.copyWithin(0, 0) as Result[];
+                const copiedResults = results.copyWithin(0, 0);
                 for (const item of copiedResults) {
                     if (item.kind === "number") console.log(item.value + 151);
                     else console.log(item.value + " copied");
@@ -17333,6 +17333,45 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
             "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n169\n170\n171\n177\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n219\n220\n226\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n218\n210\ngeneric inherited\n216\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+        );
+    }
+
+    #[test]
+    fn compiles_union_array_metadata_through_native_methods() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function print(values: Result[]): void {
+                for (const item of values) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + "!");
+                }
+            }
+            function main(): void {
+                const results: Result[] = [
+                    { kind: "number", value: 6 },
+                    { kind: "text", value: "sync" }
+                ];
+                const copied = results
+                    .slice(0, 2)
+                    .concat(results.slice(0, 0))
+                    .copyWithin(0, 0);
+                const filtered = results
+                    .filter(() => true)
+                    .toReversed()
+                    .reverse();
+                const replaced = results
+                    .toSpliced(1, 0)
+                    .with(0, results[0]);
+                print(copied);
+                print(filtered);
+                print(replaced);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "union_array_method_metadata"),
+            "7\nsync!\n7\nsync!\n7\nsync!\n"
         );
     }
 
