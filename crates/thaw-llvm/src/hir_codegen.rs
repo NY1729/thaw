@@ -16146,6 +16146,37 @@ mod tests {
     }
 
     #[test]
+    fn compiles_object_union_properties_and_discriminant_type_narrowing() {
+        let source = r#"
+            type Result =
+                { kind: number; value: number; shared: string } |
+                { kind: string; value: string; shared: string };
+            function describe(result: Result): string {
+                console.log(result.shared);
+                if (typeof result.kind === "number") {
+                    return String(result.value + 1);
+                }
+                return result.value + "!";
+            }
+            async function delayed(flag: boolean): Promise<Result> {
+                await sleep(1);
+                if (flag) return { kind: 1, value: 41, shared: "number" };
+                return { kind: "text", value: "thaw", shared: "string" };
+            }
+            async function main(): Promise<void> {
+                console.log(describe({ kind: 0, value: 2, shared: "sync-number" }));
+                console.log(describe({ kind: "text", value: "sync", shared: "sync-string" }));
+                console.log(describe(await delayed(true)));
+                console.log(describe(await delayed(false)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_union_discriminants"),
+            "sync-number\n3\nsync-string\nsync!\nnumber\n42\nstring\nthaw!\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{
