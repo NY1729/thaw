@@ -178,7 +178,9 @@ The workspace crates have narrow responsibilities:
   strict equality/inequality against concrete members short-circuits on the
   tag and applies the member's native comparison semantics. Equality between
   two values of the same union compares tags first and dispatches to the
-  matching member semantics, including NaN and string-content behavior.
+  matching member semantics, including NaN and string-content behavior;
+  equivalent unions declared in different member orders retag one operand
+  before synchronous or async comparison.
   Conditional expressions with two different native branch types construct a
   tagged union directly and can feed annotations, returns, and nested calls.
   General three-or-more-member unions can include `null` and `undefined` as
