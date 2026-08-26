@@ -11829,7 +11829,7 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                     if let Some((name, matching, allowed, elements, equal_when_true)) =
-                        self.union_typeof_narrowing(&if_stmt.test)
+                        self.union_narrowing(&if_stmt.test)
                     {
                         let continuing = if equal_when_true {
                             allowed
@@ -12122,6 +12122,77 @@ impl<'a> FnLowerer<'a> {
         (!matching.is_empty()).then(|| (name, matching, allowed, elements.clone(), equal_when_true))
     }
 
+    fn union_member_equality_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        if let Expr::Paren(paren) = expr {
+            return self.union_member_equality_narrowing(&paren.expr);
+        }
+        if let Expr::Unary(unary) = expr {
+            if unary.op == UnaryOp::Bang {
+                return self.union_member_equality_narrowing(&unary.arg).map(
+                    |(name, matching, allowed, elements, equal)| {
+                        (name, matching, allowed, elements, !equal)
+                    },
+                );
+            }
+            return None;
+        }
+        let Expr::Bin(binary) = expr else {
+            return None;
+        };
+        let equal_when_true = match binary.op {
+            BinaryOp::EqEqEq => true,
+            BinaryOp::NotEqEq => false,
+            _ => return None,
+        };
+        let literal_type = |value: &Expr| match value {
+            Expr::Lit(Lit::Null(_)) => Some(HirType::Null),
+            Expr::Ident(identifier)
+                if identifier.sym == *"undefined" && !self.scope.contains_key("undefined") =>
+            {
+                Some(HirType::Undefined)
+            }
+            _ => None,
+        };
+        let (identifier, member) = if let Expr::Ident(identifier) = binary.left.as_ref() {
+            if let Some(member) = literal_type(&binary.right) {
+                (identifier, member)
+            } else if let Expr::Ident(identifier) = binary.right.as_ref() {
+                (identifier, literal_type(&binary.left)?)
+            } else {
+                return None;
+            }
+        } else if let Expr::Ident(identifier) = binary.right.as_ref() {
+            (identifier, literal_type(&binary.left)?)
+        } else {
+            return None;
+        };
+        let name = self.resolve_binding(identifier.sym.as_ref());
+        let HirType::Union(elements) = self.scope.get(&name)? else {
+            return None;
+        };
+        let allowed = self
+            .union_narrowings
+            .get(&name)
+            .map(|(allowed, _)| allowed.clone())
+            .unwrap_or_else(|| (0..elements.len()).collect());
+        let index = elements.iter().position(|element| element == &member)?;
+        if !allowed.contains(&index) {
+            return None;
+        }
+        Some((
+            name,
+            vec![index],
+            allowed,
+            elements.clone(),
+            equal_when_true,
+        ))
+    }
+
+    fn union_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
+        self.union_typeof_narrowing(expr)
+            .or_else(|| self.union_member_equality_narrowing(expr))
+    }
+
     fn lower_body_with_union_narrowing(
         &mut self,
         stmt: &Stmt,
@@ -12171,7 +12242,7 @@ impl<'a> FnLowerer<'a> {
 
             Stmt::If(if_stmt) => {
                 let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
-                let union_narrowing = self.union_typeof_narrowing(&if_stmt.test);
+                let union_narrowing = self.union_narrowing(&if_stmt.test);
                 let cond = self.lower_expr(&if_stmt.test)?;
                 self.expect_type(&HirType::Bool, &cond, "if condition")?;
                 let then_narrowing = narrowing
@@ -14857,12 +14928,6 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Undefined, HirType::Nullish(payload)) => Some(
                     HirExpr::NullishIsUndefined(Box::new(rhs), payload.as_ref().clone()),
                 ),
-                (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
-                (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
-                (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
-                (HirType::Undefined, _) | (_, HirType::Undefined) => {
-                    Some(HirExpr::Lit(HirLit::Bool(false)))
-                }
                 (HirType::Union(left), HirType::Union(right)) if left == right => Some(
                     HirExpr::UnionIsEqual(Box::new(lhs), Box::new(rhs), left.clone()),
                 ),
@@ -14888,6 +14953,12 @@ impl<'a> FnLowerer<'a> {
                             elements.clone(),
                         )
                     }),
+                (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
+                (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
+                (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
+                (HirType::Undefined, _) | (_, HirType::Undefined) => {
+                    Some(HirExpr::Lit(HirLit::Bool(false)))
+                }
                 _ => None,
             };
         Ok(result)
