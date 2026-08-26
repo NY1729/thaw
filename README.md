@@ -180,7 +180,10 @@ The workspace crates have narrow responsibilities:
   two values of the same union compares tags first and dispatches to the
   matching member semantics, including NaN and string-content behavior.
   Conditional expressions with two different native branch types construct a
-  tagged union directly and can feed annotations, returns, and nested calls
+  tagged union directly and can feed annotations, returns, and nested calls.
+  General three-or-more-member unions can include `null` and `undefined` as
+  ordinary tagged members, preserving comparison, logging, `typeof` narrowing,
+  function boundaries and async suspension
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
