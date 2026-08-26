@@ -18812,6 +18812,25 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_constructor_parameter_properties() {
+        let source = r#"
+            class Point {
+                constructor(public x: number, readonly label: string) {}
+                sum(y: number): number { return this.x + y; }
+            }
+            function main(): void {
+                const point = new Point(40, "ready");
+                console.log(point.sum(2));
+                console.log(point.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "constructor_parameter_properties"),
+            "42\nready\n"
+        );
+    }
+
+    #[test]
     fn await_sleep_is_driven_by_the_runtime_event_loop() {
         let source = r#"
             async function main(): Promise<void> {
