@@ -476,6 +476,54 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
         }
     }
 
+    fn undefined_default(
+        value: Expr,
+        default: Box<Expr>,
+        span: swc_common::Span,
+        counter: &mut usize,
+        used: &mut HashSet<String>,
+        out: &mut Vec<swc_ecma_ast::VarDecl>,
+    ) -> Expr {
+        let temporary = loop {
+            let candidate = format!("__thaw_top_default_{}", *counter);
+            *counter += 1;
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        let identifier = swc_ecma_ast::Ident::new_no_ctxt(temporary.into(), span);
+        out.push(swc_ecma_ast::VarDecl {
+            span,
+            ctxt: Default::default(),
+            kind: swc_ecma_ast::VarDeclKind::Const,
+            declare: false,
+            decls: vec![swc_ecma_ast::VarDeclarator {
+                span,
+                name: Pat::Ident(swc_ecma_ast::BindingIdent {
+                    id: identifier.clone(),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(value)),
+                definite: false,
+            }],
+        });
+        let temporary = || Expr::Ident(identifier.clone());
+        Expr::Cond(swc_ecma_ast::CondExpr {
+            span,
+            test: Box::new(Expr::Bin(swc_ecma_ast::BinExpr {
+                span,
+                op: BinaryOp::EqEqEq,
+                left: Box::new(temporary()),
+                right: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                    "undefined".into(),
+                    span,
+                ))),
+            })),
+            cons: default,
+            alt: Box::new(temporary()),
+        })
+    }
+
     fn expand_pattern(
         pattern: &Pat,
         value: Expr,
@@ -486,20 +534,8 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
         out: &mut Vec<swc_ecma_ast::VarDecl>,
     ) -> Result<(), String> {
         if let Pat::Assign(assign) = pattern {
-            return expand_pattern(
-                &assign.left,
-                Expr::Bin(swc_ecma_ast::BinExpr {
-                    span,
-                    op: BinaryOp::NullishCoalescing,
-                    left: Box::new(value),
-                    right: assign.right.clone(),
-                }),
-                kind,
-                span,
-                counter,
-                used,
-                out,
-            );
+            let value = undefined_default(value, assign.right.clone(), span, counter, used, out);
+            return expand_pattern(&assign.left, value, kind, span, counter, used, out);
         }
         if let Pat::Ident(binding) = pattern {
             out.push(swc_ecma_ast::VarDecl {
@@ -555,12 +591,14 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                             used_keys.push(property.key.id.sym.to_string());
                             let mut value = member(temporary_expr(), &key, span)?;
                             if let Some(default) = &property.value {
-                                value = Expr::Bin(swc_ecma_ast::BinExpr {
+                                value = undefined_default(
+                                    value,
+                                    default.clone(),
                                     span,
-                                    op: BinaryOp::NullishCoalescing,
-                                    left: Box::new(value),
-                                    right: default.clone(),
-                                });
+                                    counter,
+                                    used,
+                                    out,
+                                );
                             }
                             expand_pattern(
                                 &Pat::Ident(property.key.clone()),
@@ -17566,6 +17604,34 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Cond(conditional) => {
+                let undefined_default_binding = if let Expr::Bin(test) = conditional.test.as_ref() {
+                    if test.op == BinaryOp::EqEqEq && !self.scope.contains_key("undefined") {
+                        match (test.left.as_ref(), test.right.as_ref(), conditional.alt.as_ref()) {
+                            (Expr::Ident(value), Expr::Ident(undefined), Expr::Ident(alternate))
+                                if undefined.sym == *"undefined"
+                                    && value.sym == alternate.sym =>
+                            {
+                                Some(alternate)
+                            }
+                            (Expr::Ident(undefined), Expr::Ident(value), Expr::Ident(alternate))
+                                if undefined.sym == *"undefined"
+                                    && value.sym == alternate.sym =>
+                            {
+                                Some(alternate)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(binding) = undefined_default_binding {
+                    let lhs = self.lower_expr(&Expr::Ident(binding.clone()))?;
+                    let rhs = self.lower_expr(&conditional.cons)?;
+                    return self.lower_undefined_default(lhs, rhs);
+                }
                 let test = self.lower_expr(&conditional.test)?;
                 self.expect_type(&HirType::Bool, &test, "conditional expression test")?;
                 let mut consequent = self.lower_expr(&conditional.cons)?;

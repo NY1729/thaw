@@ -20221,10 +20221,22 @@ mod tests {
         let source = r#"
             interface Config { fallback: number | undefined; }
             const { fallback = 42 }: Config = { fallback: undefined };
+            const nullable: [number | null] = [null];
+            const [keptNull = topFallback()] = nullable;
+            const nullish: [number | null | undefined, number | null | undefined] =
+                [null, undefined];
+            const [alsoNull = topFallback(), defaultedUndefined = topFallback()] = nullish;
             const [head, ...tail] = [20, 10, 12];
             const { answer, ...metadata } = { answer: 42, label: "ready", code: 2 };
+            function topFallback(): number {
+                console.log("top fallback");
+                return 7;
+            }
             function main(): void {
                 console.log(fallback);
+                console.log(keptNull);
+                console.log(alsoNull);
+                console.log(defaultedUndefined);
                 console.log(head + tail[0] + tail[1]);
                 console.log(metadata.label);
                 console.log(answer + metadata.code - 2);
@@ -20232,7 +20244,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "top_level_destructuring_default_rest"),
-            "42\n42\nready\n42\n"
+            "top fallback\n42\nnull\nnull\n7\n42\nready\n42\n"
         );
     }
 
