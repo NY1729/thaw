@@ -3597,7 +3597,9 @@ mod tests {
             dir.join("models.ts"),
             r#"
                 export class Box<T> {
-                    constructor(public value: T) {}
+                    static count: number = 0;
+                    static { Box.count += 1; }
+                    constructor(public value: T) { Box.count += 1; }
                     get(): T { return this.value; }
                 }
                 export class Pair<T, U> {
@@ -3632,6 +3634,7 @@ mod tests {
                     console.log(pair.second);
                     console.log(nestedBox.get());
                     console.log(inferredNestedBox.get());
+                    console.log(Box.count);
                     console.log(derived.double());
                     console.log(derived.get());
                 }
@@ -3648,7 +3651,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "module\n42\n40\n40\n42\n21\n"
+            "module\n42\n40\n40\n5\n42\n21\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

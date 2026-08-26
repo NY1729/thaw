@@ -830,6 +830,67 @@ struct GenericClassTemplate {
     constructor_patterns: Vec<GenericTypePattern>,
 }
 
+fn generic_class_static_owner(name: &str) -> Symbol {
+    format!("{name}__thaw_generic_static")
+}
+
+fn generic_class_static_member(member: &ClassMember) -> bool {
+    match member {
+        ClassMember::Method(method) => method.is_static,
+        ClassMember::PrivateMethod(method) => method.is_static,
+        ClassMember::ClassProp(property) => property.is_static,
+        ClassMember::PrivateProp(property) => property.is_static,
+        ClassMember::StaticBlock(_) => true,
+        ClassMember::AutoAccessor(accessor) => accessor.is_static,
+        _ => false,
+    }
+}
+
+fn member_references_class_type_parameter(
+    member: &ClassMember,
+    parameters: &HashSet<Symbol>,
+) -> Option<Symbol> {
+    struct Detector<'a> {
+        parameters: &'a HashSet<Symbol>,
+        found: Option<Symbol>,
+    }
+    impl Visit for Detector<'_> {
+        fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
+            if reference.type_params.is_none() {
+                if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                    if self.parameters.contains(name.sym.as_ref()) {
+                        self.found = Some(name.sym.to_string());
+                        return;
+                    }
+                }
+            }
+            reference.visit_children_with(self);
+        }
+    }
+    let mut detector = Detector {
+        parameters,
+        found: None,
+    };
+    member.visit_with(&mut detector);
+    detector.found
+}
+
+struct GenericClassStaticReferenceRewriter<'a> {
+    owners: &'a HashMap<Symbol, Symbol>,
+}
+
+impl VisitMut for GenericClassStaticReferenceRewriter<'_> {
+    fn visit_mut_member_expr(&mut self, member: &mut MemberExpr) {
+        member.visit_mut_children_with(self);
+        let Expr::Ident(owner) = member.obj.as_mut() else {
+            return;
+        };
+        if let Some(shared) = self.owners.get(owner.sym.as_ref()) {
+            owner.sym = shared.clone().into();
+        }
+    }
+}
+
 struct GenericClassUse {
     name: Symbol,
     arguments: Vec<TsType>,
@@ -1855,7 +1916,90 @@ fn specialize_generic_classes(
     }
 
     let names = templates.keys().cloned().collect::<HashSet<_>>();
+    let declared_class_names = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
+                Some(declaration.ident.sym.to_string())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut static_owners = HashMap::new();
+    for (name, template) in &templates {
+        if !template
+            .declaration
+            .class
+            .body
+            .iter()
+            .any(generic_class_static_member)
+        {
+            continue;
+        }
+        let parameters = template.parameters.iter().cloned().collect::<HashSet<_>>();
+        if let Some(parameter) = template
+            .declaration
+            .class
+            .body
+            .iter()
+            .filter(|member| generic_class_static_member(member))
+            .find_map(|member| member_references_class_type_parameter(member, &parameters))
+        {
+            return Err(format!(
+                "generic class `{name}` static members cannot reference class type parameter `{parameter}`"
+            ));
+        }
+        let owner = generic_class_static_owner(name);
+        if declared_class_names.contains(&owner) {
+            return Err(format!(
+                "generic class `{name}` static owner `{owner}` conflicts with a class declaration"
+            ));
+        }
+        static_owners.insert(name.clone(), owner);
+    }
     let mut specialized = module.clone();
+    for item in &mut specialized.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let Some(owner) = static_owners.get(declaration.ident.sym.as_ref()) else {
+            continue;
+        };
+        let shared_base = declaration
+            .class
+            .super_class
+            .as_deref()
+            .and_then(Expr::as_ident)
+            .and_then(|base| static_owners.get(base.sym.as_ref()))
+            .cloned();
+        let generic_base = declaration
+            .class
+            .super_class
+            .as_deref()
+            .and_then(Expr::as_ident)
+            .is_some_and(|base| templates.contains_key(base.sym.as_ref()));
+        declaration.ident.sym = owner.clone().into();
+        declaration.class.type_params = None;
+        if let Some(shared_base) = shared_base {
+            let span = declaration
+                .class
+                .super_class
+                .as_deref()
+                .and_then(Expr::as_ident)
+                .map(|base| base.span)
+                .unwrap_or(swc_common::DUMMY_SP);
+            declaration.class.super_class = Some(Box::new(Expr::Ident(
+                swc_ecma_ast::Ident::new_no_ctxt(shared_base.into(), span),
+            )));
+        } else if generic_base {
+            declaration.class.super_class = None;
+        }
+        declaration.class.super_type_params = None;
+        declaration.class.implements.clear();
+        declaration.class.is_abstract = false;
+        declaration.class.body.retain(generic_class_static_member);
+    }
     specialized.body.retain(|item| {
         !matches!(item, ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
             if templates.contains_key(declaration.ident.sym.as_ref()))
@@ -1943,6 +2087,10 @@ fn specialize_generic_classes(
             declaration.class.type_params = None;
             declaration
                 .class
+                .body
+                .retain(|member| !generic_class_static_member(member));
+            declaration
+                .class
                 .visit_mut_with(&mut GenericClassTypeSubstituter {
                     substitutions: &substitutions,
                 });
@@ -2008,6 +2156,9 @@ fn specialize_generic_classes(
         }
         return Err(error);
     }
+    specialized.visit_mut_with(&mut GenericClassStaticReferenceRewriter {
+        owners: &static_owners,
+    });
     if specialized.body.iter().any(|item| {
         matches!(
             item,
@@ -22866,6 +23017,49 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("fixed-size native layout"), "{error}");
+    }
+
+    #[test]
+    fn lowers_one_shared_static_owner_for_generic_class_specializations() {
+        let program = lower(
+            r#"
+            class Box<T> {
+                static count: number = 0;
+                constructor(public value: T) { Box.count += 1; }
+            }
+            function main(): void {
+                new Box(1);
+                new Box("two");
+                console.log(Box.count);
+            }
+            "#,
+        );
+        let owner = generic_class_static_owner("Box");
+        assert_eq!(
+            program
+                .globals
+                .iter()
+                .filter(|global| global.name == class_static_field_symbol(&owner, "count"))
+                .count(),
+            1
+        );
+        assert!(!program.globals.iter().any(|global| {
+            global.name.contains("Box__thaw_f64_static_field_count")
+                || global.name.contains("Box__thaw_str_static_field_count")
+        }));
+    }
+
+    #[test]
+    fn rejects_generic_class_type_parameters_in_static_members() {
+        let module = thaw_parser::parse_typescript(
+            "class Invalid<T> { static value: T; } function main(): void {}",
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("static members cannot reference class type parameter `T`"),
+            "{error}"
+        );
     }
 
     #[test]
