@@ -1575,7 +1575,7 @@ The workspace crates have narrow responsibilities:
   arrays preserve element discriminants through aliases, named synchronous or
   asynchronous function returns, typed function values and callback parameters
   into `for...of` or `for await...of`, including direct item variables and
-  object destructuring.
+  object destructuring in declaration and existing-variable assignment heads.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
