@@ -886,21 +886,21 @@ impl<'a> FnLowerer<'a> {
                                 | "clz32"
                         )
                     {
-                        let [argument] = call.args.as_slice() else {
+                        let label = format!("Math.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [value] = arguments.as_slice() else {
                             return Err(format!(
                                 "`Math.{}` expects exactly one argument",
                                 property.sym
                             ));
                         };
-                        if argument.spread.is_some() {
-                            return Err("Math function spread is not supported".into());
-                        }
-                        let value = self.lower_expr(&argument.expr)?;
-                        let value = self.coerce_primitive_to_number(value)?;
-                        return Ok(HirExpr::Call(
+                        let value = self.coerce_primitive_to_number(value.clone())?;
+                        let result = HirExpr::Call(
                             Box::new(HirExpr::Var(format!("__thaw_math_{}", property.sym))),
                             vec![value],
-                        ));
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Math"
                         && matches!(
@@ -908,30 +908,30 @@ impl<'a> FnLowerer<'a> {
                             "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul"
                         )
                     {
+                        let label = format!("Math.{}", property.sym);
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
                         let expected = match property.sym.as_ref() {
                             "pow" | "atan2" | "imul" => Some(2),
                             "sign" | "round" => Some(1),
                             _ => None,
                         };
-                        if expected.is_some_and(|expected| call.args.len() != expected) {
+                        if expected.is_some_and(|expected| arguments.len() != expected) {
                             return Err(format!(
                                 "`Math.{}` expects {} argument(s)",
                                 property.sym,
                                 expected.unwrap()
                             ));
                         }
-                        let mut arguments = Vec::with_capacity(call.args.len());
-                        for argument in &call.args {
-                            if argument.spread.is_some() {
-                                return Err("Math function spread is not supported".into());
-                            }
-                            let value = self.lower_expr(&argument.expr)?;
-                            arguments.push(self.coerce_primitive_to_number(value)?);
-                        }
-                        return Ok(HirExpr::Call(
+                        let arguments = arguments
+                            .into_iter()
+                            .map(|value| self.coerce_primitive_to_number(value))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let result = HirExpr::Call(
                             Box::new(HirExpr::Var(format!("__thaw_math_{}", property.sym))),
                             arguments,
-                        ));
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Number"
                         && matches!(
@@ -939,19 +939,19 @@ impl<'a> FnLowerer<'a> {
                             "isNaN" | "isFinite" | "isInteger" | "isSafeInteger"
                         )
                     {
-                        let [argument] = call.args.as_slice() else {
+                        let label = format!("Number.{}", property.sym);
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [value] = arguments.as_slice() else {
                             return Err(format!(
                                 "`Number.{}` expects exactly one argument",
                                 property.sym
                             ));
                         };
-                        if argument.spread.is_some() {
-                            return Err("number predicate spread is not supported".into());
-                        }
-                        let value = self.lower_expr(&argument.expr)?;
+                        let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
                         if ty == HirType::F64 {
-                            return Ok(HirExpr::Call(
+                            let result = HirExpr::Call(
                                 Box::new(HirExpr::Var(
                                     match property.sym.as_ref() {
                                         "isNaN" => "__thaw_number_is_nan",
@@ -963,14 +963,16 @@ impl<'a> FnLowerer<'a> {
                                     .to_string(),
                                 )),
                                 vec![value],
-                            ));
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let name = format!("__thaw_number_predicate_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), ty.clone());
+                        bindings.push((name, ty, value));
                         return self.wrap_call_argument_bindings(
                             HirExpr::Lit(HirLit::Bool(false)),
-                            &[(name, ty, value)],
+                            &bindings,
                         );
                     }
                 }
