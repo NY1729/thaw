@@ -18354,6 +18354,37 @@ mod tests {
     }
 
     #[test]
+    fn compiles_union_array_sorting_with_a_comparator() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number; rank: number } |
+                { kind: "text"; value: string; rank: number };
+            function print(values: Result[]): void {
+                for (const item of values) {
+                    if (item.kind === "number") console.log(item.value + 10);
+                    else console.log(item.value + "!");
+                }
+            }
+            function main(): void {
+                const results: Result[] = [
+                    { kind: "text", value: "last", rank: 3 },
+                    { kind: "number", value: 1, rank: 1 },
+                    { kind: "text", value: "middle", rank: 2 }
+                ];
+                const sorted = results.toSorted((left, right) => left.rank - right.rank);
+                print(sorted);
+                print(results);
+                results.sort((left, right) => left.rank - right.rank);
+                print(results);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "union_array_sort"),
+            "11\nmiddle!\nlast!\nlast!\n11\nmiddle!\n11\nmiddle!\nlast!\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_some_and_every() {
         let source = r#"
             interface Item { value: number; }
