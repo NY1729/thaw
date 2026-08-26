@@ -878,6 +878,23 @@ fn compiles_native_array_flat() {
 }
 
 #[test]
+fn compiles_tuple_spreads_for_array_positional_methods() {
+    let source = r#"
+        function main(): void {
+            console.log([1, 2, 3].join(...["-"]));
+            console.log([1, 2, 3].at(...[-1]));
+            console.log([1, 2, 3].with(...[1, 9]).join(","));
+            const nested: number[][] = [[1], [2, 3]];
+            console.log(nested.flat(...[1]).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_positional_tuple_spreads"),
+        "1-2-3\n3\n1,9,3\n1,2,3\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_of() {
     let source = r#"
         interface Item { value: number; }
@@ -2780,4 +2797,3 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-
