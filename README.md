@@ -1583,6 +1583,8 @@ The workspace crates have narrow responsibilities:
   named synchronous or asynchronous function returns. Typed function values,
   aliases and callback parameters preserve the same property metadata. Nested
   fixed-property paths such as `container.payload.results` use the same flow.
+  Inferred object literals preserve tracked arrays through key-value and
+  shorthand properties, nesting and fixed-object spreads.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata

@@ -12459,6 +12459,7 @@ impl<'a> FnLowerer<'a> {
                     })
                     .cloned()
             }
+            Expr::Object(object) => self.object_literal_array_property_discriminants(object),
             Expr::Cond(conditional) => {
                 let consequent =
                     self.expression_object_array_property_discriminants(&conditional.cons)?;
@@ -12468,6 +12469,75 @@ impl<'a> FnLowerer<'a> {
             }
             _ => None,
         }
+    }
+
+    fn object_literal_array_property_discriminants(
+        &self,
+        object: &SwcObjectLit,
+    ) -> Option<ObjectArrayPropertyDiscriminants> {
+        let mut metadata = ObjectArrayPropertyDiscriminants::new();
+        for property in &object.props {
+            match property {
+                PropOrSpread::Spread(spread) => {
+                    let Some(incoming) =
+                        self.expression_object_array_property_discriminants(&spread.expr)
+                    else {
+                        continue;
+                    };
+                    for first in incoming.keys().filter_map(|path| path.first()) {
+                        metadata.retain(|path, _| path.first() != Some(first));
+                    }
+                    metadata.extend(incoming);
+                }
+                PropOrSpread::Prop(property) => {
+                    let (name, value) = match property.as_ref() {
+                        Prop::KeyValue(property) => {
+                            let Ok(name) = class_property_name(&property.key) else {
+                                continue;
+                            };
+                            (name, Some(property.value.as_ref()))
+                        }
+                        Prop::Shorthand(identifier) => {
+                            let name = identifier.sym.to_string();
+                            metadata.retain(|path, _| path.first() != Some(&name));
+                            let binding = self.resolve_binding(identifier.sym.as_ref());
+                            if let Some(discriminants) =
+                                self.array_element_discriminants.get(&binding)
+                            {
+                                metadata.insert(vec![name.clone()], discriminants.clone());
+                            }
+                            if let Some(nested) =
+                                self.object_array_property_discriminants.get(&binding)
+                            {
+                                metadata.extend(nested.iter().map(|(path, value)| {
+                                    let mut path = path.clone();
+                                    path.insert(0, name.clone());
+                                    (path, value.clone())
+                                }));
+                            }
+                            (name, None)
+                        }
+                        _ => continue,
+                    };
+                    let Some(value) = value else {
+                        continue;
+                    };
+                    metadata.retain(|path, _| path.first() != Some(&name));
+                    if let Some(discriminants) = self.expression_array_element_discriminants(value)
+                    {
+                        metadata.insert(vec![name.clone()], discriminants);
+                    }
+                    if let Some(nested) = self.expression_object_array_property_discriminants(value)
+                    {
+                        metadata.extend(nested.into_iter().map(|(mut path, value)| {
+                            path.insert(0, name.clone());
+                            (path, value)
+                        }));
+                    }
+                }
+            }
+        }
+        (!metadata.is_empty()).then_some(metadata)
     }
 
     fn expression_identifier_alias_source(&self, expression: &Expr) -> Option<Symbol> {
