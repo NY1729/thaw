@@ -13642,6 +13642,28 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn expression_static_property_path(&self, expression: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+        match expression {
+            Expr::Ident(identifier) => {
+                Some((self.resolve_binding(identifier.sym.as_ref()), Vec::new()))
+            }
+            Expr::Member(member) => {
+                let (root, mut path) = self.expression_static_property_path(&member.obj)?;
+                path.push(member_property_name(&member.prop)?);
+                Some((root, path))
+            }
+            Expr::Paren(parenthesized) => self.expression_static_property_path(&parenthesized.expr),
+            Expr::TsAs(assertion) => self.expression_static_property_path(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => {
+                self.expression_static_property_path(&assertion.expr)
+            }
+            Expr::TsConstAssertion(assertion) => {
+                self.expression_static_property_path(&assertion.expr)
+            }
+            _ => None,
+        }
+    }
+
     fn expression_function_discriminants(
         &self,
         expression: &Expr,
@@ -21785,13 +21807,23 @@ impl<'a> FnLowerer<'a> {
         let assigned_function_property = if assign.op == AssignOp::Assign {
             match &assign.left {
                 AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
-                    match (member.obj.as_ref(), member_property_name(&member.prop)) {
-                        (Expr::Ident(object), Some(property)) => Some((
-                            self.resolve_binding(object.sym.as_ref()),
-                            property,
-                            self.expression_function_property_result_discriminants(&assign.right),
-                            self.expression_object_function_property_discriminants(&assign.right),
-                        )),
+                    match (
+                        self.expression_static_property_path(&member.obj),
+                        member_property_name(&member.prop),
+                    ) {
+                        (Some((object, mut path)), Some(property)) => {
+                            path.push(property);
+                            Some((
+                                object,
+                                path,
+                                self.expression_function_property_result_discriminants(
+                                    &assign.right,
+                                ),
+                                self.expression_object_function_property_discriminants(
+                                    &assign.right,
+                                ),
+                            ))
+                        }
                         _ => None,
                     }
                 }
@@ -22271,19 +22303,20 @@ impl<'a> FnLowerer<'a> {
         };
 
         let result = build_assign(target, value);
-        if let Some((object, property, value, nested)) = assigned_function_property {
+        if let Some((object, path, value, nested)) = assigned_function_property {
             let metadata = self
                 .object_function_property_discriminants
                 .entry(object.clone())
                 .or_default();
-            metadata.retain(|path, _| path.first() != Some(&property));
+            metadata.retain(|existing, _| !existing.starts_with(&path));
             if let Some(value) = value {
-                metadata.insert(vec![property.clone()], value);
+                metadata.insert(path.clone(), value);
             }
             if let Some(nested) = nested {
-                metadata.extend(nested.into_iter().map(|(mut path, discriminants)| {
-                    path.insert(0, property.clone());
-                    (path, discriminants)
+                metadata.extend(nested.into_iter().map(|(suffix, discriminants)| {
+                    let mut nested_path = path.clone();
+                    nested_path.extend(suffix);
+                    (nested_path, discriminants)
                 }));
             }
             if metadata.is_empty() {
