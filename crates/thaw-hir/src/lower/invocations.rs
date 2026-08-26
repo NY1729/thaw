@@ -2628,7 +2628,13 @@ impl<'a> FnLowerer<'a> {
                 return Err("`Promise.all` expects exactly one array argument".into());
             };
             if arg.spread.is_some() {
-                return Err("spread arguments are not supported in `Promise.all`".into());
+                let (arguments, bindings) =
+                    self.lower_native_spread_values(&call.args, "Promise.all")?;
+                let [value] = arguments.as_slice() else {
+                    return Err("`Promise.all` expects exactly one array argument".into());
+                };
+                let result = self.lower_spread_promise_combinator(value.clone(), "all")?;
+                return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "all")?;
@@ -2685,7 +2691,16 @@ impl<'a> FnLowerer<'a> {
                 return Err("`Promise.allSettled` expects exactly one array argument".into());
             };
             if arg.spread.is_some() {
-                return Err("spread arguments are not supported in `Promise.allSettled`".into());
+                let (arguments, bindings) =
+                    self.lower_native_spread_values(&call.args, "Promise.allSettled")?;
+                let [value] = arguments.as_slice() else {
+                    return Err(
+                        "`Promise.allSettled` expects exactly one array argument".into(),
+                    );
+                };
+                let result =
+                    self.lower_spread_promise_combinator(value.clone(), "allSettled")?;
+                return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "allSettled")?;
@@ -2753,7 +2768,13 @@ impl<'a> FnLowerer<'a> {
                 return Err("`Promise.race` expects exactly one array argument".into());
             };
             if arg.spread.is_some() {
-                return Err("spread arguments are not supported in `Promise.race`".into());
+                let (arguments, bindings) =
+                    self.lower_native_spread_values(&call.args, "Promise.race")?;
+                let [value] = arguments.as_slice() else {
+                    return Err("`Promise.race` expects exactly one array argument".into());
+                };
+                let result = self.lower_spread_promise_combinator(value.clone(), "race")?;
+                return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "race")?;
@@ -2820,7 +2841,13 @@ impl<'a> FnLowerer<'a> {
                 return Err("`Promise.any` expects exactly one array argument".into());
             };
             if arg.spread.is_some() {
-                return Err("spread arguments are not supported in `Promise.any`".into());
+                let (arguments, bindings) =
+                    self.lower_native_spread_values(&call.args, "Promise.any")?;
+                let [value] = arguments.as_slice() else {
+                    return Err("`Promise.any` expects exactly one array argument".into());
+                };
+                let result = self.lower_spread_promise_combinator(value.clone(), "any")?;
+                return self.wrap_call_argument_bindings(result, &bindings);
             }
             let Expr::Array(array) = arg.expr.as_ref() else {
                 let (values, element) = self.lower_promise_array_value(&arg.expr, "any")?;

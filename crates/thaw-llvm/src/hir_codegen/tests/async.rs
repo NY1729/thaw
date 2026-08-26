@@ -1711,6 +1711,33 @@ fn frame_split_promise_all_accepts_a_promise_array_variable() {
 }
 
 #[test]
+fn frame_split_promise_combinators_accept_outer_tuple_spreads() {
+    let source = r#"
+        async function value(input: number): Promise<number> {
+            await sleep(1);
+            return input;
+        }
+        async function text(): Promise<string> { return "ready"; }
+        async function main(): Promise<void> {
+            const all: number[] = await Promise.all(...[[value(1), value(2)]]);
+            console.log(all.join(","));
+            console.log(await Promise.race(...[[value(3)]]));
+            console.log(await Promise.any(...[[value(4)]]));
+            const settled = await Promise.allSettled(...[[value(5)]]);
+            console.log(settled[0].status);
+            console.log(settled[0].value);
+            const mixed: [number, string] = await Promise.all(...[[value(6), text()]]);
+            console.log(mixed[0]);
+            console.log(mixed[1]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_combinator_outer_tuple_spreads"),
+        "1,2\n3\n4\nfulfilled\n5\n6\nready\n"
+    );
+}
+
+#[test]
 fn frame_split_promise_all_supports_heterogeneous_tuples() {
     let source = r#"
         async function numberValue(): Promise<number> {
