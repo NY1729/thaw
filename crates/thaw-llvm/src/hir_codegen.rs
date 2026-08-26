@@ -16365,6 +16365,83 @@ mod tests {
     }
 
     #[test]
+    fn correlates_destructured_discriminants_with_sibling_payloads() {
+        let source = r#"
+            type Result =
+                { kind: "success"; value: number; detail: number } |
+                { kind: "failure"; value: string; detail: string } |
+                { kind: "pending"; value: boolean; detail: boolean };
+            type Numeric =
+                { code: 200; value: number } |
+                { code: 500; value: string };
+            type Flagged =
+                { active: true; value: number } |
+                { active: false; value: string };
+            function describe(result: Result): string {
+                const { kind: tag, value, detail } = result;
+                if (tag === "success" && value > 0) {
+                    return String(value + detail);
+                }
+                if ("failure" === tag) return value + detail;
+                if (tag === "pending") return value && detail ? "pending" : "waiting";
+                return "zero";
+            }
+            function guarded(result: Result): string {
+                const { kind, value, detail } = result;
+                if (kind !== "success") {
+                    if (!(kind !== "failure")) return value + detail;
+                    return value || detail ? "pending" : "waiting";
+                }
+                return String(value + detail);
+            }
+            function numeric(result: Numeric): string {
+                const { code, value } = result;
+                if (code === 200) return String(value + 1);
+                return value + "!";
+            }
+            function flagged(result: Flagged): string {
+                const { active, value } = result;
+                if (active === true) return String(value + 2);
+                return value + "!";
+            }
+            function parameter({ kind, value }: Result): string {
+                if (kind === "success") return String(value + 3);
+                if (kind === "failure") return value + " parameter";
+                return value ? "pending" : "waiting";
+            }
+            async function delayed(ok: boolean): Promise<Result> {
+                await sleep(1);
+                if (ok) return { kind: "success", value: 20, detail: 2 };
+                return { kind: "failure", value: "async", detail: "!" };
+            }
+            async function main(): Promise<void> {
+                console.log(describe({ kind: "success", value: 4, detail: 3 }));
+                console.log(describe({ kind: "failure", value: "bad", detail: "!" }));
+                console.log(describe({ kind: "pending", value: true, detail: false }));
+                console.log(guarded({ kind: "success", value: 8, detail: 1 }));
+                console.log(guarded({ kind: "failure", value: "no", detail: "?" }));
+                console.log(guarded({ kind: "pending", value: false, detail: false }));
+                console.log(numeric({ code: 200, value: 5 }));
+                console.log(numeric({ code: 500, value: "error" }));
+                console.log(flagged({ active: true, value: 8 }));
+                console.log(flagged({ active: false, value: "off" }));
+                console.log(parameter({ kind: "success", value: 7, detail: 0 }));
+                console.log(parameter({ kind: "failure", value: "bad", detail: "" }));
+                const { kind, value, detail } = await delayed(true);
+                if (kind === "success") console.log(value + detail);
+                const { kind: asyncKind, value: asyncValue, detail: asyncDetail } = await delayed(false);
+                if (asyncKind !== "success") {
+                    if (asyncKind === "failure") console.log(asyncValue + asyncDetail);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "correlated_object_union_destructuring"),
+            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n22\nasync!\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{
