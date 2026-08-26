@@ -1417,7 +1417,9 @@ The workspace crates have narrow responsibilities:
   closure. Fixed-arity leading arguments may be partially applied after `thisArg`; the
   lookup target, receiver and bound arguments are each evaluated once in JavaScript order.
   Bound async generic methods retain their single `Promise<T>` result layer and can be
-  awaited like other typed function values.
+  awaited like other typed function values. Explicitly instantiated methods also support
+  `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)`; these reuse ordinary
+  default/rest/spread adapters while evaluating the method target before `thisArg`.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
