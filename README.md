@@ -1922,8 +1922,9 @@ Dynamic indexed reads such as `object[key]` work for uniform fixed-shape
 objects and return a flattened optional/nullish value. Heterogeneous untagged
 fields produce a tagged union of the distinct field types plus `undefined`;
 ordinary `typeof` control-flow narrowing can consume that result. Mixing
-already-tagged nullable/optional fields with other field layouts remains
-outside this path.
+raw `null`/`undefined` fields with scalar or pointer fields uses the same
+union, while already-tagged nullable/optional fields mixed with other layouts
+remain outside this path.
 `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
