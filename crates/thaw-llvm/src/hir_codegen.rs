@@ -19502,11 +19502,14 @@ mod tests {
                 let load = first.load;
                 load = second.load;
                 print(load().flat()[0]);
+                let destructuredLoad = first.load;
+                ({ load: destructuredLoad } = second);
+                print(destructuredLoad().flat()[0]);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "reassigned_function_union_metadata"),
-            "12\n"
+            "12\n12\n"
         );
     }
 
