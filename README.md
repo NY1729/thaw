@@ -1395,7 +1395,8 @@ The workspace crates have narrow responsibilities:
   native layout. Static fields, methods, private members and blocks are emitted once on
   a shared non-generic owner, retain source initialization order and share inherited
   base storage across every specialization; class type parameters in static members are
-  rejected as in TypeScript. Constructor inference also follows annotated functions,
+  rejected as in TypeScript. Static access accepts both `Box.member` and validated
+  instantiation expressions such as `Box<number>.member`. Constructor inference also follows annotated functions,
   unannotated forward return-call chains, conditional returns, local initializer chains,
   typed arrows/function values and function-valued object properties. Calls whose
   result remains dynamically typed still require an explicit class type argument or
