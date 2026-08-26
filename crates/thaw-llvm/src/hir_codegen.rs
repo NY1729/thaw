@@ -19854,6 +19854,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_pick_and_omit_utility_types() {
+        let source = r#"
+            type Model = { id: number; label: string; active: boolean };
+            type Identity = Pick<Model, "id" | "label">;
+            type WithoutId = Omit<Model, "id">;
+            type GenericIdentity<T> = Pick<{ id: number; value: T; ignored: boolean }, "id" | "value">;
+            function main(): void {
+                const identity: Identity = { label: "ready", id: 42 };
+                const rest: WithoutId = { active: true, label: identity.label };
+                const generic: GenericIdentity<string> = { value: rest.label, id: identity.id };
+                console.log(generic.id);
+                console.log(generic.value);
+                console.log(rest.active);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "pick_and_omit_utility_types"),
+            "42\nready\ntrue\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
