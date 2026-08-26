@@ -16177,6 +16177,43 @@ mod tests {
     }
 
     #[test]
+    fn flattens_tagged_properties_across_object_union_members() {
+        let source = r#"
+            type Mixed =
+                { kind: number; value: number | undefined } |
+                { kind: string; value: string | null } |
+                { kind: boolean; value: boolean | null | undefined } |
+                { kind: Json; value: number | string };
+            function show(value: Mixed): void { console.log(value.value); }
+            async function delayed(kind: number): Promise<Mixed> {
+                await sleep(1);
+                if (kind === 0) return { kind: 0, value: undefined };
+                if (kind === 1) return { kind: "text", value: null };
+                if (kind === 2) return { kind: true, value: true };
+                return { kind: JSON.parse("{}"), value: "nested" };
+            }
+            async function main(): Promise<void> {
+                show({ kind: 0, value: 41 });
+                show({ kind: 0, value: undefined });
+                show({ kind: "text", value: "thaw" });
+                show({ kind: "text", value: null });
+                show({ kind: false, value: false });
+                show({ kind: false, value: undefined });
+                show({ kind: JSON.parse("{}"), value: 7 });
+                show({ kind: JSON.parse("{}"), value: "nested" });
+                show(await delayed(0));
+                show(await delayed(1));
+                show(await delayed(2));
+                show(await delayed(3));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "flattened_object_union_properties"),
+            "41\nundefined\nthaw\nnull\nfalse\nundefined\n7\nnested\nundefined\nnull\ntrue\nnested\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{
