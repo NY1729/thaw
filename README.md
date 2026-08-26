@@ -1556,8 +1556,11 @@ The workspace crates have narrow responsibilities:
   without unsafely narrowing the joined branch. Typed function aliases,
   callback parameters, synchronous arrows and named async function values
   propagate their declared result discriminants through calls and `await`.
-  Correlated destructuring and untyped/dynamically callable boundaries remain
-  outside this subset
+  Object unions can also be destructured after one source evaluation, including
+  renamed and nested bindings, defaults over flattened nullish fields, and
+  object rest rebuilt according to the selected runtime member. Correlating a
+  separately destructured discriminant with its sibling payload binding, and
+  untyped/dynamically callable boundaries, remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global

@@ -13626,7 +13626,13 @@ impl<'a> FnLowerer<'a> {
             } else {
                 self.infer_expr_type(&value)?
             };
-            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) {
+            let destructurable_union = matches!(
+                &ty,
+                HirType::Union(elements)
+                    if matches!(&decl.name, Pat::Object(_))
+                        && elements.iter().all(|element| matches!(element, HirType::Object(_)))
+            );
+            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) && !destructurable_union {
                 return Err(format!(
                     "destructuring requires a fixed-shape object or tuple, got {ty:?}"
                 ));
@@ -13665,6 +13671,10 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Object(pattern) => {
+                if let HirType::Union(elements) = ty {
+                    return self
+                        .lower_union_object_binding_pattern(pattern, value, elements, statements);
+                }
                 let HirType::Object(fields) = ty else {
                     return Err(format!("object pattern cannot destructure {ty:?}"));
                 };
@@ -13822,6 +13832,157 @@ impl<'a> FnLowerer<'a> {
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
             _ => Err("unsupported destructuring binding pattern".into()),
         }
+    }
+
+    fn lower_union_object_binding_pattern(
+        &mut self,
+        pattern: &swc_ecma_ast::ObjectPat,
+        value: HirExpr,
+        elements: &[HirType],
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        let mut used = BTreeSet::new();
+        for property in &pattern.props {
+            match property {
+                ObjectPatProp::Assign(property) => {
+                    let key = property.key.id.sym.to_string();
+                    let mut field_value =
+                        self.lower_union_property_read(value.clone(), elements, &key)?;
+                    let mut field_type = self.infer_expr_type(&field_value)?;
+                    used.insert(key);
+                    if let Some(default) = &property.value {
+                        let default = self.lower_expr(default)?;
+                        field_value = self.lower_nullish_coalescing(field_value, default)?;
+                        field_type = self.infer_expr_type(&field_value)?;
+                    }
+                    self.lower_binding_pattern(
+                        &Pat::Ident(property.key.clone()),
+                        field_value,
+                        &field_type,
+                        statements,
+                    )?;
+                }
+                ObjectPatProp::KeyValue(property) => {
+                    let key = match &property.key {
+                        PropName::Ident(key) => key.sym.to_string(),
+                        PropName::Str(key) => key.value.to_string_lossy().into_owned(),
+                        PropName::Computed(computed) => match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Str(key)) => key.value.to_string_lossy().into_owned(),
+                            _ => {
+                                return Err(
+                                    "computed destructuring keys must be string literals".into()
+                                )
+                            }
+                        },
+                        _ => return Err("unsupported object destructuring key".into()),
+                    };
+                    let field_value =
+                        self.lower_union_property_read(value.clone(), elements, &key)?;
+                    let field_type = self.infer_expr_type(&field_value)?;
+                    used.insert(key);
+                    self.lower_binding_pattern(
+                        &property.value,
+                        field_value,
+                        &field_type,
+                        statements,
+                    )?;
+                }
+                ObjectPatProp::Rest(rest) => {
+                    let (rest_value, rest_type) =
+                        self.lower_union_object_rest(value.clone(), elements, &used)?;
+                    self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_union_object_rest(
+        &self,
+        value: HirExpr,
+        elements: &[HirType],
+        used: &BTreeSet<Symbol>,
+    ) -> Result<(HirExpr, HirType), String> {
+        let mut rest_types = Vec::new();
+        for element in elements {
+            let HirType::Object(fields) = element else {
+                return Err("object union rest requires object members".into());
+            };
+            let rest = HirType::Object(
+                fields
+                    .iter()
+                    .filter(|(name, _)| !used.contains(name))
+                    .cloned()
+                    .collect(),
+            );
+            if !rest_types.contains(&rest) {
+                rest_types.push(rest);
+            }
+        }
+        let result_type = match rest_types.as_slice() {
+            [rest] => rest.clone(),
+            rests => HirType::Union(rests.to_vec()),
+        };
+        let parameter = "__thaw_union_rest_value".to_string();
+        let mut body = Vec::new();
+        for (index, element) in elements.iter().enumerate() {
+            let HirType::Object(fields) = element else {
+                unreachable!()
+            };
+            let member = HirExpr::UnionValue(
+                Box::new(HirExpr::Var(parameter.clone())),
+                index,
+                elements.to_vec(),
+            );
+            let rest = HirExpr::ObjectLit(
+                fields
+                    .iter()
+                    .filter(|(name, _)| !used.contains(name))
+                    .map(|(name, _)| {
+                        (
+                            name.clone(),
+                            HirExpr::PropAccess(
+                                Box::new(member.clone()),
+                                element.clone(),
+                                name.clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            );
+            let rest = self.coerce_to_declared(&result_type, rest)?;
+            if index + 1 == elements.len() {
+                body.push(HirStmt::Return(Some(rest)));
+            } else {
+                body.push(HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(
+                            Box::new(HirExpr::Var(parameter.clone())),
+                            elements.to_vec(),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    ),
+                    vec![HirStmt::Return(Some(rest))],
+                    Vec::new(),
+                ));
+            }
+        }
+        Ok((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: parameter,
+                        ty: HirType::Union(elements.to_vec()),
+                    }],
+                    result_type.clone(),
+                    Box::new(HirExpr::Block(body)),
+                )),
+                vec![value],
+            ),
+            result_type,
+        ))
     }
 
     /// If `declared` is an object type and `value` is an object literal,
@@ -15298,6 +15459,57 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_nullish_coalescing(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
+        if let HirType::Union(elements) = &lhs_type {
+            if !elements
+                .iter()
+                .any(|element| matches!(element, HirType::Null | HirType::Undefined))
+            {
+                return Ok(lhs);
+            }
+            let rhs_type = self.infer_expr_type(&rhs)?;
+            let mut result_members = elements
+                .iter()
+                .filter(|element| !matches!(element, HirType::Null | HirType::Undefined))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !result_members.contains(&rhs_type) {
+                result_members.push(rhs_type);
+            }
+            let result_type = match result_members.as_slice() {
+                [member] => member.clone(),
+                members => HirType::Union(members.to_vec()),
+            };
+            let name = format!("__thaw_nullish_union_left_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), lhs_type.clone());
+            let left = HirExpr::Var(name.clone());
+            let mut body = Vec::new();
+            for (index, element) in elements.iter().enumerate() {
+                let value = if matches!(element, HirType::Null | HirType::Undefined) {
+                    self.coerce_to_declared(&result_type, rhs.clone())?
+                } else {
+                    self.coerce_to_declared(
+                        &result_type,
+                        HirExpr::UnionValue(Box::new(left.clone()), index, elements.clone()),
+                    )?
+                };
+                if index + 1 == elements.len() {
+                    body.push(HirStmt::Return(Some(value)));
+                } else {
+                    body.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(left.clone()), elements.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        vec![HirStmt::Return(Some(value))],
+                        Vec::new(),
+                    ));
+                }
+            }
+            return self
+                .wrap_call_argument_bindings(HirExpr::Block(body), &[(name, lhs_type, lhs)]);
+        }
         let (payload, is_none, value) = match lhs_type.clone() {
             HirType::Optional(payload) => {
                 let is_none = HirExpr::OptionalIsNone(
