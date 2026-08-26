@@ -11154,6 +11154,55 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
     }
 }
 
+fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
+    fn visit(statements: &[HirStmt], saw_tail_await: &mut bool) -> bool {
+        statements.iter().all(|statement| match statement {
+            HirStmt::Return(Some(HirExpr::AwaitPromise(_, _))) => {
+                *saw_tail_await = true;
+                true
+            }
+            HirStmt::Return(_) => false,
+            HirStmt::If(condition, then_body, else_body) => {
+                !contains_await(condition)
+                    && visit(then_body, saw_tail_await)
+                    && visit(else_body, saw_tail_await)
+            }
+            HirStmt::While(condition, body) => {
+                !contains_await(condition) && visit(body, saw_tail_await)
+            }
+            // Adopting a returned promise would move its rejection outside the
+            // surrounding catch, so try/catch needs the general async frame path.
+            HirStmt::Try(body, _, catch) => {
+                !body.iter().any(stmt_contains_await) && !catch.iter().any(stmt_contains_await)
+            }
+            other => !stmt_contains_await(other),
+        })
+    }
+
+    let mut saw_tail_await = false;
+    visit(statements, &mut saw_tail_await) && saw_tail_await
+}
+
+fn strip_async_arrow_tail_awaits(statements: Vec<HirStmt>) -> Vec<HirStmt> {
+    statements
+        .into_iter()
+        .map(|statement| match statement {
+            HirStmt::Return(Some(HirExpr::AwaitPromise(promise, _))) => {
+                HirStmt::Return(Some(*promise))
+            }
+            HirStmt::If(condition, then_body, else_body) => HirStmt::If(
+                condition,
+                strip_async_arrow_tail_awaits(then_body),
+                strip_async_arrow_tail_awaits(else_body),
+            ),
+            HirStmt::While(condition, body) => {
+                HirStmt::While(condition, strip_async_arrow_tail_awaits(body))
+            }
+            other => other,
+        })
+        .collect()
+}
+
 fn rewrite_async_arrow_returns(
     statements: Vec<HirStmt>,
     resolve: &str,
@@ -20436,14 +20485,23 @@ impl<'a> FnLowerer<'a> {
                     stmts.extend(self.lower_stmts(&block.stmts)?);
                     let inferred = self.infer_return_type(&stmts)?;
                     if arrow.is_async {
-                        if stmts.iter().any(stmt_contains_await) {
-                            return Err(
-                                "await in async arrow block bodies is not supported yet".into()
-                            );
-                        }
+                        let assimilates = if stmts.iter().any(stmt_contains_await) {
+                            if !async_arrow_has_only_tail_await_returns(&stmts) {
+                                return Err(
+                                    "non-tail await in async arrow block bodies is not supported yet"
+                                        .into(),
+                                );
+                            }
+                            stmts = strip_async_arrow_tail_awaits(stmts);
+                            true
+                        } else {
+                            false
+                        };
                         let resolved = declared_async_result.clone().unwrap_or(inferred);
                         let resolve_type = HirType::Function(
-                            if resolved == HirType::Void {
+                            if assimilates {
+                                vec![HirType::Promise(Box::new(resolved.clone()))]
+                            } else if resolved == HirType::Void {
                                 Vec::new()
                             } else {
                                 vec![resolved.clone()]
@@ -20455,7 +20513,7 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         let mut executor_body =
                             rewrite_async_arrow_returns(stmts, &resolve_name, &resolved)?;
-                        if resolved == HirType::Void {
+                        if resolved == HirType::Void && !assimilates {
                             executor_body.push(HirStmt::Expr(HirExpr::Call(
                                 Box::new(HirExpr::Var(resolve_name.clone())),
                                 Vec::new(),
@@ -20484,7 +20542,7 @@ impl<'a> FnLowerer<'a> {
                             Box::new(executor_body),
                         );
                         (
-                            HirExpr::PromiseNew(Box::new(executor), resolved.clone(), false),
+                            HirExpr::PromiseNew(Box::new(executor), resolved.clone(), assimilates),
                             HirType::Promise(Box::new(resolved)),
                         )
                     } else {
