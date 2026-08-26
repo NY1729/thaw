@@ -4589,8 +4589,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         &type_substitution,
                     )?
                 };
+                let generates_call_wrappers = !is_extern && generic_type_params.is_empty();
                 signatures.insert(
-                    name,
+                    name.clone(),
                     FnSignature {
                         params,
                         variadic,
@@ -4615,6 +4616,21 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                     },
                 );
+                if generates_call_wrappers {
+                    let patterns = func
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.pat.clone())
+                        .collect::<Vec<_>>();
+                    if let Some(default_start) = trailing_omittable_start(&patterns) {
+                        for arity in default_start..patterns.len() {
+                            let mut wrapper = signatures[&name].clone();
+                            wrapper.params.truncate(arity);
+                            signatures.insert(default_arity_symbol(&name, arity), wrapper);
+                        }
+                    }
+                    insert_omitted_parameter_signatures(&mut signatures, &name, &patterns, 0)?;
+                }
                 if !is_extern {
                     fn_decls.push(fn_decl);
                 }
@@ -5594,26 +5610,60 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         })
         .collect();
 
-    let functions = fn_decls
-        .into_iter()
-        .map(|fn_decl| {
-            lower_fn_decl(
-                fn_decl,
-                &signatures,
-                &interfaces,
-                &generic_interfaces,
-                &enum_values,
-                &enum_reverse_values,
-                &global_types,
-                &immutable_globals,
-                None,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut specialized = functions
-        .into_iter()
-        .filter(|function| signatures[&function.name].generic_type_params.is_empty())
-        .collect::<Vec<_>>();
+    let mut specialized = Vec::new();
+    for fn_decl in fn_decls {
+        let function = lower_fn_decl(
+            fn_decl,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
+            None,
+        )?;
+        if !signatures[&function.name].generic_type_params.is_empty() {
+            continue;
+        }
+        let patterns = fn_decl
+            .function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>();
+        specialized.extend(lower_callable_default_wrappers(
+            &function.name,
+            &function.params,
+            &patterns,
+            0,
+            None,
+            &function.ret,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
+        )?);
+        specialized.extend(lower_callable_omitted_parameter_wrappers(
+            &function.name,
+            &function.params,
+            &patterns,
+            0,
+            None,
+            &function.ret,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
+        )?);
+        specialized.push(function);
+    }
     for declaration in &class_decls {
         specialized.extend(lower_class_constructor(
             declaration,
@@ -7671,7 +7721,7 @@ fn resolve_type_dependencies(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_class_default_wrappers(
+fn lower_callable_default_wrappers(
     symbol: &str,
     params: &[HirParam],
     patterns: &[Pat],
@@ -7806,7 +7856,7 @@ fn lower_class_default_wrappers(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_class_omitted_parameter_wrappers(
+fn lower_callable_omitted_parameter_wrappers(
     symbol: &str,
     params: &[HirParam],
     patterns: &[Pat],
@@ -8187,7 +8237,7 @@ fn lower_class_constructor(
         .map(class_constructor_param_pattern)
         .collect::<Vec<_>>();
     let mut functions = vec![constructor, initializer];
-    functions.extend(lower_class_default_wrappers(
+    functions.extend(lower_callable_default_wrappers(
         &constructor_symbol,
         &params,
         &patterns,
@@ -8202,7 +8252,7 @@ fn lower_class_constructor(
         global_types,
         immutable_globals,
     )?);
-    functions.extend(lower_class_omitted_parameter_wrappers(
+    functions.extend(lower_callable_omitted_parameter_wrappers(
         &constructor_symbol,
         &params,
         &patterns,
@@ -8222,7 +8272,7 @@ fn lower_class_constructor(
         ty: instance_type.clone(),
     }];
     initializer_wrapper_params.extend(params.iter().cloned());
-    functions.extend(lower_class_default_wrappers(
+    functions.extend(lower_callable_default_wrappers(
         &initializer_symbol,
         &initializer_wrapper_params,
         &patterns,
@@ -8237,7 +8287,7 @@ fn lower_class_constructor(
         global_types,
         immutable_globals,
     )?);
-    functions.extend(lower_class_omitted_parameter_wrappers(
+    functions.extend(lower_callable_omitted_parameter_wrappers(
         &initializer_symbol,
         &initializer_wrapper_params,
         &patterns,
@@ -8559,7 +8609,7 @@ fn lower_class_methods(
             .iter()
             .map(|parameter| parameter.pat.clone())
             .collect::<Vec<_>>();
-        functions.extend(lower_class_default_wrappers(
+        functions.extend(lower_callable_default_wrappers(
             &symbol,
             &params,
             &patterns,
@@ -8574,7 +8624,7 @@ fn lower_class_methods(
             global_types,
             immutable_globals,
         )?);
-        functions.extend(lower_class_omitted_parameter_wrappers(
+        functions.extend(lower_callable_omitted_parameter_wrappers(
             &symbol,
             &params,
             &patterns,
@@ -8593,7 +8643,7 @@ fn lower_class_methods(
             let unbound_symbol = unbound_class_method_symbol(&symbol);
             let unbound_params = params[receiver_offset..].to_vec();
             let unbound_context = Some((class_name.as_str(), method.is_static));
-            functions.extend(lower_class_default_wrappers(
+            functions.extend(lower_callable_default_wrappers(
                 &unbound_symbol,
                 &unbound_params,
                 &patterns,
@@ -8608,7 +8658,7 @@ fn lower_class_methods(
                 global_types,
                 immutable_globals,
             )?);
-            functions.extend(lower_class_omitted_parameter_wrappers(
+            functions.extend(lower_callable_omitted_parameter_wrappers(
                 &unbound_symbol,
                 &unbound_params,
                 &patterns,
