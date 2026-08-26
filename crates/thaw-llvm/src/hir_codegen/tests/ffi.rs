@@ -1172,11 +1172,14 @@ fn compiles_number_predicates_and_aggregate_numeric_conversion() {
             console.log(isNaN(many));
             console.log(isNaN({ value: 1 }));
             console.log(isNaN(await delayed("9")));
+            console.log(Number(...["12"]));
+            console.log(String(...[true]));
+            console.log(Boolean(...[0]));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "number_predicates"),
-        "true\nstrict-predicate-evaluated\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n0\n7\ntrue\ntrue\nawaited-predicate\nfalse\n"
+        "true\nstrict-predicate-evaluated\nfalse\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n0\n7\ntrue\ntrue\nawaited-predicate\nfalse\n12\ntrue\nfalse\n"
     );
 }
 

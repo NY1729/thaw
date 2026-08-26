@@ -1146,6 +1146,8 @@ The workspace crates have narrow responsibilities:
   covers ECMAScript whitespace, signs, decimal/exponent syntax, arbitrary-size
   hexadecimal/octal/binary input, infinities and `NaN` for invalid input, and
   works after an awaited string expression
+- `Number(...)`, `String(...)` and `Boolean(...)` accept their single value
+  through a statically sized tuple spread
 - Primitive `==` and `!=` implement JavaScript abstract equality conversion
   across number, string and boolean operands, including `NaN`, while preserving
   left-to-right single evaluation and awaited operands; same-typed values keep
