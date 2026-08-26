@@ -708,7 +708,22 @@ fn class_property_name(name: &PropName) -> Result<Symbol, String> {
     match name {
         PropName::Ident(name) => Ok(name.sym.to_string()),
         PropName::Str(name) => Ok(name.value.to_string_lossy().into_owned()),
+        PropName::Computed(computed) => match computed.expr.as_ref() {
+            Expr::Lit(Lit::Str(name)) => Ok(name.value.to_string_lossy().into_owned()),
+            _ => Err("native class computed members require a string-literal name".into()),
+        },
         _ => Err("native class members require an identifier or string-literal name".into()),
+    }
+}
+
+fn member_property_name(name: &MemberProp) -> Option<Symbol> {
+    match name {
+        MemberProp::Ident(name) => Some(name.sym.to_string()),
+        MemberProp::Computed(computed) => match computed.expr.as_ref() {
+            Expr::Lit(Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -10287,15 +10302,13 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        if let MemberProp::Ident(property) = &member.prop {
+        if let Some(property) = member_property_name(&member.prop) {
             if let Expr::Ident(receiver) = member.obj.as_ref() {
-                let field_symbol =
-                    class_static_field_symbol(receiver.sym.as_ref(), property.sym.as_ref());
+                let field_symbol = class_static_field_symbol(receiver.sym.as_ref(), &property);
                 if self.scope.contains_key(&field_symbol) {
                     return Ok(HirExpr::Var(field_symbol));
                 }
-                let static_symbol =
-                    class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                let static_symbol = class_getter_symbol(receiver.sym.as_ref(), &property, true);
                 if self.signatures.contains_key(&static_symbol) {
                     return Ok(HirExpr::Call(
                         Box::new(HirExpr::Var(static_symbol)),
@@ -10305,7 +10318,7 @@ impl<'a> FnLowerer<'a> {
                 let binding = self.resolve_binding(receiver.sym.as_ref());
                 if let Some(receiver_type) = self.scope.get(&binding).cloned() {
                     if let Some(class_name) = class_name_from_type(&receiver_type) {
-                        let symbol = class_getter_symbol(class_name, property.sym.as_ref(), false);
+                        let symbol = class_getter_symbol(class_name, &property, false);
                         if self.signatures.contains_key(&symbol) {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var(symbol)),
@@ -10639,53 +10652,62 @@ impl<'a> FnLowerer<'a> {
             SimpleAssignTarget::Ident(binding) => {
                 Ok(Target::Var(self.resolve_binding(binding.id.sym.as_ref())))
             }
-            SimpleAssignTarget::Member(member) => match &member.prop {
-                MemberProp::Computed(computed) => self.lower_computed_target(member, computed),
-                MemberProp::Ident(prop) => {
-                    if let Expr::Ident(class) = member.obj.as_ref() {
-                        let symbol =
-                            class_static_field_symbol(class.sym.as_ref(), prop.sym.as_ref());
-                        if self.scope.contains_key(&symbol) {
-                            return Ok(Target::Var(symbol));
-                        }
-                    }
-                    let obj = self.lower_expr(&member.obj)?;
-                    let obj_ty = self.infer_expr_type(&obj)?;
-                    match &obj_ty {
-                        HirType::Object(fields)
-                            if fields.iter().any(|(n, _)| n == prop.sym.as_str()) =>
-                        {
-                            Ok(Target::Prop(obj, obj_ty.clone(), prop.sym.to_string()))
-                        }
-                        other => Err(format!(
-                            "cannot assign to `.{}` on a value of type {other:?}",
-                            prop.sym
-                        )),
+            SimpleAssignTarget::Member(member) => {
+                if let (Expr::Ident(class), Some(property)) =
+                    (member.obj.as_ref(), member_property_name(&member.prop))
+                {
+                    let symbol = class_static_field_symbol(class.sym.as_ref(), &property);
+                    if self.scope.contains_key(&symbol) {
+                        return Ok(Target::Var(symbol));
                     }
                 }
-                _ => Err(
-                    "only `arr[i] = ...` / `obj.field = ...` member assignment is supported".into(),
-                ),
-            },
+                match &member.prop {
+                    MemberProp::Computed(computed) => self.lower_computed_target(member, computed),
+                    MemberProp::Ident(prop) => {
+                        if let Expr::Ident(class) = member.obj.as_ref() {
+                            let symbol =
+                                class_static_field_symbol(class.sym.as_ref(), prop.sym.as_ref());
+                            if self.scope.contains_key(&symbol) {
+                                return Ok(Target::Var(symbol));
+                            }
+                        }
+                        let obj = self.lower_expr(&member.obj)?;
+                        let obj_ty = self.infer_expr_type(&obj)?;
+                        match &obj_ty {
+                            HirType::Object(fields)
+                                if fields.iter().any(|(n, _)| n == prop.sym.as_str()) =>
+                            {
+                                Ok(Target::Prop(obj, obj_ty.clone(), prop.sym.to_string()))
+                            }
+                            other => Err(format!(
+                                "cannot assign to `.{}` on a value of type {other:?}",
+                                prop.sym
+                            )),
+                        }
+                    }
+                    _ => Err(
+                        "only `arr[i] = ...` / `obj.field = ...` member assignment is supported"
+                            .into(),
+                    ),
+                }
+            }
             _ => Err("unsupported assignment target".into()),
         }
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
         if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
-            if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
-                (member.obj.as_ref(), &member.prop)
+            if let (Expr::Ident(receiver), Some(property)) =
+                (member.obj.as_ref(), member_property_name(&member.prop))
             {
-                let getter =
-                    class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
-                let setter =
-                    class_setter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                let getter = class_getter_symbol(receiver.sym.as_ref(), &property, true);
+                let setter = class_setter_symbol(receiver.sym.as_ref(), &property, true);
                 let has_getter = self.signatures.contains_key(&getter);
                 let has_setter = self.signatures.contains_key(&setter);
                 if has_getter && !has_setter {
                     return Err(format!(
                         "cannot assign to readonly static member `{}.{}`",
-                        receiver.sym, property.sym
+                        receiver.sym, property
                     ));
                 }
                 if assign.op != AssignOp::Assign && has_setter {
@@ -10741,11 +10763,10 @@ impl<'a> FnLowerer<'a> {
                 return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
             }
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
-                if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
-                    (member.obj.as_ref(), &member.prop)
+                if let (Expr::Ident(receiver), Some(property)) =
+                    (member.obj.as_ref(), member_property_name(&member.prop))
                 {
-                    let static_symbol =
-                        class_setter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                    let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
                     let (symbol, receiver_argument) =
                         if self.signatures.contains_key(&static_symbol) {
                             (Some(static_symbol), None)
@@ -10753,7 +10774,7 @@ impl<'a> FnLowerer<'a> {
                             let binding = self.resolve_binding(receiver.sym.as_ref());
                             let instance_symbol = self.scope.get(&binding).and_then(|ty| {
                                 class_name_from_type(ty).map(|class_name| {
-                                    class_setter_symbol(class_name, property.sym.as_ref(), false)
+                                    class_setter_symbol(class_name, &property, false)
                                 })
                             });
                             match instance_symbol {
@@ -11224,24 +11245,22 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
         if let Expr::Member(member) = update.arg.as_ref() {
-            if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
-                (member.obj.as_ref(), &member.prop)
+            if let (Expr::Ident(receiver), Some(property)) =
+                (member.obj.as_ref(), member_property_name(&member.prop))
             {
-                let getter =
-                    class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                let getter = class_getter_symbol(receiver.sym.as_ref(), &property, true);
                 if let Some(getter_signature) = self.signatures.get(&getter).cloned() {
-                    let setter =
-                        class_setter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                    let setter = class_setter_symbol(receiver.sym.as_ref(), &property, true);
                     if !self.signatures.contains_key(&setter) {
                         return Err(format!(
                             "cannot update readonly static member `{}.{}`",
-                            receiver.sym, property.sym
+                            receiver.sym, property
                         ));
                     }
                     if getter_signature.ret != HirType::F64 {
                         return Err(format!(
                             "cannot apply ++/-- to non-number static member `{}.{}`",
-                            receiver.sym, property.sym
+                            receiver.sym, property
                         ));
                     }
                     let operator = match update.op {
@@ -11270,29 +11289,68 @@ impl<'a> FnLowerer<'a> {
         }
         let target = match update.arg.as_ref() {
             Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
-            Expr::Member(member) => match &member.prop {
-                MemberProp::Computed(computed) => self.lower_computed_target(member, computed)?,
-                MemberProp::Ident(prop) => {
-                    let object = self.lower_expr(&member.obj)?;
-                    let object_type = self.infer_expr_type(&object)?;
-                    match &object_type {
-                        HirType::Object(fields)
-                            if fields.iter().any(|(name, ty)| {
-                                name == prop.sym.as_str() && *ty == HirType::F64
-                            }) =>
-                        {
-                            Target::Prop(object, object_type, prop.sym.to_string())
+            Expr::Member(member) => {
+                if let (Expr::Ident(class), Some(property)) =
+                    (member.obj.as_ref(), member_property_name(&member.prop))
+                {
+                    let symbol = class_static_field_symbol(class.sym.as_ref(), &property);
+                    if self.scope.contains_key(&symbol) {
+                        Target::Var(symbol)
+                    } else {
+                        match &member.prop {
+                            MemberProp::Computed(computed) => {
+                                self.lower_computed_target(member, computed)?
+                            }
+                            MemberProp::Ident(prop) => {
+                                let object = self.lower_expr(&member.obj)?;
+                                let object_type = self.infer_expr_type(&object)?;
+                                match &object_type {
+                                    HirType::Object(fields)
+                                        if fields.iter().any(|(name, ty)| {
+                                            name == prop.sym.as_str() && *ty == HirType::F64
+                                        }) =>
+                                    {
+                                        Target::Prop(object, object_type, prop.sym.to_string())
+                                    }
+                                    _ => {
+                                        return Err(format!(
+                                            "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
+                                            prop.sym
+                                        ))
+                                    }
+                                }
+                            }
+                            _ => return Err("unsupported ++/-- target".into()),
                         }
-                        _ => {
-                            return Err(format!(
+                    }
+                } else {
+                    match &member.prop {
+                        MemberProp::Computed(computed) => {
+                            self.lower_computed_target(member, computed)?
+                        }
+                        MemberProp::Ident(prop) => {
+                            let object = self.lower_expr(&member.obj)?;
+                            let object_type = self.infer_expr_type(&object)?;
+                            match &object_type {
+                                HirType::Object(fields)
+                                    if fields.iter().any(|(name, ty)| {
+                                        name == prop.sym.as_str() && *ty == HirType::F64
+                                    }) =>
+                                {
+                                    Target::Prop(object, object_type, prop.sym.to_string())
+                                }
+                                _ => {
+                                    return Err(format!(
                                 "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
                                 prop.sym
                             ))
+                                }
+                            }
                         }
+                        _ => return Err("unsupported ++/-- target".into()),
                     }
                 }
-                _ => return Err("unsupported ++/-- target".into()),
-            },
+            }
             _ => return Err("unsupported ++/-- target".into()),
         };
         if let Target::Var(name) = &target {
@@ -13139,15 +13197,14 @@ impl<'a> FnLowerer<'a> {
         };
 
         if let Expr::Member(member) = callee_expr.as_ref() {
-            if let MemberProp::Ident(property) = &member.prop {
+            if let Some(property) = member_property_name(&member.prop) {
                 if let Expr::Ident(class) = member.obj.as_ref() {
                     let class_name = class.sym.as_ref();
-                    let symbol = class_static_method_symbol(class_name, property.sym.as_ref());
+                    let symbol = class_static_method_symbol(class_name, &property);
                     if let Some(signature) = self.signatures.get(&symbol).cloned() {
                         if call.type_args.is_some() {
                             return Err(format!(
-                                "native static method `{class_name}.{}` is not generic",
-                                property.sym
+                                "native static method `{class_name}.{property}` is not generic"
                             ));
                         }
                         if call.args.iter().any(|argument| argument.spread.is_some()) {
@@ -13158,8 +13215,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         if call.args.len() != signature.params.len() {
                             return Err(format!(
-                                "static method `{class_name}.{}` expects {} argument(s), got {}",
-                                property.sym,
+                                "static method `{class_name}.{property}` expects {} argument(s), got {}",
                                 signature.params.len(),
                                 call.args.len()
                             ));
@@ -13190,12 +13246,11 @@ impl<'a> FnLowerer<'a> {
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let class_name = class_name_from_type(&receiver_type)
                         .expect("the receiver was classified as a native class");
-                    let symbol = class_method_symbol(class_name, property.sym.as_ref());
+                    let symbol = class_method_symbol(class_name, &property);
                     if let Some(signature) = self.signatures.get(&symbol).cloned() {
                         if call.type_args.is_some() {
                             return Err(format!(
-                                "native class method `{class_name}.{}` is not generic",
-                                property.sym
+                                "native class method `{class_name}.{property}` is not generic"
                             ));
                         }
                         if call.args.iter().any(|argument| argument.spread.is_some()) {
@@ -13205,8 +13260,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         if call.args.len() + 1 != signature.params.len() {
                             return Err(format!(
-                                "method `{class_name}.{}` expects {} argument(s), got {}",
-                                property.sym,
+                                "method `{class_name}.{property}` expects {} argument(s), got {}",
                                 signature.params.len() - 1,
                                 call.args.len()
                             ));
@@ -13221,8 +13275,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
                     }
                     return Err(format!(
-                        "class `{class_name}` has no native method `{}`",
-                        property.sym
+                        "class `{class_name}` has no native method `{property}`"
                     ));
                 }
             }
@@ -20630,5 +20683,51 @@ mod tests {
             .position(|step| matches!(step, HirInitStep::StoreGlobal(name, _) if name == &result))
             .unwrap();
         assert!(result_index > value_index + 1);
+    }
+
+    #[test]
+    fn lowers_string_literal_computed_native_class_members() {
+        let program = lower(
+            r#"class Box {
+                ["value"]: number;
+                static ["count"]: number = 40;
+                constructor(value: number) { this["value"] = value; }
+                ["add"](delta: number): number { return this["value"] + delta; }
+                get ["current"](): number { return this["value"]; }
+                set ["current"](value: number) { this["value"] = value; }
+                static ["next"](): number { return ++Box["count"]; }
+            }
+            function main(): number {
+                const value = new Box(40);
+                value["current"] = value["add"](2);
+                return value["current"] + Box["next"]();
+            }"#,
+        );
+        for symbol in [
+            class_method_symbol("Box", "add"),
+            class_getter_symbol("Box", "current", false),
+            class_setter_symbol("Box", "current", false),
+            class_static_method_symbol("Box", "next"),
+        ] {
+            assert!(program
+                .functions
+                .iter()
+                .any(|function| function.name == symbol));
+        }
+    }
+
+    #[test]
+    fn rejects_dynamically_computed_native_class_members() {
+        let module = thaw_parser::parse_typescript(
+            r#"const key: string = "value";
+            class Box { [key]: number = 42; }
+            function main(): void {}"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("computed members require a string-literal name"),
+            "{error}"
+        );
     }
 }

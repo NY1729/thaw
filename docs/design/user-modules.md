@@ -77,7 +77,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Generic/abstract classes, private or computed members, class expressions, top-level
+Generic/abstract classes, private or dynamically computed members, class expressions, top-level
 declarations/statements outside the general HIR-supported subset, package multi-capture
 package export keys, and full ESM live bindings are outside the current typed AOT subset.
 Typed fixed-layout class declarations, including inheritance and named or anonymous default
