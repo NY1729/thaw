@@ -16735,6 +16735,13 @@ mod tests {
                 if (number) return { kind: "number", value: 8 };
                 return { kind: "text", value: "async" };
             }
+            function producedResults(): Result[] {
+                return [{ kind: "number", value: 9 }];
+            }
+            async function delayedResults(): Promise<Result[]> {
+                await sleep(1);
+                return [{ kind: "text", value: "returned" }];
+            }
             function consumeResults(results: Result[]): string {
                 for (const { kind, value } of results) {
                     if (kind === "number") return String(value + 4);
@@ -16777,6 +16784,19 @@ mod tests {
                     else console.log(item.value + " item");
                 }
                 console.log(consumeResults([{ kind: "text", value: "loop" }]));
+                for (const item of producedResults()) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + "!");
+                }
+                const producedAlias = producedResults();
+                for (const { kind, value } of producedAlias) {
+                    if (kind === "number") console.log(value + 2);
+                    else console.log(value + "!");
+                }
+                for (const { kind, value } of await delayedResults()) {
+                    if (kind === "number") console.log(value + 3);
+                    else console.log(value + "!");
+                }
                 const pendingResults: Promise<Result>[] = [result(true), result(false)];
                 for await (const { kind, value } of pendingResults) {
                     if (kind === "number") console.log(value + 3);
@@ -16786,7 +16806,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\nloop parameter\n11\nasync!\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\nloop parameter\n10\n11\nreturned!\n11\nasync!\n"
         );
     }
 

@@ -6915,6 +6915,7 @@ struct GenericInterfaces<'a> {
     function_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     function_interface_chains: HashMap<Symbol, Symbol>,
     function_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    function_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
 }
 
 impl GenericInterfaces<'_> {
@@ -7023,7 +7024,23 @@ fn array_element_union_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
 ) -> HashMap<Symbol, Vec<Option<HirLit>>> {
-    let Some(resolved) = resolve_plain_alias_type(ty, generic) else {
+    let raw = strip_parenthesized_ts_type(ty);
+    let unwrapped = if let TsType::TsTypeRef(reference) = raw {
+        if matches!(&reference.type_name, swc_ecma_ast::TsEntityName::Ident(name) if name.sym == *"Promise")
+        {
+            reference
+                .type_params
+                .as_ref()
+                .and_then(|arguments| arguments.params.first())
+                .map(AsRef::as_ref)
+                .unwrap_or(raw)
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
+    let Some(resolved) = resolve_plain_alias_type(unwrapped, generic) else {
         return HashMap::new();
     };
     let element = match resolved {
@@ -7392,6 +7409,13 @@ fn resolve_interfaces(
             generic
                 .function_discriminants
                 .insert(function.ident.sym.to_string(), discriminants);
+        }
+        let array_discriminants =
+            array_element_union_discriminants(&return_type.type_ann, &generic);
+        if !array_discriminants.is_empty() {
+            generic
+                .function_array_discriminants
+                .insert(function.ident.sym.to_string(), array_discriminants);
         }
     }
 
@@ -12136,6 +12160,19 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::TsConstAssertion(assertion) => {
                 self.expression_array_element_discriminants(&assertion.expr)
+            }
+            Expr::Await(awaited) => self.expression_array_element_discriminants(&awaited.arg),
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Ident(callee) = callee.as_ref() else {
+                    return None;
+                };
+                self.generic_interfaces
+                    .function_array_discriminants
+                    .get(callee.sym.as_ref())
+                    .cloned()
             }
             Expr::Cond(conditional) => {
                 let consequent = self.expression_array_element_discriminants(&conditional.cons)?;
