@@ -19280,6 +19280,44 @@ mod tests {
     }
 
     #[test]
+    fn infers_native_generic_classes_from_constructor_arguments() {
+        let source = r#"
+            class Box<T = string> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            class Pair<T, U> {
+                constructor(public first: T, public second: U) {}
+            }
+            class Values<T> {
+                constructor(public values: T[]) {}
+                first(): T { return this.values[0]; }
+            }
+            class RecordBox<T> {
+                constructor(public value: T) {}
+            }
+            function main(): void {
+                const number = new Box(42);
+                const text = new Box("ready");
+                const pair = new Pair("answer", 42);
+                const values = new Values([40, 42]);
+                const record = new RecordBox({ count: 42, label: "items" });
+                console.log(number.get());
+                console.log(text.get());
+                console.log(pair.first);
+                console.log(pair.second);
+                console.log(values.first());
+                console.log(record.value.count);
+                console.log(record.value.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_class_inference"),
+            "42\nready\nanswer\n42\n40\n42\nitems\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
