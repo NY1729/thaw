@@ -1594,7 +1594,9 @@ The workspace crates have narrow responsibilities:
   synchronous and asynchronous functions preserve the same service metadata
   in their direct or awaited fixed-object returns. Typed service factories,
   aliases and callback parameters preserve it across synchronous and
-  asynchronous function-value calls.
+  asynchronous function-value calls. Object destructuring carries typed
+  function properties into renamed or nested function locals and preserves
+  remaining properties in fixed-object rest values.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
