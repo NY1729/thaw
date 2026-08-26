@@ -19499,6 +19499,8 @@ mod tests {
                 collect<U>(first: U, ...rest: U[]): U { return rest[0]; }
                 keep<U>(ignored: U): T { return this.value; }
                 choose<U>(first: U, second: U): U { return second; }
+                viaThis(): string { return this.convert("this-call"); }
+                forwardThis<U>(value: U): U { return this.convert(value); }
                 withDefault<U = string>(value: number = 50): number { return value; }
                 async convertAsync<U>(value: U): Promise<U> { return value; }
                 static identity<U>(value: U): U { return value; }
@@ -19576,11 +19578,13 @@ mod tests {
                 console.log(staticComplete());
                 const staticAsyncBound = Box.identityAsync<string>.bind(box);
                 console.log(await staticAsyncBound("static-async-bound"));
+                console.log(box.viaThis());
+                console.log(box.forwardThis("nested-this-call"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\n"
         );
     }
 

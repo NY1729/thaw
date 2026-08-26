@@ -2645,6 +2645,7 @@ impl GenericClassMethodUseCollector<'_, '_> {
                     .and_then(class_name_from_type)
                     .map(str::to_owned)
             }),
+            Expr::This(_) => self.current_classes.last().cloned(),
             Expr::Paren(parenthesized) => self.receiver_class(&parenthesized.expr),
             Expr::TsAs(assertion) => self.receiver_class(&assertion.expr),
             Expr::TsTypeAssertion(assertion) => self.receiver_class(&assertion.expr),
