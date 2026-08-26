@@ -52,6 +52,73 @@ impl<'a> FnLowerer<'a> {
         }
         Ok(result)
     }
+
+    fn lower_primitive_conversion(
+        &mut self,
+        callee_name: &str,
+        value: HirExpr,
+        mut bindings: Vec<LoweredBinding>,
+    ) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        let result = if callee_name == "String" && ty == HirType::Str {
+            value
+        } else if callee_name == "String" && ty == HirType::Bool {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
+                vec![value],
+            )
+        } else if callee_name == "String" && ty == HirType::F64 {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
+                vec![value],
+            )
+        } else if callee_name == "String"
+            && matches!(
+                ty,
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+            )
+        {
+            self.coerce_primitive_to_string(value)?
+        } else if callee_name == "Boolean" && ty != HirType::Json {
+            let name = format!("__thaw_boolean_value_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            let converted = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
+            bindings.push((name, ty, value));
+            converted
+        } else if callee_name == "Number" && ty == HirType::F64 {
+            value
+        } else if callee_name == "Number" && ty == HirType::Bool {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
+                vec![value],
+            )
+        } else if callee_name == "Number" && ty == HirType::Str {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
+                vec![value],
+            )
+        } else if callee_name == "Number"
+            && matches!(
+                ty,
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
+            )
+        {
+            self.coerce_primitive_to_number(value)?
+        } else if ty != HirType::Json {
+            return Err(format!(
+                "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
+            ));
+        } else {
+            match callee_name {
+                "Number" => HirExpr::JsonAsNumber(Box::new(value)),
+                "String" => HirExpr::JsonAsString(Box::new(value)),
+                _ => HirExpr::JsonAsBool(Box::new(value)),
+            }
+        };
+        self.wrap_call_argument_bindings(result, &bindings)
+    }
+
     fn lower_native_spread_values(
         &mut self,
         arguments: &[swc_ecma_ast::ExprOrSpread],
@@ -3003,70 +3070,86 @@ impl<'a> FnLowerer<'a> {
         // this has to be resolved here at lowering time using the
         // argument's inferred type, not deferred to codegen.
         if matches!(callee_name.as_str(), "Number" | "String" | "Boolean") {
-            let (arguments, mut bindings) =
-                self.lower_native_spread_values(&call.args, &callee_name)?;
-            let [value] = arguments.as_slice() else {
+            let [arg] = call.args.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
-            let value = value.clone();
+            if arg.spread.is_some() {
+                let (arguments, bindings) =
+                    self.lower_native_spread_values(&call.args, &callee_name)?;
+                let [value] = arguments.as_slice() else {
+                    return Err(format!("`{callee_name}` expects exactly one argument"));
+                };
+                return self.lower_primitive_conversion(
+                    &callee_name,
+                    value.clone(),
+                    bindings,
+                );
+            }
+            let value = self.lower_expr(&arg.expr)?;
             let ty = self.infer_expr_type(&value)?;
-            let result = if callee_name == "String" && ty == HirType::Str {
-                value
-            } else if callee_name == "String" && ty == HirType::Bool {
-                HirExpr::Call(
+            if callee_name == "String" && ty == HirType::Str {
+                return Ok(value);
+            }
+            if callee_name == "String" && ty == HirType::Bool {
+                return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_bool_to_string".to_string())),
                     vec![value],
-                )
-            } else if callee_name == "String" && ty == HirType::F64 {
-                HirExpr::Call(
+                ));
+            }
+            if callee_name == "String" && ty == HirType::F64 {
+                return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_number_to_string".to_string())),
                     vec![value],
-                )
-            } else if callee_name == "String"
+                ));
+            }
+            if callee_name == "String"
                 && matches!(
                     ty,
                     HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
                 )
             {
-                self.coerce_primitive_to_string(value)?
-            } else if callee_name == "Boolean" && ty != HirType::Json {
+                return self.coerce_primitive_to_string(value);
+            }
+            if callee_name == "Boolean" && ty != HirType::Json {
                 let name = format!("__thaw_boolean_value_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
                 let converted = self.truthiness_expr(HirExpr::Var(name.clone()), &ty)?;
-                bindings.push((name, ty, value));
-                converted
-            } else if callee_name == "Number" && ty == HirType::F64 {
-                value
-            } else if callee_name == "Number" && ty == HirType::Bool {
-                HirExpr::Call(
+                return self.wrap_call_argument_bindings(converted, &[(name, ty, value)]);
+            }
+            if callee_name == "Number" && ty == HirType::F64 {
+                return Ok(value);
+            }
+            if callee_name == "Number" && ty == HirType::Bool {
+                return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_bool_to_number".to_string())),
                     vec![value],
-                )
-            } else if callee_name == "Number" && ty == HirType::Str {
-                HirExpr::Call(
+                ));
+            }
+            if callee_name == "Number" && ty == HirType::Str {
+                return Ok(HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_string_to_number".to_string())),
                     vec![value],
-                )
-            } else if callee_name == "Number"
+                ));
+            }
+            if callee_name == "Number"
                 && matches!(
                     ty,
                     HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
                 )
             {
-                self.coerce_primitive_to_number(value)?
-            } else if ty != HirType::Json {
+                return self.coerce_primitive_to_number(value);
+            }
+            if ty != HirType::Json {
                 return Err(format!(
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
                 ));
-            } else {
-                match callee_name.as_str() {
-                    "Number" => HirExpr::JsonAsNumber(Box::new(value)),
-                    "String" => HirExpr::JsonAsString(Box::new(value)),
-                    _ => HirExpr::JsonAsBool(Box::new(value)),
-                }
-            };
-            return self.wrap_call_argument_bindings(result, &bindings);
+            }
+            return Ok(match callee_name.as_str() {
+                "Number" => HirExpr::JsonAsNumber(Box::new(value)),
+                "String" => HirExpr::JsonAsString(Box::new(value)),
+                _ => HirExpr::JsonAsBool(Box::new(value)),
+            });
         }
 
         let mut signature = self.signatures.get(&callee_name).cloned();
