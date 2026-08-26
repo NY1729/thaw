@@ -598,8 +598,15 @@ The workspace crates have narrow responsibilities:
   growth. Standalone Memory, Global and Table values provide their standard
   construction, access and growth surface. Generic JavaScript import-object
   linkage, exported/imported tables and custom-section extraction remain the
-  next interoperability layer; WASI imports are handled separately by
-  `node:wasi`
+  next interoperability layer
+- `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
+  wasmi instances. `WASI` validates Preview1 args, environment and preopened
+  directories, exposes both `getImportObject()` and `wasiImport`, runs command
+  `_start` and reactor `_initialize` exports exactly once, retains memory
+  changes after `proc_exit`, and returns the exit status when `returnOnExit` is
+  enabled. Host stdio is inherited; when `returnOnExit` is disabled an embedded
+  WASI exit records `process.exitCode` rather than terminating the entire host
+  QuickJS runtime
 - QuickJS bundles expose `performance.timeOrigin` and elapsed-millisecond
   `performance.now()` values scoped to the shared JavaScript context
 - The Performance Timeline adds mark/measure entries, queries, clearing,
