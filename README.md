@@ -1579,7 +1579,8 @@ The workspace crates have narrow responsibilities:
   forms. Ordinary assignment preserves correlation for renamed and nested
   bindings, undefined-only defaults and object rest. Indexed reads from a
   tracked array retain the same metadata. Fixed object properties declared as
-  union arrays retain it through parameter boundaries and local object aliases.
+  union arrays retain it through parameter boundaries, local object aliases and
+  named synchronous or asynchronous function returns.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
