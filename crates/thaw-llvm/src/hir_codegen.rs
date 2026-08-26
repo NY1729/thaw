@@ -19008,6 +19008,27 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_implicit_derived_constructor_forwarding() {
+        let source = r#"
+            class Leaf extends Middle {}
+            class Middle extends Base {}
+            class Base {
+                constructor(public value: number, public label: string) {}
+                answer(): number { return this.value; }
+            }
+            function main(): void {
+                const value = new Leaf(42, "ready");
+                console.log(value.answer());
+                console.log(value.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "implicit_derived_constructor_forwarding"),
+            "42\nready\n"
+        );
+    }
+
+    #[test]
     fn frame_split_preserves_and_mutates_locals_across_awaits() {
         let source = r#"
             async function main(): Promise<void> {
