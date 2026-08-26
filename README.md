@@ -1354,13 +1354,15 @@ The workspace crates have narrow responsibilities:
   subset. Compatible declarations merge in source order, with duplicate
   member names and mixed native layouts rejected
 - The typed AOT class subset supports constructors, parameter properties,
-  instance fields and methods, accessors, static members, inheritance, `super`
+  instance fields and methods, accessors, initialized typed static fields and
+  static methods, inheritance, `super`
   calls, implicit derived-constructor forwarding and structural `implements`
   validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
   into one executable. Runtime class values, computed members, `new.target`,
-  constructor object returns and full JavaScript prototype mutation remain outside
-  that native fixed-layout model
+  constructor object returns, uninitialized static fields, inherited static-field
+  lookup and full JavaScript prototype mutation remain outside that native
+  fixed-layout model
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel
   collisions. Nullish coalescing and `??=` unwrap or update the payload with
