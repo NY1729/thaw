@@ -6972,6 +6972,7 @@ type ObjectArrayPropertyDiscriminants = HashMap<Vec<Symbol>, UnionDiscriminants>
 
 #[derive(Clone, PartialEq)]
 struct FunctionPropertyDiscriminants {
+    value: Option<UnionDiscriminants>,
     array: Option<UnionDiscriminants>,
     nested_array: NestedArrayDiscriminants,
     object: ObjectArrayPropertyDiscriminants,
@@ -7609,6 +7610,7 @@ fn object_function_property_discriminants(
                 continue;
             };
             prefix.push(name);
+            let value = function_return_discriminants(&annotation.type_ann, generic);
             let array = function_return_array_discriminants(&annotation.type_ann, generic);
             let nested_array =
                 function_return_nested_array_discriminants(&annotation.type_ann, generic);
@@ -7626,7 +7628,8 @@ fn object_function_property_discriminants(
                     &mut functions,
                 );
             }
-            if !array.is_empty()
+            if !value.is_empty()
+                || !array.is_empty()
                 || !nested_array.is_empty()
                 || !object.is_empty()
                 || !functions.is_empty()
@@ -7634,6 +7637,7 @@ fn object_function_property_discriminants(
                 result.insert(
                     prefix.clone(),
                     FunctionPropertyDiscriminants {
+                        value: (!value.is_empty()).then_some(value),
                         array: (!array.is_empty()).then_some(array),
                         nested_array,
                         object,
@@ -12836,6 +12840,9 @@ impl<'a> FnLowerer<'a> {
                             })
                             .or_else(|| self.expression_array_element_discriminants(&member.obj));
                     }
+                    return self
+                        .expression_called_function_property_discriminants(&callee)
+                        .and_then(|metadata| metadata.value);
                 }
                 let Expr::Ident(callee) = &callee else {
                     return None;
@@ -13130,6 +13137,11 @@ impl<'a> FnLowerer<'a> {
             Expr::OptChain(chain) => self.expression_function_nested_array_discriminants(
                 &ordinary_optional_chain_expression(chain),
             ),
+            Expr::Member(_) => self
+                .expression_called_function_property_discriminants(expression)
+                .and_then(|metadata| {
+                    (!metadata.nested_array.is_empty()).then_some(metadata.nested_array)
+                }),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_nested_array_discriminants(
                     &assertion.type_ann,
@@ -13408,6 +13420,7 @@ impl<'a> FnLowerer<'a> {
         &self,
         expression: &Expr,
     ) -> Option<FunctionPropertyDiscriminants> {
+        let value = self.expression_function_discriminants(expression);
         let array = self.expression_function_array_discriminants(expression);
         let nested_array = self
             .expression_function_nested_array_discriminants(expression)
@@ -13418,13 +13431,18 @@ impl<'a> FnLowerer<'a> {
         let functions = self
             .expression_function_object_function_property_discriminants(expression)
             .unwrap_or_default();
-        (array.is_some() || !nested_array.is_empty() || !object.is_empty() || !functions.is_empty())
-            .then_some(FunctionPropertyDiscriminants {
-                array,
-                nested_array,
-                object,
-                functions,
-            })
+        (value.is_some()
+            || array.is_some()
+            || !nested_array.is_empty()
+            || !object.is_empty()
+            || !functions.is_empty())
+        .then_some(FunctionPropertyDiscriminants {
+            value,
+            array,
+            nested_array,
+            object,
+            functions,
+        })
     }
 
     fn insert_object_literal_function_property(
@@ -13636,6 +13654,9 @@ impl<'a> FnLowerer<'a> {
             Expr::OptChain(chain) => {
                 self.expression_function_discriminants(&ordinary_optional_chain_expression(chain))
             }
+            Expr::Member(_) => self
+                .expression_called_function_property_discriminants(expression)
+                .and_then(|metadata| metadata.value),
             Expr::TsAs(assertion) => {
                 let metadata =
                     function_return_discriminants(&assertion.type_ann, self.generic_interfaces);
@@ -13689,6 +13710,9 @@ impl<'a> FnLowerer<'a> {
             Expr::OptChain(chain) => self.expression_function_array_discriminants(
                 &ordinary_optional_chain_expression(chain),
             ),
+            Expr::Member(_) => self
+                .expression_called_function_property_discriminants(expression)
+                .and_then(|metadata| metadata.array),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_array_discriminants(
                     &assertion.type_ann,
@@ -13750,6 +13774,9 @@ impl<'a> FnLowerer<'a> {
             Expr::OptChain(chain) => self.expression_function_object_array_property_discriminants(
                 &ordinary_optional_chain_expression(chain),
             ),
+            Expr::Member(_) => self
+                .expression_called_function_property_discriminants(expression)
+                .and_then(|metadata| (!metadata.object.is_empty()).then_some(metadata.object)),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_object_array_property_discriminants(
                     &assertion.type_ann,
@@ -13814,6 +13841,11 @@ impl<'a> FnLowerer<'a> {
                 .expression_function_object_function_property_discriminants(
                     &ordinary_optional_chain_expression(chain),
                 ),
+            Expr::Member(_) => self
+                .expression_called_function_property_discriminants(expression)
+                .and_then(|metadata| {
+                    (!metadata.functions.is_empty()).then_some(metadata.functions)
+                }),
             Expr::TsAs(assertion) => {
                 let metadata = function_return_object_function_property_discriminants(
                     &assertion.type_ann,
@@ -15884,9 +15916,17 @@ impl<'a> FnLowerer<'a> {
                         .insert(name.clone(), discriminants);
                 }
                 if let Some(discriminants) = function_discriminants {
+                    if let Some(value) = discriminants.value {
+                        self.function_value_discriminants
+                            .insert(name.clone(), value);
+                    }
                     if let Some(array) = discriminants.array {
                         self.function_value_array_discriminants
                             .insert(name.clone(), array);
+                    }
+                    if !discriminants.nested_array.is_empty() {
+                        self.function_value_nested_array_discriminants
+                            .insert(name.clone(), discriminants.nested_array);
                     }
                     if !discriminants.object.is_empty() {
                         self.function_value_object_array_property_discriminants
