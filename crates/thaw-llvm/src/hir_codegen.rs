@@ -16876,6 +16876,12 @@ mod tests {
             interface ArrayServiceBase { inheritedResults: Result[]; }
             interface LoaderServiceBase { inheritedLoad: ResultFactory; }
             interface HolderServiceBase { inheritedHolder: HolderFactory; }
+            interface GenericResultHolder<T> { results: T[]; }
+            interface GenericResultBase<T> { inheritedResults: T[]; }
+            interface GenericResultService<T> extends GenericResultBase<T> {
+                load: () => T[];
+                holder: () => GenericResultHolder<T>;
+            }
             async function result(number: boolean): Promise<Result> {
                 await sleep(1);
                 if (number) return { kind: "number", value: 8 };
@@ -16977,6 +16983,20 @@ mod tests {
                 for (const item of service.inheritedResults) {
                     if (item.kind === "number") return String(item.value + 12);
                     return item.value + " inherited array";
+                }
+                return "empty";
+            }
+            function consumeGenericHolder(holder: GenericResultHolder<Result>): string {
+                for (const item of holder.results) {
+                    if (item.kind === "number") return String(item.value + 200);
+                    return item.value + " generic holder";
+                }
+                return "empty";
+            }
+            function consumeGenericService(service: GenericResultService<Result>): string {
+                for (const item of service.load()) {
+                    if (item.kind === "number") return String(item.value + 201);
+                    return item.value + " generic load";
                 }
                 return "empty";
             }
@@ -17189,6 +17209,23 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 1);
                     else console.log(item.value + "!");
                 }
+                const genericService: GenericResultService<Result> = {
+                    inheritedResults: [{ kind: "text", value: "generic" }],
+                    load: producedResults,
+                    holder: producedHolder
+                };
+                console.log(consumeGenericHolder({
+                    results: [{ kind: "number", value: 18 }]
+                }));
+                console.log(consumeGenericService(genericService));
+                for (const item of genericService.inheritedResults) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + " inherited");
+                }
+                for (const item of genericService.holder().results) {
+                    if (item.kind === "number") console.log(item.value + 202);
+                    else console.log(item.value + " generic service holder");
+                }
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -17246,7 +17283,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n218\n210\ngeneric inherited\n216\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
