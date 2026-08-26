@@ -19528,6 +19528,7 @@ mod tests {
                 const tuple: [string] = ["tuple-spread"];
                 const restTuple: [number, number] = [52, 53];
                 const applyTuple: [number, number] = [56, 57];
+                const staticTuple: [string] = ["static-apply"];
                 console.log(box.convert<string>("converted"));
                 console.log(box.convert<number>(42));
                 console.log(box.convert("inferred"));
@@ -19564,11 +19565,16 @@ mod tests {
                 console.log(box.collect<number>.apply(box, applyTuple));
                 console.log(box.withDefault<number>.bind(box)());
                 console.log(box.collect<number>.bind(box, 58)(59));
+                console.log(Box.identity<string>.call(
+                    (console.log("static-this"), box),
+                    (console.log("static-arg"), "static-call")
+                ));
+                console.log(Box.identity<string>.apply(box, staticTuple));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\n"
         );
     }
 
