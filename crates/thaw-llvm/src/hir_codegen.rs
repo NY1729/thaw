@@ -1353,7 +1353,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Null => Ok(self.context.bool_type().into()),
-            HirType::Function(_, _) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            HirType::Function(_, _) | HirType::RestFunction(..) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::Optional(payload) => {
                 let payload = self.basic_type(payload)?;
@@ -5074,6 +5076,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::RecursiveClosure(name, ty, closure) => {
                 self.compile_recursive_closure(name, ty, closure)
             }
+            HirExpr::TypedClosure(_, closure) => self.compile_expr(closure),
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
             HirExpr::MethodRef(unbound, explicit, params, ret, is_static) => {
                 self.compile_method_ref(unbound, explicit, params, ret, *is_static)
@@ -9240,6 +9243,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Box::new(ret.clone()),
             )),
             HirExpr::RecursiveClosure(_, ty, _) => Some(ty.clone()),
+            HirExpr::TypedClosure(ty, _) => Some(ty.clone()),
             HirExpr::FunctionRef(_, params, ret) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
@@ -9254,6 +9258,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 match self.expr_hir_type(callee)? {
                     HirType::Function(_, ret) => Some(*ret),
+                    HirType::RestFunction(_, _, ret) => Some(*ret),
                     _ => None,
                 }
             }
@@ -9472,6 +9477,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     ret.as_ref(),
                     args,
                     "function expression",
+                );
+            }
+            if let Some(HirType::RestFunction(mut params, rest, ret)) = self.expr_hir_type(callee) {
+                params.push(HirType::Array(rest));
+                return self.compile_closure_call(
+                    callee,
+                    &params,
+                    ret.as_ref(),
+                    args,
+                    "rest function expression",
                 );
             }
             return Err("call target is not a compiled function value".to_string());
@@ -10059,6 +10074,12 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         if let Some(HirType::Function(params, ret)) = self.variable_hir_types.get(name).cloned() {
+            return self.compile_closure_call(callee, &params, &ret, args, name);
+        }
+        if let Some(HirType::RestFunction(mut params, rest, ret)) =
+            self.variable_hir_types.get(name).cloned()
+        {
+            params.push(HirType::Array(rest));
             return self.compile_closure_call(callee, &params, &ret, args, name);
         }
 
@@ -13826,6 +13847,66 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "mutable_captured_arrow"),
             "41\n42\n42\n"
+        );
+    }
+
+    #[test]
+    fn calls_rest_function_values_across_typed_boundaries() {
+        let source = r#"
+            interface Holder { run: (prefix: string, ...values: string[]) => string; }
+            function pass(
+                callback: (prefix: string, ...values: string[]) => string
+            ): (prefix: string, ...values: string[]) => string {
+                return callback;
+            }
+            function main(): void {
+                const combine: (prefix: string, ...values: string[]) => string =
+                    (prefix: string, ...values: string[]): string =>
+                        prefix + values.join("|");
+                const through = pass(combine);
+                const holder: Holder = { run: through };
+                const tail: [string, string] = ["b", "c"];
+                const applied: [string, string, string] = ["apply:", "x", "y"];
+                const bound = through.bind(null, "bound:", "a");
+                console.log(through("values:", "a", ...tail));
+                console.log(through("empty:"));
+                console.log(holder.run("object:", ...tail));
+                console.log(through.call(null, "call:", "x", "y"));
+                console.log(through.apply(null, applied));
+                console.log(bound("b", "c"));
+                console.log(bound.call("ignored", "d"));
+                console.log(through.bind(null, "immediate:", "a")("b"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "rest_function_boundary"),
+            "values:a|b|c\nempty:\nobject:b|c\ncall:x|y\napply:x|y\nbound:a|b|c\nbound:a|d\nimmediate:a|b\n"
+        );
+    }
+
+    #[test]
+    fn calls_async_rest_function_values_across_typed_boundaries() {
+        let source = r#"
+            async function collect(
+                prefix: string, ...values: string[]
+            ): Promise<string> {
+                await sleep(1);
+                return prefix + values.join("|");
+            }
+            function passAsync(
+                callback: (prefix: string, ...values: string[]) => Promise<string>
+            ): (prefix: string, ...values: string[]) => Promise<string> {
+                return callback;
+            }
+            async function main(): Promise<void> {
+                const through = passAsync(collect);
+                console.log(await through.call(null, "call:", "a", "b"));
+                console.log(await through.bind(null, "bound:", "a")("b", "c"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "async_rest_function_boundary"),
+            "call:a|b\nbound:a|b|c\n"
         );
     }
 
