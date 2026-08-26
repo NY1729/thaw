@@ -1412,7 +1412,9 @@ The workspace crates have narrow responsibilities:
   methods with the same canonical parameter, result, constraint, default, optional and
   async shape; type-parameter spelling may differ. Generic calls through `super` are
   specialized after the enclosing generic method, so inferred and explicit nested type
-  arguments resolve against the concrete outer specialization.
+  arguments resolve against the concrete outer specialization. Explicit generic method
+  instantiation expressions can be followed by `.bind(thisArg)` to produce a typed native
+  closure; the lookup target and bound receiver are each evaluated once in JavaScript order.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
