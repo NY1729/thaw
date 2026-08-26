@@ -5253,10 +5253,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_insert_block()
             .and_then(|block| block.get_parent())
             .ok_or("dynamic property access is outside a function")?;
-        let source = fields
-            .first()
-            .map(|(_, ty)| ty)
-            .ok_or("dynamic property access requires at least one field")?;
+        if fields.is_empty() {
+            return Err("dynamic property access requires at least one field".into());
+        }
         let result_type = self.basic_type(result)?;
         let result_slot = self
             .builder
@@ -5265,7 +5264,22 @@ impl<'ctx> HirCompiler<'ctx> {
         let none = match result {
             HirType::Optional(payload) => self.compile_optional_none(payload)?,
             HirType::Nullish(payload) => self.compile_nullish_none(payload, 2)?,
-            _ => return Err("dynamic property access requires an optional result".into()),
+            HirType::Union(elements) => {
+                let index = elements
+                    .iter()
+                    .position(|element| element == &HirType::Undefined)
+                    .ok_or("dynamic property union result needs an undefined member")?;
+                self.build_union_value(
+                    self.context.bool_type().const_zero().into(),
+                    index,
+                    elements,
+                )?
+            }
+            _ => {
+                return Err(
+                    "dynamic property access requires an optional, nullish, or union result".into(),
+                )
+            }
         };
         self.builder
             .build_store(result_slot, none)
@@ -5273,7 +5287,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let merge = self
             .context
             .append_basic_block(function, "dynamic_property_merge");
-        for (index, (name, _)) in fields.iter().enumerate() {
+        for (index, (name, source)) in fields.iter().enumerate() {
             let matched = self
                 .context
                 .append_basic_block(function, "dynamic_property_match");
@@ -5370,6 +5384,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     if source == result_payload.as_ref() =>
                 {
                     self.build_optional_value(value, source, true)?
+                }
+                (source, HirType::Union(elements)) => {
+                    let index = elements
+                        .iter()
+                        .position(|element| element == source)
+                        .ok_or("dynamic property field is missing from its union result")?;
+                    self.build_union_value(value, index, elements)?
                 }
                 _ => {
                     return Err(
@@ -5481,7 +5502,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_bit_cast(value, self.context.i64_type(), "union_float_bits")
                 .map_err(|error| error.to_string())?
                 .into_int_value(),
-            (HirType::Bool, BasicValueEnum::IntValue(value)) => self
+            (HirType::Bool | HirType::Undefined, BasicValueEnum::IntValue(value)) => self
                 .builder
                 .build_int_z_extend(value, self.context.i64_type(), "union_bool_bits")
                 .map_err(|error| error.to_string())?,
@@ -5521,7 +5542,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_bit_cast(payload, self.context.f64_type(), "union_float")
                 .map_err(|error| error.to_string()),
-            HirType::Bool => self
+            HirType::Bool | HirType::Undefined => self
                 .builder
                 .build_int_truncate(payload, self.context.bool_type(), "union_bool")
                 .map(Into::into)
@@ -12818,6 +12839,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
             }
+            HirType::Undefined => {
+                let undefined = self
+                    .builder
+                    .build_global_string_ptr("undefined", "union_undefined")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[undefined.as_pointer_value().into()],
+                        "puts_union_undefined",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             HirType::Object(_) | HirType::Json | HirType::Array(_) | HirType::Function(_, _) => {
                 let object = self
                     .builder
@@ -14966,6 +15000,35 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "dynamic_computed_properties"),
             "object\nkey\n2\nundefined\nasync-key\n1\n"
+        );
+    }
+
+    #[test]
+    fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
+        let source = r#"
+            function read(key: string): number | string | undefined {
+                const mixed = { value: 41, label: "thaw" };
+                return mixed[key];
+            }
+            function print(key: string): void {
+                const value = read(key);
+                if (typeof value === "number") {
+                    console.log(value + 1);
+                } else if (typeof value === "string") {
+                    console.log(value + "!");
+                } else {
+                    console.log(value);
+                }
+            }
+            function main(): void {
+                print("value");
+                print("label");
+                print("missing");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "dynamic_heterogeneous_properties"),
+            "42\nthaw!\nundefined\n"
         );
     }
 
