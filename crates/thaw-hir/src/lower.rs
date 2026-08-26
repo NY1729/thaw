@@ -20364,6 +20364,10 @@ impl<'a> FnLowerer<'a> {
                     let mut expression = self.lower_expr(expr)?;
                     let mut inferred = self.infer_expr_type(&expression)?;
                     if arrow.is_async {
+                        if let HirExpr::AwaitPromise(promise, resolved) = expression {
+                            expression = *promise;
+                            inferred = HirType::Promise(Box::new(resolved));
+                        }
                         let resolved = declared_async_result.clone().unwrap_or_else(|| {
                             if let HirType::Promise(inner) = &inferred {
                                 inner.as_ref().clone()
