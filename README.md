@@ -129,7 +129,8 @@ The workspace crates have narrow responsibilities:
   same dependency-ordered, exactly-once initializer sequence
 - Nested object/array destructuring in module-scoped declarations evaluates its
   source once, creates typed globals for each binding, and can export/import those
-  bindings across bundled files; top-level destructuring defaults/rest remain explicit errors
+  bindings across bundled files. Default initializers, homogeneous-array rest slices,
+  and fixed-shape object rest copies are supported in the same path
 - An uncaught exception from registry/native/module initialization stops later
   initializers, skips `main` or the Lambda polling loop, and makes the native
   process exit unsuccessfully instead of running user code with a pending error

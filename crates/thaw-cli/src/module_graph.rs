@@ -456,6 +456,16 @@ impl VisitMut for RenameReferences<'_> {
         }
     }
 
+    fn visit_mut_ts_property_signature(
+        &mut self,
+        property: &mut thaw_parser::ast::TsPropertySignature,
+    ) {
+        if property.computed {
+            property.key.visit_mut_with(self);
+        }
+        property.type_ann.visit_mut_with(self);
+    }
+
     fn visit_mut_fn_decl(&mut self, function: &mut thaw_parser::ast::FnDecl) {
         function.function.visit_mut_with(self);
         if self.function_depth == 0 {
