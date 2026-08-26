@@ -19699,6 +19699,30 @@ mod tests {
     }
 
     #[test]
+    fn calls_extracted_this_independent_native_methods() {
+        let source = r#"
+            class Operations {
+                pass(value: string): string { return value; }
+                async passAsync(value: string): Promise<string> { return value; }
+                static double(value: number): number { return value * 2; }
+            }
+            async function main(): Promise<void> {
+                const operations = new Operations();
+                const pass = operations.pass;
+                const passAsync = operations.passAsync;
+                const double = Operations.double;
+                console.log(pass("instance-reference"));
+                console.log(await passAsync("async-reference"));
+                console.log(double(21));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "extracted_native_method_values"),
+            "instance-reference\nasync-reference\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
