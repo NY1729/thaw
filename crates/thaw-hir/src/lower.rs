@@ -9000,6 +9000,7 @@ fn lower_ts_type(
                             | HirType::Tuple(_)
                             | HirType::Object(_)
                             | HirType::Function(_, _)
+                            | HirType::Undefined
                     )
                 })
             {
@@ -16988,10 +16989,41 @@ impl<'a> FnLowerer<'a> {
                         };
                         let payload = payload.clone();
                         if fields.iter().any(|(_, ty)| ty != &payload) {
-                            return Err(
-                                "dynamic object index requires every field to have the same type"
-                                    .into(),
-                            );
+                            if fields.iter().any(|(_, ty)| {
+                                !matches!(
+                                    ty,
+                                    HirType::F64
+                                        | HirType::I64
+                                        | HirType::Bool
+                                        | HirType::Str
+                                        | HirType::Json
+                                        | HirType::JsValue
+                                        | HirType::Array(_)
+                                        | HirType::Tuple(_)
+                                        | HirType::Object(_)
+                                        | HirType::Function(_, _)
+                                )
+                            }) {
+                                return Err(
+                                    "dynamic heterogeneous object index requires untagged union-compatible fields"
+                                        .into(),
+                                );
+                            }
+                            let mut members = Vec::new();
+                            for (_, ty) in &fields {
+                                if !members.contains(ty) {
+                                    members.push(ty.clone());
+                                }
+                            }
+                            members.push(HirType::Undefined);
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.expect_type(&HirType::Str, &key, "computed object key")?;
+                            return Ok(HirExpr::DynamicPropAccess(
+                                Box::new(obj),
+                                Box::new(key),
+                                fields,
+                                HirType::Union(members),
+                            ));
                         }
                         let result = match &payload {
                             HirType::Optional(inner) => HirType::Optional(inner.clone()),
@@ -24897,17 +24929,38 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_computed_object_reads_require_uniform_fields() {
-        let module = thaw_parser::parse_typescript(
-            r#"function read(key: string): number | undefined {
+    fn dynamic_computed_object_reads_form_heterogeneous_unions() {
+        let program = lower(
+            r#"function read(key: string): number | string | undefined {
                 const mixed = { value: 1, label: "one" };
                 return mixed[key];
             }"#,
+        );
+        let HirStmt::Return(Some(HirExpr::DynamicPropAccess(_, _, fields, result))) =
+            &program.functions[0].body[1]
+        else {
+            panic!("expected a dynamic property union return");
+        };
+        assert_eq!(fields[0].1, HirType::F64);
+        assert_eq!(fields[1].1, HirType::Str);
+        assert_eq!(
+            result,
+            &HirType::Union(vec![HirType::F64, HirType::Str, HirType::Undefined])
+        );
+    }
+
+    #[test]
+    fn dynamic_computed_object_reads_reject_tagged_heterogeneous_fields() {
+        let module = thaw_parser::parse_typescript(
+            r#"function read(
+                mixed: { value: number | undefined; label: string },
+                key: string
+            ): void { console.log(mixed[key]); }"#,
         )
         .unwrap();
         assert!(lower_module(&module)
             .unwrap_err()
-            .contains("requires every field to have the same type"));
+            .contains("requires untagged union-compatible fields"));
     }
 
     #[test]

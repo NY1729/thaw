@@ -1915,9 +1915,12 @@ an identifier or assign each element to an existing same-typed variable.
 accepts synchronous typed arrays, and routes rejection to async `try/catch`.
 `for...in` evaluates a fixed-shape object once and enumerates its statically
 known keys in layout order, with declaration/assignment heads and async bodies.
-Dynamic indexed reads such as `object[key]` now work for uniform untagged
-fixed-shape objects. Heterogeneous and already-nullable field sets remain a
-separate typed-union problem.
+Dynamic indexed reads such as `object[key]` work for uniform fixed-shape
+objects and return a flattened optional/nullish value. Heterogeneous untagged
+fields produce a tagged union of the distinct field types plus `undefined`;
+ordinary `typeof` control-flow narrowing can consume that result. Mixing
+already-tagged nullable/optional fields with other field layouts remains
+outside this path.
 `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
