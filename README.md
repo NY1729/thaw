@@ -1541,7 +1541,10 @@ The workspace crates have narrow responsibilities:
   field union, and evaluates the receiver once. A `typeof value.property`
   comparison narrows the original object union when the member field types
   have distinct JavaScript runtime categories, including through terminating
-  guards and async callers. Literal-valued discriminants such as
+  guards and async callers. Shared fields that themselves contain general,
+  optional, nullable or three-state nullish unions are recursively flattened
+  into one runtime tag space; object literals are structurally coerced into
+  the selected union member before injection. Literal-valued discriminants such as
   `value.kind === "success"` still require preservation of literal types and
   remain outside the current narrowing subset
 - Automatic exception propagation through external C calls that use the legacy
