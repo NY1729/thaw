@@ -18642,6 +18642,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compiles_and_runs_native_class_getters() {
+        let source = r#"
+            class Box {
+                value: number;
+                constructor(value: number) { this.value = value; }
+                get doubled(): number { return this.value * 2; }
+                static get version(): string { return "v1"; }
+            }
+            function main(): void {
+                const box = new Box(21);
+                console.log(box.doubled);
+                console.log(Box.version);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "native_class_getters"), "42\nv1\n");
+    }
+
     /// Same mechanism, but through the Lambda `handler` entry point instead
     /// of `main` (`emit_lambda_entry` has its own copy of the
     /// `call_module_init_if_present` call, see hir_codegen.rs).
