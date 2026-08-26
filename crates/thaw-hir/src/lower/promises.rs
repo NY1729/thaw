@@ -201,10 +201,23 @@ impl<'a> FnLowerer<'a> {
         let [executor] = args else {
             return Err("`new Promise<T>` expects exactly one executor".into());
         };
-        if executor.spread.is_some() {
-            return Err("Promise executor spread is not supported".into());
-        }
-        let inferred_resolve = self.infer_promise_constructor_type(&executor.expr);
+        let (spread_executor, spread_bindings) = if executor.spread.is_some() {
+            let (executors, bindings) =
+                self.lower_native_spread_values(args, "Promise executor")?;
+            let [executor] = executors.as_slice() else {
+                return Err(
+                    "`new Promise<T>` expects exactly one executor after spread expansion".into(),
+                );
+            };
+            (Some(executor.clone()), bindings)
+        } else {
+            (None, Vec::new())
+        };
+        let inferred_resolve = if let Some(executor) = &spread_executor {
+            self.infer_promise_constructor_value_type(executor)
+        } else {
+            self.infer_promise_constructor_type(&executor.expr)
+        };
         let (resolved, assimilates) = if let Some(type_args) = &new_expr.type_args {
             let [resolved] = type_args.params.as_slice() else {
                 return Err("`new Promise` requires exactly one type argument".into());
@@ -230,20 +243,60 @@ impl<'a> FnLowerer<'a> {
         };
         let resolve = HirType::Function(resolve_value, Box::new(HirType::Void));
         let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
-        let arity = self.callback_parameter_count(&executor.expr, "Promise executor")?;
+        let arity = if let Some(executor) = &spread_executor {
+            match self.infer_expr_type(executor)? {
+                HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _) => {
+                    params.len()
+                }
+                _ => return Err("Promise executor is not a function value".into()),
+            }
+        } else {
+            self.callback_parameter_count(&executor.expr, "Promise executor")?
+        };
         if arity > 2 {
             return Err(format!(
                 "Promise executor accepts at most two parameters, got {arity}"
             ));
         }
         let available = [resolve, reject];
-        let executor =
-            self.lower_promise_callback(&executor.expr, &available[..arity], Some(&HirType::Void))?;
-        Ok(HirExpr::PromiseNew(
+        let executor = if let Some(executor) = spread_executor {
+            self.validate_promise_callback_value(
+                &executor,
+                &available[..arity],
+                Some(&HirType::Void),
+            )?;
+            executor
+        } else {
+            self.lower_promise_callback(
+                &executor.expr,
+                &available[..arity],
+                Some(&HirType::Void),
+            )?
+        };
+        let result = HirExpr::PromiseNew(
             Box::new(executor),
             resolved,
             assimilates,
-        ))
+        );
+        self.wrap_call_argument_bindings(result, &spread_bindings)
+    }
+
+    fn infer_promise_constructor_value_type(
+        &mut self,
+        executor: &HirExpr,
+    ) -> Result<HirType, String> {
+        let (params, _) = match self.infer_expr_type(executor)? {
+            HirType::Function(params, ret) => (params, ret),
+            HirType::CallableFunction(params, _, _, ret) => (params, ret),
+            _ => return Err("cannot infer Promise type from executor function".into()),
+        };
+        let Some(HirType::Function(resolve_params, _)) = params.first() else {
+            return Err("cannot infer Promise type from executor resolve parameter".into());
+        };
+        let [resolved] = resolve_params.as_slice() else {
+            return Err("Promise resolve callback must take exactly one value".into());
+        };
+        Ok(resolved.clone())
     }
 
     fn infer_promise_constructor_type(&mut self, executor: &Expr) -> Result<HirType, String> {
