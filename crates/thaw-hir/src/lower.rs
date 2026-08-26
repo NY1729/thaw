@@ -730,6 +730,13 @@ fn class_getter_symbol(class: &str, property: &str, is_static: bool) -> Symbol {
     )
 }
 
+fn class_setter_symbol(class: &str, property: &str, is_static: bool) -> Symbol {
+    format!(
+        "__thaw_class_{class}_{}_setter_{property}",
+        if is_static { "static" } else { "instance" }
+    )
+}
+
 fn class_name_from_type(ty: &HirType) -> Option<&str> {
     let HirType::Object(fields) = ty else {
         return None;
@@ -1032,7 +1039,10 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     let ClassMember::Method(method) = member else {
                         continue;
                     };
-                    if !matches!(method.kind, MethodKind::Method | MethodKind::Getter) {
+                    if !matches!(
+                        method.kind,
+                        MethodKind::Method | MethodKind::Getter | MethodKind::Setter
+                    ) {
                         continue;
                     }
                     if method.function.type_params.is_some() || method.function.is_generator {
@@ -1045,6 +1055,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     if method.kind == MethodKind::Getter && !method.function.params.is_empty() {
                         return Err(format!(
                             "class `{name}` getter `{method_name}` cannot accept parameters"
+                        ));
+                    }
+                    if method.kind == MethodKind::Setter && method.function.params.len() != 1 {
+                        return Err(format!(
+                            "class `{name}` setter `{method_name}` requires exactly one parameter"
                         ));
                     }
                     let mut params = if method.is_static {
@@ -1069,20 +1084,32 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     );
-                    let ret = lower_fn_return_type(
-                        method.function.is_async,
-                        &method.function.return_type,
-                        &format!("{name}.{method_name}"),
-                        &interfaces,
-                        &generic_interfaces,
-                        &HashMap::new(),
-                    )?;
-                    let symbol = if method.kind == MethodKind::Getter {
-                        class_getter_symbol(&name, &method_name, method.is_static)
-                    } else if method.is_static {
-                        class_static_method_symbol(&name, &method_name)
+                    let ret = if method.kind == MethodKind::Setter {
+                        params
+                            .last()
+                            .expect("a setter has one declared value parameter")
+                            .clone()
                     } else {
-                        class_method_symbol(&name, &method_name)
+                        lower_fn_return_type(
+                            method.function.is_async,
+                            &method.function.return_type,
+                            &format!("{name}.{method_name}"),
+                            &interfaces,
+                            &generic_interfaces,
+                            &HashMap::new(),
+                        )?
+                    };
+                    let symbol = match method.kind {
+                        MethodKind::Getter => {
+                            class_getter_symbol(&name, &method_name, method.is_static)
+                        }
+                        MethodKind::Setter => {
+                            class_setter_symbol(&name, &method_name, method.is_static)
+                        }
+                        MethodKind::Method if method.is_static => {
+                            class_static_method_symbol(&name, &method_name)
+                        }
+                        MethodKind::Method => class_method_symbol(&name, &method_name),
                     };
                     if signatures.contains_key(&symbol) {
                         return Err(format!(
@@ -3367,16 +3394,20 @@ fn lower_class_methods(
         let ClassMember::Method(method) = member else {
             continue;
         };
-        if !matches!(method.kind, MethodKind::Method | MethodKind::Getter) {
+        if !matches!(
+            method.kind,
+            MethodKind::Method | MethodKind::Getter | MethodKind::Setter
+        ) {
             continue;
         }
         let method_name = class_property_name(&method.key)?;
-        let symbol = if method.kind == MethodKind::Getter {
-            class_getter_symbol(&class_name, &method_name, method.is_static)
-        } else if method.is_static {
-            class_static_method_symbol(&class_name, &method_name)
-        } else {
-            class_method_symbol(&class_name, &method_name)
+        let symbol = match method.kind {
+            MethodKind::Getter => class_getter_symbol(&class_name, &method_name, method.is_static),
+            MethodKind::Setter => class_setter_symbol(&class_name, &method_name, method.is_static),
+            MethodKind::Method if method.is_static => {
+                class_static_method_symbol(&class_name, &method_name)
+            }
+            MethodKind::Method => class_method_symbol(&class_name, &method_name),
         };
         let signature = &signatures[&symbol];
         let mut params = if method.is_static {
@@ -3430,12 +3461,18 @@ fn lower_class_methods(
                 .or_default()
                 .push("__thaw_this".into());
         }
+        let mut lowered_body = lowerer.lower_stmts(&body.stmts)?;
+        if method.kind == MethodKind::Setter {
+            lowered_body.push(HirStmt::Return(Some(HirExpr::Var(
+                params.last().expect("setter value parameter").name.clone(),
+            ))));
+        }
         functions.push(HirFunction {
             name: symbol,
             params,
             ret: signature.ret.clone(),
             is_async: signature.is_async,
-            body: lowerer.lower_stmts(&body.stmts)?,
+            body: lowered_body,
         });
     }
     Ok(functions)
@@ -9841,6 +9878,45 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        if assign.op == AssignOp::Assign {
+            if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
+                if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
+                    (member.obj.as_ref(), &member.prop)
+                {
+                    let static_symbol =
+                        class_setter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                    let (symbol, receiver_argument) =
+                        if self.signatures.contains_key(&static_symbol) {
+                            (Some(static_symbol), None)
+                        } else {
+                            let binding = self.resolve_binding(receiver.sym.as_ref());
+                            let instance_symbol = self.scope.get(&binding).and_then(|ty| {
+                                class_name_from_type(ty).map(|class_name| {
+                                    class_setter_symbol(class_name, property.sym.as_ref(), false)
+                                })
+                            });
+                            match instance_symbol {
+                                Some(symbol) if self.signatures.contains_key(&symbol) => {
+                                    (Some(symbol), Some(HirExpr::Var(binding)))
+                                }
+                                _ => (None, None),
+                            }
+                        };
+                    if let Some(symbol) = symbol {
+                        let signature = self.signatures[&symbol].clone();
+                        let value_index = usize::from(receiver_argument.is_some());
+                        let rhs = self.lower_expr(&assign.right)?;
+                        let rhs = self.coerce_to_declared(&signature.params[value_index], rhs)?;
+                        let mut args = Vec::with_capacity(value_index + 1);
+                        if let Some(receiver) = receiver_argument {
+                            args.push(receiver);
+                        }
+                        args.push(rhs);
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                    }
+                }
+            }
+        }
         if let AssignTarget::Pat(pattern) = &assign.left {
             if assign.op != AssignOp::Assign {
                 return Err("destructuring only supports simple `=` assignment".into());
@@ -19035,5 +19111,50 @@ mod tests {
         let body = format!("{:?}", main.body);
         assert!(body.contains("__thaw_class_Box_static_getter_version"));
         assert!(body.contains("__thaw_class_Box_instance_getter_doubled"));
+    }
+
+    #[test]
+    fn lowers_native_class_setters_and_preserves_assignment_values() {
+        let program = lower(
+            r#"let version: number = 0;
+            class Box {
+                stored: number;
+                constructor(value: number) { this.stored = value; }
+                set value(next: number) { this.stored = next; }
+                static set current(next: number) { version = next; }
+            }
+            function main(): number {
+                const box = new Box(1);
+                const assigned = (box.value = 40);
+                const selected = (Box.current = 2);
+                return assigned + selected + version;
+            }"#,
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "__thaw_class_Box_instance_setter_value"));
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "__thaw_class_Box_static_setter_current"));
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("__thaw_class_Box_instance_setter_value"));
+        assert!(body.contains("__thaw_class_Box_static_setter_current"));
+        let setter = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Box_instance_setter_value")
+            .unwrap();
+        assert_eq!(setter.ret, HirType::F64);
+        assert!(matches!(
+            setter.body.last(),
+            Some(HirStmt::Return(Some(HirExpr::Var(name)))) if name == "next"
+        ));
     }
 }
