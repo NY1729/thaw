@@ -1548,10 +1548,11 @@ The workspace crates have narrow responsibilities:
   and locals also retain non-ABI literal metadata from inline or aliased object
   unions. Direct, reversed, negated and strict-not-equal comparisons against
   string, number or boolean discriminants narrow the complete object, including
-  terminating guards and values returned through async functions. Propagating
-  literal-discriminant metadata through unannotated inferred bindings,
-  destructuring and arbitrary function-value boundaries remains outside this
-  subset
+  terminating guards and values returned through async functions. Metadata
+  propagates through unannotated identifier aliases, type assertions,
+  conditionals, annotated function returns and their synchronous or awaited
+  call results. Destructuring and arbitrary function-value boundaries remain
+  outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
