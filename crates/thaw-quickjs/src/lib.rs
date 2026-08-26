@@ -604,6 +604,8 @@ struct WasmJsImport {
 struct WasmInstance {
     store: WasmStore<WasmStoreData>,
     instance: wasmi::Instance,
+    imported_memories: HashMap<String, WasmMemory>,
+    imported_globals: HashMap<String, wasmi::Global>,
 }
 
 struct StandaloneWasmMemory {
@@ -819,6 +821,8 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                 Some(((value.get("module")?.as_str()?.to_string(), value.get("name")?.as_str()?.to_string()), u32::try_from(value.get("handle")?.as_u64()?).ok()?))
             })
             .collect::<HashMap<_, _>>();
+        let memory_imports = wasm_linkage_values(&linkage, "memories");
+        let global_imports = wasm_linkage_values(&linkage, "globals");
         let wasi = match wasi_options.map(wasm_wasi_context).transpose() {
             Ok(wasi) => wasi,
             Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
@@ -833,23 +837,67 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                 return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
             }
         }
+        let mut imported_memories = HashMap::new();
+        let mut imported_globals = HashMap::new();
         for import in module.imports() {
             if import.module() == "wasi_snapshot_preview1" && store.data().wasi.is_some() {
                 continue;
             }
-            let Some(handle) = function_imports.get(&(import.module().to_string(), import.name().to_string())).copied() else {
-                return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not provided", import.module(), import.name()) }).to_string();
-            };
-            let wasmi::ExternType::Func(function_type) = import.ty() else {
-                return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not a function", import.module(), import.name()) }).to_string();
-            };
-            if let Err(error) = linker.func_new(
-                import.module(),
-                import.name(),
-                function_type.clone(),
-                move |_caller, inputs, outputs| wasm_call_js_import(handle, inputs, outputs),
-            ) {
-                return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+            let key = (import.module().to_string(), import.name().to_string());
+            let encoded_key = wasm_import_key(import.module(), import.name());
+            match import.ty() {
+                wasmi::ExternType::Func(function_type) => {
+                    let Some(handle) = function_imports.get(&key).copied() else {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not provided", import.module(), import.name()) }).to_string();
+                    };
+                    if let Err(error) = linker.func_new(
+                        import.module(),
+                        import.name(),
+                        function_type.clone(),
+                        move |_caller, inputs, outputs| wasm_call_js_import(handle, inputs, outputs),
+                    ) {
+                        return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+                    }
+                }
+                wasmi::ExternType::Memory(expected) => {
+                    let Some(descriptor) = memory_imports.get(&key) else {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly memory import {}.{} is not provided", import.module(), import.name()) }).to_string();
+                    };
+                    let bytes = hex_decode(descriptor.get("data").and_then(serde_json::Value::as_str).unwrap_or(""));
+                    let pages = u32::try_from(bytes.len() / 65_536).unwrap_or(u32::MAX);
+                    let maximum = descriptor.get("maximum").and_then(serde_json::Value::as_u64).and_then(|value| u32::try_from(value).ok());
+                    if !bytes.len().is_multiple_of(65_536)
+                        || u64::from(pages) < expected.minimum()
+                    {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly memory import {}.{} has incompatible limits", import.module(), import.name()) }).to_string();
+                    }
+                    let memory = match WasmMemory::new(&mut store, WasmMemoryType::new(pages, maximum)) {
+                        Ok(memory) => memory,
+                        Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+                    };
+                    memory.data_mut(&mut store).copy_from_slice(&bytes);
+                    if let Err(error) = linker.define(import.module(), import.name(), memory) {
+                        return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+                    }
+                    imported_memories.insert(encoded_key, memory);
+                }
+                wasmi::ExternType::Global(global_type) => {
+                    let Some(descriptor) = global_imports.get(&key) else {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} is not provided", import.module(), import.name()) }).to_string();
+                    };
+                    let value = match wasm_number(descriptor, global_type.content()) {
+                        Ok(value) => value,
+                        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                    };
+                    let global = wasmi::Global::new(&mut store, value, global_type.mutability());
+                    if let Err(error) = linker.define(import.module(), import.name(), global) {
+                        return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+                    }
+                    imported_globals.insert(encoded_key, global);
+                }
+                wasmi::ExternType::Table(_) => {
+                    return serde_json::json!({ "ok": false, "error": format!("WebAssembly table import {}.{} is not yet linked", import.module(), import.name()) }).to_string();
+                }
             }
         }
         let instance = match linker.instantiate_and_start(&mut store, &module) {
@@ -876,9 +924,34 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
             .collect::<Vec<_>>();
         let handle = table.next_instance;
         table.next_instance += 1;
-        table.instances.insert(handle, WasmInstance { store, instance });
+        table.instances.insert(handle, WasmInstance { store, instance, imported_memories, imported_globals });
         serde_json::json!({ "ok": true, "handle": handle, "exports": exports }).to_string()
     })
+}
+
+fn wasm_import_key(module: &str, name: &str) -> String {
+    format!("{module}\u{1f}{name}")
+}
+
+fn wasm_linkage_values(
+    linkage: &serde_json::Value,
+    field: &str,
+) -> HashMap<(String, String), serde_json::Value> {
+    linkage
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            Some((
+                (
+                    value.get("module")?.as_str()?.to_string(),
+                    value.get("name")?.as_str()?.to_string(),
+                ),
+                value.get("value")?.clone(),
+            ))
+        })
+        .collect()
 }
 
 fn wasm_wasi_context(options: &str) -> Result<WasiCtx, String> {
@@ -1003,7 +1076,12 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
         let Some(record) = table.instances.get_mut(&instance_handle) else {
             return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
         };
-        let Some(global) = record.instance.get_global(&record.store, &name) else {
+        let global = if let Some(key) = name.strip_prefix("import:") {
+            record.imported_globals.get(key).copied()
+        } else {
+            record.instance.get_global(&record.store, &name)
+        };
+        let Some(global) = global else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a global") }).to_string();
         };
         if let Some(value) = value {
@@ -1059,7 +1137,12 @@ fn wasm_memory(instance_handle: u32, name: String, operation: String, value: Str
         let Some(record) = table.instances.get_mut(&instance_handle) else {
             return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
         };
-        let Some(memory) = record.instance.get_memory(&record.store, &name) else {
+        let memory = if let Some(key) = name.strip_prefix("import:") {
+            record.imported_memories.get(key).copied()
+        } else {
+            record.instance.get_memory(&record.store, &name)
+        };
+        let Some(memory) = memory else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a memory") }).to_string();
         };
         wasm_memory_operation(&memory, &mut record.store, &operation, &value)
@@ -3913,25 +3996,38 @@ const PLATFORM_GLOBALS: &str = r#"
         const result = wasmResult(__thaw_wasm_memory_create(initial, maximum), RangeError);
         this.__thawInstance = 0;
         this.__thawName = String(result.handle);
+        this.__thawMaximum = descriptor.maximum === undefined ? null : Number(descriptor.maximum);
       }
+      this.__thawBindings = [];
       this.__thawRefresh();
     }
-    __thawRefresh() {
-      const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'read', ''));
+    __thawRefresh(binding) {
+      const instance = binding ? binding.instance : this.__thawInstance, name = binding ? binding.name : this.__thawName;
+      const result = wasmResult(__thaw_wasm_memory(instance, name, 'read', ''));
       const bytes = wasmUnhex(result.value);
+      if (this.__thawBuffer && bytes.byteLength > this.__thawBuffer.byteLength && binding) {
+        const delta = (bytes.byteLength - this.__thawBuffer.byteLength) / 65536;
+        wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(delta)), RangeError);
+        for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_memory(other.instance, other.name, 'grow', String(delta)), RangeError);
+      }
       if (this.__thawBuffer && this.__thawBuffer.byteLength === bytes.byteLength) new Uint8Array(this.__thawBuffer).set(bytes);
       else {
         if (this.__thawBuffer) __thaw_detach_array_buffer(this.__thawBuffer);
         this.__thawBuffer = bytes.buffer;
       }
+      if (binding) { const data = wasmHex(this.__thawBuffer); wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', data)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_memory(other.instance, other.name, 'write', data)); }
     }
     __thawSync() {
-      wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', wasmHex(this.__thawBuffer)));
+      const data = wasmHex(this.__thawBuffer);
+      wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', data));
+      for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_memory(binding.instance, binding.name, 'write', data));
     }
+    __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     get buffer() { return this.__thawBuffer; }
     grow(delta) {
       this.__thawSync();
       const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(Number(delta))), RangeError);
+      for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_memory(binding.instance, binding.name, 'grow', String(Number(delta))), RangeError);
       this.__thawRefresh();
       return result.value;
     }
@@ -3942,6 +4038,7 @@ const PLATFORM_GLOBALS: &str = r#"
       if (!descriptor || !['i32','i64','f32','f64'].includes(String(descriptor.value))) throw new TypeError('WebAssembly.Global(): invalid value type');
       this.__thawType = String(descriptor.value); this.__thawMutable = Boolean(descriptor.mutable);
       this.__thawLocalValue = this.__thawConvert(value === undefined ? (this.__thawType === 'i64' ? 0n : 0) : value);
+      this.__thawBindings = [];
     }
     __thawConvert(value) {
       if (this.__thawType === 'i64') return BigInt.asIntN(64, BigInt(value));
@@ -3953,10 +4050,13 @@ const PLATFORM_GLOBALS: &str = r#"
     set value(value) {
       if (this.__thawInstance === undefined) {
         if (!this.__thawMutable) throw new TypeError('set WebAssembly.Global.value: immutable global');
-        this.__thawLocalValue = this.__thawConvert(value); return;
+        this.__thawLocalValue = this.__thawConvert(value); this.__thawSync(); return;
       }
       wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeValue(value))));
     }
+    __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
+    __thawSync() { if (this.__thawInstance !== undefined) return; const encoded = JSON.stringify(wasmEncodeValue(this.__thawLocalValue)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
+    __thawRefresh(binding) { if (!binding) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeValue(this.__thawLocalValue)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
     valueOf() { return this.value; }
   }
   class WasmTable {
@@ -3977,24 +4077,32 @@ const PLATFORM_GLOBALS: &str = r#"
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Instance(): argument 0 must be a WebAssembly.Module');
       if (imports === null || (typeof imports !== 'object' && typeof imports !== 'function')) throw new TypeError('WebAssembly.Instance(): imports must be an object');
       const wasi = imports && imports.wasi_snapshot_preview1 && imports.wasi_snapshot_preview1.__thawWasiOptions;
-      const linkage = { wasi: wasi, functions: [] };
+      const linkage = { wasi: wasi, functions: [], memories: [], globals: [] }, pendingResources = [];
       for (const item of module.__thawImports) {
         if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
         const namespace = imports[item.module];
         if (namespace === null || (typeof namespace !== 'object' && typeof namespace !== 'function')) throw new WebAssembly.LinkError(`WebAssembly import namespace '${item.module}' is not provided`);
         const value = namespace[item.name];
-        if (item.kind !== 'function' || typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
-        linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
+        if (item.kind === 'function') {
+          if (typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
+          linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
+        } else if (item.kind === 'memory') {
+          if (!(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
+          value.__thawSync(); linkage.memories.push({ module: item.module, name: item.name, value: { data: wasmHex(value.buffer), maximum: value.__thawMaximum } }); pendingResources.push({ value, item });
+        } else if (item.kind === 'global') {
+          if (!(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
+          linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeValue(value.value) }); pendingResources.push({ value, item });
+        } else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
       }
       const result = wasmResult(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)), WebAssembly.LinkError);
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
-      const exports = {}, memories = [];
+      const exports = {}, resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
       for (const item of result.exports) {
         if (item.kind === 'function') {
           const callable = (...args) => {
-            for (const memory of memories) memory.__thawSync();
+            for (const resource of resources) resource.value.__thawSync();
             const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(args.map(wasmEncodeValue))));
-            for (const memory of memories) memory.__thawRefresh();
+            for (const resource of resources) resource.value.__thawRefresh(resource.binding);
             if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
             const called = raw.ok ? raw : (() => { throw new WebAssembly.RuntimeError(raw.error); })();
             const values = called.values.map(wasmDecodeValue);
@@ -4004,7 +4112,7 @@ const PLATFORM_GLOBALS: &str = r#"
           exports[item.name] = callable;
         } else if (item.kind === 'memory') {
           const memory = new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
-          memories.push(memory); exports[item.name] = memory;
+          resources.push({ value: memory }); exports[item.name] = memory;
         } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name }, undefined, true);
       }
       Object.defineProperty(this, 'exports', { value: Object.freeze(exports), enumerable: true });
@@ -7321,6 +7429,36 @@ mod tests {
         assert_eq!(
             call("wasmImports", "[]"),
             r#"[42,[21],"42",[3.5,4],true,true,5]"#
+        );
+    }
+
+    #[test]
+    fn webassembly_synchronizes_imported_memory_and_mutable_globals() {
+        assert_eq!(
+            load(
+                "function wasmImportedState() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (import \"env\" \"memory\" (memory 1 2))\n\
+                     (import \"env\" \"counter\" (global $counter (mut i32)))\n\
+                     (func (export \"read\") (result i32) i32.const 0 i32.load8_u)\n\
+                     (func (export \"write\") (param i32) i32.const 0 local.get 0 i32.store8)\n\
+                     (func (export \"bump\") (result i32) global.get $counter i32.const 1 i32.add global.set $counter global.get $counter)\n\
+                     (func (export \"grow\") (result i32) i32.const 1 memory.grow))`);\n\
+                   const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 }), old = memory.buffer; new Uint8Array(memory.buffer)[0] = 10;\n\
+                   const counter = new WebAssembly.Global({ value: 'i32', mutable: true }, 5);\n\
+                   const instance = new WebAssembly.Instance(new WebAssembly.Module(source), { env: { memory, counter } });\n\
+                   const sibling = new WebAssembly.Instance(new WebAssembly.Module(source), { env: { memory, counter } });\n\
+                   const before = instance.exports.read(); instance.exports.write(33); const written = new Uint8Array(memory.buffer)[0], siblingRead = sibling.exports.read();\n\
+                   const first = instance.exports.bump(), reflected = counter.value, siblingBump = sibling.exports.bump(); counter.value = 20; const second = instance.exports.bump();\n\
+                   const previous = instance.exports.grow(), detached = old.byteLength, length = memory.buffer.byteLength; new Uint8Array(memory.buffer)[65536] = 77;\n\
+                   return [before, written, siblingRead, first, reflected, siblingBump, second, counter.value, previous, detached, length, instance.exports.read()];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("wasmImportedState", "[]"),
+            r#"[10,33,33,6,6,7,21,21,1,0,131072,33]"#
         );
     }
 
