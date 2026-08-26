@@ -1923,8 +1923,9 @@ objects and return a flattened optional/nullish value. Heterogeneous untagged
 fields produce a tagged union of the distinct field types plus `undefined`;
 ordinary `typeof` control-flow narrowing can consume that result. Mixing
 raw `null`/`undefined` fields with scalar or pointer fields uses the same
-union, while already-tagged nullable/optional fields mixed with other layouts
-remain outside this path.
+union. Optional, nullable and three-way nullish fields mixed with other layouts
+are flattened into their payload, `null` and `undefined` members, so a missing
+key and an absent stored field retain the same JavaScript value semantics.
 `try/catch` conservatively
 joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts

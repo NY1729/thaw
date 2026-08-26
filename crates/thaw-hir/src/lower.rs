@@ -16990,9 +16990,22 @@ impl<'a> FnLowerer<'a> {
                         };
                         let payload = payload.clone();
                         if fields.iter().any(|(_, ty)| ty != &payload) {
-                            if fields.iter().any(|(_, ty)| {
-                                !matches!(
-                                    ty,
+                            let mut members = Vec::new();
+                            for (_, ty) in &fields {
+                                let (payload, absences) = match ty {
+                                    HirType::Optional(payload) => {
+                                        (payload.as_ref(), &[HirType::Undefined][..])
+                                    }
+                                    HirType::Nullable(payload) => {
+                                        (payload.as_ref(), &[HirType::Null][..])
+                                    }
+                                    HirType::Nullish(payload) => {
+                                        (payload.as_ref(), &[HirType::Null, HirType::Undefined][..])
+                                    }
+                                    other => (other, &[][..]),
+                                };
+                                if !matches!(
+                                    payload,
                                     HirType::F64
                                         | HirType::I64
                                         | HirType::Bool
@@ -17005,17 +17018,19 @@ impl<'a> FnLowerer<'a> {
                                         | HirType::Function(_, _)
                                         | HirType::Null
                                         | HirType::Undefined
-                                )
-                            }) {
-                                return Err(
-                                    "dynamic heterogeneous object index requires untagged union-compatible fields"
-                                        .into(),
-                                );
-                            }
-                            let mut members = Vec::new();
-                            for (_, ty) in &fields {
-                                if !members.contains(ty) {
-                                    members.push(ty.clone());
+                                ) {
+                                    return Err(
+                                        "dynamic heterogeneous object index requires word-sized union-compatible field payloads"
+                                            .into(),
+                                    );
+                                }
+                                if !members.contains(payload) {
+                                    members.push(payload.clone());
+                                }
+                                for absence in absences {
+                                    if !members.contains(absence) {
+                                        members.push(absence.clone());
+                                    }
                                 }
                             }
                             if !members.contains(&HirType::Undefined) {
@@ -24960,17 +24975,23 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_computed_object_reads_reject_tagged_heterogeneous_fields() {
-        let module = thaw_parser::parse_typescript(
+    fn dynamic_computed_object_reads_flatten_tagged_heterogeneous_fields() {
+        let program = lower(
             r#"function read(
                 mixed: { value: number | undefined; label: string },
                 key: string
             ): void { console.log(mixed[key]); }"#,
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("requires untagged union-compatible fields"));
+        );
+        assert!(matches!(
+            &program.functions[0].body[0],
+            HirStmt::Expr(HirExpr::Call(_, args))
+                if matches!(
+                    &args[0],
+                    HirExpr::DynamicPropAccess(
+                        _, _, _, HirType::Union(members)
+                    ) if members == &[HirType::F64, HirType::Undefined, HirType::Str]
+                )
+        ));
     }
 
     #[test]

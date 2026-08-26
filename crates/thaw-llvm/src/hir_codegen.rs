@@ -5385,6 +5385,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 {
                     self.build_optional_value(value, source, true)?
                 }
+                (
+                    source @ (HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)),
+                    HirType::Union(elements),
+                ) => self.flatten_tagged_field_to_union(value, source, elements)?,
                 (source, HirType::Union(elements)) => {
                     let index = elements
                         .iter()
@@ -5413,6 +5417,100 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_load(result_type, result_slot, "dynamic_property_optional")
             .map_err(|error| error.to_string())
+    }
+
+    fn flatten_tagged_field_to_union(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        source: &HirType,
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let tagged = value.into_struct_value();
+        let payload_type = match source {
+            HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+                payload.as_ref()
+            }
+            _ => return Err("dynamic property field is not tagged".into()),
+        };
+        let payload = self
+            .builder
+            .build_extract_value(tagged, 1, "dynamic_property_tagged_payload")
+            .map_err(|error| error.to_string())?;
+        let payload_index = elements
+            .iter()
+            .position(|element| element == payload_type)
+            .ok_or("dynamic property payload is missing from its union result")?;
+        let payload = self.build_union_value(payload, payload_index, elements)?;
+
+        let absence = |compiler: &mut Self, ty: HirType| {
+            let index = elements
+                .iter()
+                .position(|element| element == &ty)
+                .ok_or("dynamic property absence is missing from its union result")?;
+            compiler.build_union_value(
+                compiler.context.bool_type().const_zero().into(),
+                index,
+                elements,
+            )
+        };
+        match source {
+            HirType::Optional(_) | HirType::Nullable(_) => {
+                let present = self
+                    .builder
+                    .build_extract_value(tagged, 0, "dynamic_property_present")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let absent_type = if matches!(source, HirType::Nullable(_)) {
+                    HirType::Null
+                } else {
+                    HirType::Undefined
+                };
+                let absent = absence(self, absent_type)?;
+                self.builder
+                    .build_select(present, payload, absent, "dynamic_property_flattened")
+                    .map_err(|error| error.to_string())
+            }
+            HirType::Nullish(_) => {
+                let tag = self
+                    .builder
+                    .build_extract_value(tagged, 0, "dynamic_property_nullish_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let null = absence(self, HirType::Null)?;
+                let undefined = absence(self, HirType::Undefined)?;
+                let is_null = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_int(1, false),
+                        "dynamic_property_is_null",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let absent = self
+                    .builder
+                    .build_select(is_null, null, undefined, "dynamic_property_absence")
+                    .map_err(|error| error.to_string())?;
+                let is_present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        tag,
+                        self.context.i8_type().const_zero(),
+                        "dynamic_property_has_payload",
+                    )
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_select(
+                        is_present,
+                        payload,
+                        absent,
+                        "dynamic_property_flattened_nullish",
+                    )
+                    .map_err(|error| error.to_string())
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn compile_enum_reverse_lookup(
@@ -15028,6 +15126,28 @@ mod tests {
                 };
                 return mixed[key];
             }
+            function readTagged(key: string) {
+                const mixed: {
+                    optionalValue: number | undefined;
+                    optionalAbsent: number | undefined;
+                    nullableValue: number | null;
+                    nullableNull: number | null;
+                    nullishValue: number | null | undefined;
+                    nullishNull: number | null | undefined;
+                    nullishUndefined: number | null | undefined;
+                    label: string;
+                } = {
+                    optionalValue: 6,
+                    optionalAbsent: undefined,
+                    nullableValue: 7,
+                    nullableNull: null,
+                    nullishValue: 8,
+                    nullishNull: null,
+                    nullishUndefined: undefined,
+                    label: "tagged"
+                };
+                return mixed[key];
+            }
             function print(key: string): void {
                 const value = read(key);
                 if (typeof value === "number") {
@@ -15046,11 +15166,20 @@ mod tests {
                 print("empty");
                 print("absent");
                 print("missing");
+                console.log(readTagged("optionalValue"));
+                console.log(readTagged("optionalAbsent"));
+                console.log(readTagged("nullableValue"));
+                console.log(readTagged("nullableNull"));
+                console.log(readTagged("nullishValue"));
+                console.log(readTagged("nullishNull"));
+                console.log(readTagged("nullishUndefined"));
+                console.log(readTagged("label"));
+                console.log(readTagged("missing"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "dynamic_heterogeneous_properties"),
-            "42\nthaw!\ntrue\nundefined\nundefined\n"
+            "42\nthaw!\ntrue\nundefined\nundefined\n6\nundefined\n7\nnull\n8\nnull\nundefined\ntagged\nundefined\n"
         );
     }
 
