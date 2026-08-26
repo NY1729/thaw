@@ -18894,6 +18894,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_class_optional_parameters() {
+        let source = r#"
+            class OptionalBox {
+                constructor(public value?: number) {}
+                read(): number { return this.value ?? 40; }
+                add(delta?: number | null): number { return (this.value ?? 40) + (delta ?? 2); }
+            }
+            function main(): void {
+                const empty = new OptionalBox();
+                const filled = new OptionalBox(5);
+                console.log(empty.read());
+                console.log(filled.read());
+                console.log(empty.add());
+                console.log(filled.add(null));
+                console.log(filled.add(3));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_optional_parameters"),
+            "40\n5\n42\n7\n8\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
