@@ -665,6 +665,22 @@ fn wasm_compile(value: String) -> String {
     })
 }
 
+fn wasm_custom_sections(module_handle: u32, name: String) -> String {
+    WASM.with(|table| {
+        let table = table.borrow();
+        let Some(module) = table.modules.get(&module_handle) else {
+            return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Module" })
+                .to_string();
+        };
+        let sections = module
+            .custom_sections()
+            .filter(|section| section.name() == name)
+            .map(|section| hex_encode(section.data()))
+            .collect::<Vec<_>>();
+        serde_json::json!({ "ok": true, "sections": sections }).to_string()
+    })
+}
+
 fn wasm_instantiate(module_handle: u32, wasi_options: Option<String>) -> String {
     WASM.with(|table| {
         let mut table = table.borrow_mut();
@@ -2972,6 +2988,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .expect("failed to create WebAssembly compiler");
                 let wasm_instantiate_function = Function::new(ctx.clone(), wasm_instantiate)
                     .expect("failed to create WebAssembly instantiator");
+                let wasm_custom_sections_function =
+                    Function::new(ctx.clone(), wasm_custom_sections)
+                        .expect("failed to create WebAssembly custom-section reader");
                 let wasm_call_function = Function::new(ctx.clone(), wasm_call)
                     .expect("failed to create WebAssembly function caller");
                 let wasm_global_function = Function::new(ctx.clone(), wasm_global)
@@ -2986,6 +3005,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_wasm_instantiate", wasm_instantiate_function)
                     .expect("failed to install WebAssembly instantiator");
+                ctx.globals()
+                    .set("__thaw_wasm_custom_sections", wasm_custom_sections_function)
+                    .expect("failed to install WebAssembly custom-section reader");
                 ctx.globals()
                     .set("__thaw_wasm_call", wasm_call_function)
                     .expect("failed to install WebAssembly function caller");
@@ -3726,7 +3748,8 @@ const PLATFORM_GLOBALS: &str = r#"
     }
     static customSections(module, name) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Module.customSections(): argument 0 must be a WebAssembly.Module');
-      return [];
+      const result = wasmResult(__thaw_wasm_custom_sections(module.__thawHandle, String(name)));
+      return result.sections.map(section => wasmUnhex(section).buffer);
     }
   }
   class WasmMemory {
@@ -3844,7 +3867,13 @@ const PLATFORM_GLOBALS: &str = r#"
         ? new WasmInstance(source, imports)
         : (() => { const module = new WasmModule(source); return { module, instance: new WasmInstance(module, imports) }; })());
     },
-    compileStreaming(source) { return Promise.resolve(source).then(response => response.arrayBuffer()).then(bytes => new WasmModule(bytes)); },
+    compileStreaming(source) { return Promise.resolve(source).then(response => {
+      if (!response || typeof response.arrayBuffer !== 'function') throw new TypeError('WebAssembly streaming source must be a Response');
+      if (response.ok === false) throw new TypeError('WebAssembly streaming response was not successful');
+      const contentType = response.headers && typeof response.headers.get === 'function' ? response.headers.get('content-type') : null;
+      if (!contentType || String(contentType).split(';', 1)[0].trim().toLowerCase() !== 'application/wasm') throw new TypeError('WebAssembly streaming response has an unsupported MIME type');
+      return response.arrayBuffer();
+    }).then(bytes => new WasmModule(bytes)); },
     instantiateStreaming(source, imports) { return this.compileStreaming(source).then(module => ({ module, instance: new WasmInstance(module, imports) })); }
   };
   let nextTimerId = 1;
@@ -7090,15 +7119,19 @@ mod tests {
                    const table = new WebAssembly.Table({ element: 'externref', initial: 1, maximum: 2 }, 'a'); const tablePrevious = table.grow(1, 'b');\n\
                    const compiled = await WebAssembly.compile(source);\n\
                    const asyncResult = await WebAssembly.instantiate(source);\n\
+                   const customModule = new WebAssembly.Module(new TextEncoder().encode(`(module (@custom \"meta\" \"one\") (@custom \"meta\" \"two\"))`));\n\
+                   const custom = WebAssembly.Module.customSections(customModule, 'meta').map(value => new TextDecoder().decode(value));\n\
+                   const streamed = await WebAssembly.compileStreaming(new Response(source, { headers: { 'Content-Type': 'application/wasm; charset=binary' } }));\n\
+                   let mimeError = false; try { await WebAssembly.compileStreaming(new Response(source)); } catch (error) { mimeError = error instanceof TypeError; }\n\
                    let compileError = false; try { new WebAssembly.Module(new Uint8Array([0])); } catch (error) { compileError = error instanceof WebAssembly.CompileError; }\n\
-                   return [WebAssembly.validate(source), WebAssembly.validate(new Uint8Array([0])), WebAssembly.Module.exports(module).map(x => x.name).sort(), WebAssembly.Module.imports(module), instance.exports.add.length, instance.exports.add(20, 22), instance.exports.add64(40n, 2n).toString(), instance.exports.pair(), read, refreshed, oldGlobal, instance.exports.counter.value, previous, oldBuffer.byteLength, memory.buffer.byteLength, standaloneGlobal.value.toString(), tablePrevious, table.length, table.get(1), compiled instanceof WebAssembly.Module, asyncResult.instance.exports.add(1, 2), compileError];\n\
+                   return [WebAssembly.validate(source), WebAssembly.validate(new Uint8Array([0])), WebAssembly.Module.exports(module).map(x => x.name).sort(), WebAssembly.Module.imports(module), instance.exports.add.length, instance.exports.add(20, 22), instance.exports.add64(40n, 2n).toString(), instance.exports.pair(), read, refreshed, oldGlobal, instance.exports.counter.value, previous, oldBuffer.byteLength, memory.buffer.byteLength, standaloneGlobal.value.toString(), tablePrevious, table.length, table.get(1), compiled instanceof WebAssembly.Module, asyncResult.instance.exports.add(1, 2), custom, streamed instanceof WebAssembly.Module, mimeError, compileError];\n\
                  }"
             ),
             1
         );
         assert_eq!(
             call("wasmFoundation", "[]"),
-            r#"[true,false,["add","add64","counter","memory","pair","read0","write0"],[],2,42,"42",[3,4],41,99,5,12,1,0,131072,"9",1,2,"b",true,3,true]"#
+            r#"[true,false,["add","add64","counter","memory","pair","read0","write0"],[],2,42,"42",[3,4],41,99,5,12,1,0,131072,"9",1,2,"b",true,3,["one","two"],true,true,true]"#
         );
     }
 
