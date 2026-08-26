@@ -43,6 +43,8 @@ use crate::{
     HirProgram, HirStmt, HirType, Symbol,
 };
 
+type LoweredBinding = (Symbol, HirType, HirExpr);
+
 fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
     let (backend, hex) = name
         .strip_prefix("__thaw_typed_js_")
@@ -13105,6 +13107,79 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
+    fn lower_native_spread_arguments(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        expected: &[HirType],
+        label: &str,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        let lowered = arguments
+            .iter()
+            .map(|argument| self.lower_expr(&argument.expr))
+            .collect::<Result<Vec<_>, _>>()?;
+        let preserve_order = arguments.iter().any(|argument| argument.spread.is_some())
+            || lowered.iter().any(contains_await);
+        let mut bindings = Vec::new();
+        let mut values = Vec::new();
+        for (argument, value) in arguments.iter().zip(lowered) {
+            if !preserve_order {
+                values.push(value);
+                continue;
+            }
+            if argument.spread.is_none() {
+                let ty = self.infer_expr_type(&value)?;
+                let name = format!("__thaw_native_arg_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                bindings.push((name.clone(), ty, value));
+                values.push(HirExpr::Var(name));
+                continue;
+            }
+            if let HirExpr::ArrayLit(elements) = value {
+                for element in elements {
+                    let ty = self.infer_expr_type(&element)?;
+                    let name = format!("__thaw_native_arg_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), ty.clone());
+                    bindings.push((name.clone(), ty, element));
+                    values.push(HirExpr::Var(name));
+                }
+                continue;
+            }
+            let source_type = self.infer_expr_type(&value)?;
+            let HirType::Tuple(elements) = &source_type else {
+                return Err(format!(
+                    "{label} spread source must have statically known tuple length, got {source_type:?}"
+                ));
+            };
+            let elements = elements.clone();
+            let name = format!("__thaw_native_spread_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), source_type.clone());
+            bindings.push((name.clone(), source_type, value));
+            values.extend(elements.into_iter().enumerate().map(|(index, ty)| {
+                HirExpr::TypedIndex(
+                    Box::new(HirExpr::Var(name.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    ty,
+                )
+            }));
+        }
+        if values.len() != expected.len() {
+            return Err(format!(
+                "{label} expects {} argument(s), got {}",
+                expected.len(),
+                values.len()
+            ));
+        }
+        let values = values
+            .into_iter()
+            .zip(expected)
+            .map(|(value, expected)| self.coerce_to_declared(expected, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((values, bindings))
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if matches!(call.callee, Callee::Super(_)) {
             let (symbol, _base_type, _base_name) = self
@@ -13116,27 +13191,19 @@ impl<'a> FnLowerer<'a> {
                 .get(&symbol)
                 .cloned()
                 .ok_or_else(|| format!("missing base class initializer `{symbol}`"))?;
-            if call.type_args.is_some()
-                || call.args.iter().any(|argument| argument.spread.is_some())
-            {
-                return Err(
-                    "native `super(...)` does not support type or spread arguments yet".into(),
-                );
-            }
-            if call.args.len() + 1 != signature.params.len() {
-                return Err(format!(
-                    "base constructor expects {} argument(s), got {}",
-                    signature.params.len() - 1,
-                    call.args.len()
-                ));
+            if call.type_args.is_some() {
+                return Err("native `super(...)` does not support type arguments".into());
             }
             let this_name = self.resolve_binding("this");
             let mut args = vec![HirExpr::Var(this_name)];
-            for (index, argument) in call.args.iter().enumerate() {
-                let value = self.lower_expr(&argument.expr)?;
-                args.push(self.coerce_to_declared(&signature.params[index + 1], value)?);
-            }
-            return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+            let (arguments, bindings) = self.lower_native_spread_arguments(
+                &call.args,
+                &signature.params[1..],
+                "base constructor",
+            )?;
+            args.extend(arguments);
+            let result = HirExpr::Call(Box::new(HirExpr::Var(symbol)), args);
+            return self.wrap_call_argument_bindings(result, &bindings);
         }
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::SuperProp(member) = callee.as_ref() {
@@ -13163,33 +13230,24 @@ impl<'a> FnLowerer<'a> {
                 let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
                     format!("base class `{base_name}` has no method `{method_name}`")
                 })?;
-                if call.type_args.is_some()
-                    || call.args.iter().any(|argument| argument.spread.is_some())
-                {
-                    return Err(
-                        "native super methods do not support type or spread arguments yet".into(),
-                    );
+                if call.type_args.is_some() {
+                    return Err("native super methods do not support type arguments".into());
                 }
                 let receiver_count = usize::from(!self.class_static_context);
-                if call.args.len() + receiver_count != signature.params.len() {
-                    return Err(format!(
-                        "super method `{base_name}.{method_name}` expects {} argument(s), got {}",
-                        signature.params.len() - receiver_count,
-                        call.args.len()
-                    ));
-                }
                 let mut args = if self.class_static_context {
                     Vec::new()
                 } else {
                     vec![HirExpr::Var(self.resolve_binding("this"))]
                 };
-                for (index, argument) in call.args.iter().enumerate() {
-                    let value = self.lower_expr(&argument.expr)?;
-                    args.push(
-                        self.coerce_to_declared(&signature.params[index + receiver_count], value)?,
-                    );
-                }
-                return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                let label = format!("super method `{base_name}.{method_name}`");
+                let (arguments, bindings) = self.lower_native_spread_arguments(
+                    &call.args,
+                    &signature.params[receiver_count..],
+                    &label,
+                )?;
+                args.extend(arguments);
+                let result = HirExpr::Call(Box::new(HirExpr::Var(symbol)), args);
+                return self.wrap_call_argument_bindings(result, &bindings);
             }
         }
         let Callee::Expr(callee_expr) = &call.callee else {
@@ -13201,31 +13259,21 @@ impl<'a> FnLowerer<'a> {
                 if let Expr::Ident(class) = member.obj.as_ref() {
                     let class_name = class.sym.as_ref();
                     let symbol = class_static_method_symbol(class_name, &property);
-                    if let Some(signature) = self.signatures.get(&symbol).cloned() {
+                    if self.signatures.contains_key(&symbol) {
                         if call.type_args.is_some() {
                             return Err(format!(
                                 "native static method `{class_name}.{property}` is not generic"
                             ));
                         }
-                        if call.args.iter().any(|argument| argument.spread.is_some()) {
-                            return Err(
-                                "native static method spread arguments are not supported yet"
-                                    .into(),
-                            );
-                        }
-                        if call.args.len() != signature.params.len() {
-                            return Err(format!(
-                                "static method `{class_name}.{property}` expects {} argument(s), got {}",
-                                signature.params.len(),
-                                call.args.len()
-                            ));
-                        }
-                        let mut args = Vec::with_capacity(call.args.len());
-                        for (index, argument) in call.args.iter().enumerate() {
-                            let value = self.lower_expr(&argument.expr)?;
-                            args.push(self.coerce_to_declared(&signature.params[index], value)?);
-                        }
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                        return self.lower_call(&CallExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Ident(
+                                swc_ecma_ast::Ident::new_no_ctxt(symbol.into(), call.span),
+                            ))),
+                            args: call.args.clone(),
+                            type_args: None,
+                        });
                     }
                 }
                 let known_class_receiver = match member.obj.as_ref() {
@@ -13247,32 +13295,27 @@ impl<'a> FnLowerer<'a> {
                     let class_name = class_name_from_type(&receiver_type)
                         .expect("the receiver was classified as a native class");
                     let symbol = class_method_symbol(class_name, &property);
-                    if let Some(signature) = self.signatures.get(&symbol).cloned() {
+                    if self.signatures.contains_key(&symbol) {
                         if call.type_args.is_some() {
                             return Err(format!(
                                 "native class method `{class_name}.{property}` is not generic"
                             ));
                         }
-                        if call.args.iter().any(|argument| argument.spread.is_some()) {
-                            return Err(
-                                "native class method spread arguments are not supported yet".into(),
-                            );
-                        }
-                        if call.args.len() + 1 != signature.params.len() {
-                            return Err(format!(
-                                "method `{class_name}.{property}` expects {} argument(s), got {}",
-                                signature.params.len() - 1,
-                                call.args.len()
-                            ));
-                        }
-                        let mut args = vec![receiver];
-                        for (index, argument) in call.args.iter().enumerate() {
-                            let value = self.lower_expr(&argument.expr)?;
-                            args.push(
-                                self.coerce_to_declared(&signature.params[index + 1], value)?,
-                            );
-                        }
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                        let mut args = Vec::with_capacity(call.args.len() + 1);
+                        args.push(swc_ecma_ast::ExprOrSpread {
+                            spread: None,
+                            expr: member.obj.clone(),
+                        });
+                        args.extend(call.args.iter().cloned());
+                        return self.lower_call(&CallExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Ident(
+                                swc_ecma_ast::Ident::new_no_ctxt(symbol.into(), call.span),
+                            ))),
+                            args,
+                            type_args: None,
+                        });
                     }
                     return Err(format!(
                         "class `{class_name}` has no native method `{property}`"
@@ -20729,5 +20772,65 @@ mod tests {
             error.contains("computed members require a string-literal name"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn lowers_tuple_spreads_for_native_class_constructors_and_methods() {
+        let program = lower(
+            r#"class Calculator {
+                constructor(public offset: number) {}
+                sum(left: number, right: number): number {
+                    return this.offset + left + right;
+                }
+                static sum(left: number, right: number): number { return left + right; }
+            }
+            function main(): number {
+                const constructorArgs: [number] = [1];
+                const args: [number, number] = [20, 21];
+                const calculator = new Calculator(...constructorArgs);
+                return calculator.sum(...args) + Calculator.sum(...args);
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("__thaw_class_Calculator_constructor"));
+        assert!(body.contains("__thaw_class_Calculator_method_sum"));
+        assert!(body.contains("__thaw_class_Calculator_static_sum"));
+    }
+
+    #[test]
+    fn lowers_tuple_spreads_for_super_constructors_and_methods() {
+        let program = lower(
+            r#"class Base {
+                constructor(public left: number, public right: number) {}
+                sum(left: number, right: number): number { return left + right; }
+                static sum(left: number, right: number): number { return left + right; }
+            }
+            class Derived extends Base {
+                constructor(args: [number, number]) { super(...args); }
+                sumPair(args: [number, number]): number { return super.sum(...args); }
+                static sumPair(args: [number, number]): number { return super.sum(...args); }
+            }
+            function main(): number {
+                const args: [number, number] = [20, 22];
+                return new Derived(args).sumPair(args) + Derived.sumPair(args);
+            }"#,
+        );
+        for symbol in [
+            class_initializer_symbol("Derived"),
+            class_method_symbol("Derived", "sumPair"),
+            class_static_method_symbol("Derived", "sumPair"),
+        ] {
+            let function = program
+                .functions
+                .iter()
+                .find(|function| function.name == symbol)
+                .unwrap();
+            assert!(format!("{:?}", function.body).contains("__thaw_native_spread_"));
+        }
     }
 }
