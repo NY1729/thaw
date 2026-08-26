@@ -768,6 +768,131 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
     })
 }
 
+fn static_class_member_name(
+    expression: &Expr,
+    constants: &HashMap<Symbol, String>,
+) -> Option<String> {
+    match expression {
+        Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
+        Expr::Lit(Lit::Num(value)) => Some(value.value.to_string()),
+        Expr::Lit(Lit::Bool(value)) => Some(value.value.to_string()),
+        Expr::Ident(identifier) => constants.get(identifier.sym.as_ref()).cloned(),
+        Expr::Bin(binary) if binary.op == BinaryOp::Add => Some(format!(
+            "{}{}",
+            static_class_member_name(&binary.left, constants)?,
+            static_class_member_name(&binary.right, constants)?
+        )),
+        Expr::Paren(parenthesized) => static_class_member_name(&parenthesized.expr, constants),
+        Expr::TsAs(assertion) => static_class_member_name(&assertion.expr, constants),
+        Expr::TsTypeAssertion(assertion) => static_class_member_name(&assertion.expr, constants),
+        Expr::TsConstAssertion(assertion) => static_class_member_name(&assertion.expr, constants),
+        Expr::Tpl(template) => {
+            let mut value = String::new();
+            for (index, quasi) in template.quasis.iter().enumerate() {
+                let quasi = quasi
+                    .cooked
+                    .as_ref()
+                    .map(|value| value.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| quasi.raw.to_string());
+                value.push_str(&quasi);
+                if let Some(expression) = template.exprs.get(index) {
+                    value.push_str(&static_class_member_name(expression, constants)?);
+                }
+            }
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+fn normalize_static_computed_class_members(module: &Module) -> Module {
+    let mut declarations = Vec::new();
+    for item in &module.body {
+        let declaration = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration)))
+                if declaration.kind == swc_ecma_ast::VarDeclKind::Const =>
+            {
+                Some(declaration.as_ref())
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                let Decl::Var(declaration) = &export.decl else {
+                    continue;
+                };
+                (declaration.kind == swc_ecma_ast::VarDeclKind::Const)
+                    .then_some(declaration.as_ref())
+            }
+            _ => None,
+        };
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        for declarator in &declaration.decls {
+            let (Pat::Ident(binding), Some(initializer)) =
+                (&declarator.name, declarator.init.as_deref())
+            else {
+                continue;
+            };
+            declarations.push((binding.id.sym.to_string(), initializer));
+        }
+    }
+    let mut constants = HashMap::new();
+    loop {
+        let mut changed = false;
+        for (name, initializer) in &declarations {
+            if constants.contains_key(name) {
+                continue;
+            }
+            if let Some(value) = static_class_member_name(initializer, &constants) {
+                constants.insert(name.clone(), value);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let normalize_class = |class: &mut swc_ecma_ast::Class| {
+        for member in &mut class.body {
+            let key = match member {
+                ClassMember::ClassProp(property) => Some(&mut property.key),
+                ClassMember::Method(method) => Some(&mut method.key),
+                _ => None,
+            };
+            let Some(key) = key else {
+                continue;
+            };
+            let PropName::Computed(computed) = key else {
+                continue;
+            };
+            let span = computed.span;
+            let Some(value) = static_class_member_name(&computed.expr, &constants) else {
+                continue;
+            };
+            *key = PropName::Str(swc_ecma_ast::Str {
+                span,
+                value: value.into(),
+                raw: None,
+            });
+        }
+    };
+    let mut normalized = module.clone();
+    for item in &mut normalized.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
+                normalize_class(&mut declaration.class)
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                if let Decl::Class(declaration) = &mut export.decl {
+                    normalize_class(&mut declaration.class);
+                }
+            }
+            _ => {}
+        }
+    }
+    normalized
+}
+
 fn private_member_name(owner: &str, name: &str) -> Symbol {
     format!("__thaw_private_{owner}_{name}")
 }
@@ -4177,6 +4302,7 @@ fn collect_native_classes<'a>(
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_top_level_destructuring(module)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
+    let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     lower_normalized_module(&normalized)
 }
@@ -13231,6 +13357,9 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
+            Expr::TsAs(assertion) => self.lower_expr(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => self.lower_expr(&assertion.expr),
+            Expr::TsConstAssertion(assertion) => self.lower_expr(&assertion.expr),
             Expr::TsInstantiation(instantiation) => {
                 self.lower_generic_instantiation_expression(instantiation)
             }
@@ -26004,9 +26133,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dynamically_computed_native_class_members() {
+    fn folds_static_computed_native_class_member_names() {
+        let program = lower(
+            r#"const prefix = "val";
+            const field = `${prefix}ue` as const;
+            const method = ("re" + "ad") as string;
+            class Box {
+                [field]: number = 42;
+                [method](): number { return this.value; }
+            }
+            function main(): number { return new Box().read(); }"#,
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == class_method_symbol("Box", "read")));
+
         let module = thaw_parser::parse_typescript(
-            r#"const key: string = "value";
+            r#"let key: string = "value";
             class Box { [key]: number = 42; }
             function main(): void {}"#,
         )
