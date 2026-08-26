@@ -1006,7 +1006,8 @@ The workspace crates have narrow responsibilities:
   `.apply(thisArg, typedTuple)` after passing through parameters and return values.
   `.bind(thisArg, ...leadingArgs)` also survives these boundaries, supports typed tuple
   spreads and partial application, and keeps the original receiver when the bound value is
-  later invoked through `.call()`. The target, `thisArg` and ordinary or tuple-expanded
+  later invoked through `.call()`. Immediate `.bind(thisArg, ...leadingArgs)(...remainingArgs)` uses the same path,
+  including async results and tuple-spread evaluation order. The target, `thisArg` and ordinary or tuple-expanded
   arguments are evaluated once in JavaScript order; ordinary functions ignore the explicit receiver
 - Named async generic functions specialize for inferred or explicit types and
   retain exactly one Promise layer when used directly, as instantiated function

@@ -13859,11 +13859,12 @@ mod tests {
                 const bound = passed.bind(null, 4);
                 console.log(passed.call(null, 4));
                 console.log(bound());
+                console.log(pass(factorial).bind(null, 3)());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "recursive_named_local_functions"),
-            "120\n8\n25\n8\n24\n24\n"
+            "120\n8\n25\n8\n24\n24\n6\n"
         );
     }
 
@@ -13880,6 +13881,18 @@ mod tests {
             function passBinary(callback: (left: number, right: number) => number): (left: number, right: number) => number {
                 return callback;
             }
+            function makeBinary(): (left: number, right: number) => number {
+                console.log("immediate-target");
+                return (left: number, right: number): number => left + right;
+            }
+            function immediateLeading(): [number] {
+                console.log("immediate-leading");
+                return [40];
+            }
+            function immediateTrailing(): number {
+                console.log("immediate-trailing");
+                return 2;
+            }
             function main(): void {
                 const callback = pass((value: number): number => value + 1);
                 const args: [number] = [41];
@@ -13891,11 +13904,36 @@ mod tests {
                 console.log(make().call((console.log("this"), 0), (console.log("argument"), 41)));
                 console.log(bound(2));
                 console.log(bound.call((console.log("rebound-this"), 0), 2));
+                console.log(makeBinary()
+                    .bind((console.log("immediate-this"), null), ...immediateLeading())
+                    (immediateTrailing()));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "function_call_apply_with_this"),
-            "bind-this\n42\n42\ntarget\nthis\nargument\n42\n42\nrebound-this\n42\n"
+            "bind-this\n42\n42\ntarget\nthis\nargument\n42\n42\nrebound-this\n42\nimmediate-target\nimmediate-this\nimmediate-leading\nimmediate-trailing\n42\n"
+        );
+    }
+
+    #[test]
+    fn immediately_invokes_bound_async_function_values() {
+        let source = r#"
+            async function addLater(left: number, right: number): Promise<number> {
+                await sleep(1);
+                return left + right;
+            }
+            function passAsync(
+                callback: (left: number, right: number) => Promise<number>
+            ): (left: number, right: number) => Promise<number> {
+                return callback;
+            }
+            async function main(): Promise<void> {
+                console.log(await passAsync(addLater).bind(null, 40)(2));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "immediate_async_function_bind"),
+            "42\n"
         );
     }
 
