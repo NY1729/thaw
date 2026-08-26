@@ -153,6 +153,7 @@ enum GenericTypePattern {
     Array(Box<GenericTypePattern>),
     Promise(Box<GenericTypePattern>),
     Awaited(Box<GenericTypePattern>),
+    NonNullable(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6253,6 +6254,31 @@ fn awaited_hir_type(mut ty: HirType) -> HirType {
     ty
 }
 
+fn non_nullable_hir_type(ty: HirType) -> Result<HirType, String> {
+    match ty {
+        HirType::Optional(value) | HirType::Nullable(value) | HirType::Nullish(value) => {
+            non_nullable_hir_type(*value)
+        }
+        HirType::Union(values) => {
+            let values = values
+                .into_iter()
+                .filter(|value| !matches!(value, HirType::Null | HirType::Undefined))
+                .collect::<Vec<_>>();
+            match values.as_slice() {
+                [] => Err(
+                    "NonNullable<T> has no native value when T is only null or undefined".into(),
+                ),
+                [value] => non_nullable_hir_type(value.clone()),
+                _ => Ok(HirType::Union(values)),
+            }
+        }
+        HirType::Null | HirType::Undefined => {
+            Err("NonNullable<T> has no native value when T is only null or undefined".into())
+        }
+        other => Ok(other),
+    }
+}
+
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     fn fingerprint(ty: &HirType) -> String {
         match ty {
@@ -6292,7 +6318,10 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         GenericTypePattern::Variable(name) => name == variable,
         GenericTypePattern::Array(inner)
         | GenericTypePattern::Promise(inner)
-        | GenericTypePattern::Awaited(inner) => generic_pattern_contains_variable(inner, variable),
+        | GenericTypePattern::Awaited(inner)
+        | GenericTypePattern::NonNullable(inner) => {
+            generic_pattern_contains_variable(inner, variable)
+        }
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
@@ -6320,6 +6349,9 @@ fn instantiate_generic_pattern(
             inner,
             substitution,
         )?)),
+        GenericTypePattern::NonNullable(inner) => {
+            non_nullable_hir_type(instantiate_generic_pattern(inner, substitution)?)
+        }
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
                 .iter()
@@ -6582,6 +6614,7 @@ fn generic_type_pattern(
                     "Promise" => return Ok(GenericTypePattern::Promise(inner)),
                     "Readonly" => return Ok(*inner),
                     "Awaited" => return Ok(GenericTypePattern::Awaited(inner)),
+                    "NonNullable" => return Ok(GenericTypePattern::NonNullable(inner)),
                     _ => {}
                 }
             }
@@ -6681,6 +6714,9 @@ fn match_generic_pattern(
             match_generic_pattern(expected, value, inferred)
         }
         (GenericTypePattern::Awaited(expected), actual) => {
+            match_generic_pattern(expected, actual, inferred)
+        }
+        (GenericTypePattern::NonNullable(expected), actual) => {
             match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
@@ -10288,6 +10324,11 @@ fn lower_ts_type(
                         generic_interfaces,
                     )?))
                 }
+                (Some("NonNullable"), Some(inner)) => non_nullable_hir_type(lower_ts_type(
+                    inner,
+                    interfaces,
+                    generic_interfaces,
+                )?),
                 _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
         }
@@ -10693,6 +10734,7 @@ fn resolve_ts_type_with_substitution(
                         "Promise" => return Ok(HirType::Promise(Box::new(resolved_elem))),
                         "Readonly" => return Ok(resolved_elem),
                         "Awaited" => return Ok(awaited_hir_type(resolved_elem)),
+                        "NonNullable" => return non_nullable_hir_type(resolved_elem),
                         _ => {}
                     }
                 }
@@ -30640,6 +30682,14 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("does not satisfy constraint F64"));
+
+        let module = thaw_parser::parse_typescript(
+            "type Missing = NonNullable<null | undefined>; function bad(value: Missing): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("NonNullable<T> has no native value"));
     }
 
     #[test]
