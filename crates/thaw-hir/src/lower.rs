@@ -12194,6 +12194,22 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn switch_case_prevents_fallthrough(statements: &[Stmt]) -> bool {
+        let Some(last) = statements.last() else {
+            return false;
+        };
+        match last {
+            Stmt::Break(break_stmt) => break_stmt.label.is_none(),
+            Stmt::Return(_) | Stmt::Throw(_) => true,
+            Stmt::Block(block) => Self::switch_case_prevents_fallthrough(&block.stmts),
+            Stmt::If(if_stmt) => if_stmt.alt.as_ref().is_some_and(|alternative| {
+                Self::stmt_definitely_exits(&if_stmt.cons)
+                    && Self::stmt_definitely_exits(alternative)
+            }),
+            _ => false,
+        }
+    }
+
     fn infer_return_type(&self, body: &[HirStmt]) -> Result<HirType, String> {
         fn collect<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
             for stmt in stmts {
@@ -13326,7 +13342,106 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::F64(case_count as f64))),
                     ));
                     for (index, case) in switch_stmt.cases.iter().enumerate() {
-                        let mut body = self.lower_stmts(&case.cons)?;
+                        let isolated_entry = index == 0
+                            || Self::switch_case_prevents_fallthrough(
+                                &switch_stmt.cases[index - 1].cons,
+                            );
+                        let case_union = if isolated_entry {
+                            if let Some(test) = &case.test {
+                                self.union_narrowing(&Expr::Bin(swc_ecma_ast::BinExpr {
+                                    span: switch_stmt.span,
+                                    op: BinaryOp::EqEqEq,
+                                    left: switch_stmt.discriminant.clone(),
+                                    right: test.clone(),
+                                }))
+                                .map(|(targets, equal, complement)| {
+                                    targets
+                                        .into_iter()
+                                        .map(|target| UnionNarrowingTarget {
+                                            matching: if equal {
+                                                target.matching.clone()
+                                            } else if complement {
+                                                target
+                                                    .allowed
+                                                    .iter()
+                                                    .filter(|member| {
+                                                        !target.matching.contains(member)
+                                                    })
+                                                    .copied()
+                                                    .collect()
+                                            } else {
+                                                target.allowed.clone()
+                                            },
+                                            ..target
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                            } else {
+                                let mut excluded = HashMap::<
+                                    Symbol,
+                                    (Vec<usize>, Vec<usize>, Vec<HirType>),
+                                >::new();
+                                for tested_case in &switch_stmt.cases {
+                                    let Some(test) = &tested_case.test else {
+                                        continue;
+                                    };
+                                    let Some((targets, equal, _)) = self.union_narrowing(
+                                        &Expr::Bin(swc_ecma_ast::BinExpr {
+                                            span: switch_stmt.span,
+                                            op: BinaryOp::EqEqEq,
+                                            left: switch_stmt.discriminant.clone(),
+                                            right: test.clone(),
+                                        }),
+                                    ) else {
+                                        continue;
+                                    };
+                                    if !equal {
+                                        continue;
+                                    }
+                                    for target in targets {
+                                        let entry = excluded.entry(target.name).or_insert_with(|| {
+                                            (Vec::new(), target.allowed, target.elements)
+                                        });
+                                        for member in target.matching {
+                                            if !entry.0.contains(&member) {
+                                                entry.0.push(member);
+                                            }
+                                        }
+                                    }
+                                }
+                                let targets = excluded
+                                    .into_iter()
+                                    .filter_map(|(name, (excluded, allowed, elements))| {
+                                        let matching = allowed
+                                            .iter()
+                                            .filter(|member| !excluded.contains(member))
+                                            .copied()
+                                            .collect::<Vec<_>>();
+                                        (!matching.is_empty()).then_some(UnionNarrowingTarget {
+                                            name,
+                                            matching,
+                                            allowed,
+                                            elements,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                (!targets.is_empty()).then_some(targets)
+                            }
+                        } else {
+                            None
+                        };
+                        let saved_union_narrowings = self.union_narrowings.clone();
+                        if let Some(targets) = &case_union {
+                            for target in targets {
+                                self.union_narrowings.insert(
+                                    target.name.clone(),
+                                    (target.matching.clone(), target.elements.clone()),
+                                );
+                            }
+                        }
+                        let lowered_case = self.lower_stmts(&case.cons);
+                        self.union_narrowings = saved_union_narrowings;
+                        let mut body = lowered_case?;
                         body = rewrite_switch_case_stmts(
                             body,
                             &selected_name,
