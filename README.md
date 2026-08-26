@@ -1392,8 +1392,11 @@ The workspace crates have narrow responsibilities:
   the innermost fixed layout outward, including inferred constructor-result bindings
   and bundled modules; equivalent explicit and inferred nests share one specialization.
   Recursive by-value generic class fields are rejected because they have no finite
-  native layout. Inference through arbitrary call results and runtime sharing of generic
-  static state remain outside the native subset.
+  native layout. Static fields, methods, private members and blocks are emitted once on
+  a shared non-generic owner, retain source initialization order and share inherited
+  base storage across every specialization; class type parameters in static members are
+  rejected as in TypeScript. Inference through arbitrary call results remains outside
+  the native subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
