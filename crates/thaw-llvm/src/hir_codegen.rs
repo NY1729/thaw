@@ -13869,6 +13869,40 @@ mod tests {
     }
 
     #[test]
+    fn recursively_specializes_named_generic_local_function_values() {
+        let source = r#"
+            type Repeat = <T, U>(value: T, marker: U, remaining: number) => T;
+            function main(): void {
+                let calls = 0;
+                const repeat: Repeat = function again<T, U>(
+                    value: T, marker: U, remaining: number
+                ): T {
+                    calls += 1;
+                    if (remaining <= 0) { return value; }
+                    return again(value, marker, remaining - 1);
+                };
+                const alias = repeat;
+                console.log(repeat("done", true, 2));
+                console.log(calls);
+                calls = 0;
+                console.log(alias<number, string>(42, "marker", 3));
+                console.log(calls);
+                const normalize = function normalize<T>(
+                    value: T, index: number, values: T[]
+                ): T {
+                    if (index <= 0) { return value; }
+                    return normalize(value, index - 1, values);
+                };
+                console.log(["a", "b", "c"].map(normalize).join(","));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "recursive_named_generic_local_functions"),
+            "done\n3\n42\n4\na,b,c\n"
+        );
+    }
+
+    #[test]
     fn calls_function_values_with_explicit_this_across_function_boundaries() {
         let source = r#"
             function pass(callback: (value: number) => number): (value: number) => number {
