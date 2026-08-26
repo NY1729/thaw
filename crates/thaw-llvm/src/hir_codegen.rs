@@ -19341,6 +19341,39 @@ mod tests {
     }
 
     #[test]
+    fn preserves_union_discriminants_through_nested_array_flattening() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            function main(): void {
+                const number: Result = { kind: "number", value: 1 };
+                const text: Result = { kind: "text", value: "flat" };
+                const nested: Result[][] = [[number], [text]];
+                const flattened = nested.slice().flat();
+                print(flattened[0]);
+                print(flattened[1]);
+                const deep: Result[][][] = [nested];
+                const flattenedDeep = deep.flat(2);
+                print(flattenedDeep[0]);
+                print(flattenedDeep[1]);
+                const oneLevel = deep.flat();
+                const flattenedAgain = oneLevel.flat();
+                print(flattenedAgain[0]);
+                print(flattenedAgain[1]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "nested_union_array_flat"),
+            "11\nflat!\n11\nflat!\n11\nflat!\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_of() {
         let source = r#"
             interface Item { value: number; }
