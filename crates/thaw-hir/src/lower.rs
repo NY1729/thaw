@@ -29,8 +29,8 @@ use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee,
     ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr, MemberProp,
-    Module, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat, Prop,
-    PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam,
+    Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, Pat,
+    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam,
     TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp,
     UpdateOp, VarDecl, VarDeclOrExpr,
 };
@@ -357,7 +357,273 @@ fn collect_enums(
     Ok((values, reverse_values, types))
 }
 
+pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, String> {
+    fn binding_annotation(pattern: &Pat) -> Option<Box<swc_ecma_ast::TsTypeAnn>> {
+        match pattern {
+            Pat::Ident(binding) => binding.type_ann.clone(),
+            Pat::Array(pattern) => pattern.type_ann.clone(),
+            Pat::Object(pattern) => pattern.type_ann.clone(),
+            _ => None,
+        }
+    }
+
+    fn member(object: Expr, key: &PropName, span: swc_common::Span) -> Result<Expr, String> {
+        let prop = match key {
+            PropName::Ident(identifier) => MemberProp::Ident(identifier.clone()),
+            PropName::Str(string) => MemberProp::Computed(ComputedPropName {
+                span,
+                expr: Box::new(Expr::Lit(Lit::Str(string.clone()))),
+            }),
+            PropName::Computed(computed) => match computed.expr.as_ref() {
+                Expr::Lit(Lit::Str(_)) | Expr::Lit(Lit::Num(_)) => {
+                    MemberProp::Computed(computed.clone())
+                }
+                _ => {
+                    return Err(
+                        "top-level destructuring keys must be static string/number literals".into(),
+                    )
+                }
+            },
+            _ => return Err("unsupported top-level destructuring property key".into()),
+        };
+        Ok(Expr::Member(MemberExpr {
+            span,
+            obj: Box::new(object),
+            prop,
+        }))
+    }
+
+    fn expand_pattern(
+        pattern: &Pat,
+        value: Expr,
+        kind: swc_ecma_ast::VarDeclKind,
+        span: swc_common::Span,
+        counter: &mut usize,
+        used: &mut HashSet<String>,
+        out: &mut Vec<swc_ecma_ast::VarDecl>,
+    ) -> Result<(), String> {
+        if let Pat::Ident(binding) = pattern {
+            out.push(swc_ecma_ast::VarDecl {
+                span,
+                ctxt: Default::default(),
+                kind,
+                declare: false,
+                decls: vec![swc_ecma_ast::VarDeclarator {
+                    span,
+                    name: Pat::Ident(binding.clone()),
+                    init: Some(Box::new(value)),
+                    definite: false,
+                }],
+            });
+            return Ok(());
+        }
+
+        let temporary = loop {
+            let candidate = format!("__thaw_top_destructure_{}", *counter);
+            *counter += 1;
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        let temporary_ident = swc_ecma_ast::Ident::new_no_ctxt(temporary.clone().into(), span);
+        out.push(swc_ecma_ast::VarDecl {
+            span,
+            ctxt: Default::default(),
+            kind: swc_ecma_ast::VarDeclKind::Const,
+            declare: false,
+            decls: vec![swc_ecma_ast::VarDeclarator {
+                span,
+                name: Pat::Ident(swc_ecma_ast::BindingIdent {
+                    id: temporary_ident.clone(),
+                    type_ann: binding_annotation(pattern),
+                }),
+                init: Some(Box::new(value)),
+                definite: false,
+            }],
+        });
+        let temporary_expr = || Expr::Ident(temporary_ident.clone());
+
+        match pattern {
+            Pat::Object(object) => {
+                for property in &object.props {
+                    match property {
+                        ObjectPatProp::Assign(property) => {
+                            if property.value.is_some() {
+                                return Err(
+                                    "top-level destructuring defaults are not supported yet".into(),
+                                );
+                            }
+                            let key = PropName::Ident(swc_ecma_ast::IdentName::new(
+                                property.key.id.sym.clone(),
+                                property.key.id.span,
+                            ));
+                            expand_pattern(
+                                &Pat::Ident(property.key.clone()),
+                                member(temporary_expr(), &key, span)?,
+                                kind,
+                                span,
+                                counter,
+                                used,
+                                out,
+                            )?;
+                        }
+                        ObjectPatProp::KeyValue(property) => expand_pattern(
+                            &property.value,
+                            member(temporary_expr(), &property.key, span)?,
+                            kind,
+                            span,
+                            counter,
+                            used,
+                            out,
+                        )?,
+                        ObjectPatProp::Rest(_) => {
+                            return Err(
+                                "top-level object destructuring rest is not supported yet".into()
+                            )
+                        }
+                    }
+                }
+            }
+            Pat::Array(array) => {
+                for (index, element) in array.elems.iter().enumerate() {
+                    let Some(element) = element else { continue };
+                    if matches!(element, Pat::Rest(_) | Pat::Assign(_)) {
+                        return Err(
+                            "top-level array destructuring rest/default is not supported yet"
+                                .into(),
+                        );
+                    }
+                    let value = Expr::Member(MemberExpr {
+                        span,
+                        obj: Box::new(temporary_expr()),
+                        prop: MemberProp::Computed(ComputedPropName {
+                            span,
+                            expr: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number {
+                                span,
+                                value: index as f64,
+                                raw: None,
+                            }))),
+                        }),
+                    });
+                    expand_pattern(element, value, kind, span, counter, used, out)?;
+                }
+            }
+            _ => return Err("unsupported top-level destructuring pattern".into()),
+        }
+        Ok(())
+    }
+
+    fn expand_declaration(
+        declaration: &VarDecl,
+        exported: bool,
+        counter: &mut usize,
+        used: &mut HashSet<String>,
+    ) -> Result<Vec<ModuleItem>, String> {
+        let mut items = Vec::new();
+        for declarator in &declaration.decls {
+            let init = declarator
+                .init
+                .as_deref()
+                .ok_or("top-level destructuring declarations need an initializer")?
+                .clone();
+            let mut declarations = Vec::new();
+            expand_pattern(
+                &declarator.name,
+                init,
+                declaration.kind,
+                declaration.span,
+                counter,
+                used,
+                &mut declarations,
+            )?;
+            for declaration in declarations {
+                let is_temporary = declaration.decls.first().is_some_and(|declarator| {
+                    matches!(&declarator.name, Pat::Ident(binding) if binding.id.sym.starts_with("__thaw_top_destructure_"))
+                });
+                if exported && !is_temporary {
+                    items.push(ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(
+                        swc_ecma_ast::ExportDecl {
+                            span: declaration.span,
+                            decl: Decl::Var(Box::new(declaration)),
+                        },
+                    )));
+                } else {
+                    items.push(ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(
+                        declaration,
+                    )))));
+                }
+            }
+        }
+        Ok(items)
+    }
+
+    let mut used = HashSet::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(declaration)) => {
+                used.extend(declaration_names_for_normalization(declaration));
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                used.extend(declaration_names_for_normalization(&export.decl));
+            }
+            _ => {}
+        }
+    }
+    let mut counter = 0;
+    let mut body = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration)))
+                if declaration
+                    .decls
+                    .iter()
+                    .any(|declarator| !matches!(declarator.name, Pat::Ident(_))) =>
+            {
+                body.extend(expand_declaration(
+                    declaration.as_ref(),
+                    false,
+                    &mut counter,
+                    &mut used,
+                )?);
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) if matches!(&export.decl, Decl::Var(declaration) if declaration.decls.iter().any(|declarator| !matches!(declarator.name, Pat::Ident(_)))) =>
+            {
+                let Decl::Var(declaration) = &export.decl else {
+                    unreachable!()
+                };
+                body.extend(expand_declaration(
+                    declaration.as_ref(),
+                    true,
+                    &mut counter,
+                    &mut used,
+                )?);
+            }
+            _ => body.push(item.clone()),
+        }
+    }
+    let mut normalized = module.clone();
+    normalized.body = body;
+    Ok(normalized)
+}
+
+fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
+    struct Collector(Vec<String>);
+    impl Visit for Collector {
+        fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+            self.0.push(binding.id.sym.to_string());
+        }
+    }
+    let mut collector = Collector(Vec::new());
+    declaration.visit_with(&mut collector);
+    collector.0
+}
+
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
+    let normalized = normalize_top_level_destructuring(module)?;
+    lower_normalized_module(&normalized)
+}
+
+fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
     let (enum_values, enum_reverse_values, enum_types) = collect_enums(module)?;
     for (name, ty) in enum_types {
@@ -14491,6 +14757,31 @@ mod tests {
             .find(|function| function.name == "configure")
             .unwrap();
         assert_eq!(configure.params[0].ty, HirType::F64);
+    }
+
+    #[test]
+    fn expands_nested_top_level_object_and_array_destructuring() {
+        let program = lower(
+            r#"
+                const { point: { x, y }, values: [first, second] } = {
+                    point: { x: 40, y: 2 },
+                    values: [20, 22]
+                };
+                function main(): void {
+                    console.log(x + y);
+                    console.log(first + second);
+                }
+            "#,
+        );
+        for name in ["x", "y", "first", "second"] {
+            let global = program
+                .globals
+                .iter()
+                .find(|global| global.name == name)
+                .unwrap_or_else(|| panic!("missing destructured global `{name}`"));
+            assert_eq!(global.ty, HirType::F64);
+            assert!(!global.mutable);
+        }
     }
 
     #[test]

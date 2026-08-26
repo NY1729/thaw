@@ -3601,6 +3601,42 @@ mod tests {
     }
 
     #[test]
+    fn exports_top_level_destructured_bindings() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-top-level-destructuring-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("values.ts"),
+            r#"
+                export const { answer, label: text } = { answer: 42, label: "ready" };
+                export const [first, second] = [20, 22];
+            "#,
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { answer, text, first, second } from "./values";
+                function main(): void {
+                    console.log(text);
+                    console.log(answer);
+                    console.log(first + second);
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "ready\n42\n42\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn resolves_and_reports_star_export_ambiguity() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-star-export-ambiguity-{}",
