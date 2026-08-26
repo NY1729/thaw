@@ -1017,6 +1017,11 @@ The workspace crates have narrow responsibilities:
   prepended to invocation-time values. The same closure ABI carries synchronous
   and async results, and `.d.ts` fast-path callback classification recognizes a
   trailing typed rest parameter
+- Ordinary top-level functions now share the native class callable adapters for
+  omitted trailing defaults, optional parameters and explicit `undefined` at
+  any omittable position. Default expressions run in declaration order with
+  earlier parameters in scope, and async wrappers retain exactly one Promise
+  result layer
 - Named async generic functions specialize for inferred or explicit types and
   retain exactly one Promise layer when used directly, as instantiated function
   values, or as assimilated Promise callbacks

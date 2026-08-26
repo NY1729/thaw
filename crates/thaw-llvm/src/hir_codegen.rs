@@ -19737,6 +19737,35 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_top_level_default_and_optional_parameters() {
+        let source = r#"
+            function describe(
+                prefix: string = "value=",
+                value?: number,
+                suffix: string = "!"
+            ): string {
+                return prefix + String(value ?? 5) + suffix;
+            }
+            async function delayed(value: number = 20): Promise<number> {
+                await sleep(1);
+                return value + 22;
+            }
+            async function main(): Promise<void> {
+                console.log(describe());
+                console.log(describe("n=", 7));
+                console.log(describe(undefined, 8, "?"));
+                console.log(describe("empty=", undefined, "."));
+                console.log(await delayed());
+                console.log(await delayed(undefined));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "top_level_default_optional_parameters"),
+            "value=5!\nn=7!\nvalue=8?\nempty=5.\n42\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_default_parameters() {
         let source = r#"
             class Box {
