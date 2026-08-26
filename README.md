@@ -618,7 +618,9 @@ The workspace crates have narrow responsibilities:
   unreachable objects are also finalized automatically. Releasing an instance
   drops its wasmi store, function imports, inactive externrefs and bindings to
   standalone Memory, Global and Table objects, while cached JavaScript values
-  can be reactivated safely by a later instance
+  can be reactivated safely by a later instance. Failed link attempts preflight
+  import kinds and release any function or externref handles retained before a
+  later type/limit mismatch is discovered
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command
