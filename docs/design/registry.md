@@ -925,7 +925,7 @@ native method functionでは明示的`thisArg`を利用するadapterを指す。
 `serveOnceWith(port, (target) => body)` はこのABIを使い、callbackの戻り値を実際の
 HTTP response bodyとして送信する。capture entryは値のコピーではなくarena上の
 variable cellを指すため、closure生成後に外側で行った代入とclosure内の代入を
-双方から観測できる。nested closureが作成元の呼び出しを抜けた後もcellは有効である。
+双方から観測できる。 名前付きローカル関数式が自己参照する場合はinitializer評価前に専用self cellを確保して生成closureを格納するため、外側binding名と異なる内部名でも再帰し、typed境界やbind後も同じself closureを参照する。nested closureが作成元の呼び出しを抜けた後もcellは有効である。
 
 objectのfunction型propertyは一般のclosureとして呼び出せる。これを利用した
 `createServer(callback).listen(port)` は、callbackへ

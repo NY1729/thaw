@@ -276,6 +276,8 @@ pub enum HirExpr {
     /// the body in deterministic name order, followed by ordinary parameters,
     /// the return type, and the body itself.
     Lambda(Vec<HirParam>, Vec<HirParam>, HirType, Box<HirExpr>),
+    // A closure initializer whose named function expression captures its own preallocated cell.
+    RecursiveClosure(Symbol, HirType, Box<HirExpr>),
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     /// A native method value with separate unbound and explicit-receiver entries.
@@ -519,6 +521,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::UnionInject(inner, _, _)
             | HirExpr::UnionTag(inner, _)
             | HirExpr::UnionValue(inner, _, _) => visit_expr(inner, symbol, abi, found),
+            HirExpr::RecursiveClosure(_, _, closure) => visit_expr(closure, symbol, abi, found),
             HirExpr::Lambda(_, _, _, body) => visit_expr(body, symbol, abi, found),
             HirExpr::PromiseNew(executor, _, _) => visit_expr(executor, symbol, abi, found),
             HirExpr::PromiseThen(source, callback, _, _, _, _) => {
@@ -712,6 +715,9 @@ pub fn set_ffi_ownership(
             | HirExpr::UnionTag(inner, _)
             | HirExpr::UnionValue(inner, _, _) => {
                 update_expr(inner, symbol, returns, errors, found)
+            }
+            HirExpr::RecursiveClosure(_, _, closure) => {
+                update_expr(closure, symbol, returns, errors, found)
             }
             HirExpr::Lambda(_, _, _, body) => update_expr(body, symbol, returns, errors, found),
             HirExpr::PromiseNew(executor, _, _) => {
@@ -1017,6 +1023,15 @@ pub fn set_ffi_string_abi(
             | HirExpr::UnionTag(inner, _)
             | HirExpr::UnionValue(inner, _, _) => update_expr(
                 inner,
+                symbol,
+                params,
+                returns,
+                calling_convention,
+                aggregate_return_abi,
+                found,
+            ),
+            HirExpr::RecursiveClosure(_, _, closure) => update_expr(
+                closure,
                 symbol,
                 params,
                 returns,
