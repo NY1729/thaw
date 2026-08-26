@@ -19758,6 +19758,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_readonly_array_and_tuple_types() {
+        let source = r#"
+            function first<T>(values: readonly T[]): T {
+                return values[0];
+            }
+            function second(values: ReadonlyArray<number>): number {
+                return values[1];
+            }
+            function main(): void {
+                const tuple: readonly [number, string] = [40, "ready"];
+                const values: ReadonlyArray<number> = [41, 42];
+                console.log(tuple[0] + 2);
+                console.log(tuple[1]);
+                console.log(first<number>(values) + 1);
+                console.log(second(values));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "readonly_arrays_and_tuples"),
+            "42\nready\n42\n42\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =

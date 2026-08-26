@@ -6566,7 +6566,7 @@ fn generic_type_pattern(
                     in_progress,
                 )?);
                 match name {
-                    "Array" => return Ok(GenericTypePattern::Array(inner)),
+                    "Array" | "ReadonlyArray" => return Ok(GenericTypePattern::Array(inner)),
                     "Promise" => return Ok(GenericTypePattern::Promise(inner)),
                     _ => {}
                 }
@@ -6574,6 +6574,17 @@ fn generic_type_pattern(
         }
     }
     match ty {
+        TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
+        {
+            generic_type_pattern(
+                &operator.type_ann,
+                substitutions,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        }
         TsType::TsArrayType(array) => {
             Ok(GenericTypePattern::Array(Box::new(generic_type_pattern(
                 &array.elem_type,
@@ -7171,10 +7182,17 @@ fn materialize_generic_metadata_type(ty: &TsType, generic: &GenericInterfaces<'_
 }
 
 fn strip_parenthesized_ts_type(mut ty: &TsType) -> &TsType {
-    while let TsType::TsParenthesizedType(parenthesized) = ty {
-        ty = &parenthesized.type_ann;
+    loop {
+        ty = match ty {
+            TsType::TsParenthesizedType(parenthesized) => &parenthesized.type_ann,
+            TsType::TsTypeOperator(operator)
+                if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
+            {
+                &operator.type_ann
+            }
+            _ => return ty,
+        };
     }
-    ty
 }
 
 fn resolve_plain_alias_type<'a>(
@@ -8602,6 +8620,18 @@ fn resolve_type_dependencies(
             resolved,
             in_progress,
         )?,
+        TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
+        {
+            resolve_type_dependencies(
+                &operator.type_ann,
+                interfaces,
+                aliases,
+                generic,
+                resolved,
+                in_progress,
+            )?
+        }
         TsType::TsTupleType(tuple) => {
             for element in &tuple.elem_types {
                 resolve_type_dependencies(
@@ -9950,6 +9980,11 @@ fn lower_ts_type(
             interfaces,
             generic_interfaces,
         ),
+        TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
+        {
+            lower_ts_type(&operator.type_ann, interfaces, generic_interfaces)
+        }
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => Ok(HirType::F64),
             TsKeywordTypeKind::TsStringKeyword => Ok(HirType::Str),
@@ -10218,11 +10253,9 @@ fn lower_ts_type(
                 });
 
             match (ref_name, single_type_param) {
-                (Some("Array"), Some(elem)) => Ok(HirType::Array(Box::new(lower_ts_type(
-                    elem,
-                    interfaces,
-                    generic_interfaces,
-                )?))),
+                (Some("Array" | "ReadonlyArray"), Some(elem)) => Ok(HirType::Array(Box::new(
+                    lower_ts_type(elem, interfaces, generic_interfaces)?,
+                ))),
                 (Some("Promise"), Some(inner)) => Ok(HirType::Promise(Box::new(lower_ts_type(
                     inner,
                     interfaces,
@@ -10627,7 +10660,9 @@ fn resolve_ts_type_with_substitution(
                         in_progress,
                     )?;
                     match ref_name {
-                        "Array" => return Ok(HirType::Array(Box::new(resolved_elem))),
+                        "Array" | "ReadonlyArray" => {
+                            return Ok(HirType::Array(Box::new(resolved_elem)))
+                        }
                         "Promise" => return Ok(HirType::Promise(Box::new(resolved_elem))),
                         _ => {}
                     }
@@ -10645,6 +10680,17 @@ fn resolve_ts_type_with_substitution(
             generic_interfaces,
             in_progress,
         ),
+        TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
+        {
+            resolve_ts_type_with_substitution(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        }
         TsType::TsArrayType(arr) => {
             Ok(HirType::Array(Box::new(resolve_ts_type_with_substitution(
                 &arr.elem_type,
