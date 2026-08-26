@@ -1028,11 +1028,14 @@ fn compiles_native_array_from_native_arrays() {
             console.log(Array.from(text()).join("|"));
             console.log(Array.from<string, string>("ab", (value, index) => value + String(index), thisValue()).join(","));
             console.log(Array.from(await delayedText()).length);
+            console.log(Array.from(...[source]).join(","));
+            console.log(Array.from(...[source, project]).join(","));
+            console.log(Array.from(...[source, project, thisValue()]).join(","));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "array_from"),
-        "1,2,3\n2,5,8\n1!|2!|3!\n7\n0\nreceiver\nthisArg\n1,3\nawaited\naa,bb\ntext\nA|😀|é\nthisArg\na0,b1\nawaited text\n2\n"
+        "1,2,3\n2,5,8\n1!|2!|3!\n7\n0\nreceiver\nthisArg\n1,3\nawaited\naa,bb\ntext\nA|😀|é\nthisArg\na0,b1\nawaited text\n2\n1,2,3\n2,5,8\nthisArg\n2,5,8\n"
     );
 }
 
