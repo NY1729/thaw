@@ -611,7 +611,9 @@ The workspace crates have narrow responsibilities:
   accept exported functions in `set()` and `grow()`. Standalone function
   Tables can be imported into one or several instances, preserve function
   identity, synchronize module-internal references bidirectionally and use
-  typed host thunks to forward calls between separate WebAssembly stores
+  typed host thunks to forward calls between separate WebAssembly stores.
+  Repeated `externref` crossings reuse both the JavaScript persistent handle
+  and the per-store wasmi reference, avoiding unbounded growth for stable values
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command
