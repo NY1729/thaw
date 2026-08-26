@@ -16672,6 +16672,21 @@ mod tests {
             async function pair(value: number, label: string): Promise<[number, string]> {
                 await sleep(1); return [value, label];
             }
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            async function result(number: boolean): Promise<Result> {
+                await sleep(1);
+                if (number) return { kind: "number", value: 8 };
+                return { kind: "text", value: "async" };
+            }
+            function consumeResults(results: Result[]): string {
+                for (const { kind, value } of results) {
+                    if (kind === "number") return String(value + 4);
+                    return value + " parameter";
+                }
+                return "empty";
+            }
             async function main(): Promise<void> {
                 const rows = [
                     { x: 1, nested: { flag: true } },
@@ -16693,11 +16708,35 @@ mod tests {
                 for await (const [value, label] of pending) {
                     console.log(value); console.log(label);
                 }
+                const results: Result[] = [
+                    { kind: "number", value: 6 },
+                    { kind: "text", value: "sync" }
+                ];
+                for (const { kind, value } of results) {
+                    if (kind === "number") console.log(value + 1);
+                    else console.log(value + "!");
+                }
+                const resultsAlias = results;
+                for (const item of resultsAlias) {
+                    if (item.kind === "number") console.log(item.value + 2);
+                    else console.log(item.value + " item");
+                }
+                console.log(consumeResults([{ kind: "text", value: "loop" }]));
+                const pendingNumbers: Promise<Result>[] = [result(true)];
+                for await (const { kind, value } of pendingNumbers) {
+                    if (kind === "number") console.log(value + 3);
+                    else console.log(value + "!");
+                }
+                const pendingTexts: Promise<Result>[] = [result(false)];
+                for await (const { kind, value } of pendingTexts) {
+                    if (kind === "number") console.log(value + 3);
+                    else console.log(value + "!");
+                }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\nloop parameter\n11\nasync!\n"
         );
     }
 
