@@ -19506,6 +19506,12 @@ mod tests {
             class Holder {
                 constructor(public box: Box<number>) {}
             }
+            abstract class GenericBase {
+                abstract transform<U>(value: U): U;
+            }
+            class GenericDerived extends GenericBase {
+                transform<V>(value: V): V { return value; }
+            }
             async function main(): Promise<void> {
                 const box = new Box(40);
                 const derived = new DerivedBox(40);
@@ -19533,11 +19539,12 @@ mod tests {
                 console.log(holder.box.convert("member-receiver"));
                 console.log(box.convert(...tuple));
                 console.log(box.collect(51, ...restTuple));
+                console.log(new GenericDerived().transform("generic-override"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\n"
         );
     }
 

@@ -91,13 +91,24 @@ struct FnSignature {
     generic_return_type: Option<Box<TsType>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum GenericTypePattern {
     Variable(Symbol),
     Concrete(HirType),
     Array(Box<GenericTypePattern>),
     Promise(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
+}
+
+#[derive(PartialEq)]
+struct GenericClassMethodShape {
+    parameters: Vec<GenericTypePattern>,
+    optional: Vec<bool>,
+    rest: bool,
+    result: GenericTypePattern,
+    constraints: Vec<Option<GenericTypePattern>>,
+    defaults: Vec<Option<GenericTypePattern>>,
+    is_async: bool,
 }
 
 #[derive(Clone)]
@@ -2909,11 +2920,170 @@ impl VisitMut for GenericClassMethodCallRewriter<'_> {
     }
 }
 
+fn generic_class_method_shape(
+    class: &str,
+    method_name: &str,
+    method: &ClassMethod,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Option<GenericClassMethodShape>, String> {
+    let Some(type_parameters) = method.function.type_params.as_ref() else {
+        return Ok(None);
+    };
+    let substitutions = type_parameters
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            (
+                parameter.name.sym.to_string(),
+                GenericTypePattern::Variable(format!("__thaw_method_type_{index}")),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut parameters = Vec::new();
+    let mut optional = Vec::new();
+    for parameter in &method.function.params {
+        let (annotation, is_optional) = match &parameter.pat {
+            Pat::Ident(binding) => (binding.type_ann.as_ref(), binding.id.optional),
+            Pat::Assign(assignment) => match assignment.left.as_ref() {
+                Pat::Ident(binding) => (binding.type_ann.as_ref(), true),
+                _ => (None, true),
+            },
+            Pat::Rest(rest) => (rest.type_ann.as_ref(), false),
+            _ => (None, false),
+        };
+        let annotation = annotation.ok_or_else(|| {
+            format!("generic method `{class}.{method_name}` needs annotated parameters")
+        })?;
+        parameters.push(generic_type_pattern(
+            &annotation.type_ann,
+            &substitutions,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?);
+        optional.push(is_optional);
+    }
+    let result = method.function.return_type.as_ref().ok_or_else(|| {
+        format!("generic method `{class}.{method_name}` needs a return annotation")
+    })?;
+    let result = generic_type_pattern(
+        &result.type_ann,
+        &substitutions,
+        interfaces,
+        generic_interfaces,
+        &mut Vec::new(),
+    )?;
+    let convert = |ty: &TsType| {
+        generic_type_pattern(
+            ty,
+            &substitutions,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )
+    };
+    Ok(Some(GenericClassMethodShape {
+        parameters,
+        optional,
+        rest: method
+            .function
+            .params
+            .last()
+            .is_some_and(|parameter| matches!(parameter.pat, Pat::Rest(_))),
+        result,
+        constraints: type_parameters
+            .params
+            .iter()
+            .map(|parameter| parameter.constraint.as_deref().map(&convert).transpose())
+            .collect::<Result<_, _>>()?,
+        defaults: type_parameters
+            .params
+            .iter()
+            .map(|parameter| parameter.default.as_deref().map(&convert).transpose())
+            .collect::<Result<_, _>>()?,
+        is_async: method.function.is_async,
+    }))
+}
+
+fn validate_abstract_generic_class_methods(
+    module: &Module,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<(), String> {
+    let classes = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => {
+                Some((class.ident.sym.to_string(), class))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    for (name, declaration) in &classes {
+        if declaration.class.is_abstract {
+            continue;
+        }
+        let mut selected = HashMap::<(bool, MethodKind, Symbol), (&str, &ClassMethod)>::new();
+        let mut current = Some(name.as_str());
+        while let Some(class_name) = current {
+            let class = classes[class_name];
+            for member in &class.class.body {
+                let ClassMember::Method(method) = member else {
+                    continue;
+                };
+                let method_name = class_property_name(&method.key)?;
+                let key = (method.is_static, method.kind, method_name.clone());
+                if let Some((implementation_class, implementation)) = selected.get(&key) {
+                    if method.is_abstract && method.function.type_params.is_some() {
+                        let required = generic_class_method_shape(
+                            class_name,
+                            &method_name,
+                            method,
+                            interfaces,
+                            generic_interfaces,
+                        )?;
+                        let actual = generic_class_method_shape(
+                            implementation_class,
+                            &method_name,
+                            implementation,
+                            interfaces,
+                            generic_interfaces,
+                        )?;
+                        if required != actual {
+                            return Err(format!(
+                                "class `{name}` implements abstract generic member `{method_name}` from `{class_name}` with an incompatible signature"
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                selected.insert(key, (class_name, method));
+                if method.is_abstract && method.function.type_params.is_some() {
+                    return Err(format!(
+                        "concrete class `{name}` must implement abstract generic member `{method_name}` from `{class_name}`"
+                    ));
+                }
+            }
+            current = class
+                .class
+                .super_class
+                .as_deref()
+                .and_then(|parent| parent.as_ident())
+                .map(|parent| parent.sym.as_ref());
+        }
+    }
+    Ok(())
+}
+
 fn specialize_generic_class_methods(
     module: &Module,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Result<Option<Module>, String> {
+    validate_abstract_generic_class_methods(module, interfaces, generic_interfaces)?;
     let mut templates = HashMap::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
@@ -24035,6 +24205,38 @@ mod tests {
             (
                 "class Box { convert<T>(value: T): T { return value; } } function main(): void { const box = new Box(); const values: string[] = [\"bad\"]; box.convert(...values); }",
                 "requires a statically sized tuple spread",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn validates_abstract_generic_class_method_implementations() {
+        let valid = thaw_parser::parse_typescript(
+            "abstract class Base { abstract convert<T>(value: T): T; } class Derived extends Base { convert<U>(value: U): U { return value; } } function main(): void { new Derived().convert(42); }",
+        )
+        .unwrap();
+        lower_module(&valid).unwrap();
+
+        for (source, expected) in [
+            (
+                "abstract class Base { abstract convert<T>(value: T): T; } class Derived extends Base {} function main(): void {}",
+                "must implement abstract generic member `convert`",
+            ),
+            (
+                "abstract class Base { abstract convert<T>(value: T): T; } class Derived extends Base { convert<T>(value: T): string { return \"bad\"; } } function main(): void {}",
+                "abstract generic member `convert` from `Base` with an incompatible signature",
+            ),
+            (
+                "abstract class Base { abstract convert<T extends number>(value: T): T; } class Derived extends Base { convert<T extends string>(value: T): T { return value; } } function main(): void {}",
+                "abstract generic member `convert` from `Base` with an incompatible signature",
+            ),
+            (
+                "abstract class Base { abstract collect<T>(...value: T[]): T; } class Derived extends Base { collect<T>(value: T[]): T { return value[0]; } } function main(): void {}",
+                "abstract generic member `collect` from `Base` with an incompatible signature",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();
