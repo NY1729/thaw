@@ -16377,6 +16377,9 @@ mod tests {
             type Flagged =
                 { active: true; value: number } |
                 { active: false; value: string };
+            type Nested =
+                { kind: "success"; nested: { value: number }; extra: number } |
+                { kind: "failure"; nested: { value: string }; extra: string };
             function describe(result: Result): string {
                 const { kind: tag, value, detail } = result;
                 if (tag === "success" && value > 0) {
@@ -16409,6 +16412,11 @@ mod tests {
                 if (kind === "failure") return value + " parameter";
                 return value ? "pending" : "waiting";
             }
+            function nested(result: Nested): string {
+                const { kind, nested: { value }, ...rest } = result;
+                if (kind === "success") return String(value + rest.extra);
+                return value + rest.extra;
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 20, detail: 2 };
@@ -16427,6 +16435,8 @@ mod tests {
                 console.log(flagged({ active: false, value: "off" }));
                 console.log(parameter({ kind: "success", value: 7, detail: 0 }));
                 console.log(parameter({ kind: "failure", value: "bad", detail: "" }));
+                console.log(nested({ kind: "success", nested: { value: 6 }, extra: 4 }));
+                console.log(nested({ kind: "failure", nested: { value: "nested" }, extra: "!" }));
                 const { kind, value, detail } = await delayed(true);
                 if (kind === "success") console.log(value + detail);
                 const { kind: asyncKind, value: asyncValue, detail: asyncDetail } = await delayed(false);
@@ -16437,7 +16447,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "correlated_object_union_destructuring"),
-            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n22\nasync!\n"
+            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n22\nasync!\n"
         );
     }
 
