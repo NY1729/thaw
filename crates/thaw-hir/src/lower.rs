@@ -29,10 +29,10 @@ use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee, ClassDecl,
     ClassMember, ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr,
-    MemberProp, Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit, ObjectPatProp,
-    OptChainBase, ParamOrTsParamProp, Pat, Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt,
-    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsType, TsTypeElement,
-    TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
+    MemberProp, MethodKind, Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit,
+    ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop, PropName, PropOrSpread,
+    SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind,
+    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -715,6 +715,21 @@ fn class_constructor_symbol(name: &str) -> Symbol {
     format!("__thaw_class_{name}_constructor")
 }
 
+fn class_method_symbol(class: &str, method: &str) -> Symbol {
+    format!("__thaw_class_{class}_method_{method}")
+}
+
+fn class_name_from_type(ty: &HirType) -> Option<&str> {
+    let HirType::Object(fields) = ty else {
+        return None;
+    };
+    fields.first().and_then(|(name, ty)| {
+        (*ty == HirType::Bool)
+            .then(|| name.strip_prefix("__thaw_class_identity_"))
+            .flatten()
+    })
+}
+
 fn collect_native_classes<'a>(
     module: &'a Module,
     interfaces: &mut HashMap<Symbol, HirType>,
@@ -990,7 +1005,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     FnSignature {
                         params,
                         variadic: None,
-                        ret: instance_type,
+                        ret: instance_type.clone(),
                         is_async: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
@@ -1002,6 +1017,70 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_return_type: None,
                     },
                 );
+                for member in &class_decl.class.body {
+                    let ClassMember::Method(method) = member else {
+                        continue;
+                    };
+                    if method.is_static || method.kind != MethodKind::Method {
+                        continue;
+                    }
+                    if method.function.type_params.is_some() || method.function.is_generator {
+                        return Err(format!(
+                            "class `{name}` method `{}` cannot be generic or a generator yet",
+                            class_property_name(&method.key)?
+                        ));
+                    }
+                    let method_name = class_property_name(&method.key)?;
+                    let mut params = vec![instance_type.clone()];
+                    params.extend(
+                        method
+                            .function
+                            .params
+                            .iter()
+                            .map(|parameter| {
+                                lower_param(
+                                    &parameter.pat,
+                                    &interfaces,
+                                    &generic_interfaces,
+                                    false,
+                                    &HashMap::new(),
+                                )
+                                .map(|parameter| parameter.ty)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
+                    let ret = lower_fn_return_type(
+                        method.function.is_async,
+                        &method.function.return_type,
+                        &format!("{name}.{method_name}"),
+                        &interfaces,
+                        &generic_interfaces,
+                        &HashMap::new(),
+                    )?;
+                    let symbol = class_method_symbol(&name, &method_name);
+                    if signatures.contains_key(&symbol) {
+                        return Err(format!(
+                            "class `{name}` has duplicate method `{method_name}`"
+                        ));
+                    }
+                    signatures.insert(
+                        symbol,
+                        FnSignature {
+                            params,
+                            variadic: None,
+                            ret,
+                            is_async: method.function.is_async,
+                            is_extern: false,
+                            source_range: (method.span.lo.0, method.span.hi.0),
+                            generic_type_params: Vec::new(),
+                            generic_type_constraints: Vec::new(),
+                            generic_type_defaults: Vec::new(),
+                            generic_param_patterns: Vec::new(),
+                            generic_param_optional: Vec::new(),
+                            generic_return_type: None,
+                        },
+                    );
+                }
             }
             // Already consumed by `resolve_interfaces` above.
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {}
@@ -1241,7 +1320,8 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         .collect::<Vec<_>>();
     specialized.extend(
         class_decls
-            .into_iter()
+            .iter()
+            .copied()
             .map(|declaration| {
                 lower_class_constructor(
                     declaration,
@@ -1256,6 +1336,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             })
             .collect::<Result<Vec<_>, _>>()?,
     );
+    for declaration in class_decls {
+        specialized.extend(lower_class_methods(
+            declaration,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
+        )?);
+    }
     let mut pending = generic_instantiations
         .iter()
         .flat_map(|(name, instances)| instances.iter().cloned().map(|types| (name.clone(), types)))
@@ -3229,6 +3321,85 @@ fn lower_class_constructor(
         is_async: false,
         body,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_class_methods(
+    declaration: &ClassDecl,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
+) -> Result<Vec<HirFunction>, String> {
+    let class_name = declaration.ident.sym.to_string();
+    let instance_type = interfaces[&class_name].clone();
+    let mut functions = Vec::new();
+    for member in &declaration.class.body {
+        let ClassMember::Method(method) = member else {
+            continue;
+        };
+        if method.is_static || method.kind != MethodKind::Method {
+            continue;
+        }
+        let method_name = class_property_name(&method.key)?;
+        let symbol = class_method_symbol(&class_name, &method_name);
+        let signature = &signatures[&symbol];
+        let mut params = vec![HirParam {
+            name: "__thaw_this".into(),
+            ty: instance_type.clone(),
+        }];
+        for (index, parameter) in method.function.params.iter().enumerate() {
+            let mut parameter = lower_param(
+                &parameter.pat,
+                interfaces,
+                generic_interfaces,
+                false,
+                &HashMap::new(),
+            )?;
+            parameter.ty = signature.params[index + 1].clone();
+            params.push(parameter);
+        }
+        let body =
+            method.function.body.as_ref().ok_or_else(|| {
+                format!("class `{class_name}` method `{method_name}` needs a body")
+            })?;
+        let mut lowerer = FnLowerer::new(
+            signatures,
+            interfaces,
+            generic_interfaces,
+            enum_values,
+            enum_reverse_values,
+            signature.ret.clone(),
+            None,
+        );
+        seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        for parameter in &params {
+            lowerer
+                .scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+            lowerer
+                .bindings
+                .entry(parameter.name.clone())
+                .or_default()
+                .push(parameter.name.clone());
+        }
+        lowerer
+            .bindings
+            .entry("this".into())
+            .or_default()
+            .push("__thaw_this".into());
+        functions.push(HirFunction {
+            name: symbol,
+            params,
+            ret: signature.ret.clone(),
+            is_async: signature.is_async,
+            body: lowerer.lower_stmts(&body.stmts)?,
+        });
+    }
+    Ok(functions)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11836,6 +12007,64 @@ impl<'a> FnLowerer<'a> {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
 
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Ident(property) = &member.prop {
+                let known_class_receiver = match member.obj.as_ref() {
+                    Expr::Ident(receiver) => {
+                        let name = self.resolve_binding(receiver.sym.as_ref());
+                        self.scope
+                            .get(&name)
+                            .and_then(class_name_from_type)
+                            .is_some()
+                    }
+                    Expr::New(construction) => {
+                        matches!(construction.callee.as_ref(), Expr::Ident(class) if self.signatures.contains_key(&class_constructor_symbol(class.sym.as_ref())))
+                    }
+                    _ => false,
+                };
+                if known_class_receiver {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let receiver_type = self.infer_expr_type(&receiver)?;
+                    let class_name = class_name_from_type(&receiver_type)
+                        .expect("the receiver was classified as a native class");
+                    let symbol = class_method_symbol(class_name, property.sym.as_ref());
+                    if let Some(signature) = self.signatures.get(&symbol).cloned() {
+                        if call.type_args.is_some() {
+                            return Err(format!(
+                                "native class method `{class_name}.{}` is not generic",
+                                property.sym
+                            ));
+                        }
+                        if call.args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(
+                                "native class method spread arguments are not supported yet".into(),
+                            );
+                        }
+                        if call.args.len() + 1 != signature.params.len() {
+                            return Err(format!(
+                                "method `{class_name}.{}` expects {} argument(s), got {}",
+                                property.sym,
+                                signature.params.len() - 1,
+                                call.args.len()
+                            ));
+                        }
+                        let mut args = vec![receiver];
+                        for (index, argument) in call.args.iter().enumerate() {
+                            let value = self.lower_expr(&argument.expr)?;
+                            args.push(
+                                self.coerce_to_declared(&signature.params[index + 1], value)?,
+                            );
+                        }
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                    }
+                    return Err(format!(
+                        "class `{class_name}` has no native method `{}`",
+                        property.sym
+                    ));
+                }
+            }
+        }
+
         if matches!(callee_expr.as_ref(), Expr::Ident(identifier) if identifier.sym == *"__thaw_object_rest")
         {
             if call.args.is_empty() || call.args.iter().any(|argument| argument.spread.is_some()) {
@@ -18620,6 +18849,39 @@ mod tests {
             &main.body[0],
             HirStmt::Let(_, HirType::Object(_), HirExpr::Call(callee, _))
                 if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Counter_constructor")
+        ));
+    }
+
+    #[test]
+    fn lowers_native_class_instance_methods_with_explicit_receiver() {
+        let program = lower(
+            r#"class Counter {
+                value: number;
+                constructor(value: number) { this.value = value; }
+                add(delta: number): number {
+                    this.value += delta;
+                    return this.value;
+                }
+            }
+            function main(): number {
+                const counter = new Counter(40);
+                return counter.add(2);
+            }"#,
+        );
+        let method = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Counter_method_add")
+            .expect("native class method");
+        assert_eq!(method.params[0].name, "__thaw_this");
+        assert!(matches!(method.params[0].ty, HirType::Object(_)));
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(format!("{:?}", main.body).contains(
+            "Call(Var(\"__thaw_class_Counter_method_add\"), [Var(\"counter\"), Lit(F64(2.0))])"
         ));
     }
 }
