@@ -1430,6 +1430,8 @@ The workspace crates have narrow responsibilities:
   an enclosing generic method after its outer type tuple has become concrete.
   Static methods resolve `this.field`, `this.getter` and `this.method(...)` against their
   declaring native class, including nested inference into generic static methods.
+  Static methods and blocks also route `this` field/accessor assignment, compound updates
+  and prefix/postfix updates through shared static storage with readonly checks.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
