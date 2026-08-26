@@ -11319,7 +11319,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     i64_type.const_int(args.len() as u64, false).into(),
                     i64_type
-                        .const_int(if *element == HirType::Bool { 1 } else { 8 }, false)
+                        .const_int(array_element_storage_bytes(element), false)
                         .into(),
                 ],
                 "promise_all",
@@ -11359,7 +11359,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(if *element == HirType::Bool { 1 } else { 8 }, false)
+                        .const_int(array_element_storage_bytes(element), false)
                         .into(),
                 ],
                 "promise_all_array",
@@ -11419,7 +11419,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_store(
                     size_slot,
-                    i64_type.const_int(if *element == HirType::Bool { 1 } else { 8 }, false),
+                    i64_type.const_int(array_element_storage_bytes(element), false),
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -19466,6 +19466,42 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "union_array_construction_metadata"),
             "11\nmapped!\n11\nmapped!\n11\nmapped!\n11\nmapped!\n11\nmapped!\n"
+        );
+    }
+
+    #[test]
+    fn preserves_union_discriminants_for_inferred_arrays_and_promise_all() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            async function number(): Promise<Result> {
+                return { kind: "number", value: 1 };
+            }
+            async function text(): Promise<Result> {
+                return { kind: "text", value: "async" };
+            }
+            function print(values: Result[]): void {
+                for (const item of values) {
+                    if (item.kind === "number") console.log(item.value + 10);
+                    else console.log(item.value + "!");
+                }
+            }
+            async function main(): Promise<void> {
+                const first: Result = { kind: "number", value: 2 };
+                const second: Result = { kind: "text", value: "sync" };
+                const inferred = [first, second];
+                print(inferred);
+                const pending: Promise<Result>[] = [number(), text()];
+                const fromVariable = await Promise.all(pending);
+                print(fromVariable);
+                const fromLiteral = await Promise.all([number(), text()]);
+                print(fromLiteral);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "inferred_union_array_metadata"),
+            "12\nsync!\n11\nasync!\n11\nasync!\n"
         );
     }
 
