@@ -19447,6 +19447,7 @@ mod tests {
                 { kind: "number"; value: number } |
                 { kind: "text"; value: string };
             interface Service {
+                get: () => Result;
                 load: () => Result[][];
                 loadAsync: () => Promise<Result[][]>;
             }
@@ -19459,16 +19460,20 @@ mod tests {
             }
             async function main(): Promise<void> {
                 const service: Service = {
+                    get: (): Result => ({ kind: "text", value: "direct" }),
                     load: (): Result[][] => [[{ kind: "number", value: 1 } as Result]],
                     loadAsync,
                 };
-                print(service.load().flat()[0]);
-                print((await service.loadAsync()).flat()[0]);
+                print(service.get());
+                const load = service.load;
+                print(load().flat()[0]);
+                const { loadAsync: extractedAsync } = service;
+                print((await extractedAsync()).flat()[0]);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "function_property_nested_union_array"),
-            "11\nasync!\n"
+            "direct!\n11\nasync!\n"
         );
     }
 
