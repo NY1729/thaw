@@ -6377,6 +6377,90 @@ fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
     Ok(keys)
 }
 
+fn hir_object_keys(ty: HirType) -> Result<Vec<Symbol>, String> {
+    let HirType::Object(fields) = ty else {
+        return Err("keyof requires an object type".into());
+    };
+    Ok(fields.into_iter().map(|(name, _)| name).collect())
+}
+
+fn generic_pattern_keys(pattern: &GenericTypePattern) -> Result<Vec<Symbol>, String> {
+    match pattern {
+        GenericTypePattern::Object(fields) => {
+            Ok(fields.iter().map(|(name, _)| name.clone()).collect())
+        }
+        GenericTypePattern::Concrete(ty) => hir_object_keys(ty.clone()),
+        GenericTypePattern::Partial(inner)
+        | GenericTypePattern::Required(inner)
+        | GenericTypePattern::NonNullable(inner) => generic_pattern_keys(inner),
+        GenericTypePattern::Record(keys, _) | GenericTypePattern::Pick(_, keys) => Ok(keys.clone()),
+        GenericTypePattern::Omit(inner, omitted) => Ok(generic_pattern_keys(inner)?
+            .into_iter()
+            .filter(|key| !omitted.contains(key))
+            .collect()),
+        _ => Err("keyof requires an object type".into()),
+    }
+}
+
+fn generic_utility_keys(
+    ty: &TsType,
+    substitutions: &HashMap<Symbol, GenericTypePattern>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<Vec<Symbol>, String> {
+    if let TsType::TsTypeOperator(operator) = ty {
+        if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf {
+            return generic_pattern_keys(&generic_type_pattern(
+                &operator.type_ann,
+                substitutions,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?);
+        }
+    }
+    finite_property_keys(ty)
+}
+
+fn utility_keys(
+    ty: &TsType,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Vec<Symbol>, String> {
+    if let TsType::TsTypeOperator(operator) = ty {
+        if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf {
+            return hir_object_keys(lower_ts_type(
+                &operator.type_ann,
+                interfaces,
+                generic_interfaces,
+            )?);
+        }
+    }
+    finite_property_keys(ty)
+}
+
+fn substituted_utility_keys(
+    ty: &TsType,
+    substitution: &HashMap<Symbol, HirType>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<Symbol>,
+) -> Result<Vec<Symbol>, String> {
+    if let TsType::TsTypeOperator(operator) = ty {
+        if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf {
+            return hir_object_keys(resolve_ts_type_with_substitution(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?);
+        }
+    }
+    finite_property_keys(ty)
+}
+
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     fn fingerprint(ty: &HirType) -> String {
         match ty {
@@ -6740,7 +6824,13 @@ fn generic_type_pattern(
                     return Err("Record<K, V> requires exactly two type arguments".into());
                 };
                 return Ok(GenericTypePattern::Record(
-                    finite_property_keys(keys)?,
+                    generic_utility_keys(
+                        keys,
+                        substitutions,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?,
                     Box::new(generic_type_pattern(
                         value,
                         substitutions,
@@ -6766,7 +6856,13 @@ fn generic_type_pattern(
                     generic_interfaces,
                     in_progress,
                 )?);
-                let keys = finite_property_keys(keys)?;
+                let keys = generic_utility_keys(
+                    keys,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
                 return Ok(if name == "Pick" {
                     GenericTypePattern::Pick(object, keys)
                 } else {
@@ -6799,6 +6895,18 @@ fn generic_type_pattern(
         }
     }
     match ty {
+        TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf =>
+        {
+            generic_pattern_keys(&generic_type_pattern(
+                &operator.type_ann,
+                substitutions,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?)?;
+            Ok(GenericTypePattern::Concrete(HirType::Str))
+        }
         TsType::TsTypeOperator(operator)
             if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
         {
@@ -10251,6 +10359,16 @@ fn lower_ts_type(
             generic_interfaces,
         ),
         TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf =>
+        {
+            hir_object_keys(lower_ts_type(
+                &operator.type_ann,
+                interfaces,
+                generic_interfaces,
+            )?)?;
+            Ok(HirType::Str)
+        }
+        TsType::TsTypeOperator(operator)
             if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
         {
             lower_ts_type(&operator.type_ann, interfaces, generic_interfaces)
@@ -10522,7 +10640,7 @@ fn lower_ts_type(
                 };
                 let value = lower_ts_type(value, interfaces, generic_interfaces)?;
                 return Ok(HirType::Object(
-                    finite_property_keys(keys)?
+                    utility_keys(keys, interfaces, generic_interfaces)?
                         .into_iter()
                         .map(|key| (key, value.clone()))
                         .collect(),
@@ -10541,7 +10659,7 @@ fn lower_ts_type(
                     ));
                 };
                 let object = lower_ts_type(object, interfaces, generic_interfaces)?;
-                let keys = finite_property_keys(keys)?;
+                let keys = utility_keys(keys, interfaces, generic_interfaces)?;
                 return if ref_name == Some("Pick") {
                     pick_hir_type(object, &keys)
                 } else {
@@ -11010,10 +11128,16 @@ fn resolve_ts_type_with_substitution(
                     in_progress,
                 )?;
                 return Ok(HirType::Object(
-                    finite_property_keys(keys)?
-                        .into_iter()
-                        .map(|key| (key, value.clone()))
-                        .collect(),
+                    substituted_utility_keys(
+                        keys,
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?
+                    .into_iter()
+                    .map(|key| (key, value.clone()))
+                    .collect(),
                 ));
             }
             if ref_name == "Pick" || ref_name == "Omit" {
@@ -11034,7 +11158,13 @@ fn resolve_ts_type_with_substitution(
                     generic_interfaces,
                     in_progress,
                 )?;
-                let keys = finite_property_keys(keys)?;
+                let keys = substituted_utility_keys(
+                    keys,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
                 return if ref_name == "Pick" {
                     pick_hir_type(object, &keys)
                 } else {
@@ -11076,6 +11206,18 @@ fn resolve_ts_type_with_substitution(
             generic_interfaces,
             in_progress,
         ),
+        TsType::TsTypeOperator(operator)
+            if operator.op == swc_ecma_ast::TsTypeOperatorOp::KeyOf =>
+        {
+            hir_object_keys(resolve_ts_type_with_substitution(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?)?;
+            Ok(HirType::Str)
+        }
         TsType::TsTypeOperator(operator)
             if operator.op == swc_ecma_ast::TsTypeOperatorOp::ReadOnly =>
         {

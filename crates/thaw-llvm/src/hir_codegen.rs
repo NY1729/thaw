@@ -19899,6 +19899,31 @@ mod tests {
     }
 
     #[test]
+    fn compiles_keyof_for_fixed_object_types() {
+        let source = r#"
+            interface Model { id: number; label: string }
+            type ModelKey = keyof Model;
+            type Clone = Pick<Model, keyof Model>;
+            type Flags = Record<keyof Model, boolean>;
+            type GenericClone<T> = Pick<T, keyof T>;
+            function show(key: ModelKey): string { return key; }
+            function main(): void {
+                const clone: Clone = { label: "ready", id: 42 };
+                const flags: Flags = { id: true, label: false };
+                const generic: GenericClone<Model> = clone;
+                console.log(show("label"));
+                console.log(generic.id);
+                console.log(flags.id);
+                console.log(flags.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "keyof_fixed_object_types"),
+            "label\n42\ntrue\nfalse\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
