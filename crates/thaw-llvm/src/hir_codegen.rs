@@ -181,6 +181,7 @@ pub struct HirCompiler<'ctx> {
     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
     /// so callers and callees agree on the LLVM signature.
     frame_async_functions: HashMap<String, HirType>,
+    active_async_completion: Option<PointerValue<'ctx>>,
     next_lambda: usize,
     uses_napi: bool,
     uses_quickjs_handles: bool,
@@ -200,6 +201,7 @@ impl<'ctx> HirCompiler<'ctx> {
             catch_stack: Vec::new(),
             loop_stack: Vec::new(),
             frame_async_functions: HashMap::new(),
+            active_async_completion: None,
             next_lambda: 0,
             uses_napi: false,
             uses_quickjs_handles: false,
@@ -4095,7 +4097,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(slot, value)
                 .map_err(|e| e.to_string())?;
         }
-        match self.compile_async_segment_block(&segment.stmts, frame, completion, plan)? {
+        let saved_async_completion = self.active_async_completion.replace(completion);
+        let block_result =
+            self.compile_async_segment_block(&segment.stmts, frame, completion, plan);
+        self.active_async_completion = saved_async_completion;
+        match block_result? {
             AsyncBlockExit::Returned => {
                 self.resolve_async_completion(
                     completion,
@@ -4319,6 +4325,27 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(return_block);
                     match value {
+                        Some(HirExpr::ThrowValue(error, _)) => {
+                            let error = self.compile_expr(error)?.into_pointer_value();
+                            self.builder
+                                .build_call(
+                                    self.module.get_function("thaw_promise_reject").unwrap(),
+                                    &[completion.into(), error.into()],
+                                    "reject_throw_value",
+                                )
+                                .map_err(|error| error.to_string())?;
+                            if function.get_type().get_return_type().is_some() {
+                                self.builder
+                                    .build_return(Some(&completion))
+                                    .map_err(|error| error.to_string())?;
+                            } else {
+                                self.builder
+                                    .build_return(None)
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            self.builder.position_at_end(continue_block);
+                            continue;
+                        }
                         Some(expr) if plan.ret != HirType::Void => {
                             let result = self.compile_expr(expr)?;
                             let result_slot =
@@ -4439,6 +4466,17 @@ impl<'ctx> HirCompiler<'ctx> {
                     );
                 }
                 return Ok(AsyncBlockExit::Returned);
+            }
+            if let HirStmt::Return(Some(HirExpr::ThrowValue(error, _))) = stmt {
+                let error = self.compile_expr(error)?.into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_promise_reject").unwrap(),
+                        &[completion.into(), error.into()],
+                        "reject_throw_value",
+                    )
+                    .map_err(|error| error.to_string())?;
+                return Ok(AsyncBlockExit::Rejected);
             }
             if let HirStmt::Return(Some(expr)) = stmt {
                 if plan.ret == HirType::Void {
@@ -5080,6 +5118,50 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(field_ptr, val)
                     .map_err(|e| e.to_string())?;
                 Ok(val)
+            }
+
+            HirExpr::ThrowValue(error, fallback) => {
+                let value = self.compile_expr(error)?;
+                if let Some(completion) = self.active_async_completion {
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_promise_reject").unwrap(),
+                            &[completion.into(), value.into()],
+                            "reject_throw_value",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let function = self.current_function();
+                    if function.get_type().get_return_type().is_some() {
+                        self.builder
+                            .build_return(Some(&completion))
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        self.builder
+                            .build_return(None)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    let unreachable = self
+                        .context
+                        .append_basic_block(function, "after_async_throw_value");
+                    self.builder.position_at_end(unreachable);
+                    return self.compile_expr(fallback);
+                }
+                self.builder
+                    .build_store(self.pending_exception().as_pointer_value(), value)
+                    .map_err(|error| error.to_string())?;
+                if let Some(catch_block) = self.catch_stack.last().copied() {
+                    self.builder
+                        .build_unconditional_branch(catch_block)
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    self.build_default_return()?;
+                }
+                let function = self.current_function();
+                let unreachable = self
+                    .context
+                    .append_basic_block(function, "after_throw_value");
+                self.builder.position_at_end(unreachable);
+                self.compile_expr(fallback)
             }
 
             other => Err(format!("Phase 1/2 codegen does not support {other:?} yet")),
@@ -8902,6 +8984,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
             HirExpr::AwaitPromise(_, resolved) => Some(resolved.clone()),
+            HirExpr::ThrowValue(_, fallback) => self.expr_hir_type(fallback),
             _ => None,
         }
     }
@@ -19737,10 +19820,24 @@ mod tests {
                 constructor(public value: string) {}
                 read(suffix: string): string { return this.value + suffix; }
                 async readAsync(suffix: string): Promise<string> { return this.value + suffix; }
+                maybe(useThis: boolean): string {
+                    if (useThis) return this.value;
+                    return this === undefined ? "undefined-this" : "wrong-this";
+                }
+                async maybeAsync(useThis: boolean): Promise<string> {
+                    if (useThis) return this.value;
+                    return this === undefined ? "undefined-async-this" : "wrong-async-this";
+                }
+                write(value: string): string { this.value = value; return value; }
+                append(suffix: string): string { this.value += suffix; return this.value; }
                 static staticValue: string = "static";
                 static staticRead(suffix: string): string { return this.staticValue + suffix; }
                 static async staticReadAsync(suffix: string): Promise<string> {
                     return this.staticValue + suffix;
+                }
+                static staticMaybe(useThis: boolean): string {
+                    if (useThis) return this.staticValue;
+                    return "undefined-static-this";
                 }
             }
             class Holder { constructor(public box: Box) {} }
@@ -19752,6 +19849,10 @@ mod tests {
                 const read = make().read;
                 const extracted = new Box("ignored");
                 const readAsync = extracted.readAsync;
+                const maybe = extracted.maybe;
+                const maybeAsync = extracted.maybeAsync;
+                const write = extracted.write;
+                const append = extracted.append;
                 const holderRead = new Holder(new Box("holder")).box.read;
                 const alias = read;
                 const args: [string] = ["?"];
@@ -19760,6 +19861,7 @@ mod tests {
                 const asyncBound = readAsync.bind(new Box("async-bound"));
                 const staticRead = Box.staticRead;
                 const staticReadAsync = Box.staticReadAsync;
+                const staticMaybe = Box.staticMaybe;
                 const staticBound = staticRead.bind(
                     (console.log("static-bind-this"), extracted),
                     ...boundArgs
@@ -19782,11 +19884,20 @@ mod tests {
                 console.log(mutable("ordinary"));
                 mutable = extracted.read;
                 console.log(mutable.call(new Box("reassigned"), "!"));
+                console.log(maybe(false));
+                console.log(await maybeAsync(false));
+                console.log(staticMaybe(false));
+                try { maybe(true); } catch (error) { console.log(error); }
+                try { await maybeAsync(true); } catch (error) { console.log(error); }
+                try { await readAsync("!"); } catch (error) { console.log(error); }
+                try { staticMaybe(true); } catch (error) { console.log(error); }
+                try { write((console.log("assignment-rhs"), "changed")); } catch (error) { console.log(error); }
+                try { append((console.log("compound-rhs"), "!")); } catch (error) { console.log(error); }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\n"
         );
     }
 

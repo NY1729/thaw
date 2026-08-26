@@ -1440,7 +1440,9 @@ The workspace crates have narrow responsibilities:
   support synchronous or async `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)` without
   retaining the extraction receiver. They can also be converted after extraction with
   `.bind(thisArg, ...typedTuple)`, including partial application and async results. A plain invocation
-  remains an explicit error until the native function-value ABI carries JavaScript's unbound `this` state;
+  executes through an unbound adapter with `this === undefined`; control flow that does not touch a
+  member can complete normally, while a reached `this.member` access raises the corresponding
+  JavaScript-style `TypeError` message at that point. This applies to synchronous, async and static methods;
   saved static operations evaluate but otherwise ignore `thisArg`, matching direct native static operations.
   Instance calls through `this` are specialized directly, including calls nested inside
   an enclosing generic method after its outer type tuple has become concrete.
