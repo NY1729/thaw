@@ -3463,8 +3463,9 @@ struct PromiseAllSettledState {
     remaining: usize,
     result_slot: *mut *const u8,
     result: *mut u64,
-    objects: *mut u64,
+    objects: *mut u8,
     element_size: usize,
+    object_stride: usize,
 }
 
 struct PromiseAllSettledChild {
@@ -3478,22 +3479,20 @@ extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8)
     let state = unsafe { &mut *child.state };
     let rejected = unsafe { thaw_promise_state(child.promise) } == 2;
     for index in &child.indices {
-        let object = unsafe { state.objects.add(index * 3) };
+        let object = unsafe { state.objects.add(index * state.object_stride) };
+        let value_slot = unsafe { object.add(size_of::<u64>()) };
+        let reason_slot = unsafe { value_slot.add(state.element_size.max(size_of::<u64>())) };
         unsafe {
-            object.write(if rejected {
+            object.cast::<u64>().write(if rejected {
                 PROMISE_SETTLED_REJECTED.as_ptr() as u64
             } else {
                 PROMISE_SETTLED_FULFILLED.as_ptr() as u64
             });
-            object.add(1).write(0);
+            value_slot.write_bytes(0, state.element_size.max(size_of::<u64>()));
             if !rejected {
-                std::ptr::copy_nonoverlapping(
-                    value,
-                    object.add(1).cast::<u8>(),
-                    state.element_size,
-                );
+                std::ptr::copy_nonoverlapping(value, value_slot, state.element_size);
             }
-            object.add(2).write(if rejected {
+            reason_slot.cast::<u64>().write(if rejected {
                 value as u64
             } else {
                 PROMISE_SETTLED_EMPTY_REASON.as_ptr() as u64
@@ -3517,7 +3516,7 @@ extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8)
 /// # Safety
 ///
 /// `promises` must reference `len` readable Promise handles. Each distinct
-/// handle is consumed. `element_size` must fit one eight-byte value slot.
+/// handle is consumed. Values wider than one array slot are copied in full.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_promise_all_settled(
     promises: *const *mut ThawPromise,
@@ -3525,17 +3524,24 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     element_size: usize,
 ) -> *mut ThawPromise {
     let output = thaw_promise_new();
-    if element_size == 0 || element_size > size_of::<u64>() || (len != 0 && promises.is_null()) {
+    if element_size == 0 || (len != 0 && promises.is_null()) {
         thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let allocation =
         thaw_arena::thaw_arena_alloc((len + 2) * size_of::<u64>(), align_of::<u64>()).cast::<u64>();
-    let objects = thaw_arena::thaw_arena_alloc(
-        len.saturating_mul(3).saturating_mul(size_of::<u64>()),
-        align_of::<u64>(),
-    )
-    .cast::<u64>();
+    let Some(object_stride) = size_of::<u64>()
+        .checked_add(element_size.max(size_of::<u64>()))
+        .and_then(|size| size.checked_add(size_of::<u64>()))
+    else {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    };
+    let Some(objects_size) = len.checked_mul(object_stride) else {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    };
+    let objects = thaw_arena::thaw_arena_alloc(objects_size, align_of::<u64>());
     if allocation.is_null() || (len != 0 && objects.is_null()) {
         thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
@@ -3573,6 +3579,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         result,
         objects,
         element_size,
+        object_stride,
     }));
     ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     for (promise, indices) in grouped {
@@ -4501,6 +4508,28 @@ mod tests {
             PROMISE_SETTLED_FULFILLED.as_ptr()
         );
         assert_eq!(f64::from_bits(unsafe { third.add(1).read() }), 7.0);
+        unsafe { thaw_promise_destroy(settled) };
+    }
+
+    #[test]
+    fn promise_all_settled_preserves_wide_values() {
+        let fulfilled = thaw_promise_new();
+        let children = [fulfilled];
+        let settled = unsafe { thaw_promise_all_settled(children.as_ptr(), 1, 16) };
+        let value = [3u64, 33];
+        assert_eq!(thaw_promise_resolve(fulfilled, value.as_ptr().cast()), 1);
+        thaw_runtime_run_until_idle();
+        let result = unsafe { *thaw_runtime_run_until_resolved(settled).cast::<*const u64>() };
+        let object = unsafe { result.add(1).read() as *const u8 };
+        assert_eq!(
+            unsafe { object.cast::<u64>().read() as *const u8 },
+            PROMISE_SETTLED_FULFILLED.as_ptr()
+        );
+        assert_eq!(unsafe { object.add(8).cast::<[u64; 2]>().read() }, value);
+        assert_eq!(
+            unsafe { object.add(24).cast::<u64>().read() as *const u8 },
+            PROMISE_SETTLED_EMPTY_REASON.as_ptr()
+        );
         unsafe { thaw_promise_destroy(settled) };
     }
 

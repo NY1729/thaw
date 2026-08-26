@@ -12679,6 +12679,13 @@ impl<'a> FnLowerer<'a> {
                 let callee = ordinary_optional_expression(callee);
                 if let Expr::Member(member) = &callee {
                     let property = member_property_name(&member.prop)?;
+                    if matches!(property.as_str(), "race" | "any")
+                        && matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Promise")
+                    {
+                        return call.args.first().and_then(|argument| {
+                            self.expression_array_element_discriminants(&argument.expr)
+                        });
+                    }
                     if matches!(property.as_str(), "at" | "find" | "findLast") {
                         return self.expression_array_element_discriminants(&member.obj);
                     }
