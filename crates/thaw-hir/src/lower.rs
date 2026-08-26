@@ -2584,6 +2584,7 @@ struct GenericClassMethodUseCollector<'a, 'ast> {
     uses: Vec<GenericClassMethodUse>,
     call_results: &'a HashMap<Symbol, HirType>,
     parents: &'a HashMap<Symbol, Symbol>,
+    current_classes: Vec<Symbol>,
     error: Option<String>,
 }
 
@@ -2687,6 +2688,19 @@ impl GenericClassMethodUseCollector<'_, '_> {
 }
 
 impl Visit for GenericClassMethodUseCollector<'_, '_> {
+    fn visit_class_decl(&mut self, declaration: &ClassDecl) {
+        self.current_classes.push(declaration.ident.sym.to_string());
+        declaration.class.visit_with(self);
+        self.current_classes.pop();
+    }
+
+    fn visit_class_method(&mut self, method: &ClassMethod) {
+        if method.function.type_params.is_some() {
+            return;
+        }
+        method.visit_children_with(self);
+    }
+
     fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
         self.scopes.push(HashMap::new());
         for parameter in &function.params {
@@ -2769,6 +2783,40 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                                 Err(error) => {
                                     self.error = Some(format!(
                                         "cannot infer generic method `{owner}.{method}`: {error}"
+                                    ));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        self.uses.push(GenericClassMethodUse {
+                            span: call.span,
+                            class: owner,
+                            method,
+                            arguments: call
+                                .type_args
+                                .as_ref()
+                                .map(|arguments| unbox_types(&arguments.params)),
+                            actual_params,
+                        });
+                    }
+                }
+            }
+            if let Expr::SuperProp(member) = callee.as_ref() {
+                if let Ok(method) = super_property_name(&member.prop) {
+                    let owner = self
+                        .current_classes
+                        .last()
+                        .and_then(|class| self.parents.get(class))
+                        .and_then(|parent| self.template_owner(parent, &method));
+                    if let Some(owner) = owner {
+                        let actual_params = if call.type_args.is_none() {
+                            match self.call_actual_params(call) {
+                                Ok(actual) => Some(actual),
+                                Err(error) => {
+                                    self.error = Some(format!(
+                                        "cannot infer generic super method `{owner}.{method}`: {error}"
                                     ));
                                     None
                                 }
@@ -2912,10 +2960,15 @@ impl VisitMut for GenericClassMethodCallRewriter<'_> {
         let Callee::Expr(callee) = &mut call.callee else {
             return;
         };
-        let Expr::Member(member) = callee.as_mut() else {
-            return;
-        };
-        member.prop = MemberProp::Ident(IdentName::new(method.clone().into(), call.span));
+        match callee.as_mut() {
+            Expr::Member(member) => {
+                member.prop = MemberProp::Ident(IdentName::new(method.clone().into(), call.span));
+            }
+            Expr::SuperProp(member) => {
+                member.prop = SuperProp::Ident(IdentName::new(method.clone().into(), call.span));
+            }
+            _ => return,
+        }
         call.type_args = None;
     }
 }
@@ -3216,12 +3269,14 @@ fn specialize_generic_class_methods(
         uses: Vec::new(),
         call_results: &call_results,
         parents: &parents,
+        current_classes: Vec::new(),
         error: None,
     };
     module.visit_with(&mut collector);
     if let Some(error) = collector.error {
         return Err(error);
     }
+    let has_uses = !collector.uses.is_empty();
     let mut instances = Vec::<(Symbol, Symbol, Vec<HirType>, Symbol)>::new();
     let mut calls = HashMap::new();
     let mut generated = HashMap::<Symbol, Vec<ClassMethod>>::new();
@@ -3252,25 +3307,37 @@ fn specialize_generic_class_methods(
             existing
         } else {
             let specialized_name = specialized_generic_name(&usage.method, &types);
-            let substitutions = template
-                .parameters
-                .iter()
-                .cloned()
-                .zip(arguments.into_iter().map(Box::new))
-                .collect::<HashMap<_, _>>();
-            let mut method = template.method.clone();
-            method.key =
-                PropName::Ident(IdentName::new(specialized_name.clone().into(), method.span));
-            method.function.type_params = None;
-            method
-                .function
-                .visit_mut_with(&mut GenericClassTypeSubstituter {
-                    substitutions: &substitutions,
-                });
-            generated
-                .entry(usage.class.clone())
-                .or_default()
-                .push(method);
+            let already_generated = module.body.iter().any(|item| {
+                matches!(item, ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+                if declaration.ident.sym.as_ref() == usage.class
+                    && declaration.class.body.iter().any(|member| {
+                        matches!(member, ClassMember::Method(method)
+                            if method.function.type_params.is_none()
+                                && class_property_name(&method.key).ok().as_deref()
+                                    == Some(specialized_name.as_str()))
+                    }))
+            });
+            if !already_generated {
+                let substitutions = template
+                    .parameters
+                    .iter()
+                    .cloned()
+                    .zip(arguments.into_iter().map(Box::new))
+                    .collect::<HashMap<_, _>>();
+                let mut method = template.method.clone();
+                method.key =
+                    PropName::Ident(IdentName::new(specialized_name.clone().into(), method.span));
+                method.function.type_params = None;
+                method
+                    .function
+                    .visit_mut_with(&mut GenericClassTypeSubstituter {
+                        substitutions: &substitutions,
+                    });
+                generated
+                    .entry(usage.class.clone())
+                    .or_default()
+                    .push(method);
+            }
             instances.push((
                 usage.class.clone(),
                 usage.method.clone(),
@@ -3289,7 +3356,9 @@ fn specialize_generic_class_methods(
         };
         let class = declaration.ident.sym.to_string();
         declaration.class.body.retain(|member| {
-            !matches!(member, ClassMember::Method(method) if method.function.type_params.is_some())
+            !matches!(member, ClassMember::Method(method)
+                if method.function.type_params.is_some()
+                    && !has_uses)
         });
         if let Some(methods) = generated.remove(&class) {
             declaration
