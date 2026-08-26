@@ -12935,6 +12935,57 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn hir_function_property_discriminants(
+        &self,
+        expression: &HirExpr,
+    ) -> Option<FunctionPropertyDiscriminants> {
+        let HirExpr::PropAccess(object, _, property) = expression else {
+            return None;
+        };
+        self.hir_object_function_property_discriminants(object)?
+            .get(std::slice::from_ref(property))
+            .cloned()
+    }
+
+    fn hir_object_function_property_discriminants(
+        &self,
+        expression: &HirExpr,
+    ) -> Option<ObjectFunctionPropertyDiscriminants> {
+        match expression {
+            HirExpr::Var(name) => self
+                .object_function_property_discriminants
+                .get(name)
+                .cloned(),
+            HirExpr::ObjectLit(fields) => {
+                let mut metadata = ObjectFunctionPropertyDiscriminants::new();
+                for (name, value) in fields {
+                    if let Some(discriminants) = self.hir_function_property_discriminants(value) {
+                        metadata.insert(vec![name.clone()], discriminants);
+                    }
+                    if let Some(nested) = self.hir_object_function_property_discriminants(value) {
+                        metadata.extend(nested.into_iter().map(|(mut path, discriminants)| {
+                            path.insert(0, name.clone());
+                            (path, discriminants)
+                        }));
+                    }
+                }
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            HirExpr::PropAccess(object, _, property) => {
+                let nested = self
+                    .hir_object_function_property_discriminants(object)?
+                    .into_iter()
+                    .filter_map(|(path, discriminants)| {
+                        (path.first() == Some(property) && path.len() > 1)
+                            .then(|| (path[1..].to_vec(), discriminants))
+                    })
+                    .collect::<ObjectFunctionPropertyDiscriminants>();
+                (!nested.is_empty()).then_some(nested)
+            }
+            _ => None,
+        }
+    }
+
     fn expression_identifier_alias_source(&self, expression: &Expr) -> Option<Symbol> {
         match expression {
             Expr::Ident(identifier) => Some(self.resolve_binding(identifier.sym.as_ref())),
@@ -15039,6 +15090,8 @@ impl<'a> FnLowerer<'a> {
             let propagated_discriminants = self.expression_union_discriminants(init);
             let propagated_property_discriminants =
                 self.expression_object_array_property_discriminants(init);
+            let propagated_function_property_discriminants =
+                self.expression_object_function_property_discriminants(init);
             let mut value = self.lower_expr(init)?;
             let annotation = match &decl.name {
                 Pat::Array(pattern) => pattern.type_ann.as_ref(),
@@ -15103,6 +15156,19 @@ impl<'a> FnLowerer<'a> {
                 self.object_array_property_discriminants
                     .insert(temporary.clone(), discriminants);
             }
+            let declared_function_property_discriminants = annotation.and_then(|annotation| {
+                let discriminants = object_function_property_discriminants(
+                    &annotation.type_ann,
+                    self.generic_interfaces,
+                );
+                (!discriminants.is_empty()).then_some(discriminants)
+            });
+            if let Some(discriminants) = declared_function_property_discriminants
+                .or(propagated_function_property_discriminants)
+            {
+                self.object_function_property_discriminants
+                    .insert(temporary.clone(), discriminants);
+            }
             statements.push(HirStmt::Let(temporary.clone(), ty.clone(), value));
             self.lower_binding_pattern(&decl.name, HirExpr::Var(temporary), &ty, &mut statements)?;
         }
@@ -15120,6 +15186,9 @@ impl<'a> FnLowerer<'a> {
             Pat::Ident(binding) => {
                 let array_discriminants = self.hir_array_element_discriminants(&value);
                 let property_discriminants = self.hir_object_array_property_discriminants(&value);
+                let function_discriminants = self.hir_function_property_discriminants(&value);
+                let object_function_discriminants =
+                    self.hir_object_function_property_discriminants(&value);
                 let binding_type = if let Some(annotation) = &binding.type_ann {
                     let annotated = lower_ts_type(
                         &annotation.type_ann,
@@ -15138,6 +15207,20 @@ impl<'a> FnLowerer<'a> {
                 }
                 if let Some(discriminants) = property_discriminants {
                     self.object_array_property_discriminants
+                        .insert(name.clone(), discriminants);
+                }
+                if let Some(discriminants) = function_discriminants {
+                    if let Some(array) = discriminants.array {
+                        self.function_value_array_discriminants
+                            .insert(name.clone(), array);
+                    }
+                    if !discriminants.object.is_empty() {
+                        self.function_value_object_array_property_discriminants
+                            .insert(name.clone(), discriminants.object);
+                    }
+                }
+                if let Some(discriminants) = object_function_discriminants {
+                    self.object_function_property_discriminants
                         .insert(name.clone(), discriminants);
                 }
                 statements.push(HirStmt::Let(name, binding_type, value));
