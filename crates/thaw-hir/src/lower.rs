@@ -12557,6 +12557,21 @@ impl<'a> FnLowerer<'a> {
     ) -> Option<ObjectArrayPropertyDiscriminants> {
         match expression {
             HirExpr::Var(name) => self.object_array_property_discriminants.get(name).cloned(),
+            HirExpr::ObjectLit(fields) => {
+                let mut metadata = ObjectArrayPropertyDiscriminants::new();
+                for (name, value) in fields {
+                    if let Some(discriminants) = self.hir_array_element_discriminants(value) {
+                        metadata.insert(vec![name.clone()], discriminants);
+                    }
+                    if let Some(nested) = self.hir_object_array_property_discriminants(value) {
+                        metadata.extend(nested.into_iter().map(|(mut path, discriminants)| {
+                            path.insert(0, name.clone());
+                            (path, discriminants)
+                        }));
+                    }
+                }
+                (!metadata.is_empty()).then_some(metadata)
+            }
             HirExpr::PropAccess(object, _, property) => {
                 let nested = self
                     .hir_object_array_property_discriminants(object)?
