@@ -19635,6 +19635,35 @@ mod tests {
     }
 
     #[test]
+    fn infers_generic_methods_from_inherited_instance_members() {
+        let source = r#"
+            class SourceBase {
+                value: string = "field";
+                get current(): string { return "getter"; }
+                read(): string { return "method"; }
+                convert<T>(value: T): T { return value; }
+                fromThisField(): string { return this.convert(this.value); }
+                fromThisGetter(): string { return this.convert(this.current); }
+                fromThisMethod(): string { return this.convert(this.read()); }
+            }
+            class SourceDerived extends SourceBase {}
+            function main(): void {
+                const source = new SourceDerived();
+                console.log(source.convert(source.value));
+                console.log(source.convert(source.current));
+                console.log(source.convert(source.read()));
+                console.log(source.fromThisField());
+                console.log(source.fromThisGetter());
+                console.log(source.fromThisMethod());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "generic_method_instance_member_inference"),
+            "field\ngetter\nmethod\nfield\ngetter\nmethod\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
