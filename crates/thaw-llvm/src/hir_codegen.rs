@@ -15022,8 +15022,10 @@ mod tests {
     #[test]
     fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
         let source = r#"
-            function read(key: string): number | string | undefined {
-                const mixed = { value: 41, label: "thaw" };
+            function read(key: string): number | string | null | undefined {
+                const mixed = {
+                    value: 41, label: "thaw", empty: null, absent: undefined
+                };
                 return mixed[key];
             }
             function print(key: string): void {
@@ -15032,6 +15034,8 @@ mod tests {
                     console.log(value + 1);
                 } else if (typeof value === "string") {
                     console.log(value + "!");
+                } else if (typeof value === "object") {
+                    console.log(value === null);
                 } else {
                     console.log(value);
                 }
@@ -15039,12 +15043,14 @@ mod tests {
             function main(): void {
                 print("value");
                 print("label");
+                print("empty");
+                print("absent");
                 print("missing");
             }
         "#;
         assert_eq!(
             compile_and_run(source, "dynamic_heterogeneous_properties"),
-            "42\nthaw!\nundefined\n"
+            "42\nthaw!\ntrue\nundefined\nundefined\n"
         );
     }
 
