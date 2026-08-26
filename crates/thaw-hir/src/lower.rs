@@ -95,6 +95,11 @@ struct FnSignature {
     generic_return_type: Option<Box<TsType>>,
 }
 
+#[derive(Clone)]
+struct NativeMethodValue {
+    symbol: Symbol,
+}
+
 #[derive(Default)]
 struct ThisUseCollector {
     found: bool,
@@ -9986,6 +9991,7 @@ struct FnLowerer<'a> {
     generic_call_returns: HashMap<Symbol, HirType>,
     generic_arrows: HashMap<Symbol, swc_ecma_ast::ArrowExpr>,
     generic_named_templates: HashMap<Symbol, Symbol>,
+    native_method_values: HashMap<Symbol, NativeMethodValue>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
@@ -10290,9 +10296,38 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         if signature.uses_this {
-            return Err(format!(
-                "cannot extract native class method `{class_name}.{method_name}` because it uses `this`; bind it explicitly"
-            ));
+            let receiver = self.lower_expr(&member.obj)?;
+            self.expect_type(&receiver_type, &receiver, "method reference receiver")?;
+            let receiver_name = format!("__thaw_unbound_method_receiver_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope
+                .insert(receiver_name.clone(), receiver_type.clone());
+            let parameters = signature.params[1..]
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| HirParam {
+                    name: format!("__thaw_unbound_method_argument_{index}"),
+                    ty: ty.clone(),
+                })
+                .collect::<Vec<_>>();
+            let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+                HirType::Promise(Box::new(signature.ret.clone()))
+            } else {
+                signature.ret.clone()
+            };
+            let trap = HirExpr::Lambda(
+                Vec::new(),
+                parameters,
+                result,
+                Box::new(HirExpr::Block(vec![HirStmt::Throw(HirExpr::Lit(
+                    HirLit::Str(format!(
+                        "Cannot call unbound native method `{class_name}.{method_name}` without an explicit thisArg"
+                    )),
+                ))])),
+            );
+            return self
+                .wrap_call_argument_bindings(trap, &[(receiver_name, receiver_type, receiver)])
+                .map(Some);
         }
         let receiver = self.lower_expr(&member.obj)?;
         self.expect_type(&receiver_type, &receiver, "method reference receiver")?;
@@ -10330,6 +10365,97 @@ impl<'a> FnLowerer<'a> {
         );
         self.wrap_call_argument_bindings(closure, &[(receiver_name, receiver_type, receiver)])
             .map(Some)
+    }
+
+    fn native_instance_method_value(&self, expression: &Expr) -> Option<NativeMethodValue> {
+        let Expr::Member(member) = expression else {
+            return None;
+        };
+        let method = member_property_name(&member.prop)?;
+        let receiver = self.native_class_expression_type(&member.obj)?;
+        let class = class_name_from_type(&receiver)?;
+        let symbol = class_method_symbol(class, &method);
+        self.signatures
+            .get(&symbol)
+            .is_some_and(|signature| signature.uses_this)
+            .then_some(NativeMethodValue { symbol })
+    }
+
+    fn lower_saved_native_method_call_or_apply(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        if let Expr::Ident(identifier) = callee.as_ref() {
+            let binding = self.resolve_binding(identifier.sym.as_ref());
+            if self.native_method_values.contains_key(&binding) {
+                return Err(format!(
+                    "unbound native method `{}` requires `.call(thisArg, ...)` or `.apply(thisArg, tuple)`; bind the method before extraction to create an ordinary callable closure",
+                    identifier.sym
+                ));
+            }
+            return Ok(None);
+        }
+        let Expr::Member(operation) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Some(operation_name) = member_property_name(&operation.prop) else {
+            return Ok(None);
+        };
+        if operation_name != "call" && operation_name != "apply" {
+            return Ok(None);
+        }
+        let Expr::Ident(target) = operation.obj.as_ref() else {
+            return Ok(None);
+        };
+        let binding = self.resolve_binding(target.sym.as_ref());
+        let Some(method) = self.native_method_values.get(&binding).cloned() else {
+            return Ok(None);
+        };
+        let Some((this_argument, supplied)) = call.args.split_first() else {
+            return Err(format!(
+                "unbound native method `{}.{operation_name}` expects a `thisArg`",
+                target.sym
+            ));
+        };
+        if this_argument.spread.is_some() {
+            return Err(format!(
+                "unbound native method `.{operation_name}()` cannot spread its `thisArg`"
+            ));
+        }
+        let forwarded = if operation_name == "apply" {
+            let [arguments] = supplied else {
+                return Err(format!(
+                    "unbound native method `{}.apply` expects exactly a `thisArg` and an argument tuple",
+                    target.sym
+                ));
+            };
+            if arguments.spread.is_some() {
+                return Err("unbound native method `.apply()` tuple cannot be spread".into());
+            }
+            vec![swc_ecma_ast::ExprOrSpread {
+                spread: Some(call.span),
+                expr: arguments.expr.clone(),
+            }]
+        } else {
+            supplied.to_vec()
+        };
+        let mut arguments = Vec::with_capacity(forwarded.len() + 1);
+        arguments.push(this_argument.clone());
+        arguments.extend(forwarded);
+        let lowered = self.lower_call(&CallExpr {
+            span: call.span,
+            ctxt: call.ctxt,
+            callee: Callee::Expr(Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                method.symbol.into(),
+                call.span,
+            )))),
+            args: arguments,
+            type_args: None,
+        })?;
+        Ok(Some(lowered))
     }
 
     fn lower_native_class_call_or_apply(
@@ -10577,6 +10703,7 @@ impl<'a> FnLowerer<'a> {
             generic_call_returns: HashMap::new(),
             generic_arrows: HashMap::new(),
             generic_named_templates: HashMap::new(),
+            native_method_values: HashMap::new(),
             loop_depth: 0,
             labels: Vec::new(),
             super_initializer: None,
@@ -10617,6 +10744,7 @@ impl<'a> FnLowerer<'a> {
         let saved_union_narrowings = self.union_narrowings.clone();
         let saved_generic_arrows = self.generic_arrows.clone();
         let saved_generic_named_templates = self.generic_named_templates.clone();
+        let saved_native_method_values = self.native_method_values.clone();
         let lowered = self.lower_stmts(stmts);
         self.bindings = saved;
         self.narrowings = saved_narrowings;
@@ -10625,6 +10753,7 @@ impl<'a> FnLowerer<'a> {
         self.union_narrowings = saved_union_narrowings;
         self.generic_arrows = saved_generic_arrows;
         self.generic_named_templates = saved_generic_named_templates;
+        self.native_method_values = saved_native_method_values;
         lowered
     }
 
@@ -11786,6 +11915,14 @@ impl<'a> FnLowerer<'a> {
                     self.generic_arrows.insert(hir_name, arrow);
                     continue;
                 }
+                let native_method_value = self.native_instance_method_value(init).or_else(|| {
+                    let Expr::Ident(identifier) = init else {
+                        return None;
+                    };
+                    self.native_method_values
+                        .get(&self.resolve_binding(identifier.sym.as_ref()))
+                        .cloned()
+                });
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
@@ -11809,6 +11946,9 @@ impl<'a> FnLowerer<'a> {
                 let value = self.coerce_to_declared(&ty, value)?;
 
                 let hir_name = self.bind_local(&name, ty.clone());
+                if let Some(method) = native_method_value {
+                    self.native_method_values.insert(hir_name.clone(), method);
+                }
                 statements.push(HirStmt::Let(hir_name, ty, value));
                 continue;
             }
@@ -18252,6 +18392,10 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
+
+        if let Some(invoked) = self.lower_saved_native_method_call_or_apply(call)? {
+            return Ok(invoked);
+        }
 
         if let Some(invoked) = self.lower_immediately_invoked_class_bind(call)? {
             return Ok(invoked);
@@ -26343,12 +26487,9 @@ mod tests {
         assert!(body.contains("Lambda"));
         assert!(body.contains("FunctionRef"));
 
-        for source in [
-            r#"class Box { value: string = "value"; read(): string { return this.value; } }
-            function main(): void { const box = new Box(); const read = box.read; }"#,
-            r#"class Box { static value: string = "value"; static read(): string { return this.value; } }
-            function main(): void { const read = Box.read; }"#,
-        ] {
+        {
+            let source = r#"class Box { static value: string = "value"; static read(): string { return this.value; } }
+            function main(): void { const read = Box.read; }"#;
             let module = thaw_parser::parse_typescript(source).unwrap();
             let error = lower_module(&module).unwrap_err();
             assert!(
@@ -26356,6 +26497,39 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn invokes_saved_this_dependent_methods_with_call_and_apply() {
+        let program = lower(
+            r#"class Box {
+                constructor(public value: string) {}
+                read(suffix: string): string { return this.value + suffix; }
+            }
+            function main(): void {
+                const first = new Box("first");
+                const second = new Box("second");
+                const read = first.read;
+                const alias = read;
+                const args: [string] = ["?"];
+                console.log(read.call(second, "!"));
+                console.log(alias.apply(first, args));
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(format!("{:?}", main.body).contains("__thaw_class_Box_method_read"));
+
+        let module = thaw_parser::parse_typescript(
+            r#"class Box { value: string = "value"; read(): string { return this.value; } }
+            function main(): void { const box = new Box(); const read = box.read; read(); }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("requires `.call(thisArg"), "{error}");
     }
 
     #[test]
