@@ -1591,6 +1591,129 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
 
+    // Inherited static fields share their declaring class's single storage.
+    // Derived getters/setters provide the same dispatch surface as inherited
+    // static accessors without copying the field into a second global.
+    for derived in &class_decls {
+        let derived_name = derived.ident.sym.as_ref();
+        let mut seen = derived
+            .class
+            .body
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::ClassProp(property) if property.is_static => {
+                    class_property_name(&property.key).ok()
+                }
+                ClassMember::Method(method) if method.is_static => {
+                    class_property_name(&method.key).ok()
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut base_name =
+            derived
+                .class
+                .super_class
+                .as_ref()
+                .and_then(|base| match base.as_ref() {
+                    Expr::Ident(base) => Some(base.sym.to_string()),
+                    _ => None,
+                });
+        while let Some(current_name) = base_name {
+            let base = class_by_name[&current_name];
+            for member in &base.class.body {
+                let field = match member {
+                    ClassMember::ClassProp(property) if property.is_static => {
+                        class_property_name(&property.key)?
+                    }
+                    ClassMember::Method(method) if method.is_static => {
+                        class_property_name(&method.key)?
+                    }
+                    _ => continue,
+                };
+                if !seen.insert(field.clone()) {
+                    continue;
+                }
+                let ClassMember::ClassProp(property) = member else {
+                    continue;
+                };
+                let storage = class_static_field_symbol(&current_name, &field);
+                let ty = global_types[&storage].clone();
+                let getter = class_getter_symbol(derived_name, &field, true);
+                let source_range = (property.span.lo.0, property.span.hi.0);
+                signatures.insert(
+                    getter.clone(),
+                    FnSignature {
+                        params: Vec::new(),
+                        variadic: None,
+                        ret: ty.clone(),
+                        is_async: false,
+                        is_extern: false,
+                        source_range,
+                        generic_type_params: Vec::new(),
+                        generic_type_constraints: Vec::new(),
+                        generic_type_defaults: Vec::new(),
+                        generic_param_patterns: Vec::new(),
+                        generic_param_optional: Vec::new(),
+                        generic_return_type: None,
+                    },
+                );
+                inherited_class_functions.push(HirFunction {
+                    name: getter,
+                    params: Vec::new(),
+                    ret: ty.clone(),
+                    is_async: false,
+                    body: vec![HirStmt::Return(Some(HirExpr::Var(storage.clone())))],
+                });
+                if !property.readonly {
+                    let setter = class_setter_symbol(derived_name, &field, true);
+                    signatures.insert(
+                        setter.clone(),
+                        FnSignature {
+                            params: vec![ty.clone()],
+                            variadic: None,
+                            ret: ty.clone(),
+                            is_async: false,
+                            is_extern: false,
+                            source_range,
+                            generic_type_params: Vec::new(),
+                            generic_type_constraints: Vec::new(),
+                            generic_type_defaults: Vec::new(),
+                            generic_param_patterns: Vec::new(),
+                            generic_param_optional: Vec::new(),
+                            generic_return_type: None,
+                        },
+                    );
+                    let parameter = "__thaw_inherited_static_value".to_string();
+                    inherited_class_functions.push(HirFunction {
+                        name: setter,
+                        params: vec![HirParam {
+                            name: parameter.clone(),
+                            ty: ty.clone(),
+                        }],
+                        ret: ty,
+                        is_async: false,
+                        body: vec![
+                            HirStmt::Expr(HirExpr::Assign(
+                                storage,
+                                Box::new(HirExpr::Var(parameter.clone())),
+                            )),
+                            HirStmt::Return(Some(HirExpr::Var(parameter))),
+                        ],
+                    });
+                }
+            }
+            base_name = base
+                .class
+                .super_class
+                .as_ref()
+                .and_then(|parent| match parent.as_ref() {
+                    Expr::Ident(parent) => Some(parent.sym.to_string()),
+                    _ => None,
+                });
+        }
+    }
+
     // Missing parameter/return annotations and global initializer types are type
     // variables. Re-lower them together until forward references reach a fixed point.
     // signatures discovered in the previous round until forward calls and
@@ -10540,6 +10663,52 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
+            if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
+                (member.obj.as_ref(), &member.prop)
+            {
+                let getter =
+                    class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                let setter =
+                    class_setter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                let has_getter = self.signatures.contains_key(&getter);
+                let has_setter = self.signatures.contains_key(&setter);
+                if has_getter && !has_setter {
+                    return Err(format!(
+                        "cannot assign to readonly static member `{}.{}`",
+                        receiver.sym, property.sym
+                    ));
+                }
+                if assign.op != AssignOp::Assign && has_setter {
+                    let signature = self.signatures[&setter].clone();
+                    let rhs = self.lower_expr(&assign.right)?;
+                    let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), Vec::new());
+                    let value = if let Some(operator) = compound_op(assign.op) {
+                        if assign.op == AssignOp::AddAssign
+                            && (self.infer_expr_type(&current)? == HirType::Str
+                                || self.infer_expr_type(&rhs)? == HirType::Str)
+                        {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                vec![
+                                    self.coerce_primitive_to_string(current)?,
+                                    self.coerce_primitive_to_string(rhs)?,
+                                ],
+                            )
+                        } else {
+                            HirExpr::BinOp(operator, Box::new(current), Box::new(rhs))
+                        }
+                    } else {
+                        return Err(format!(
+                            "unsupported inherited static-field assignment operator {:?}",
+                            assign.op
+                        ));
+                    };
+                    let value = self.coerce_to_declared(&signature.params[0], value)?;
+                    return Ok(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![value]));
+                }
+            }
+        }
         if assign.op == AssignOp::Assign {
             if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = &assign.left {
                 let (_, _, base_name) = self
@@ -11045,6 +11214,51 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
+        if let Expr::Member(member) = update.arg.as_ref() {
+            if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
+                (member.obj.as_ref(), &member.prop)
+            {
+                let getter =
+                    class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                if let Some(getter_signature) = self.signatures.get(&getter).cloned() {
+                    let setter =
+                        class_setter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                    if !self.signatures.contains_key(&setter) {
+                        return Err(format!(
+                            "cannot update readonly static member `{}.{}`",
+                            receiver.sym, property.sym
+                        ));
+                    }
+                    if getter_signature.ret != HirType::F64 {
+                        return Err(format!(
+                            "cannot apply ++/-- to non-number static member `{}.{}`",
+                            receiver.sym, property.sym
+                        ));
+                    }
+                    let operator = match update.op {
+                        UpdateOp::PlusPlus => BinOp::Add,
+                        UpdateOp::MinusMinus => BinOp::Sub,
+                    };
+                    let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), Vec::new());
+                    let one = HirExpr::Lit(HirLit::F64(1.0));
+                    if update.prefix {
+                        let updated = HirExpr::BinOp(operator, Box::new(current), Box::new(one));
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![updated]));
+                    }
+                    let old_name = format!("__thaw_static_update_old_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(old_name.clone(), HirType::F64);
+                    let old = HirExpr::Var(old_name.clone());
+                    let updated = HirExpr::BinOp(operator, Box::new(old.clone()), Box::new(one));
+                    let result = HirExpr::Block(vec![
+                        HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![updated])),
+                        HirStmt::Return(Some(old)),
+                    ]);
+                    return self
+                        .wrap_call_argument_bindings(result, &[(old_name, HirType::F64, current)]);
+                }
+            }
+        }
         let target = match update.arg.as_ref() {
             Expr::Ident(ident) => Target::Var(self.resolve_binding(ident.sym.as_ref())),
             Expr::Member(member) => match &member.prop {
@@ -20336,5 +20550,49 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("cannot assign to constant"), "{error}");
+    }
+
+    #[test]
+    fn inherits_native_static_fields_without_copying_storage() {
+        let program = lower(
+            r#"class Base {
+                static value: number = 40;
+                static readonly label: string = "shared";
+            }
+            class Middle extends Base {}
+            class Leaf extends Middle {}
+            function main(): number { Leaf.value = 42; return Base.value; }"#,
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == class_getter_symbol("Leaf", "value", true)));
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == class_setter_symbol("Leaf", "value", true)));
+        assert!(!program
+            .globals
+            .iter()
+            .any(|global| { global.name == class_static_field_symbol("Leaf", "value") }));
+        assert!(!program
+            .functions
+            .iter()
+            .any(|function| function.name == class_setter_symbol("Leaf", "label", true)));
+    }
+
+    #[test]
+    fn rejects_assignment_to_inherited_readonly_native_static_field() {
+        let module = thaw_parser::parse_typescript(
+            r#"class Base { static readonly label: string = "fixed"; }
+            class Derived extends Base {}
+            function main(): void { Derived.label = "changed"; }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("cannot assign to readonly static member `Derived.label`"),
+            "{error}"
+        );
     }
 }

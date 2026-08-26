@@ -18650,6 +18650,37 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_inherited_native_static_class_fields() {
+        let source = r#"
+            class Base {
+                static value: number = 40;
+                static readonly label: string = "shared";
+            }
+            class Middle extends Base {}
+            class Leaf extends Middle {}
+            class Override extends Base { static value: number = 10; }
+            function main(): void {
+                console.log(Leaf.value);
+                Leaf.value = 42;
+                console.log(Base.value);
+                Middle.value += 1;
+                console.log(Middle.value);
+                console.log(Leaf.value++);
+                console.log(++Middle.value);
+                console.log(Leaf.label);
+                console.log(Override.value);
+                Override.value = 11;
+                console.log(Base.value);
+                console.log(Override.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "inherited_native_static_class_fields"),
+            "40\n42\n43\n43\n45\nshared\n10\n45\n11\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
