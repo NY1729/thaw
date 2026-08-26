@@ -18730,6 +18730,57 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_native_class_tuple_spreads() {
+        let source = r#"
+            class Calculator {
+                constructor(public offset: number) {}
+                sum(left: number, right: number): number {
+                    return this.offset + left + right;
+                }
+                static sum(left: number, right: number): number { return left + right; }
+            }
+            function main(): void {
+                const constructorArgs: [number] = [1];
+                const args: [number, number] = [20, 21];
+                const calculator = new Calculator(...constructorArgs);
+                console.log(calculator.sum(...args));
+                console.log(Calculator.sum(...args));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_tuple_spreads"),
+            "42\n41\n"
+        );
+    }
+
+    #[test]
+    fn compiles_and_runs_native_super_tuple_spreads() {
+        let source = r#"
+            class Base {
+                constructor(public left: number, public right: number) {}
+                sum(left: number, right: number): number { return left + right; }
+                static sum(left: number, right: number): number { return left + right; }
+            }
+            class Derived extends Base {
+                constructor(args: [number, number]) { super(...args); }
+                sumPair(args: [number, number]): number { return super.sum(...args); }
+                static sumPair(args: [number, number]): number { return super.sum(...args); }
+            }
+            function main(): void {
+                const args: [number, number] = [20, 22];
+                const value = new Derived(args);
+                console.log(value.left + value.right);
+                console.log(value.sumPair(args));
+                console.log(Derived.sumPair(args));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_super_tuple_spreads"),
+            "42\n42\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
