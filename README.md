@@ -1606,6 +1606,8 @@ The workspace crates have narrow responsibilities:
   Concrete generic-interface instantiations substitute their type arguments
   before collecting the same direct, nested, inherited and function-property
   metadata.
+  Optional member reads, calls and non-null optional method syntax preserve
+  the same metadata while reusing the ordinary typed call path.
   Native Array methods which preserve their element type retain tracked union
   discriminants through their returned arrays, including chained mutable and
   copy-producing operations.
