@@ -19498,6 +19498,7 @@ mod tests {
                 field<U>(value: { item: U }): U { return value.item; }
                 collect<U>(first: U, ...rest: U[]): U { return rest[0]; }
                 keep<U>(ignored: U): T { return this.value; }
+                choose<U>(first: U, second: U): U { return second; }
                 withDefault<U = string>(value: number = 50): number { return value; }
                 async convertAsync<U>(value: U): Promise<U> { return value; }
                 static identity<U>(value: U): U { return value; }
@@ -19553,11 +19554,15 @@ mod tests {
                 console.log(genericSuper.fixed());
                 const rebound = box.keep<string>.bind(new Box(54));
                 console.log(rebound("bound-generic-method"));
+                const partial = box.choose<string>.bind(box, "bound-first");
+                console.log(partial("partial-bind"));
+                const asyncBound = box.convertAsync<string>.bind(box);
+                console.log(await asyncBound("bound-async"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n"
         );
     }
 

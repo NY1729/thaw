@@ -9602,13 +9602,20 @@ impl<'a> FnLowerer<'a> {
         if call.type_args.is_some() {
             return Err("native class method `.bind()` does not accept type arguments".into());
         }
-        let [this_argument] = call.args.as_slice() else {
+        let Some((this_argument, leading_arguments)) = call.args.split_first() else {
             return Err(format!(
-                "native class method `{class_name}.{method_name}.bind` expects exactly one `thisArg`"
+                "native class method `{class_name}.{method_name}.bind` expects a `thisArg`"
             ));
         };
-        if this_argument.spread.is_some() {
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
             return Err("native class method `.bind()` does not support spread arguments".into());
+        }
+        if leading_arguments.len() > signature.params.len().saturating_sub(1) {
+            return Err(format!(
+                "native class method `{class_name}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
+                leading_arguments.len(),
+                signature.params.len().saturating_sub(1)
+            ));
         }
         let target = self.lower_expr(&method.obj)?;
         self.expect_type(&target_type, &target, "method bind target")?;
@@ -9621,7 +9628,30 @@ impl<'a> FnLowerer<'a> {
         let bound_name = format!("__thaw_bound_this_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(bound_name.clone(), target_type.clone());
-        let parameters = signature.params[1..]
+        let mut bindings = vec![
+            (target_name, target_type.clone(), target),
+            (bound_name.clone(), target_type.clone(), bound),
+        ];
+        let mut bound_argument_names = Vec::new();
+        for (index, (argument, expected)) in leading_arguments
+            .iter()
+            .zip(signature.params[1..].iter())
+            .enumerate()
+        {
+            let value = self.lower_expr(&argument.expr)?;
+            let value = self.coerce_to_declared(expected, value).map_err(|error| {
+                format!(
+                    "bound argument {} of `{class_name}.{method_name}` is invalid: {error}",
+                    index + 1
+                )
+            })?;
+            let name = format!("__thaw_bound_leading_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), expected.clone());
+            bound_argument_names.push(name.clone());
+            bindings.push((name, expected.clone(), value));
+        }
+        let parameters = signature.params[1 + leading_arguments.len()..]
             .iter()
             .enumerate()
             .map(|(index, ty)| HirParam {
@@ -9630,28 +9660,41 @@ impl<'a> FnLowerer<'a> {
             })
             .collect::<Vec<_>>();
         let mut arguments = vec![HirExpr::Var(bound_name.clone())];
+        arguments.extend(bound_argument_names.iter().cloned().map(HirExpr::Var));
         arguments.extend(
             parameters
                 .iter()
                 .map(|parameter| HirExpr::Var(parameter.name.clone())),
         );
+        let mut captures = vec![HirParam {
+            name: bound_name.clone(),
+            ty: target_type.clone(),
+        }];
+        captures.extend(
+            bound_argument_names
+                .iter()
+                .cloned()
+                .zip(
+                    signature.params[1..1 + leading_arguments.len()]
+                        .iter()
+                        .cloned(),
+                )
+                .map(|(name, ty)| HirParam { name, ty }),
+        );
+        let closure_return = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
+        {
+            HirType::Promise(Box::new(signature.ret.clone()))
+        } else {
+            signature.ret.clone()
+        };
         let closure = HirExpr::Lambda(
-            vec![HirParam {
-                name: bound_name.clone(),
-                ty: target_type.clone(),
-            }],
+            captures,
             parameters,
-            signature.ret,
+            closure_return,
             Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
         );
-        self.wrap_call_argument_bindings(
-            closure,
-            &[
-                (target_name, target_type.clone(), target),
-                (bound_name, target_type, bound),
-            ],
-        )
-        .map(Some)
+        self.wrap_call_argument_bindings(closure, &bindings)
+            .map(Some)
     }
 
     fn stmt_is_iteration(stmt: &Stmt) -> bool {
