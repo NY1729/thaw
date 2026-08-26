@@ -5071,6 +5071,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lambda(captures, params, ret, body) => {
                 self.compile_lambda(captures, params, ret, body)
             }
+            HirExpr::RecursiveClosure(name, ty, closure) => {
+                self.compile_recursive_closure(name, ty, closure)
+            }
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
             HirExpr::MethodRef(unbound, explicit, params, ret, is_static) => {
                 self.compile_method_ref(unbound, explicit, params, ret, *is_static)
@@ -5932,6 +5935,23 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map(Into::into)
             .map_err(|error| error.to_string())
+    }
+
+    fn compile_recursive_closure(
+        &mut self,
+        name: &str,
+        ty: &HirType,
+        closure: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let llvm_ty = self.basic_type(ty)?;
+        let cell = self.allocate_variable_cell(llvm_ty, name)?;
+        self.variables.insert(name.to_string(), (cell, llvm_ty));
+        self.variable_hir_types.insert(name.to_string(), ty.clone());
+        let value = self.compile_expr(closure)?;
+        self.builder
+            .build_store(cell, value)
+            .map_err(|error| error.to_string())?;
+        Ok(value)
     }
 
     fn compile_lambda(
@@ -9219,6 +9239,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),
             )),
+            HirExpr::RecursiveClosure(_, ty, _) => Some(ty.clone()),
             HirExpr::FunctionRef(_, params, ret) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
@@ -13805,6 +13826,44 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "mutable_captured_arrow"),
             "41\n42\n42\n"
+        );
+    }
+
+    #[test]
+    fn recursively_calls_named_local_function_values() {
+        let source = r#"
+            function pass(callback: (value: number) => number): (value: number) => number {
+                return callback;
+            }
+            function main(): void {
+                const multiplier = 2;
+                const factorial = function factorial(value: number): number {
+                    if (value <= 1) { return 1; }
+                    return value * factorial(value - 1);
+                };
+                let calls = 0;
+                const fibonacci: (value: number) => number = function recurse(value) {
+                    calls += 1;
+                    if (value <= 1) { return value; }
+                    return recurse(value - 1) + recurse(value - 2);
+                };
+                const scaled = function inner(value: number): number {
+                    if (value <= 0) { return 0; }
+                    return multiplier + inner(value - 1);
+                };
+                console.log(factorial(5));
+                console.log(fibonacci(6));
+                console.log(calls);
+                console.log(scaled(4));
+                const passed = pass(factorial);
+                const bound = passed.bind(null, 4);
+                console.log(passed.call(null, 4));
+                console.log(bound());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "recursive_named_local_functions"),
+            "120\n8\n25\n8\n24\n24\n"
         );
     }
 

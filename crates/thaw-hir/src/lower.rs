@@ -118,6 +118,34 @@ fn function_uses_this(function: &swc_ecma_ast::Function) -> bool {
     collector.found
 }
 
+struct IdentifierUseCollector<'a> {
+    name: &'a str,
+    found: bool,
+}
+
+impl Visit for IdentifierUseCollector<'_> {
+    fn visit_ident(&mut self, identifier: &swc_ecma_ast::Ident) {
+        if identifier.sym == *self.name {
+            self.found = true;
+        }
+    }
+}
+
+fn named_function_is_recursive(expression: &swc_ecma_ast::FnExpr) -> bool {
+    let Some(name) = &expression.ident else {
+        return false;
+    };
+    let Some(body) = &expression.function.body else {
+        return false;
+    };
+    let mut collector = IdentifierUseCollector {
+        name: name.sym.as_ref(),
+        found: false,
+    };
+    body.visit_with(&mut collector);
+    collector.found
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum GenericTypePattern {
     Variable(Symbol),
@@ -9748,6 +9776,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishIsUndefined(value, _)
         | HirExpr::NullishIsNone(value, _)
         | HirExpr::NullishValue(value, _) => collect_referenced_bindings(value, names),
+        HirExpr::RecursiveClosure(_, _, closure) => collect_referenced_bindings(closure, names),
         HirExpr::Lambda(captures, _, _, _) => {
             names.extend(captures.iter().map(|capture| capture.name.clone()));
         }
@@ -9874,7 +9903,8 @@ fn contains_await(expr: &HirExpr) -> bool {
         HirExpr::Block(stmts) => stmts.iter().any(stmt_contains_await),
         // A closure body runs only when the closure is invoked, not when the
         // function value is evaluated at this expression boundary.
-        HirExpr::Lambda(..)
+        HirExpr::RecursiveClosure(..)
+        | HirExpr::Lambda(..)
         | HirExpr::FunctionRef(..)
         | HirExpr::MethodRef(..)
         | HirExpr::Lit(_)
@@ -12491,6 +12521,16 @@ impl<'a> FnLowerer<'a> {
                         )
                     })
                     .transpose()?;
+                if let Expr::Fn(function) = init {
+                    if let Some((hir_name, ty, value)) = self.lower_recursive_function_expression(
+                        &name,
+                        function,
+                        annotated.as_ref(),
+                    )? {
+                        statements.push(HirStmt::Let(hir_name, ty, value));
+                        continue;
+                    }
+                }
                 if annotated.is_none()
                     && (matches!(init, Expr::Arrow(arrow) if arrow.type_params.is_some())
                         || matches!(init, Expr::Fn(function) if function.function.type_params.is_some()))
@@ -13671,6 +13711,7 @@ impl<'a> FnLowerer<'a> {
             // but function values do not have a native ABI until the next
             // callback-lowering phase. Keep the enclosing local dynamic
             // instead of discarding or pretending to know that ABI.
+            HirExpr::RecursiveClosure(_, ty, _) => Ok(ty.clone()),
             HirExpr::Lambda(_, params, ret, _) => Ok(HirType::Function(
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),
@@ -14946,6 +14987,84 @@ impl<'a> FnLowerer<'a> {
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
             )),
         }
+    }
+
+    fn lower_recursive_function_expression(
+        &mut self,
+        outer_name: &str,
+        expression: &swc_ecma_ast::FnExpr,
+        annotated: Option<&HirType>,
+    ) -> Result<Option<(Symbol, HirType, HirExpr)>, String> {
+        if !named_function_is_recursive(expression) {
+            return Ok(None);
+        }
+        if expression.function.type_params.is_some() {
+            return Err("recursive generic local function values are not supported yet".into());
+        }
+        let internal = expression
+            .ident
+            .as_ref()
+            .expect("recursive named function expression")
+            .sym
+            .to_string();
+        let arrow = function_expression_as_arrow(expression)?;
+        let ty = if let Some(annotated) = annotated {
+            annotated.clone()
+        } else {
+            let params = arrow
+                .params
+                .iter()
+                .map(|parameter| {
+                    lower_param(
+                        parameter,
+                        self.interfaces,
+                        self.generic_interfaces,
+                        false,
+                        &HashMap::new(),
+                    )
+                    .map(|parameter| parameter.ty)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = arrow
+                .return_type
+                .as_ref()
+                .ok_or_else(|| "recursive local function values need a return annotation or an outer function type".to_string())
+                .and_then(|annotation| {
+                    lower_ts_type(
+                        &annotation.type_ann,
+                        self.interfaces,
+                        self.generic_interfaces,
+                    )
+                })?;
+            HirType::Function(params, Box::new(result))
+        };
+        let HirType::Function(params, ret) = &ty else {
+            return Err("recursive named function expression needs a function type".into());
+        };
+        let hir_name = self.bind_local(outer_name, ty.clone());
+        let saved_internal = (internal != outer_name)
+            .then(|| self.bindings.get(&internal).cloned())
+            .flatten();
+        if internal != outer_name {
+            self.bindings
+                .entry(internal.clone())
+                .or_default()
+                .push(hir_name.clone());
+        }
+        let lowered = self.lower_contextual_arrow(&arrow, params, Some(ret));
+        if internal != outer_name {
+            if let Some(saved) = saved_internal {
+                self.bindings.insert(internal, saved);
+            } else {
+                self.bindings.remove(&internal);
+            }
+        }
+        let closure = self.coerce_to_declared(&ty, lowered?)?;
+        Ok(Some((
+            hir_name.clone(),
+            ty.clone(),
+            HirExpr::RecursiveClosure(hir_name, ty, Box::new(closure)),
+        )))
     }
 
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
