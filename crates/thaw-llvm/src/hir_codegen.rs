@@ -18762,6 +18762,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compiles_and_runs_native_class_setters() {
+        let source = r#"
+            let version: number = 0;
+            class Box {
+                stored: number;
+                constructor(value: number) { this.stored = value; }
+                get value(): number { return this.stored; }
+                set value(next: number) { this.stored = next; }
+                static set current(next: number) { version = next; }
+            }
+            function main(): void {
+                const box = new Box(1);
+                const assigned = (box.value = 40);
+                const selected = (Box.current = 2);
+                console.log(assigned + selected);
+                console.log(box.value + version);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "native_class_setters"), "42\n42\n");
+    }
+
     /// Async functions without an explicit suspension still use the uniform
     /// Promise-handle ABI and resolve their completion in the initial state.
     #[test]
