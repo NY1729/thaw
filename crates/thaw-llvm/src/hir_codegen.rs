@@ -17123,6 +17123,26 @@ mod tests {
                     nested: { load: producedResults }
                 };
                 const serviceAlias = service;
+                const optionalService: ResultService = service;
+                for (const item of optionalService?.load()) {
+                    if (item.kind === "number") console.log(item.value + 160);
+                    else console.log(item.value + " optional service");
+                }
+                const optionalFactory: ResultFactory = producedResults;
+                for (const item of optionalFactory?.()) {
+                    if (item.kind === "number") console.log(item.value + 161);
+                    else console.log(item.value + " optional factory");
+                }
+                const optionalLoad: ResultFactory = optionalService?.load;
+                for (const item of optionalLoad()) {
+                    if (item.kind === "number") console.log(item.value + 162);
+                    else console.log(item.value + " optional member");
+                }
+                const optionalHolder: HolderFactory = optionalService?.holder;
+                for (const item of optionalHolder().results) {
+                    if (item.kind === "number") console.log(item.value + 163);
+                    else console.log(item.value + " optional holder");
+                }
                 for (const item of serviceAlias.load()) {
                     if (item.kind === "number") console.log(item.value + 60);
                     else console.log(item.value + " service");
@@ -17283,7 +17303,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n218\n210\ngeneric inherited\n216\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n169\n170\n171\n177\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n218\n210\ngeneric inherited\n216\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
