@@ -559,8 +559,6 @@ impl<'ctx> HirCompiler<'ctx> {
 
 include!("hir_codegen/runtime_declarations.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/functions.rs");
 
 include!("hir_codegen/ffi_types.rs");
@@ -613,47 +611,25 @@ impl<'ctx> HirCompiler<'ctx> {
 
 include!("hir_codegen/async_frames.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/statements.rs");
-
-impl<'ctx> HirCompiler<'ctx> {}
 
 include!("hir_codegen/values.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/collections.rs");
-
-impl<'ctx> HirCompiler<'ctx> {}
 
 include!("hir_codegen/builtins.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/json_values.rs");
-
-impl<'ctx> HirCompiler<'ctx> {}
 
 include!("hir_codegen/dynamic_host.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/json_bridge.rs");
-
-impl<'ctx> HirCompiler<'ctx> {}
 
 include!("hir_codegen/operators.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/invocations.rs");
 
-impl<'ctx> HirCompiler<'ctx> {}
-
 include!("hir_codegen/promises.rs");
-
-impl<'ctx> HirCompiler<'ctx> {}
 
 include!("hir_codegen/ffi_calls.rs");
 
@@ -690,8 +666,6 @@ impl<'ctx> HirCompiler<'ctx> {
 }
 
 include!("hir_codegen/console.rs");
-
-impl<'ctx> HirCompiler<'ctx> {}
 
 include!("hir_codegen/entrypoints.rs");
 
