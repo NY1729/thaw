@@ -353,6 +353,12 @@ extern "C" fn thaw_dynamic_call(
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
   booleanおよび符号付き／符号なし整数bitfieldも明示できる。
   scalar、number/boolean/string/handle配列、タグ付きnullable、これらから再帰構成した固定object以外のvariadicは未対応。
+
+TypeScript callback型の末尾rest parameterは`RestFunction`として分類する。
+固定prefixとrest element型を論理型として保持し、AOT closure境界では
+`fixed..., Array<element>`という物理ABIへ変換する。これによりcallbackを
+引数・戻り値・固定object fieldとして受け渡した後も、direct call、`.call()`、
+typed tupleの`.apply()`、部分適用した`.bind()`でrest packingを維持できる。
 # Result ABI metadata
 
 The manual bridge path accepts a separate, versioned JSON document through
