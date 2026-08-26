@@ -1383,8 +1383,11 @@ The workspace crates have narrow responsibilities:
   once per concrete type tuple across constructors, fields, methods, inheritance,
   forward references and bundled user modules. Type constraints and trailing default
   type arguments, including dependencies on earlier parameters, are validated during
-  specialization. Constructor-based inference and runtime sharing of generic static
-  state remain outside the native subset.
+  specialization. Constructor calls without explicit type arguments infer parameters
+  from typed literals, array/object aggregates and type assertions, prefer inferred
+  types over defaults, and share specializations with equivalent explicit calls.
+  Inference through unannotated identifier/data-flow chains and runtime sharing of
+  generic static state remain outside the native subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
