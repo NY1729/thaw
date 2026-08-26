@@ -5502,7 +5502,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_bit_cast(value, self.context.i64_type(), "union_float_bits")
                 .map_err(|error| error.to_string())?
                 .into_int_value(),
-            (HirType::Bool | HirType::Undefined, BasicValueEnum::IntValue(value)) => self
+            (
+                HirType::Bool | HirType::Undefined | HirType::Null,
+                BasicValueEnum::IntValue(value),
+            ) => self
                 .builder
                 .build_int_z_extend(value, self.context.i64_type(), "union_bool_bits")
                 .map_err(|error| error.to_string())?,
@@ -5542,7 +5545,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_bit_cast(payload, self.context.f64_type(), "union_float")
                 .map_err(|error| error.to_string()),
-            HirType::Bool | HirType::Undefined => self
+            HirType::Bool | HirType::Undefined | HirType::Null => self
                 .builder
                 .build_int_truncate(payload, self.context.bool_type(), "union_bool")
                 .map(Into::into)
@@ -12852,6 +12855,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
             }
+            HirType::Null => {
+                let null = self
+                    .builder
+                    .build_global_string_ptr("null", "union_null")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module.get_function("puts").unwrap(),
+                        &[null.as_pointer_value().into()],
+                        "puts_union_null",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             HirType::Object(_) | HirType::Json | HirType::Array(_) | HirType::Function(_, _) => {
                 let object = self
                     .builder
@@ -15888,6 +15904,38 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "heterogeneous_union_arrays"),
             "4\nstring\nnumber\nstring\n6\nstring\nnumber\nnumber\nstring\nnumber\n"
+        );
+    }
+
+    #[test]
+    fn compiles_null_members_in_general_unions() {
+        let source = r#"
+            function choose(kind: number): number | string | null {
+                if (kind === 0) return 7;
+                if (kind === 1) return "value";
+                return null;
+            }
+            function describe(value: number | string | null): string {
+                if (typeof value === "number") return String(value + 1);
+                if (typeof value === "string") return value + "!";
+                console.log(value === null);
+                return "null";
+            }
+            async function delayed(kind: number): Promise<number | string | null> {
+                await sleep(1);
+                return choose(kind);
+            }
+            async function main(): Promise<void> {
+                console.log(describe(choose(0)));
+                console.log(describe(choose(1)));
+                console.log(describe(choose(2)));
+                console.log(choose(2));
+                console.log(describe(await delayed(2)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "general_union_null_members"),
+            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n"
         );
     }
 
