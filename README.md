@@ -1527,6 +1527,8 @@ The workspace crates have narrow responsibilities:
   three-state tag across locals, parameters, returns, object fields and async
   frames, with distinct display, `typeof`, strict/loose nullish equality,
   `??`/`??=`, loose-nullish guard narrowing and optional-chain behavior.
+  Arrays of optional, nullable and three-state nullish values preserve each
+  element's native tag and payload across literals and indexed reads.
   Optional chains also preserve all three outcomes
   when a nullable field, method result or function result is reached: a value,
   `null`, or receiver-produced `undefined`. Non-literal dynamically computed

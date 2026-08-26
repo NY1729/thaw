@@ -108,7 +108,10 @@ fn object_field_storage_bytes(ty: &HirType) -> u64 {
 }
 
 fn array_element_storage_bytes(ty: &HirType) -> u64 {
-    if matches!(ty, HirType::Union(_)) {
+    if matches!(
+        ty,
+        HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Union(_)
+    ) {
         ASYNC_SLOT_BYTES
     } else {
         ARRAY_ELEM_BYTES
@@ -6484,9 +6487,10 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn compile_array_lit(&mut self, elems: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let element_bytes = elems
-            .first()
-            .and_then(|element| self.expr_hir_type(element))
+            .iter()
+            .filter_map(|element| self.expr_hir_type(element))
             .map(|element| array_element_storage_bytes(&element))
+            .max()
             .unwrap_or(ARRAY_ELEM_BYTES);
         let elem_vals = elems
             .iter()
@@ -6692,6 +6696,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
         let element_bytes = match self.expr_hir_type(array) {
             Some(HirType::Array(element)) => array_element_storage_bytes(&element),
+            Some(HirType::Tuple(elements)) => elements
+                .iter()
+                .map(array_element_storage_bytes)
+                .max()
+                .unwrap_or(ARRAY_ELEM_BYTES),
             _ => ARRAY_ELEM_BYTES,
         };
         let elem_size = i64_type.const_int(element_bytes, false);
@@ -14966,6 +14975,49 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "native_three_way_nullish"),
             "4\nnull\nundefined\n4\n9\n9\ntrue\nfalse\ntrue\nfalse\ntrue\ntrue\nnumber\nobject\nundefined\n6\nundefined\nundefined\nnull\n8\nundefined\n11\n11\n12\n5\n0\n0\n8\n0\n0\nnull\nbox\n4\nnull\nundefined\n"
+        );
+    }
+
+    #[test]
+    fn compiles_arrays_of_tagged_nullish_values() {
+        let source = r#"
+            function optional(present: boolean): number | undefined {
+                if (present) return 1;
+                return undefined;
+            }
+            function nullable(present: boolean): number | null {
+                if (present) return 2;
+                return null;
+            }
+            function nullish(kind: number): number | null | undefined {
+                if (kind === 1) return 3;
+                if (kind === 2) return null;
+                return undefined;
+            }
+            function main(): void {
+                const optionals: (number | undefined)[] = [
+                    optional(true), optional(false), optional(true)
+                ];
+                console.log(optionals[0]);
+                console.log(optionals[1]);
+                console.log(optionals[2]);
+                const nullables: (number | null)[] = [
+                    nullable(true), nullable(false), nullable(true)
+                ];
+                console.log(nullables[0]);
+                console.log(nullables[1]);
+                console.log(nullables[2]);
+                const nullishValues: (number | null | undefined)[] = [
+                    nullish(1), nullish(2), nullish(3)
+                ];
+                console.log(nullishValues[0]);
+                console.log(nullishValues[1]);
+                console.log(nullishValues[2]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "tagged_nullish_arrays"),
+            "1\nundefined\n1\n2\nnull\n2\n3\nnull\nundefined\n"
         );
     }
 
