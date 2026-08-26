@@ -1205,7 +1205,7 @@ The workspace crates have narrow responsibilities:
 - Global `parseFloat` and `parseInt` coerce native values before scanning the
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
-  trailing text, single evaluation and awaited arguments
+  trailing text, single evaluation, awaited arguments and fixed-length tuple spreads
 - `Number.parseFloat` and `Number.parseInt` are aliases of the same native
   parsing paths, including radix inference, coercion and suspension behavior
 - Native homogeneous arrays and heterogeneous tuples implement `.join()` with
