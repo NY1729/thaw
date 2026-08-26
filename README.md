@@ -1584,7 +1584,8 @@ The workspace crates have narrow responsibilities:
   aliases and callback parameters preserve the same property metadata. Nested
   fixed-property paths such as `container.payload.results` use the same flow.
   Inferred object literals preserve tracked arrays through key-value and
-  shorthand properties, nesting and fixed-object spreads.
+  shorthand properties, nesting and fixed-object spreads. Object destructuring
+  carries them into renamed or nested locals and destructured parameters.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
