@@ -77,9 +77,12 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Classes, top-level declarations/statements outside the general HIR-supported subset, package
-multi-capture package export keys, and full ESM live bindings are outside the current typed AOT
-subset. Cyclic user-module graphs are diagnosed rather than executed. Missing
+Generic/abstract classes, private or computed members, class expressions, top-level
+declarations/statements outside the general HIR-supported subset, package multi-capture
+package export keys, and full ESM live bindings are outside the current typed AOT subset.
+Typed fixed-layout class declarations, including inheritance and named or anonymous default
+exports, can be imported, namespace-imported and re-exported across user modules. Cyclic
+user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
 are explicit compatibility limits, not silently rewritten semantics.
 
@@ -100,3 +103,6 @@ from that Lambda and verifies package initialization, async execution and the
 Runtime API response. A generated executable also imports a registry bundle
 which combines cancelled and repeating timers, microtasks, and a non-ASCII
 `TextEncoder`/`TextDecoder` round trip.
+Class graph coverage compiles named and anonymous default classes, a derived class whose base
+is imported from another module, direct and namespace imports, and barrel re-exports into one
+native executable, then executes inherited methods and reads constructor parameter properties.
