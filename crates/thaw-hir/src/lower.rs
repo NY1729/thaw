@@ -12669,6 +12669,16 @@ impl<'a> FnLowerer<'a> {
             Expr::OptChain(chain) => {
                 self.expression_union_discriminants(&ordinary_optional_chain_expression(chain))
             }
+            Expr::New(construction) if matches!(construction.callee.as_ref(), Expr::Ident(name) if name.sym == *"Promise") =>
+            {
+                let metadata = construction
+                    .type_args
+                    .as_ref()
+                    .and_then(|arguments| arguments.params.first())
+                    .map(|ty| object_union_discriminants(ty, self.generic_interfaces))
+                    .unwrap_or_default();
+                (!metadata.is_empty()).then_some(metadata)
+            }
             Expr::Member(member) if matches!(member.prop, MemberProp::Computed(_)) => {
                 self.expression_array_element_discriminants(&member.obj)
             }
@@ -20349,6 +20359,41 @@ impl<'a> FnLowerer<'a> {
         Ok(callback)
     }
 
+    fn callback_parameter_count(&self, expr: &Expr, label: &str) -> Result<usize, String> {
+        match expr {
+            Expr::Arrow(arrow) => Ok(arrow.params.len()),
+            Expr::Fn(function) => Ok(function.function.params.len()),
+            Expr::Ident(ident) => {
+                let name = self.resolve_binding(ident.sym.as_ref());
+                self.scope
+                    .get(&name)
+                    .and_then(|ty| match ty {
+                        HirType::Function(params, _)
+                        | HirType::CallableFunction(params, _, _, _) => Some(params.len()),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        self.generic_arrows
+                            .get(&name)
+                            .map(|arrow| arrow.params.len())
+                    })
+                    .or_else(|| {
+                        self.generic_named_templates
+                            .get(&name)
+                            .and_then(|target| self.signatures.get(target))
+                            .map(|signature| signature.params.len())
+                    })
+                    .or_else(|| {
+                        self.signatures
+                            .get(&name)
+                            .map(|signature| signature.params.len())
+                    })
+                    .ok_or_else(|| format!("unknown {label} `{name}`"))
+            }
+            _ => Err(format!("{label} must be an arrow or function value")),
+        }
+    }
+
     fn lower_promise_new(&mut self, new_expr: &swc_ecma_ast::NewExpr) -> Result<HirExpr, String> {
         let Expr::Ident(callee) = new_expr.callee.as_ref() else {
             return Err("only `new Promise<T>(...)` is supported".into());
@@ -20389,8 +20434,15 @@ impl<'a> FnLowerer<'a> {
         };
         let resolve = HirType::Function(resolve_value, Box::new(HirType::Void));
         let reject = HirType::Function(vec![HirType::Str], Box::new(HirType::Void));
+        let arity = self.callback_parameter_count(&executor.expr, "Promise executor")?;
+        if arity > 2 {
+            return Err(format!(
+                "Promise executor accepts at most two parameters, got {arity}"
+            ));
+        }
+        let available = [resolve, reject];
         let executor =
-            self.lower_promise_callback(&executor.expr, &[resolve, reject], Some(&HirType::Void))?;
+            self.lower_promise_callback(&executor.expr, &available[..arity], Some(&HirType::Void))?;
         Ok(HirExpr::PromiseNew(
             Box::new(executor),
             resolved,

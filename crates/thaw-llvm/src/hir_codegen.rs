@@ -23616,6 +23616,34 @@ mod tests {
     }
 
     #[test]
+    fn promise_constructors_preserve_union_values_and_discriminants() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            async function main(): Promise<void> {
+                const promised = new Promise<Result>(resolve => {
+                    resolve({ kind: "number", value: 1 });
+                });
+                const inferred = await promised;
+                print(inferred);
+                const direct = await new Promise<Result>(resolve => {
+                    resolve({ kind: "text", value: "direct" });
+                });
+                print(direct);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_union_constructor"),
+            "11\ndirect!\n"
+        );
+    }
+
+    #[test]
     fn frame_split_async_functions_return_objects_arrays_and_tuples_from_branches() {
         let source = r#"
             interface Item { value: number; }
