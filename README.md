@@ -1214,6 +1214,8 @@ The workspace crates have narrow responsibilities:
   ordering and awaited receivers are supported
 - Native array/tuple `join` and homogeneous-array `at`, `with`, and literal-depth
   `flat` accept statically sized tuple spreads while evaluating receivers first
+- Homogeneous-array `slice`, `copyWithin`, and `fill` likewise accept fixed tuple
+  spreads and retain receiver/value/index evaluation order
 - Homogeneous number, string, boolean and fixed-object arrays implement
   `.indexOf()`, `.lastIndexOf()` and `.includes()` with positive/negative and
   infinite starting positions.

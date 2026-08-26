@@ -1989,12 +1989,6 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"slice" {
-                    if call.args.len() > 2 {
-                        return Err("native `.slice()` expects zero to two arguments".into());
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array slice spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Array(_)) {
@@ -2002,9 +1996,13 @@ impl<'a> FnLowerer<'a> {
                             "`.slice()` requires a homogeneous array, got {receiver_type:?}"
                         ));
                     }
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.slice")?;
+                    if arguments.len() > 2 {
+                        return Err("native `.slice()` expects zero to two arguments".into());
+                    }
                     let mut indices = Vec::with_capacity(2);
-                    for argument in &call.args {
-                        let value = self.lower_expr(&argument.expr)?;
+                    for value in arguments {
                         indices.push(self.coerce_primitive_to_number(value)?);
                     }
                     if indices.is_empty() {
@@ -2018,6 +2016,7 @@ impl<'a> FnLowerer<'a> {
                     self.scope
                         .insert(receiver_name.clone(), receiver_type.clone());
                     let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
                     let mut arguments = vec![HirExpr::Var(receiver_name)];
                     for (position, index) in indices.into_iter().enumerate() {
                         let name = format!("__thaw_slice_index_{}_{}", position, self.next_binding);
@@ -2033,12 +2032,6 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"copyWithin" {
-                    if !(2..=3).contains(&call.args.len()) {
-                        return Err("native `.copyWithin()` expects two or three arguments".into());
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("copyWithin spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if !matches!(receiver_type, HirType::Array(_)) {
@@ -2046,9 +2039,13 @@ impl<'a> FnLowerer<'a> {
                             "`.copyWithin()` requires a homogeneous array, got {receiver_type:?}"
                         ));
                     }
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.copyWithin")?;
+                    if !(2..=3).contains(&arguments.len()) {
+                        return Err("native `.copyWithin()` expects two or three arguments".into());
+                    }
                     let mut indices = Vec::with_capacity(3);
-                    for argument in &call.args {
-                        let value = self.lower_expr(&argument.expr)?;
+                    for value in arguments {
                         indices.push(self.coerce_primitive_to_number(value)?);
                     }
                     if indices.len() == 2 {
@@ -2059,6 +2056,7 @@ impl<'a> FnLowerer<'a> {
                     self.scope
                         .insert(receiver_name.clone(), receiver_type.clone());
                     let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
                     let mut arguments = vec![HirExpr::Var(receiver_name)];
                     for (position, index) in indices.into_iter().enumerate() {
                         let name = format!("__thaw_copy_index_{}_{}", position, self.next_binding);
@@ -2074,12 +2072,6 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"fill" {
-                    if !(1..=3).contains(&call.args.len()) {
-                        return Err("native `.fill()` expects one to three arguments".into());
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array fill spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &receiver_type else {
@@ -2088,12 +2080,16 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element = element.as_ref().clone();
-                    let value = self.lower_expr(&call.args[0].expr)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.fill")?;
+                    if !(1..=3).contains(&arguments.len()) {
+                        return Err("native `.fill()` expects one to three arguments".into());
+                    }
+                    let value = arguments[0].clone();
                     self.expect_type(&element, &value, "fill value")?;
                     let mut indices = Vec::with_capacity(2);
-                    for argument in &call.args[1..] {
-                        let value = self.lower_expr(&argument.expr)?;
-                        indices.push(self.coerce_primitive_to_number(value)?);
+                    for argument in arguments.into_iter().skip(1) {
+                        indices.push(self.coerce_primitive_to_number(argument)?);
                     }
                     if indices.is_empty() {
                         indices.push(HirExpr::Lit(HirLit::F64(0.0)));
@@ -2118,8 +2114,9 @@ impl<'a> FnLowerer<'a> {
                     self.scope.insert(value_name.clone(), element.clone());
                     let mut bindings = vec![
                         (receiver_name.clone(), receiver_type, receiver),
-                        (value_name.clone(), element, value),
                     ];
+                    bindings.extend(spread_bindings);
+                    bindings.push((value_name.clone(), element, value));
                     let mut arguments = vec![HirExpr::Var(receiver_name), HirExpr::Var(value_name)];
                     for (position, index) in indices.into_iter().enumerate() {
                         let name = format!("__thaw_fill_index_{}_{}", position, self.next_binding);

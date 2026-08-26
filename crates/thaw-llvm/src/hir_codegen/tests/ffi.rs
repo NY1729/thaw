@@ -922,6 +922,23 @@ fn compiles_tuple_spreads_for_array_callbacks() {
 }
 
 #[test]
+fn compiles_tuple_spreads_for_array_range_methods() {
+    let source = r#"
+        function main(): void {
+            console.log([1, 2, 3, 4].slice(...[1, 3]).join(","));
+            const copied: number[] = [1, 2, 3, 4];
+            console.log(copied.copyWithin(...[0, 2, 4]).join(","));
+            const filled: number[] = [1, 2, 3, 4];
+            console.log(filled.fill(...[9, 1, 3]).join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_range_tuple_spreads"),
+        "2,3\n3,4,3,4\n1,9,9,4\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_of() {
     let source = r#"
         interface Item { value: number; }
