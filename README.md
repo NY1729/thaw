@@ -1379,8 +1379,9 @@ The workspace crates have narrow responsibilities:
   `with`/`assert` attributes, acyclic top-level await and same-package runtime
   dynamic imports. Relative-module bundling also supports namespace imports,
   `export * as name`, default re-export aliases and anonymous default
-  functions. `export default localName` also preserves the referenced
-  top-level declaration. Star exports follow explicit-export precedence,
+  functions. `export default localName` preserves the referenced top-level
+  declaration, while arbitrary default expressions lower to a private
+  module-scoped constant and are evaluated exactly once. Star exports follow explicit-export precedence,
   merge identical bindings and propagate ambiguity through barrel modules;
   importing an ambiguous name is a source-located error. Top-level-await
   cycles are explicit errors. `import.meta.url` is replaced per source module

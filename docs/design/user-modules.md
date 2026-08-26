@@ -56,7 +56,9 @@ type references, interface references, declarations, and re-exports consequently
 agree on one symbol. Module-scoped `const` and `let` initializers lower to typed
 HIR globals and run in dependency/source order through a guarded LLVM initializer
 before `main` or the Lambda runtime starts. A binding imported by several modules
-therefore has one storage cell and is initialized once.
+therefore has one storage cell and is initialized once. A general
+`export default expression` becomes a private module-scoped constant, preserving
+single evaluation for calls, arrays and fixed-shape object expressions.
 The entry module's `main` or `handler` keeps its ABI name. HIR then sees one
 ordinary module, so its existing fixed-point inference, forward-reference
 resolution, generic tuple specialization and specialization deduplication apply

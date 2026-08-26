@@ -3511,6 +3511,55 @@ mod tests {
     }
 
     #[test]
+    fn compiles_general_default_export_expressions_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-default-export-expression-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("value.ts"),
+            r#"
+                let calls = 0;
+                function compute(): number {
+                    calls++;
+                    return 40 + 2;
+                }
+                export function getCalls(): number { return calls; }
+                export default { answer: compute(), label: "ready" };
+            "#,
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import value, { getCalls } from "./value";
+                function main(): void {
+                    console.log(value.label);
+                    console.log(value.answer);
+                    console.log(value.answer);
+                    console.log(getCalls());
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "ready\n42\n42\n1\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn resolves_and_reports_star_export_ambiguity() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-star-export-ambiguity-{}",
