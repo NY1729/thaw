@@ -613,7 +613,12 @@ The workspace crates have narrow responsibilities:
   identity, synchronize module-internal references bidirectionally and use
   typed host thunks to forward calls between separate WebAssembly stores.
   Repeated `externref` crossings reuse both the JavaScript persistent handle
-  and the per-store wasmi reference, avoiding unbounded growth for stable values
+  and the per-store wasmi reference, avoiding unbounded growth for stable
+  values. Module and Instance objects provide idempotent `dispose()` methods;
+  unreachable objects are also finalized automatically. Releasing an instance
+  drops its wasmi store, function imports, inactive externrefs and bindings to
+  standalone Memory, Global and Table objects, while cached JavaScript values
+  can be reactivated safely by a later instance
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command
