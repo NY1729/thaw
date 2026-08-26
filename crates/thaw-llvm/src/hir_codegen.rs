@@ -18624,6 +18624,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compiles_and_runs_native_class_static_methods() {
+        let source = r#"
+            class MathBox {
+                static add(left: number, right: number): number { return left + right; }
+                static label(value: string): string { return value; }
+            }
+            function main(): void {
+                console.log(MathBox.add(40, 2));
+                console.log(MathBox.label("ready"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_static_methods"),
+            "42\nready\n"
+        );
+    }
+
     /// Same mechanism, but through the Lambda `handler` entry point instead
     /// of `main` (`emit_lambda_entry` has its own copy of the
     /// `call_module_init_if_present` call, see hir_codegen.rs).
