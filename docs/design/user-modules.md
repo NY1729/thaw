@@ -83,7 +83,8 @@ package export keys, and full ESM live bindings are outside the current typed AO
 Typed fixed-layout class declarations, including inheritance and named or anonymous default
 exports, can be imported, namespace-imported and re-exported across user modules. Their
 `implements` clauses structurally validate inherited and local fields, including specialized
-generic interfaces. Cyclic
+generic interfaces. Typed static fields with initializers are module-scoped globals initialized
+in source order; static blocks and inherited static-field lookup remain explicit gaps. Cyclic
 user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
 are explicit compatibility limits, not silently rewritten semantics.
