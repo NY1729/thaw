@@ -12743,6 +12743,7 @@ impl<'a> FnLowerer<'a> {
                         property.as_str(),
                         "concat"
                             | "copyWithin"
+                            | "fill"
                             | "filter"
                             | "reverse"
                             | "slice"
@@ -17602,7 +17603,8 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
-                    "__thaw_number_array_fill"
+                    "__thaw_array_fill"
+                    | "__thaw_number_array_fill"
                     | "__thaw_pointer_array_fill"
                     | "__thaw_bool_array_fill" => {
                         if args.len() != 4 {
@@ -25615,7 +25617,10 @@ impl<'a> FnLowerer<'a> {
                     let runtime = match &element {
                         HirType::F64 => "__thaw_number_array_fill",
                         HirType::Bool => "__thaw_bool_array_fill",
-                        _ => "__thaw_pointer_array_fill",
+                        HirType::Str | HirType::Array(_) | HirType::Object(_) => {
+                            "__thaw_pointer_array_fill"
+                        }
+                        _ => "__thaw_array_fill",
                     };
                     let receiver_name = format!("__thaw_fill_receiver_{}", self.next_binding);
                     self.next_binding += 1;
