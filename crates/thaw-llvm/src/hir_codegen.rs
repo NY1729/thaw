@@ -19531,7 +19531,7 @@ mod tests {
             async function main(): Promise<void> {
                 const offset: number = 2;
                 const double: (value: number) => Promise<number> =
-                    async (value: number) => value * 2;
+                    async value => value * 2;
                 console.log(await double(21));
                 const worker: Worker = {
                     run: async (): Promise<number> => 40 + offset,
