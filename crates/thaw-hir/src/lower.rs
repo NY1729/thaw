@@ -742,6 +742,16 @@ fn class_setter_symbol(class: &str, property: &str, is_static: bool) -> Symbol {
     )
 }
 
+fn class_member_symbol(class: &str, member: &swc_ecma_ast::ClassMethod) -> Result<Symbol, String> {
+    let name = class_property_name(&member.key)?;
+    Ok(match member.kind {
+        MethodKind::Getter => class_getter_symbol(class, &name, member.is_static),
+        MethodKind::Setter => class_setter_symbol(class, &name, member.is_static),
+        MethodKind::Method if member.is_static => class_static_method_symbol(class, &name),
+        MethodKind::Method => class_method_symbol(class, &name),
+    })
+}
+
 fn class_name_from_type(ty: &HirType) -> Option<&str> {
     let HirType::Object(fields) = ty else {
         return None;
@@ -1301,6 +1311,118 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
 
+    let class_by_name = class_decls
+        .iter()
+        .map(|declaration| (declaration.ident.sym.to_string(), *declaration))
+        .collect::<HashMap<_, _>>();
+    let member_key = |member: &swc_ecma_ast::ClassMethod| -> Result<(u8, Symbol), String> {
+        Ok((
+            match member.kind {
+                MethodKind::Method => 0,
+                MethodKind::Getter => 1,
+                MethodKind::Setter => 2,
+            },
+            class_property_name(&member.key)?,
+        ))
+    };
+    let mut inherited_class_functions = Vec::new();
+    for derived in &class_decls {
+        let derived_name = derived.ident.sym.to_string();
+        let derived_type = interfaces[&derived_name].clone();
+        let mut seen = derived
+            .class
+            .body
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::Method(method) if !method.is_static => member_key(method).ok(),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut base_name =
+            derived
+                .class
+                .super_class
+                .as_ref()
+                .and_then(|base| match base.as_ref() {
+                    Expr::Ident(base) => Some(base.sym.to_string()),
+                    _ => None,
+                });
+        while let Some(current_name) = base_name {
+            let base = class_by_name[&current_name];
+            for member in &base.class.body {
+                let ClassMember::Method(method) = member else {
+                    continue;
+                };
+                if method.is_static {
+                    continue;
+                }
+                let key = member_key(method)?;
+                if !seen.insert(key) {
+                    continue;
+                }
+                let base_symbol = class_member_symbol(&current_name, method)?;
+                let derived_symbol = match method.kind {
+                    MethodKind::Method => {
+                        class_method_symbol(&derived_name, &class_property_name(&method.key)?)
+                    }
+                    MethodKind::Getter => class_getter_symbol(
+                        &derived_name,
+                        &class_property_name(&method.key)?,
+                        false,
+                    ),
+                    MethodKind::Setter => class_setter_symbol(
+                        &derived_name,
+                        &class_property_name(&method.key)?,
+                        false,
+                    ),
+                };
+                let mut signature = signatures[&base_symbol].clone();
+                signature.params[0] = derived_type.clone();
+                signatures.insert(derived_symbol.clone(), signature.clone());
+                let params = signature
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| HirParam {
+                        name: if index == 0 {
+                            "__thaw_this".into()
+                        } else {
+                            format!("__thaw_inherited_arg_{index}")
+                        },
+                        ty: ty.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let call = HirExpr::Call(
+                    Box::new(HirExpr::Var(base_symbol)),
+                    params
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone()))
+                        .collect(),
+                );
+                let body = if signature.ret == HirType::Void {
+                    vec![HirStmt::Expr(call), HirStmt::Return(None)]
+                } else {
+                    vec![HirStmt::Return(Some(call))]
+                };
+                inherited_class_functions.push(HirFunction {
+                    name: derived_symbol,
+                    params,
+                    ret: signature.ret,
+                    is_async: signature.is_async,
+                    body,
+                });
+            }
+            base_name = base
+                .class
+                .super_class
+                .as_ref()
+                .and_then(|parent| match parent.as_ref() {
+                    Expr::Ident(parent) => Some(parent.sym.to_string()),
+                    _ => None,
+                });
+        }
+    }
+
     let mut global_types = HashMap::new();
     let mut immutable_globals = HashSet::new();
     for declaration in &global_decls {
@@ -1534,6 +1656,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &immutable_globals,
         )?);
     }
+    specialized.extend(inherited_class_functions);
     let mut pending = generic_instantiations
         .iter()
         .flat_map(|(name, instances)| instances.iter().cloned().map(|types| (name.clone(), types)))
@@ -19542,5 +19665,42 @@ mod tests {
             &initializer.body[1],
             HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "label"
         ));
+    }
+
+    #[test]
+    fn generates_typed_inherited_member_wrappers_and_prefers_overrides() {
+        let program = lower(
+            r#"class Base {
+                constructor(public value: number) {}
+                answer(): number { return this.value; }
+                get doubled(): number { return this.value * 2; }
+                set current(next: number) { this.value = next; }
+            }
+            class Derived extends Base {
+                constructor(value: number) { super(value); }
+                answer(): number { return this.value + 1; }
+            }
+            function main(): number {
+                const value = new Derived(20);
+                value.current = 21;
+                console.log(value.doubled);
+                return value.answer();
+            }"#,
+        );
+        for symbol in [
+            "__thaw_class_Derived_instance_getter_doubled",
+            "__thaw_class_Derived_instance_setter_current",
+        ] {
+            assert!(program
+                .functions
+                .iter()
+                .any(|function| function.name == symbol));
+        }
+        let answer = program
+            .functions
+            .iter()
+            .filter(|function| function.name == "__thaw_class_Derived_method_answer")
+            .collect::<Vec<_>>();
+        assert_eq!(answer.len(), 1, "override must suppress inherited wrapper");
     }
 }
