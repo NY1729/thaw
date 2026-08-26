@@ -1418,6 +1418,57 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    fn compile_ignored_this_adapter(
+        &mut self,
+        target: FunctionValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        name: &str,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let mut this_params = Vec::with_capacity(params.len() + 1);
+        this_params.push(HirType::I64);
+        this_params.extend_from_slice(params);
+        let adapter = self.module.add_function(
+            name,
+            self.function_type(&this_params, ret)?,
+            Some(Linkage::Internal),
+        );
+        let parent = self
+            .builder
+            .get_insert_block()
+            .ok_or("this-aware adapter must be emitted inside a function")?;
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+        let mut arguments = vec![BasicMetadataValueEnum::from(
+            adapter.get_nth_param(0).unwrap(),
+        )];
+        arguments.extend(
+            adapter
+                .get_param_iter()
+                .skip(2)
+                .map(BasicMetadataValueEnum::from),
+        );
+        let call = self
+            .builder
+            .build_call(target, &arguments, "invoke_ignoring_this")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void {
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let value = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or("this-aware adapter target returned no value")?;
+            self.builder
+                .build_return(Some(&value))
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.position_at_end(parent);
+        Ok(adapter)
+    }
+
     fn allocate_variable_cell(
         &self,
         ty: BasicTypeEnum<'ctx>,
@@ -4991,6 +5042,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::BinOp(op, lhs, rhs) => self.compile_binop(*op, lhs, rhs),
 
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
+            HirExpr::FunctionCallWithThis(callee, this_arg, args, params, ret) => {
+                self.compile_function_call_with_this(callee, this_arg, args, params, ret)
+            }
             HirExpr::PromiseAll(args, element) => self.compile_promise_all(args, element),
             HirExpr::PromiseAllArray(array, element) => {
                 self.compile_promise_all_array(array, element)
@@ -5892,6 +5946,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let function = self
             .module
             .add_function(&name, function_type, Some(Linkage::Internal));
+        let this_adapter = self.compile_ignored_this_adapter(
+            function,
+            &param_types,
+            ret,
+            &format!("{name}__thaw_this_adapter"),
+        )?;
 
         // Closure layout: `[ordinary entry][this-aware entry][capture 0][capture 1]...`, with
         // one machine word per entry. The arena gives the environment a
@@ -5931,7 +5991,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(
                 this_entry,
-                self.context.ptr_type(AddressSpace::default()).const_null(),
+                this_adapter.as_global_value().as_pointer_value(),
             )
             .map_err(|error| error.to_string())?;
         for (index, capture) in captures.iter().enumerate() {
@@ -6082,6 +6142,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         }
         self.builder.position_at_end(parent);
+        let this_adapter = self.compile_ignored_this_adapter(
+            adapter,
+            params,
+            ret,
+            &format!("{adapter_name}__thaw_this_adapter"),
+        )?;
         let closure = self
             .builder
             .build_call(
@@ -6119,7 +6185,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(
                 this_entry,
-                self.context.ptr_type(AddressSpace::default()).const_null(),
+                this_adapter.as_global_value().as_pointer_value(),
             )
             .map_err(|error| error.to_string())?;
         Ok(closure.into())
@@ -9023,6 +9089,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     _ => None,
                 }
             }
+            HirExpr::FunctionCallWithThis(_, _, _, _, ret) => Some(ret.clone()),
             HirExpr::AwaitPromise(_, resolved) => Some(resolved.clone()),
             HirExpr::ThrowValue(_, fallback) => self.expr_hir_type(fallback),
             _ => None,
@@ -9830,6 +9897,105 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| format!("call to undeclared function `{name}`"))?;
 
         self.build_call_with(function, args, name)
+    }
+
+    fn compile_this_argument_word(
+        &mut self,
+        expression: &HirExpr,
+    ) -> Result<IntValue<'ctx>, String> {
+        let value = self.compile_expr(expression)?;
+        match value {
+            BasicValueEnum::FloatValue(value) => self
+                .builder
+                .build_bit_cast(value, self.context.i64_type(), "this_number_word")
+                .map(|value| value.into_int_value())
+                .map_err(|error| error.to_string()),
+            BasicValueEnum::IntValue(value) => {
+                let width = value.get_type().get_bit_width();
+                if width < 64 {
+                    self.builder
+                        .build_int_z_extend(value, self.context.i64_type(), "this_int_word")
+                        .map_err(|error| error.to_string())
+                } else if width > 64 {
+                    self.builder
+                        .build_int_truncate(value, self.context.i64_type(), "this_int_word")
+                        .map_err(|error| error.to_string())
+                } else {
+                    Ok(value)
+                }
+            }
+            BasicValueEnum::PointerValue(value) => self
+                .builder
+                .build_ptr_to_int(value, self.context.i64_type(), "this_pointer_word")
+                .map_err(|error| error.to_string()),
+            other => Err(format!(
+                "explicit thisArg has unsupported native representation {other:?}"
+            )),
+        }
+    }
+
+    fn compile_function_call_with_this(
+        &mut self,
+        callee: &HirExpr,
+        this_arg: &HirExpr,
+        args: &[HirExpr],
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let closure = self.compile_expr(callee)?.into_pointer_value();
+        let this_entry_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[self
+                        .context
+                        .i64_type()
+                        .const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
+                    "closure_this_entry_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let function_pointer = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                this_entry_slot,
+                "closure_this_entry",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let this_word = self.compile_this_argument_word(this_arg)?;
+        let mut compiled_args = vec![
+            BasicMetadataValueEnum::from(closure),
+            BasicMetadataValueEnum::from(this_word),
+        ];
+        compiled_args.extend(
+            args.iter()
+                .map(|arg| self.compile_expr(arg).map(BasicMetadataValueEnum::from))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let mut this_params = Vec::with_capacity(params.len() + 1);
+        this_params.push(HirType::I64);
+        this_params.extend_from_slice(params);
+        let call = self
+            .builder
+            .build_indirect_call(
+                self.function_type(&this_params, ret)?,
+                function_pointer,
+                &compiled_args,
+                "closure_call_with_this",
+            )
+            .map_err(|error| error.to_string())?;
+        let value = if *ret == HirType::Void {
+            self.context.f64_type().const_zero().into()
+        } else {
+            call.try_as_basic_value()
+                .basic()
+                .ok_or("this-aware function value returned no value")?
+        };
+        self.branch_on_pending_exception()?;
+        Ok(value)
     }
 
     fn compile_closure_call(
@@ -13297,6 +13463,30 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "mutable_captured_arrow"),
             "41\n42\n42\n"
+        );
+    }
+
+    #[test]
+    fn calls_function_values_with_explicit_this_across_function_boundaries() {
+        let source = r#"
+            function pass(callback: (value: number) => number): (value: number) => number {
+                return callback;
+            }
+            function make(): (value: number) => number {
+                console.log("target");
+                return (value: number): number => value + 1;
+            }
+            function main(): void {
+                const callback = pass((value: number): number => value + 1);
+                const args: [number] = [41];
+                console.log(callback.call(7, 41));
+                console.log(callback.apply({ marker: "this" }, args));
+                console.log(make().call((console.log("this"), 0), (console.log("argument"), 41)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "function_call_apply_with_this"),
+            "42\n42\ntarget\nthis\nargument\n42\n"
         );
     }
 
