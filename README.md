@@ -1581,7 +1581,8 @@ The workspace crates have narrow responsibilities:
   tracked array retain the same metadata. Fixed object properties declared as
   union arrays retain it through parameter boundaries, local object aliases and
   named synchronous or asynchronous function returns. Typed function values,
-  aliases and callback parameters preserve the same property metadata.
+  aliases and callback parameters preserve the same property metadata. Nested
+  fixed-property paths such as `container.payload.results` use the same flow.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata

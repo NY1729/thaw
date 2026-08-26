@@ -16767,8 +16767,10 @@ mod tests {
             type ResultFactory = () => Result[];
             type AsyncResultFactory = () => Promise<Result[]>;
             interface ResultHolder { results: Result[]; }
+            interface NestedResultHolder { payload: ResultHolder; }
             type HolderFactory = () => ResultHolder;
             type AsyncHolderFactory = () => Promise<ResultHolder>;
+            type NestedHolderFactory = () => NestedResultHolder;
             async function result(number: boolean): Promise<Result> {
                 await sleep(1);
                 if (number) return { kind: "number", value: 8 };
@@ -16787,6 +16789,11 @@ mod tests {
             async function delayedHolder(): Promise<ResultHolder> {
                 await sleep(1);
                 return { results: [{ kind: "text", value: "async holder" }] };
+            }
+            function producedNestedHolder(): NestedResultHolder {
+                return {
+                    payload: { results: [{ kind: "number", value: 16 }] }
+                };
             }
             function consumeResults(results: Result[]): string {
                 for (const { kind, value } of results) {
@@ -16813,6 +16820,13 @@ mod tests {
                 for (const item of factory().results) {
                     if (item.kind === "number") return String(item.value + 7);
                     return item.value + " holder factory";
+                }
+                return "empty";
+            }
+            function consumeNestedHolder(holder: NestedResultHolder): string {
+                for (const { kind, value } of holder.payload.results) {
+                    if (kind === "number") return String(value + 8);
+                    return value + " nested holder";
                 }
                 return "empty";
             }
@@ -16877,6 +16891,16 @@ mod tests {
                     if (kind === "number") console.log(value + 1);
                     else console.log(value + " function value");
                 }
+                const nestedHolder: NestedResultHolder = {
+                    payload: { results: [{ kind: "text", value: "deep" }] }
+                };
+                const nestedHolderAlias = nestedHolder;
+                console.log(consumeNestedHolder(nestedHolderAlias));
+                const nestedFactory: NestedHolderFactory = producedNestedHolder;
+                for (const item of nestedFactory().payload.results) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + " nested factory");
+                }
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -16934,7 +16958,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
