@@ -15714,6 +15714,10 @@ impl<'a> FnLowerer<'a> {
                 let propagated_function_object_function_property_discriminants =
                     self.expression_function_object_function_property_discriminants(init);
                 let value = match (init, annotated.as_ref()) {
+                    (
+                        Expr::Arrow(arrow),
+                        Some(HirType::Function(_, _) | HirType::CallableFunction(..)),
+                    ) if arrow.is_async => self.lower_arrow(arrow)?,
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
                     }
