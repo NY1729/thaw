@@ -3610,8 +3610,12 @@ mod tests {
         std::fs::write(
             dir.join("values.ts"),
             r#"
+                interface Config { fallback: number | undefined; }
                 export const { answer, label: text } = { answer: 42, label: "ready" };
                 export const [first, second] = [20, 22];
+                export const { fallback = 42 }: Config = { fallback: undefined };
+                export const [head, ...tail] = [20, 10, 12];
+                export const { primary, ...metadata } = { primary: 42, label: "meta", code: 2 };
             "#,
         )
         .unwrap();
@@ -3619,11 +3623,15 @@ mod tests {
         std::fs::write(
             &entry,
             r#"
-                import { answer, text, first, second } from "./values";
+                import { answer, text, first, second, fallback, head, tail, primary, metadata } from "./values";
                 function main(): void {
                     console.log(text);
                     console.log(answer);
                     console.log(first + second);
+                    console.log(fallback);
+                    console.log(head + tail[0] + tail[1]);
+                    console.log(metadata.label);
+                    console.log(primary + metadata.code - 2);
                 }
             "#,
         )
@@ -3632,7 +3640,10 @@ mod tests {
         build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
         let result = Command::new(&output).output().unwrap();
         assert!(result.status.success());
-        assert_eq!(String::from_utf8_lossy(&result.stdout), "ready\n42\n42\n");
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "ready\n42\n42\n42\n42\nmeta\n42\n"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

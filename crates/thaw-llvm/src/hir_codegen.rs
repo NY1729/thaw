@@ -18459,6 +18459,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn executes_top_level_destructuring_defaults_and_array_rest() {
+        let source = r#"
+            interface Config { fallback: number | undefined; }
+            const { fallback = 42 }: Config = { fallback: undefined };
+            const [head, ...tail] = [20, 10, 12];
+            const { answer, ...metadata } = { answer: 42, label: "ready", code: 2 };
+            function main(): void {
+                console.log(fallback);
+                console.log(head + tail[0] + tail[1]);
+                console.log(metadata.label);
+                console.log(answer + metadata.code - 2);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "top_level_destructuring_default_rest"),
+            "42\n42\nready\n42\n"
+        );
+    }
+
     /// Same mechanism, but through the Lambda `handler` entry point instead
     /// of `main` (`emit_lambda_entry` has its own copy of the
     /// `call_module_init_if_present` call, see hir_codegen.rs).

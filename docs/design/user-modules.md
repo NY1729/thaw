@@ -67,7 +67,9 @@ and contributes a nonzero native process status.
 Top-level object/array destructuring is normalized before graph symbol collection:
 one private temporary evaluates the source, then typed field/index globals preserve
 nested binding order. Exported patterns expose only user bindings, never the private
-temporaries. Defaults and rest patterns remain diagnosed at this normalization boundary.
+temporaries. Defaulted bindings use the native nullish-default lowering. Array rest
+uses the typed non-mutating slice path, while object rest rebuilds a shallow fixed-shape
+object from fields not consumed earlier in the pattern.
 The entry module's `main` or `handler` keeps its ABI name. HIR then sees one
 ordinary module, so its existing fixed-point inference, forward-reference
 resolution, generic tuple specialization and specialization deduplication apply

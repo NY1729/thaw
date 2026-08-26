@@ -393,6 +393,18 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
         }))
     }
 
+    fn property_name(key: &PropName) -> Result<String, String> {
+        match key {
+            PropName::Ident(identifier) => Ok(identifier.sym.to_string()),
+            PropName::Str(string) => Ok(string.value.to_string_lossy().into_owned()),
+            PropName::Computed(computed) => match computed.expr.as_ref() {
+                Expr::Lit(Lit::Str(string)) => Ok(string.value.to_string_lossy().into_owned()),
+                _ => Err("top-level object rest requires static string keys".into()),
+            },
+            _ => Err("top-level object rest requires static string keys".into()),
+        }
+    }
+
     fn expand_pattern(
         pattern: &Pat,
         value: Expr,
@@ -402,6 +414,22 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
         used: &mut HashSet<String>,
         out: &mut Vec<swc_ecma_ast::VarDecl>,
     ) -> Result<(), String> {
+        if let Pat::Assign(assign) = pattern {
+            return expand_pattern(
+                &assign.left,
+                Expr::Bin(swc_ecma_ast::BinExpr {
+                    span,
+                    op: BinaryOp::NullishCoalescing,
+                    left: Box::new(value),
+                    right: assign.right.clone(),
+                }),
+                kind,
+                span,
+                counter,
+                used,
+                out,
+            );
+        }
         if let Pat::Ident(binding) = pattern {
             out.push(swc_ecma_ast::VarDecl {
                 span,
@@ -445,21 +473,27 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
 
         match pattern {
             Pat::Object(object) => {
+                let mut used_keys = Vec::new();
                 for property in &object.props {
                     match property {
                         ObjectPatProp::Assign(property) => {
-                            if property.value.is_some() {
-                                return Err(
-                                    "top-level destructuring defaults are not supported yet".into(),
-                                );
-                            }
                             let key = PropName::Ident(swc_ecma_ast::IdentName::new(
                                 property.key.id.sym.clone(),
                                 property.key.id.span,
                             ));
+                            used_keys.push(property.key.id.sym.to_string());
+                            let mut value = member(temporary_expr(), &key, span)?;
+                            if let Some(default) = &property.value {
+                                value = Expr::Bin(swc_ecma_ast::BinExpr {
+                                    span,
+                                    op: BinaryOp::NullishCoalescing,
+                                    left: Box::new(value),
+                                    right: default.clone(),
+                                });
+                            }
                             expand_pattern(
                                 &Pat::Ident(property.key.clone()),
-                                member(temporary_expr(), &key, span)?,
+                                value,
                                 kind,
                                 span,
                                 counter,
@@ -467,19 +501,51 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                                 out,
                             )?;
                         }
-                        ObjectPatProp::KeyValue(property) => expand_pattern(
-                            &property.value,
-                            member(temporary_expr(), &property.key, span)?,
-                            kind,
-                            span,
-                            counter,
-                            used,
-                            out,
-                        )?,
-                        ObjectPatProp::Rest(_) => {
-                            return Err(
-                                "top-level object destructuring rest is not supported yet".into()
-                            )
+                        ObjectPatProp::KeyValue(property) => {
+                            used_keys.push(property_name(&property.key)?);
+                            expand_pattern(
+                                &property.value,
+                                member(temporary_expr(), &property.key, span)?,
+                                kind,
+                                span,
+                                counter,
+                                used,
+                                out,
+                            )?;
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            let mut args = vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(temporary_expr()),
+                            }];
+                            args.extend(used_keys.iter().map(|key| swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                                    span,
+                                    value: key.clone().into(),
+                                    raw: None,
+                                }))),
+                            }));
+                            expand_pattern(
+                                &rest.arg,
+                                Expr::Call(CallExpr {
+                                    span,
+                                    ctxt: Default::default(),
+                                    callee: Callee::Expr(Box::new(Expr::Ident(
+                                        swc_ecma_ast::Ident::new_no_ctxt(
+                                            "__thaw_object_rest".into(),
+                                            span,
+                                        ),
+                                    ))),
+                                    args,
+                                    type_args: None,
+                                }),
+                                kind,
+                                span,
+                                counter,
+                                used,
+                                out,
+                            )?;
                         }
                     }
                 }
@@ -487,11 +553,30 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
             Pat::Array(array) => {
                 for (index, element) in array.elems.iter().enumerate() {
                     let Some(element) = element else { continue };
-                    if matches!(element, Pat::Rest(_) | Pat::Assign(_)) {
-                        return Err(
-                            "top-level array destructuring rest/default is not supported yet"
-                                .into(),
-                        );
+                    if let Pat::Rest(rest) = element {
+                        let slice = Expr::Call(CallExpr {
+                            span,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span,
+                                obj: Box::new(temporary_expr()),
+                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                    "slice".into(),
+                                    span,
+                                )),
+                            }))),
+                            args: vec![swc_ecma_ast::ExprOrSpread {
+                                spread: None,
+                                expr: Box::new(Expr::Lit(Lit::Num(swc_ecma_ast::Number {
+                                    span,
+                                    value: index as f64,
+                                    raw: None,
+                                }))),
+                            }],
+                            type_args: None,
+                        });
+                        expand_pattern(&rest.arg, slice, kind, span, counter, used, out)?;
+                        continue;
                     }
                     let value = Expr::Member(MemberExpr {
                         span,
@@ -11444,6 +11529,43 @@ impl<'a> FnLowerer<'a> {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
 
+        if matches!(callee_expr.as_ref(), Expr::Ident(identifier) if identifier.sym == *"__thaw_object_rest")
+        {
+            if call.args.is_empty() || call.args.iter().any(|argument| argument.spread.is_some()) {
+                return Err("object-rest lowering expects a source and static field names".into());
+            }
+            let source = self.lower_expr(&call.args[0].expr)?;
+            let source_type = self.infer_expr_type(&source)?;
+            let HirType::Object(fields) = &source_type else {
+                return Err(format!(
+                    "object rest requires a fixed-shape object, got {source_type:?}"
+                ));
+            };
+            let omitted = call.args[1..]
+                .iter()
+                .map(|argument| match argument.expr.as_ref() {
+                    Expr::Lit(Lit::Str(key)) => Ok(key.value.to_string_lossy().into_owned()),
+                    _ => Err("object-rest field names must be string literals".to_string()),
+                })
+                .collect::<Result<HashSet<_>, _>>()?;
+            return Ok(HirExpr::ObjectLit(
+                fields
+                    .iter()
+                    .filter(|(name, _)| !omitted.contains(name))
+                    .map(|(name, _)| {
+                        (
+                            name.clone(),
+                            HirExpr::PropAccess(
+                                Box::new(source.clone()),
+                                source_type.clone(),
+                                name.clone(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
                 if let Expr::Ident(object) = member.obj.as_ref() {
@@ -14782,6 +14904,53 @@ mod tests {
             assert_eq!(global.ty, HirType::F64);
             assert!(!global.mutable);
         }
+    }
+
+    #[test]
+    fn expands_top_level_destructuring_defaults_and_array_rest() {
+        let program = lower(
+            r#"
+                interface Config { fallback: number | undefined; }
+                const { fallback = 42 }: Config = { fallback: undefined };
+                const [head, ...tail] = [20, 10, 12];
+                const { answer, ...metadata } = { answer: 42, label: "ready", code: 2 };
+                function main(): void {
+                    console.log(fallback);
+                    console.log(head + tail[0] + tail[1]);
+                    console.log(metadata.label);
+                }
+            "#,
+        );
+        assert_eq!(
+            program
+                .globals
+                .iter()
+                .find(|global| global.name == "fallback")
+                .unwrap()
+                .ty,
+            HirType::F64
+        );
+        assert_eq!(
+            program
+                .globals
+                .iter()
+                .find(|global| global.name == "tail")
+                .unwrap()
+                .ty,
+            HirType::Array(Box::new(HirType::F64))
+        );
+        assert_eq!(
+            program
+                .globals
+                .iter()
+                .find(|global| global.name == "metadata")
+                .unwrap()
+                .ty,
+            HirType::Object(vec![
+                ("label".into(), HirType::Str),
+                ("code".into(), HirType::F64),
+            ])
+        );
     }
 
     #[test]
