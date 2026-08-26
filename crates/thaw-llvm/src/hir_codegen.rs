@@ -18958,6 +18958,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_inherited_static_members() {
+        let source = r#"
+            let stored: number = 0;
+            class Base {
+                static add(left: number, right: number): number { return left + right; }
+                static get current(): number { return stored; }
+                static set current(next: number) { stored = next; }
+            }
+            class Derived extends Base {
+                static add(left: number, right: number): number { return left + right + 1; }
+            }
+            function main(): void {
+                console.log(Derived.current = 40);
+                console.log(Derived.current);
+                console.log(Derived.add(1, 1));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "inherited_static_members"),
+            "40\n40\n3\n"
+        );
+    }
+
+    #[test]
     fn frame_split_preserves_and_mutates_locals_across_awaits() {
         let source = r#"
             async function main(): Promise<void> {
