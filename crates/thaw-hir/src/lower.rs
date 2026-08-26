@@ -1321,6 +1321,47 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
 
+    // JavaScript synthesizes `constructor(...args) { super(...args); }` for a
+    // derived class without an explicit constructor. Propagate the nearest
+    // base signature to a fixed point so forward declarations and multi-level
+    // implicit constructor chains receive the same concrete argument tuple.
+    for _ in 0..class_decls.len() {
+        let mut changed = false;
+        for derived in &class_decls {
+            if derived
+                .class
+                .body
+                .iter()
+                .any(|member| matches!(member, ClassMember::Constructor(_)))
+            {
+                continue;
+            }
+            let Some(Expr::Ident(base)) = derived.class.super_class.as_deref() else {
+                continue;
+            };
+            let derived_name = derived.ident.sym.as_ref();
+            let base_params = signatures[&class_constructor_symbol(base.sym.as_ref())]
+                .params
+                .clone();
+            let constructor = signatures
+                .get_mut(&class_constructor_symbol(derived_name))
+                .expect("derived constructor signature");
+            if constructor.params != base_params {
+                constructor.params = base_params.clone();
+                changed = true;
+            }
+            let mut initializer_params = vec![interfaces[derived_name].clone()];
+            initializer_params.extend(base_params);
+            signatures
+                .get_mut(&class_initializer_symbol(derived_name))
+                .expect("derived initializer signature")
+                .params = initializer_params;
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let class_by_name = class_decls
         .iter()
         .map(|declaration| (declaration.ident.sym.to_string(), *declaration))
@@ -3547,6 +3588,17 @@ fn lower_class_constructor(
         parameter.ty = signatures[&constructor_symbol].params[index].clone();
         params.push(parameter);
     }
+    if constructor.is_none() && declaration.class.super_class.is_some() {
+        params = signatures[&constructor_symbol]
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_implicit_super_arg_{index}"),
+                ty: ty.clone(),
+            })
+            .collect();
+    }
 
     let this_name = "__thaw_this".to_string();
     let mut initializer_params = vec![HirParam {
@@ -3661,14 +3713,20 @@ fn lower_class_constructor(
                 .clone()
                 .expect("derived class has a base initializer");
             let signature = &signatures[&base_initializer];
-            if signature.params.len() != 1 {
+            if signature.params.len() != params.len() + 1 {
                 return Err(format!(
-                    "derived class `{class_name}` needs an explicit constructor because its base expects arguments"
+                    "derived class `{class_name}` cannot forward its implicit constructor arguments to the base"
                 ));
             }
+            let mut args = vec![HirExpr::Var(this_name.clone())];
+            args.extend(
+                params
+                    .iter()
+                    .map(|parameter| HirExpr::Var(parameter.name.clone())),
+            );
             initializer_body.push(HirStmt::Expr(HirExpr::Call(
                 Box::new(HirExpr::Var(base_initializer)),
-                vec![HirExpr::Var(this_name.clone())],
+                args,
             )));
             initializer_body.append(&mut own_initializers);
         }
@@ -19939,5 +19997,36 @@ mod tests {
                 .unwrap();
             assert!(format!("{:?}", function.body).contains("__thaw_class_Base_static"));
         }
+    }
+
+    #[test]
+    fn forwards_implicit_derived_constructor_arguments_through_multiple_levels() {
+        let program = lower(
+            r#"class Leaf extends Middle {}
+            class Middle extends Base {}
+            class Base {
+                constructor(public value: number, public label: string) {}
+                answer(): number { return this.value; }
+            }
+            function main(): number {
+                const value = new Leaf(42, "ready");
+                console.log(value.label);
+                return value.answer();
+            }"#,
+        );
+        for class_name in ["Middle", "Leaf"] {
+            let constructor = program
+                .functions
+                .iter()
+                .find(|function| function.name == format!("__thaw_class_{class_name}_constructor"))
+                .unwrap();
+            assert_eq!(constructor.params.len(), 2);
+        }
+        let leaf_initializer = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Leaf_initialize")
+            .unwrap();
+        assert!(format!("{:?}", leaf_initializer.body).contains("__thaw_class_Middle_initialize"));
     }
 }
