@@ -769,6 +769,7 @@ fn compiles_native_array_to_spliced() {
             console.log(source.toSpliced(1.9, 1.9, 6).join(","));
             console.log(source.toSpliced(99, 5, 8).join(","));
             console.log(source.toSpliced(-99, -2, 8).join(","));
+            console.log(source.toSpliced(...[1, 2, 8, 9]).join(","));
             console.log(source.join(","));
             const first: Item = { value: 1 };
             const second: Item = { value: 2 };
@@ -783,7 +784,7 @@ fn compiles_native_array_to_spliced() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_to_spliced"),
-        "1,2,3,4\n1,2\n1,2,8,9,4\n7,1,2,3,4\n1,6,3,4\n1,2,3,4,8\n8,1,2,3,4\n1,2,3,4\n8\nreceiver\nstart\ndelete\nitem\n1,9,3\nawaited receiver\nawaited start\nawaited item\na,b,z\n"
+        "1,2,3,4\n1,2\n1,2,8,9,4\n7,1,2,3,4\n1,6,3,4\n1,2,3,4,8\n8,1,2,3,4\n1,8,9,4\n1,2,3,4\n8\nreceiver\nstart\ndelete\nitem\n1,9,3\nawaited receiver\nawaited start\nawaited item\na,b,z\n"
     );
 }
 
