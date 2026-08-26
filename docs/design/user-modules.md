@@ -61,6 +61,9 @@ therefore has one storage cell and is initialized once. A general
 single evaluation for calls, arrays and fixed-shape object expressions. Executable
 top-level expressions and supported control flow are interleaved with those global
 stores in the same HIR initializer sequence, rather than being reordered around them.
+Each generated initializer call is followed by a pending-exception check; a failure
+branches directly to process cleanup, skips later initialization and user entry code,
+and contributes a nonzero native process status.
 The entry module's `main` or `handler` keeps its ABI name. HIR then sees one
 ordinary module, so its existing fixed-point inference, forward-reference
 resolution, generic tuple specialization and specialization deduplication apply

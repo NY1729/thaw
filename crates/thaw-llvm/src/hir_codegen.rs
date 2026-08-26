@@ -12301,9 +12301,10 @@ impl<'ctx> HirCompiler<'ctx> {
     fn emit_c_main_entry(&mut self) {
         let user_main = self.module.get_function(USER_MAIN_SYMBOL).unwrap();
 
-        let (_main_fn, entry) = self.new_c_main();
+        let (main_fn, entry) = self.new_c_main();
+        let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
-        self.call_module_init_if_present();
+        self.call_module_init_if_present(cleanup);
         let call = self
             .builder
             .build_call(user_main, &[], "call_thaw_user_main")
@@ -12367,13 +12368,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
+        self.builder.build_unconditional_branch(cleanup).unwrap();
+        self.builder.position_at_end(cleanup);
         self.finish_c_main();
     }
 
     /// Calls `__thaw_module_init` before user code, if the program defines
     /// one (see `MODULE_INIT_SYMBOL`). A no-op for programs with no
     /// registry packages that ship a `bundle.js`.
-    fn call_module_init_if_present(&self) {
+    fn call_module_init_if_present(&self, cleanup: BasicBlock<'ctx>) {
         for (symbol, call_name) in [
             (MODULE_INIT_SYMBOL, "call_thaw_module_init"),
             (NATIVE_MODULE_INIT_SYMBOL, "call_thaw_native_module_init"),
@@ -12381,6 +12384,31 @@ impl<'ctx> HirCompiler<'ctx> {
         ] {
             if let Some(init_fn) = self.module.get_function(symbol) {
                 self.builder.build_call(init_fn, &[], call_name).unwrap();
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .unwrap();
+                let continue_block = self
+                    .context
+                    .append_basic_block(function, &format!("{call_name}_ok"));
+                let pending = self
+                    .builder
+                    .build_load(
+                        self.context.ptr_type(AddressSpace::default()),
+                        self.pending_exception().as_pointer_value(),
+                        "init_pending_exception",
+                    )
+                    .unwrap()
+                    .into_pointer_value();
+                let failed = self
+                    .builder
+                    .build_is_not_null(pending, "init_failed")
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(failed, cleanup, continue_block)
+                    .unwrap();
+                self.builder.position_at_end(continue_block);
             }
         }
     }
@@ -12539,9 +12567,10 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function("thaw_runtime_run", run_type, Some(Linkage::External));
 
-        let (_main_fn, entry) = self.new_c_main();
+        let (main_fn, entry) = self.new_c_main();
+        let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
-        self.call_module_init_if_present();
+        self.call_module_init_if_present(cleanup);
         let handler_ptr = handler_fn.as_global_value().as_pointer_value();
         self.builder
             .build_call(
@@ -12553,6 +12582,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 "call_thaw_runtime_run",
             )
             .map_err(|e| e.to_string())?;
+        self.builder
+            .build_unconditional_branch(cleanup)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(cleanup);
         self.finish_c_main();
         Ok(())
     }
@@ -12578,8 +12611,22 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .unwrap();
         }
+        let pending = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                self.pending_exception().as_pointer_value(),
+                "process_pending_exception",
+            )
+            .unwrap()
+            .into_pointer_value();
+        let exception_failure = self
+            .builder
+            .build_is_not_null(pending, "process_exception_failed")
+            .unwrap();
         let http_failure = if self.module.get_function("createServer").is_some() {
-            self.builder
+            let status = self
+                .builder
                 .build_call(
                     self.module
                         .get_function("thaw_http_take_unhandled_error")
@@ -12591,12 +12638,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap()
-                .into_int_value()
+                .into_int_value();
+            self.builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    status,
+                    status.get_type().const_zero(),
+                    "http_failed",
+                )
+                .unwrap()
         } else {
-            self.context.i8_type().const_zero()
+            self.context.bool_type().const_zero()
         };
+        let process_failure = self
+            .builder
+            .build_or(exception_failure, http_failure, "process_failed")
+            .unwrap();
         if self.uses_napi {
-            let fatal = self
+            let fatal_status = self
                 .builder
                 .build_call(
                     self.module
@@ -12610,9 +12669,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 .basic()
                 .unwrap()
                 .into_int_value();
+            let fatal = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    fatal_status,
+                    fatal_status.get_type().const_zero(),
+                    "napi_fatal",
+                )
+                .unwrap();
             let failed = self
                 .builder
-                .build_or(fatal, http_failure, "process_failed")
+                .build_or(fatal, process_failure, "napi_process_failed")
                 .unwrap();
             let status = self
                 .builder
@@ -12623,7 +12691,7 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         let status = self
             .builder
-            .build_int_z_extend(http_failure, i32_type, "http_exit_status")
+            .build_int_z_extend(process_failure, i32_type, "process_exit_status")
             .unwrap();
         self.builder.build_return(Some(&status)).unwrap();
     }
