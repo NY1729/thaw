@@ -157,6 +157,8 @@ enum GenericTypePattern {
     Partial(Box<GenericTypePattern>),
     Required(Box<GenericTypePattern>),
     Record(Vec<Symbol>, Box<GenericTypePattern>),
+    Pick(Box<GenericTypePattern>, Vec<Symbol>),
+    Omit(Box<GenericTypePattern>, Vec<Symbol>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6313,6 +6315,33 @@ fn required_hir_type(ty: HirType) -> Result<HirType, String> {
     ))
 }
 
+fn pick_hir_type(ty: HirType, keys: &[Symbol]) -> Result<HirType, String> {
+    let HirType::Object(fields) = ty else {
+        return Err("Pick<T, K> requires an object type".into());
+    };
+    let mut picked = Vec::with_capacity(keys.len());
+    for key in keys {
+        let (_, ty) = fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .ok_or_else(|| format!("Pick<T, K> key `{key}` does not exist on the object type"))?;
+        picked.push((key.clone(), ty.clone()));
+    }
+    Ok(HirType::Object(picked))
+}
+
+fn omit_hir_type(ty: HirType, keys: &[Symbol]) -> Result<HirType, String> {
+    let HirType::Object(fields) = ty else {
+        return Err("Omit<T, K> requires an object type".into());
+    };
+    Ok(HirType::Object(
+        fields
+            .into_iter()
+            .filter(|(name, _)| !keys.contains(name))
+            .collect(),
+    ))
+}
+
 fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
     fn collect(ty: &TsType, keys: &mut Vec<Symbol>) -> Result<(), String> {
         match ty {
@@ -6391,6 +6420,9 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         | GenericTypePattern::Partial(inner)
         | GenericTypePattern::Required(inner) => generic_pattern_contains_variable(inner, variable),
         GenericTypePattern::Record(_, value) => generic_pattern_contains_variable(value, variable),
+        GenericTypePattern::Pick(inner, _) | GenericTypePattern::Omit(inner, _) => {
+            generic_pattern_contains_variable(inner, variable)
+        }
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
@@ -6434,6 +6466,12 @@ fn instantiate_generic_pattern(
                     .map(|key| (key.clone(), value.clone()))
                     .collect(),
             ))
+        }
+        GenericTypePattern::Pick(inner, keys) => {
+            pick_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
+        }
+        GenericTypePattern::Omit(inner, keys) => {
+            omit_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
         }
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
@@ -6700,6 +6738,29 @@ fn generic_type_pattern(
                     )?),
                 ));
             }
+            if name == "Pick" || name == "Omit" {
+                let [object, keys] = reference
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!("{name}<T, K> requires exactly two type arguments"));
+                };
+                let object = Box::new(generic_type_pattern(
+                    object,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?);
+                let keys = finite_property_keys(keys)?;
+                return Ok(if name == "Pick" {
+                    GenericTypePattern::Pick(object, keys)
+                } else {
+                    GenericTypePattern::Omit(object, keys)
+                });
+            }
             if let Some(inner) = reference
                 .type_params
                 .as_ref()
@@ -6840,6 +6901,10 @@ fn match_generic_pattern(
                 match_generic_pattern(expected, actual, inferred)?;
             }
             Ok(())
+        }
+        (GenericTypePattern::Pick(expected, _), actual)
+        | (GenericTypePattern::Omit(expected, _), actual) => {
+            match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
             if expected.len() == value.len() =>
@@ -10433,6 +10498,26 @@ fn lower_ts_type(
                         .collect(),
                 ));
             }
+            if matches!(ref_name, Some("Pick" | "Omit")) {
+                let [object, keys] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!(
+                        "{}<T, K> requires exactly two type arguments",
+                        ref_name.unwrap()
+                    ));
+                };
+                let object = lower_ts_type(object, interfaces, generic_interfaces)?;
+                let keys = finite_property_keys(keys)?;
+                return if ref_name == Some("Pick") {
+                    pick_hir_type(object, &keys)
+                } else {
+                    omit_hir_type(object, &keys)
+                };
+            }
 
             // Otherwise, accept `Array<T>` / `Promise<T>` as the two
             // other built-in generic spellings we recognize.
@@ -10889,6 +10974,31 @@ fn resolve_ts_type_with_substitution(
                         .map(|key| (key, value.clone()))
                         .collect(),
                 ));
+            }
+            if ref_name == "Pick" || ref_name == "Omit" {
+                let [object, keys] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err(format!(
+                        "{ref_name}<T, K> requires exactly two type arguments"
+                    ));
+                };
+                let object = resolve_ts_type_with_substitution(
+                    object,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                let keys = finite_property_keys(keys)?;
+                return if ref_name == "Pick" {
+                    pick_hir_type(object, &keys)
+                } else {
+                    omit_hir_type(object, &keys)
+                };
             }
             if let Some(params) = &ty_ref.type_params {
                 if let [elem] = params.params.as_slice() {
@@ -30875,6 +30985,14 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("keys must be a finite string or number literal union"));
+
+        let module = thaw_parser::parse_typescript(
+            "type Bad = Pick<{ value: number }, \"missing\">; function bad(value: Bad): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("key `missing` does not exist"));
     }
 
     #[test]
