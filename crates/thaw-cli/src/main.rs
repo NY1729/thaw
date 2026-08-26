@@ -3638,8 +3638,8 @@ mod tests {
                     console.log(pair.second);
                     console.log(nestedBox.get());
                     console.log(inferredNestedBox.get());
-                    console.log(first.convert<string>("method"));
-                    console.log(Box.identity<boolean>(true));
+                    console.log(first.convert("method"));
+                    console.log(Box.identity(true));
                     console.log(fromCall.get());
                     console.log(Box.count);
                     console.log(derived.double());
