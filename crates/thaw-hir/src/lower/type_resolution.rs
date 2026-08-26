@@ -242,8 +242,19 @@ fn lower_ts_type(
                 HirType::Function(params, Box::new(ret))
             })
         }
-        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(_)) => {
-            Err("constructor types are not supported yet".into())
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(constructor)) => {
+            lower_ts_type(
+                &TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(
+                    swc_ecma_ast::TsFnType {
+                        span: constructor.span,
+                        params: constructor.params.clone(),
+                        type_params: constructor.type_params.clone(),
+                        type_ann: constructor.type_ann.clone(),
+                    },
+                )),
+                interfaces,
+                generic_interfaces,
+            )
         }
         TsType::TsTypeRef(ty_ref) => {
             let ref_name = match &ty_ref.type_name {
@@ -1189,6 +1200,22 @@ fn resolve_ts_type_with_substitution(
             } else {
                 HirType::Function(params, Box::new(ret))
             })
+        }
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsConstructorType(constructor)) => {
+            resolve_ts_type_with_substitution(
+                &TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(
+                    swc_ecma_ast::TsFnType {
+                        span: constructor.span,
+                        params: constructor.params.clone(),
+                        type_params: constructor.type_params.clone(),
+                        type_ann: constructor.type_ann.clone(),
+                    },
+                )),
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
         }
         TsType::TsTypeLit(type_lit) => {
             if let Some(signature) = type_literal_index_signature(type_lit)? {

@@ -1015,6 +1015,9 @@ The workspace crates have narrow responsibilities:
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
+- Constructor signatures such as `new (value: number) => Box` use the same typed
+  native closure layout, including constructor-valued class references and static
+  `this` field initializers
 - Typed closure and named-function values support `.call(thisArg, ...args)` and
   `.apply(thisArg, typedTuple)` after passing through parameters and return values.
   `.bind(thisArg, ...leadingArgs)` also survives these boundaries, supports typed tuple
