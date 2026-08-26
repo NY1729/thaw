@@ -2584,11 +2584,74 @@ struct GenericClassMethodUseCollector<'a, 'ast> {
     uses: Vec<GenericClassMethodUse>,
     call_results: &'a HashMap<Symbol, HirType>,
     parents: &'a HashMap<Symbol, Symbol>,
+    static_member_types: &'a HashMap<(Symbol, Symbol), HirType>,
     current_classes: Vec<Symbol>,
     error: Option<String>,
 }
 
 impl GenericClassMethodUseCollector<'_, '_> {
+    fn static_member_type(&self, class: &str, member: &str) -> Option<HirType> {
+        let mut current = Some(class);
+        while let Some(class) = current {
+            if let Some(ty) = self
+                .static_member_types
+                .get(&(class.to_string(), member.to_string()))
+            {
+                return Some(ty.clone());
+            }
+            current = self.parents.get(class).map(String::as_str);
+        }
+        None
+    }
+
+    fn infer_actual_type(&self, expression: &Expr) -> Result<HirType, String> {
+        if let Expr::Member(member) = expression {
+            if let Some(property) = member_property_name(&member.prop) {
+                let class = match member.obj.as_ref() {
+                    Expr::This(_) => self.current_classes.last().map(String::as_str),
+                    Expr::Ident(class)
+                        if self
+                            .static_member_types
+                            .keys()
+                            .any(|(candidate, _)| candidate == class.sym.as_ref()) =>
+                    {
+                        Some(class.sym.as_ref())
+                    }
+                    _ => None,
+                };
+                if let Some(ty) = class.and_then(|class| self.static_member_type(class, &property))
+                {
+                    return Ok(ty);
+                }
+            }
+        }
+        if let Expr::Call(call) = expression {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let Some(method) = member_property_name(&member.prop) {
+                        let class = match member.obj.as_ref() {
+                            Expr::This(_) => self.current_classes.last().map(String::as_str),
+                            Expr::Ident(class) => Some(class.sym.as_ref()),
+                            _ => None,
+                        };
+                        if let Some(ty) =
+                            class.and_then(|class| self.static_member_type(class, &method))
+                        {
+                            return Ok(ty);
+                        }
+                    }
+                }
+            }
+        }
+        infer_generic_constructor_expr_type(
+            expression,
+            self.interfaces,
+            self.generic_interfaces,
+            &self.scopes,
+            self.call_results,
+        )
+    }
+
     fn template_owner(&self, class: &str, method: &str) -> Option<Symbol> {
         let mut current = Some(class);
         while let Some(class) = current {
@@ -2666,13 +2729,7 @@ impl GenericClassMethodUseCollector<'_, '_> {
     fn call_actual_params(&self, call: &CallExpr) -> Result<Vec<HirType>, String> {
         let mut actual = Vec::new();
         for argument in &call.args {
-            let ty = infer_generic_constructor_expr_type(
-                &argument.expr,
-                self.interfaces,
-                self.generic_interfaces,
-                &self.scopes,
-                self.call_results,
-            )?;
+            let ty = self.infer_actual_type(&argument.expr)?;
             if argument.spread.is_none() {
                 actual.push(ty);
                 continue;
@@ -3298,6 +3355,45 @@ fn specialize_generic_class_methods(
             Some((declaration.ident.sym.to_string(), parent.sym.to_string()))
         })
         .collect::<HashMap<_, _>>();
+    let mut static_member_types = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let class = declaration.ident.sym.to_string();
+        for member in &declaration.class.body {
+            let (name, ty) = match member {
+                ClassMember::ClassProp(property) if property.is_static => {
+                    let Some(annotation) = property.type_ann.as_ref() else {
+                        continue;
+                    };
+                    let mut ty =
+                        lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+                    if property.is_optional {
+                        ty = optional_parameter_type(ty);
+                    }
+                    (class_property_name(&property.key)?, ty)
+                }
+                ClassMember::Method(method)
+                    if method.is_static
+                        && method.function.type_params.is_none()
+                        && method.kind != MethodKind::Setter =>
+                {
+                    let Some(annotation) = method.function.return_type.as_ref() else {
+                        continue;
+                    };
+                    let mut ty =
+                        lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+                    if method.function.is_async && !matches!(ty, HirType::Promise(_)) {
+                        ty = HirType::Promise(Box::new(ty));
+                    }
+                    (class_property_name(&method.key)?, ty)
+                }
+                _ => continue,
+            };
+            static_member_types.insert((class.clone(), name), ty);
+        }
+    }
     let mut collector = GenericClassMethodUseCollector {
         templates: &templates,
         interfaces,
@@ -3306,6 +3402,7 @@ fn specialize_generic_class_methods(
         uses: Vec::new(),
         call_results: &call_results,
         parents: &parents,
+        static_member_types: &static_member_types,
         current_classes: Vec::new(),
         error: None,
     };
