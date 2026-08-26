@@ -1567,8 +1567,10 @@ The workspace crates have narrow responsibilities:
   after applying JavaScript's undefined-only fallback (a `null` value is kept),
   and identifier aliases (including parenthesized or asserted aliases) carry
   both discriminant and payload correlation forward. Assigning either side
-  invalidates the affected correlation. Untyped or dynamically callable
-  boundaries remain outside this subset
+  invalidates the affected correlation. `switch` applies the same narrowing to
+  isolated literal cases and computes the remaining members for `default`,
+  while conservatively dropping it across reachable fallthrough. Untyped or
+  dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
