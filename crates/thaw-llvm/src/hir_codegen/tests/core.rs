@@ -992,6 +992,25 @@ fn compiles_tuple_spreads_for_math_and_number_builtins() {
 }
 
 #[test]
+fn compiles_tuple_spreads_for_string_and_search_builtins() {
+    let source = r#"
+        function main(): void {
+            console.log("ABC".charCodeAt(...[1]));
+            console.log("x".concat(...["y", 1]));
+            console.log([1].concat(...[[2, 3], [4]]).join(","));
+            console.log("ab".repeat(...[2]));
+            console.log("hello".indexOf(...["l", 3]));
+            console.log("hello".includes(...["ell", 0]));
+            console.log([1, 2, 3].lastIndexOf(...[2, 2]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_search_tuple_spreads"),
+        "66\nxy1\n1,2,3,4\nabab\n3\ntrue\n1\n"
+    );
+}
+
+#[test]
 fn nested_finally_blocks_run_inside_out() {
     let source = r#"
         function nested(): string {

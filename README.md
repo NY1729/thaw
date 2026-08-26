@@ -1345,13 +1345,15 @@ The workspace crates have narrow responsibilities:
   observable in source order
 - Native string `.length` and `.charCodeAt()` operate on JavaScript UTF-16
   code units, including surrogate pairs, default/converted indices, out-of-range
-  `NaN`, receiver-before-index evaluation and awaited receivers
+  `NaN`, receiver-before-index evaluation, awaited receivers and tuple-spread indices
 - `Number.isInteger` and `Number.isSafeInteger` are non-coercing predicates;
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
   number expressions
 - Fixed-arity and variadic native `Math` functions plus non-coercing `Number`
   predicates accept statically sized tuple spreads in source order
+- Native string/array `concat`, string `repeat`, and string/array search methods
+  accept statically sized tuple spreads without changing receiver-first evaluation
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
