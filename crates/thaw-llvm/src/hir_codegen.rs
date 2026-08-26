@@ -18703,6 +18703,33 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_computed_native_class_members() {
+        let source = r#"
+            class Box {
+                ["value"]: number;
+                static ["count"]: number = 40;
+                constructor(value: number) { this["value"] = value; }
+                ["add"](delta: number): number { return this["value"] + delta; }
+                get ["current"](): number { return this["value"]; }
+                set ["current"](value: number) { this["value"] = value; }
+                static ["next"](): number { return ++Box["count"]; }
+            }
+            function main(): void {
+                const value = new Box(40);
+                console.log(value["add"](2));
+                value["current"] = 41;
+                console.log(value["current"]);
+                console.log(Box["next"]());
+                console.log(Box["count"]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "computed_native_class_members"),
+            "42\n41\n41\n41\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {

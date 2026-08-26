@@ -1360,7 +1360,9 @@ The workspace crates have narrow responsibilities:
   calls, implicit derived-constructor forwarding and structural `implements`
   validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
-  into one executable. Runtime class values, computed members, `new.target`,
+  into one executable. String-literal computed fields, methods, accessors and
+  static members use the same fixed-layout dispatch through dot or bracket access.
+  Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
 - Tagged native `T | undefined` values now support annotations, returns,
