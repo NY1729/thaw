@@ -10615,6 +10615,12 @@ struct DestructuredUnionCorrelation {
     targets: Vec<CorrelatedUnionTarget>,
 }
 
+struct CorrelatedDestructuredBinding {
+    name: Symbol,
+    ty: HirType,
+    source_types: Vec<Vec<HirType>>,
+}
+
 impl<'a> FnLowerer<'a> {
     fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
         match expression {
@@ -13938,11 +13944,14 @@ impl<'a> FnLowerer<'a> {
             _ => None,
         };
         let mut extracted = Vec::new();
+        let mut discriminant_bindings = Vec::new();
         let mut used = BTreeSet::new();
         for property in &pattern.props {
             match property {
                 ObjectPatProp::Assign(property) => {
                     let key = property.key.id.sym.to_string();
+                    let source_types =
+                        Self::union_destructured_property_source_types(elements, &key)?;
                     let mut field_value =
                         self.lower_union_property_read(value.clone(), elements, &key)?;
                     let mut field_type = self.infer_expr_type(&field_value)?;
@@ -13959,11 +13968,13 @@ impl<'a> FnLowerer<'a> {
                         statements,
                     )?;
                     if property.value.is_none() {
-                        extracted.push((
-                            key,
-                            self.resolve_binding(property.key.id.sym.as_ref()),
-                            field_type,
-                        ));
+                        let name = self.resolve_binding(property.key.id.sym.as_ref());
+                        discriminant_bindings.push((key, name.clone()));
+                        extracted.push(CorrelatedDestructuredBinding {
+                            name,
+                            ty: field_type,
+                            source_types,
+                        });
                     }
                 }
                 ObjectPatProp::KeyValue(property) => {
@@ -13980,6 +13991,8 @@ impl<'a> FnLowerer<'a> {
                         },
                         _ => return Err("unsupported object destructuring key".into()),
                     };
+                    let source_types =
+                        Self::union_destructured_property_source_types(elements, &key)?;
                     let field_value =
                         self.lower_union_property_read(value.clone(), elements, &key)?;
                     let field_type = self.infer_expr_type(&field_value)?;
@@ -13991,22 +14004,235 @@ impl<'a> FnLowerer<'a> {
                         statements,
                     )?;
                     if let Pat::Ident(binding) = property.value.as_ref() {
-                        extracted.push((
-                            key,
-                            self.resolve_binding(binding.id.sym.as_ref()),
-                            field_type,
-                        ));
+                        discriminant_bindings
+                            .push((key.clone(), self.resolve_binding(binding.id.sym.as_ref())));
                     }
+                    self.collect_correlated_destructured_bindings(
+                        &property.value,
+                        &source_types,
+                        &mut extracted,
+                    )?;
                 }
                 ObjectPatProp::Rest(rest) => {
+                    let source_types = Self::union_destructured_rest_source_types(elements, &used)?;
                     let (rest_value, rest_type) =
                         self.lower_union_object_rest(value.clone(), elements, &used)?;
                     self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                    self.collect_correlated_destructured_bindings(
+                        &rest.arg,
+                        &source_types,
+                        &mut extracted,
+                    )?;
                 }
             }
         }
         if let Some(discriminants) = discriminants {
-            self.register_destructured_union_correlations(elements, &discriminants, &extracted)?;
+            self.register_destructured_union_correlations(
+                elements,
+                &discriminants,
+                &discriminant_bindings,
+                &extracted,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn union_destructured_property_source_types(
+        elements: &[HirType],
+        property: &str,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        elements
+            .iter()
+            .map(|element| {
+                let HirType::Object(fields) = element else {
+                    return Err("correlated destructuring requires object members".into());
+                };
+                fields
+                    .iter()
+                    .find(|(name, _)| name == property)
+                    .map(|(_, ty)| vec![ty.clone()])
+                    .ok_or_else(|| format!("object has no field `{property}`"))
+            })
+            .collect()
+    }
+
+    fn union_destructured_rest_source_types(
+        elements: &[HirType],
+        used: &BTreeSet<Symbol>,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        elements
+            .iter()
+            .map(|element| {
+                let HirType::Object(fields) = element else {
+                    return Err("correlated destructuring requires object members".into());
+                };
+                Ok(vec![HirType::Object(
+                    fields
+                        .iter()
+                        .filter(|(name, _)| !used.contains(name))
+                        .cloned()
+                        .collect(),
+                )])
+            })
+            .collect()
+    }
+
+    fn nested_destructured_property_source_types(
+        source_types: &[Vec<HirType>],
+        property: &str,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        source_types
+            .iter()
+            .map(|source_group| {
+                let mut fields_for_source = Vec::new();
+                for source in source_group {
+                    let options = match source {
+                        HirType::Union(elements)
+                            if elements
+                                .iter()
+                                .all(|element| matches!(element, HirType::Object(_))) =>
+                        {
+                            elements.as_slice()
+                        }
+                        other => std::slice::from_ref(other),
+                    };
+                    for option in options {
+                        let HirType::Object(fields) = option else {
+                            return Err(format!(
+                                "nested object pattern cannot destructure {option:?}"
+                            ));
+                        };
+                        let field = fields
+                            .iter()
+                            .find(|(name, _)| name == property)
+                            .map(|(_, ty)| ty.clone())
+                            .ok_or_else(|| format!("object has no field `{property}`"))?;
+                        if !fields_for_source.contains(&field) {
+                            fields_for_source.push(field);
+                        }
+                    }
+                }
+                Ok(fields_for_source)
+            })
+            .collect()
+    }
+
+    fn nested_destructured_rest_source_types(
+        source_types: &[Vec<HirType>],
+        used: &BTreeSet<Symbol>,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        source_types
+            .iter()
+            .map(|source_group| {
+                let mut rests = Vec::new();
+                for source in source_group {
+                    let options = match source {
+                        HirType::Union(elements)
+                            if elements
+                                .iter()
+                                .all(|element| matches!(element, HirType::Object(_))) =>
+                        {
+                            elements.as_slice()
+                        }
+                        other => std::slice::from_ref(other),
+                    };
+                    for option in options {
+                        let HirType::Object(fields) = option else {
+                            return Err(format!(
+                                "nested object rest cannot destructure {option:?}"
+                            ));
+                        };
+                        let rest = HirType::Object(
+                            fields
+                                .iter()
+                                .filter(|(name, _)| !used.contains(name))
+                                .cloned()
+                                .collect(),
+                        );
+                        if !rests.contains(&rest) {
+                            rests.push(rest);
+                        }
+                    }
+                }
+                Ok(rests)
+            })
+            .collect()
+    }
+
+    fn collect_correlated_destructured_bindings(
+        &self,
+        pattern: &Pat,
+        source_types: &[Vec<HirType>],
+        bindings: &mut Vec<CorrelatedDestructuredBinding>,
+    ) -> Result<(), String> {
+        match pattern {
+            Pat::Ident(binding) => {
+                let name = self.resolve_binding(binding.id.sym.as_ref());
+                let ty = self
+                    .scope
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown destructured binding `{name}`"))?;
+                bindings.push(CorrelatedDestructuredBinding {
+                    name,
+                    ty,
+                    source_types: source_types.to_vec(),
+                });
+            }
+            Pat::Object(pattern) => {
+                let mut used = BTreeSet::new();
+                for property in &pattern.props {
+                    match property {
+                        ObjectPatProp::Assign(property) => {
+                            let key = property.key.id.sym.to_string();
+                            used.insert(key.clone());
+                            if property.value.is_none() {
+                                let nested = Self::nested_destructured_property_source_types(
+                                    source_types,
+                                    &key,
+                                )?;
+                                self.collect_correlated_destructured_bindings(
+                                    &Pat::Ident(property.key.clone()),
+                                    &nested,
+                                    bindings,
+                                )?;
+                            }
+                        }
+                        ObjectPatProp::KeyValue(property) => {
+                            let key = match &property.key {
+                                PropName::Ident(key) => key.sym.to_string(),
+                                PropName::Str(key) => key.value.to_string_lossy().into_owned(),
+                                PropName::Computed(computed) => match computed.expr.as_ref() {
+                                    Expr::Lit(Lit::Str(key)) => {
+                                        key.value.to_string_lossy().into_owned()
+                                    }
+                                    _ => return Ok(()),
+                                },
+                                _ => return Ok(()),
+                            };
+                            used.insert(key.clone());
+                            let nested = Self::nested_destructured_property_source_types(
+                                source_types,
+                                &key,
+                            )?;
+                            self.collect_correlated_destructured_bindings(
+                                &property.value,
+                                &nested,
+                                bindings,
+                            )?;
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            let nested =
+                                Self::nested_destructured_rest_source_types(source_types, &used)?;
+                            self.collect_correlated_destructured_bindings(
+                                &rest.arg, &nested, bindings,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Pat::Assign(_) | Pat::Array(_) | Pat::Rest(_) => {}
+            _ => {}
         }
         Ok(())
     }
@@ -14015,39 +14241,41 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         source_elements: &[HirType],
         discriminants: &HashMap<Symbol, Vec<Option<HirLit>>>,
-        extracted: &[(Symbol, Symbol, HirType)],
+        discriminant_bindings: &[(Symbol, Symbol)],
+        extracted: &[CorrelatedDestructuredBinding],
     ) -> Result<(), String> {
         let targets = extracted
             .iter()
-            .filter_map(|(property, name, ty)| {
-                let HirType::Union(result_elements) = ty else {
+            .filter_map(|binding| {
+                let HirType::Union(result_elements) = &binding.ty else {
                     return None;
                 };
-                let source_members = source_elements
+                let source_members = binding
+                    .source_types
                     .iter()
-                    .map(|source| {
-                        let HirType::Object(fields) = source else {
-                            return Err("correlated destructuring requires object members".into());
-                        };
-                        let field = fields
-                            .iter()
-                            .find(|(field, _)| field == property)
-                            .map(|(_, ty)| ty)
-                            .ok_or_else(|| format!("object has no field `{property}`"))?;
+                    .map(|source_types| {
                         let mut flattened = Vec::new();
-                        Self::flatten_property_union_members(field, &mut flattened)?;
+                        for source_type in source_types {
+                            Self::flatten_property_union_members(source_type, &mut flattened)?;
+                        }
                         flattened
                             .iter()
                             .map(|member| {
-                                result_elements.iter().position(|result| result == member).ok_or_else(
-                                    || format!("correlated field `{property}` lost union member {member:?}"),
-                                )
+                                result_elements
+                                    .iter()
+                                    .position(|result| result == member)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "correlated binding `{}` lost union member {member:?}",
+                                            binding.name
+                                        )
+                                    })
                             })
                             .collect::<Result<Vec<_>, String>>()
                     })
                     .collect::<Result<Vec<_>, String>>();
                 Some(source_members.map(|source_members| CorrelatedUnionTarget {
-                    name: name.clone(),
+                    name: binding.name.clone(),
                     elements: result_elements.clone(),
                     source_members,
                 }))
@@ -14056,7 +14284,7 @@ impl<'a> FnLowerer<'a> {
         if targets.is_empty() {
             return Ok(());
         }
-        for (property, name, _) in extracted {
+        for (property, name) in discriminant_bindings {
             let Some(literals) = discriminants.get(property) else {
                 continue;
             };
