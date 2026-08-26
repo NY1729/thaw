@@ -737,6 +737,18 @@ fn class_initializer_symbol(name: &str) -> Symbol {
     format!("__thaw_class_{name}_initialize")
 }
 
+fn default_arity_symbol(symbol: &str, arity: usize) -> Symbol {
+    format!("{symbol}__thawdefault_arity_{arity}")
+}
+
+fn trailing_default_start(patterns: &[Pat]) -> Option<usize> {
+    let start = patterns
+        .iter()
+        .rposition(|pattern| !matches!(pattern, Pat::Assign(_)))
+        .map_or(0, |index| index + 1);
+    (start < patterns.len()).then_some(start)
+}
+
 fn class_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_method_{method}")
 }
@@ -1289,6 +1301,31 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_return_type: None,
                     },
                 );
+                if let Some(constructor) = constructors.first() {
+                    let patterns = constructor
+                        .params
+                        .iter()
+                        .map(class_constructor_param_pattern)
+                        .collect::<Vec<_>>();
+                    if let Some(default_start) = trailing_default_start(&patterns) {
+                        let constructor_symbol = class_constructor_symbol(&name);
+                        let initializer_symbol = class_initializer_symbol(&name);
+                        for arity in default_start..patterns.len() {
+                            let mut constructor_signature = signatures[&constructor_symbol].clone();
+                            constructor_signature.params.truncate(arity);
+                            signatures.insert(
+                                default_arity_symbol(&constructor_symbol, arity),
+                                constructor_signature,
+                            );
+                            let mut initializer_signature = signatures[&initializer_symbol].clone();
+                            initializer_signature.params.truncate(arity + 1);
+                            signatures.insert(
+                                default_arity_symbol(&initializer_symbol, arity + 1),
+                                initializer_signature,
+                            );
+                        }
+                    }
+                }
                 for member in &class_decl.class.body {
                     let ClassMember::Method(method) = member else {
                         continue;
@@ -1387,6 +1424,22 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_return_type: None,
                         },
                     );
+                    let patterns = method
+                        .function
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.pat.clone())
+                        .collect::<Vec<_>>();
+                    if let Some(default_start) = trailing_default_start(&patterns) {
+                        let receiver_count = usize::from(!method.is_static);
+                        let symbol = class_member_symbol(&name, method)?;
+                        for arity in default_start..patterns.len() {
+                            let total_arity = arity + receiver_count;
+                            let mut wrapper = signatures[&symbol].clone();
+                            wrapper.params.truncate(total_arity);
+                            signatures.insert(default_arity_symbol(&symbol, total_arity), wrapper);
+                        }
+                    }
                 }
             }
             // Already consumed by `resolve_interfaces` above.
@@ -1446,11 +1499,34 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 changed = true;
             }
             let mut initializer_params = vec![interfaces[derived_name].clone()];
-            initializer_params.extend(base_params);
+            initializer_params.extend(base_params.iter().cloned());
             signatures
                 .get_mut(&class_initializer_symbol(derived_name))
                 .expect("derived initializer signature")
                 .params = initializer_params;
+            for arity in 0..base_params.len() {
+                let base_constructor =
+                    default_arity_symbol(&class_constructor_symbol(base.sym.as_ref()), arity);
+                if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
+                    let mut derived_wrapper = base_wrapper;
+                    derived_wrapper.ret = interfaces[derived_name].clone();
+                    signatures.insert(
+                        default_arity_symbol(&class_constructor_symbol(derived_name), arity),
+                        derived_wrapper,
+                    );
+                }
+                let base_initializer =
+                    default_arity_symbol(&class_initializer_symbol(base.sym.as_ref()), arity + 1);
+                if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
+                    let mut derived_wrapper = base_wrapper;
+                    derived_wrapper.params[0] = interfaces[derived_name].clone();
+                    derived_wrapper.ret = interfaces[derived_name].clone();
+                    signatures.insert(
+                        default_arity_symbol(&class_initializer_symbol(derived_name), arity + 1),
+                        derived_wrapper,
+                    );
+                }
+            }
         }
         if !changed {
             break;
@@ -3971,6 +4047,103 @@ fn resolve_type_dependencies(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn lower_class_default_wrappers(
+    symbol: &str,
+    params: &[HirParam],
+    patterns: &[Pat],
+    receiver_count: usize,
+    ret: &HirType,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
+) -> Result<Vec<HirFunction>, String> {
+    let Some(default_start) = trailing_default_start(patterns) else {
+        return Ok(Vec::new());
+    };
+    let mut wrappers = Vec::new();
+    for arity in default_start..patterns.len() {
+        let total_arity = receiver_count + arity;
+        let wrapper_params = params[..total_arity].to_vec();
+        let mut lowerer = FnLowerer::new(
+            signatures,
+            interfaces,
+            generic_interfaces,
+            enum_values,
+            enum_reverse_values,
+            ret.clone(),
+            None,
+        );
+        seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        for parameter in &wrapper_params {
+            lowerer
+                .scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+            lowerer
+                .bindings
+                .entry(parameter.name.clone())
+                .or_default()
+                .push(parameter.name.clone());
+        }
+        if receiver_count == 1 {
+            lowerer
+                .bindings
+                .entry("this".into())
+                .or_default()
+                .push(params[0].name.clone());
+        }
+        let mut body = Vec::new();
+        for (index, pattern) in patterns.iter().enumerate().skip(arity) {
+            let Pat::Assign(default) = pattern else {
+                return Err(format!(
+                    "default parameters of `{symbol}` must form a trailing sequence"
+                ));
+            };
+            let parameter = &params[receiver_count + index];
+            let value = lowerer.lower_expr(&default.right)?;
+            let value = lowerer.coerce_to_declared(&parameter.ty, value)?;
+            body.push(HirStmt::Let(
+                parameter.name.clone(),
+                parameter.ty.clone(),
+                value,
+            ));
+            lowerer
+                .scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+            lowerer
+                .bindings
+                .entry(parameter.name.clone())
+                .or_default()
+                .push(parameter.name.clone());
+        }
+        let call = HirExpr::Call(
+            Box::new(HirExpr::Var(symbol.to_string())),
+            params
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone()))
+                .collect(),
+        );
+        if *ret == HirType::Void {
+            body.push(HirStmt::Expr(call));
+            body.push(HirStmt::Return(None));
+        } else {
+            body.push(HirStmt::Return(Some(call)));
+        }
+        wrappers.push(HirFunction {
+            name: default_arity_symbol(symbol, total_arity),
+            params: wrapper_params,
+            ret: ret.clone(),
+            is_async: false,
+            body,
+        });
+    }
+    Ok(wrappers)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn lower_class_constructor(
     declaration: &ClassDecl,
     signatures: &HashMap<Symbol, FnSignature>,
@@ -3996,6 +4169,7 @@ fn lower_class_constructor(
     let source_params = constructor
         .map(|constructor| constructor.params.as_slice())
         .unwrap_or_default();
+    let has_implicit_constructor = constructor.is_none();
     let mut params = Vec::with_capacity(source_params.len());
     for (index, parameter) in source_params.iter().enumerate() {
         let pattern = class_constructor_param_pattern(parameter);
@@ -4103,6 +4277,7 @@ fn lower_class_constructor(
             Box::new(HirExpr::Var(parameter.name.clone())),
         )));
     }
+    let implicit_own_initializers = own_initializers.clone();
     let mut initializer_body = Vec::new();
     if declaration.class.super_class.is_some() {
         if let Some(constructor) = constructor {
@@ -4169,13 +4344,13 @@ fn lower_class_constructor(
             .map(|parameter| HirExpr::Var(parameter.name.clone())),
     );
     let constructor = HirFunction {
-        name: constructor_symbol,
+        name: constructor_symbol.clone(),
         params: params.clone(),
         ret: instance_type.clone(),
         is_async: false,
         body: vec![
             HirStmt::Let(
-                this_name,
+                this_name.clone(),
                 instance_type.clone(),
                 HirExpr::ObjectAlloc(instance_type.clone()),
             ),
@@ -4186,13 +4361,117 @@ fn lower_class_constructor(
         ],
     };
     let initializer = HirFunction {
-        name: initializer_symbol,
+        name: initializer_symbol.clone(),
         params: initializer_params,
-        ret: instance_type,
+        ret: instance_type.clone(),
         is_async: false,
         body: initializer_body,
     };
-    Ok(vec![constructor, initializer])
+    let patterns = source_params
+        .iter()
+        .map(class_constructor_param_pattern)
+        .collect::<Vec<_>>();
+    let mut functions = vec![constructor, initializer];
+    functions.extend(lower_class_default_wrappers(
+        &constructor_symbol,
+        &params,
+        &patterns,
+        0,
+        &instance_type,
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        global_types,
+        immutable_globals,
+    )?);
+    let mut initializer_wrapper_params = vec![HirParam {
+        name: this_name,
+        ty: instance_type.clone(),
+    }];
+    initializer_wrapper_params.extend(params.iter().cloned());
+    functions.extend(lower_class_default_wrappers(
+        &initializer_symbol,
+        &initializer_wrapper_params,
+        &patterns,
+        1,
+        &instance_type,
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        global_types,
+        immutable_globals,
+    )?);
+    if has_implicit_constructor {
+        if let Some(Expr::Ident(base)) = declaration.class.super_class.as_deref() {
+            for arity in 0..params.len() {
+                let derived_constructor_wrapper = default_arity_symbol(&constructor_symbol, arity);
+                let derived_initializer_wrapper =
+                    default_arity_symbol(&initializer_symbol, arity + 1);
+                if !signatures.contains_key(&derived_constructor_wrapper)
+                    || !signatures.contains_key(&derived_initializer_wrapper)
+                {
+                    continue;
+                }
+                let wrapper_params = params[..arity].to_vec();
+                let wrapper_this = "__thaw_this".to_string();
+                let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
+                initialize_args.extend(
+                    wrapper_params
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                functions.push(HirFunction {
+                    name: derived_constructor_wrapper,
+                    params: wrapper_params.clone(),
+                    ret: instance_type.clone(),
+                    is_async: false,
+                    body: vec![
+                        HirStmt::Let(
+                            wrapper_this.clone(),
+                            instance_type.clone(),
+                            HirExpr::ObjectAlloc(instance_type.clone()),
+                        ),
+                        HirStmt::Return(Some(HirExpr::Call(
+                            Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
+                            initialize_args,
+                        ))),
+                    ],
+                });
+
+                let mut initializer_params = vec![HirParam {
+                    name: wrapper_this.clone(),
+                    ty: instance_type.clone(),
+                }];
+                initializer_params.extend(wrapper_params);
+                let base_initializer_wrapper =
+                    default_arity_symbol(&class_initializer_symbol(base.sym.as_ref()), arity + 1);
+                let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
+                base_args.extend(
+                    initializer_params[1..]
+                        .iter()
+                        .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                );
+                let mut body = vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(base_initializer_wrapper)),
+                    base_args,
+                ))];
+                body.extend(implicit_own_initializers.iter().cloned());
+                body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
+                functions.push(HirFunction {
+                    name: derived_initializer_wrapper,
+                    params: initializer_params,
+                    ret: instance_type.clone(),
+                    is_async: false,
+                    body,
+                });
+            }
+        }
+    }
+    Ok(functions)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4298,12 +4577,32 @@ fn lower_class_methods(
             ))));
         }
         functions.push(HirFunction {
-            name: symbol,
-            params,
+            name: symbol.clone(),
+            params: params.clone(),
             ret: signature.ret.clone(),
             is_async: signature.is_async,
             body: lowered_body,
         });
+        let patterns = method
+            .function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>();
+        functions.extend(lower_class_default_wrappers(
+            &symbol,
+            &params,
+            &patterns,
+            receiver_offset,
+            &signature.ret,
+            signatures,
+            interfaces,
+            generic_interfaces,
+            enum_values,
+            enum_reverse_values,
+            global_types,
+            immutable_globals,
+        )?);
     }
     Ok(functions)
 }
@@ -4452,6 +4751,15 @@ fn lower_param(
     allow_inference: bool,
     type_substitution: &HashMap<Symbol, HirType>,
 ) -> Result<HirParam, String> {
+    if let Pat::Assign(assignment) = pat {
+        return lower_param(
+            &assignment.left,
+            interfaces,
+            generic_interfaces,
+            allow_inference,
+            type_substitution,
+        );
+    }
     let (name, type_ann) = match pat {
         Pat::Ident(binding) => (binding.id.sym.to_string(), binding.type_ann.as_ref()),
         Pat::Object(pattern) => (
@@ -13320,17 +13628,26 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if matches!(call.callee, Callee::Super(_)) {
-            let (symbol, _base_type, _base_name) = self
+            let (mut symbol, _base_type, _base_name) = self
                 .super_initializer
                 .clone()
                 .ok_or("`super(...)` is only valid in a derived class constructor")?;
-            let signature = self
+            let mut signature = self
                 .signatures
                 .get(&symbol)
                 .cloned()
                 .ok_or_else(|| format!("missing base class initializer `{symbol}`"))?;
             if call.type_args.is_some() {
                 return Err("native `super(...)` does not support type arguments".into());
+            }
+            if call.args.iter().all(|argument| argument.spread.is_none())
+                && call.args.len() + 1 != signature.params.len()
+            {
+                let wrapper = default_arity_symbol(&symbol, call.args.len() + 1);
+                if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                    symbol = wrapper;
+                    signature = wrapper_signature;
+                }
             }
             let this_name = self.resolve_binding("this");
             let mut args = vec![HirExpr::Var(this_name)];
@@ -13360,18 +13677,27 @@ impl<'a> FnLowerer<'a> {
                         }
                     },
                 };
-                let symbol = if self.class_static_context {
+                let mut symbol = if self.class_static_context {
                     class_static_method_symbol(&base_name, &method_name)
                 } else {
                     class_method_symbol(&base_name, &method_name)
                 };
-                let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
+                let mut signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
                     format!("base class `{base_name}` has no method `{method_name}`")
                 })?;
                 if call.type_args.is_some() {
                     return Err("native super methods do not support type arguments".into());
                 }
                 let receiver_count = usize::from(!self.class_static_context);
+                if call.args.iter().all(|argument| argument.spread.is_none())
+                    && call.args.len() + receiver_count != signature.params.len()
+                {
+                    let wrapper = default_arity_symbol(&symbol, call.args.len() + receiver_count);
+                    if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                        symbol = wrapper;
+                        signature = wrapper_signature;
+                    }
+                }
                 let mut args = if self.class_static_context {
                     Vec::new()
                 } else {
@@ -15276,7 +15602,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
-        let callee_name = match callee_expr.as_ref() {
+        let mut callee_name = match callee_expr.as_ref() {
             Expr::Ident(ident) => self.resolve_binding(ident.sym.as_ref()),
             // `console.log` has no dedicated HIR node; it's encoded as a
             // call to the synthetic name "console.log" and codegen
@@ -15672,12 +15998,12 @@ impl<'a> FnLowerer<'a> {
             });
         }
 
-        let signature = self.signatures.get(&callee_name).cloned();
+        let mut signature = self.signatures.get(&callee_name).cloned();
         let local_function = self.scope.get(&callee_name).and_then(|ty| match ty {
             HirType::Function(params, ret) => Some((params.clone(), ret.as_ref().clone())),
             _ => None,
         });
-        let param_types = signature
+        let mut param_types = signature
             .as_ref()
             .map(|sig| sig.params.clone())
             .or_else(|| local_function.as_ref().map(|(params, _)| params.clone()));
@@ -15760,6 +16086,17 @@ impl<'a> FnLowerer<'a> {
                     element,
                 )
             }));
+        }
+
+        if signature.as_ref().is_some_and(|signature| {
+            signature.variadic.is_none() && lowered_arguments.len() != signature.params.len()
+        }) {
+            let wrapper = default_arity_symbol(&callee_name, lowered_arguments.len());
+            if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                callee_name = wrapper;
+                param_types = Some(wrapper_signature.params.clone());
+                signature = Some(wrapper_signature);
+            }
         }
 
         if let Some(params) = &param_types {
@@ -21022,5 +21359,33 @@ mod tests {
             panic!("leaf constructor must return an object")
         };
         assert_eq!(fields[0].0, "__thaw_class_identity_Leaf$Middle$Base");
+    }
+
+    #[test]
+    fn lowers_native_class_default_parameter_wrappers() {
+        let program = lower(
+            r#"class Box {
+                constructor(public value: number = 40, public label: string = String(value)) {}
+                add(delta: number = this.value): number { return this.value + delta; }
+                static sum(left: number = 20, right: number = left + 22): number {
+                    return left + right;
+                }
+            }
+            function main(): number {
+                const value = new Box();
+                console.log(value.label);
+                return value.add() + Box.sum();
+            }"#,
+        );
+        for symbol in [
+            default_arity_symbol(&class_constructor_symbol("Box"), 0),
+            default_arity_symbol(&class_method_symbol("Box", "add"), 1),
+            default_arity_symbol(&class_static_method_symbol("Box", "sum"), 0),
+        ] {
+            assert!(program
+                .functions
+                .iter()
+                .any(|function| function.name == symbol));
+        }
     }
 }

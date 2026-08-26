@@ -90,7 +90,8 @@ and shadowing by a derived declaration. Static blocks execute in class-body orde
 explicit class references plus `super` fields, methods and accessors; runtime constructor-valued
 `this` inside those blocks remains an explicit gap. Constructors, instance/static methods,
 `super(...)` and super methods expand tuple spreads with source-order preservation before their
-fixed ABI call.
+fixed ABI call. Omitted trailing default parameters lower through arity-specific adapters;
+the same adapters cover explicit base calls and propagate through implicit derived constructors.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
