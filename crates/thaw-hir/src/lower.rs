@@ -6896,6 +6896,16 @@ fn lower_generic_instance(
                     .function_value_object_array_property_discriminants
                     .insert(param.name.clone(), return_property_discriminants);
             }
+            let return_function_property_discriminants =
+                function_return_object_function_property_discriminants(
+                    &annotation.type_ann,
+                    generic_interfaces,
+                );
+            if !return_function_property_discriminants.is_empty() {
+                lowerer
+                    .function_value_object_function_property_discriminants
+                    .insert(param.name.clone(), return_function_property_discriminants);
+            }
         }
     }
     let body = lowerer.lower_stmts(
@@ -7266,6 +7276,31 @@ fn function_return_object_array_property_discriminants(
     };
     result
         .map(|result| object_array_property_discriminants(result, generic))
+        .unwrap_or_default()
+}
+
+fn function_return_object_function_property_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> ObjectFunctionPropertyDiscriminants {
+    let Some(resolved) = resolve_plain_alias_type(ty, generic) else {
+        return HashMap::new();
+    };
+    let result = match resolved {
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            Some(function.type_ann.type_ann.as_ref())
+        }
+        TsType::TsTypeLit(literal) => match literal.members.as_slice() {
+            [TsTypeElement::TsCallSignatureDecl(call)] => call
+                .type_ann
+                .as_ref()
+                .map(|annotation| annotation.type_ann.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    };
+    result
+        .map(|result| object_function_property_discriminants(result, generic))
         .unwrap_or_default()
 }
 
@@ -9358,6 +9393,16 @@ fn lower_fn_decl(
                     .function_value_object_array_property_discriminants
                     .insert(param.name.clone(), return_property_discriminants);
             }
+            let return_function_property_discriminants =
+                function_return_object_function_property_discriminants(
+                    &annotation.type_ann,
+                    generic_interfaces,
+                );
+            if !return_function_property_discriminants.is_empty() {
+                lowerer
+                    .function_value_object_function_property_discriminants
+                    .insert(param.name.clone(), return_function_property_discriminants);
+            }
         }
     }
     let mut body = Vec::new();
@@ -11006,6 +11051,8 @@ struct FnLowerer<'a> {
     function_value_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_object_array_property_discriminants:
         HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
+    function_value_object_function_property_discriminants:
+        HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     next_binding: usize,
@@ -12392,6 +12439,7 @@ impl<'a> FnLowerer<'a> {
             function_value_discriminants: HashMap::new(),
             function_value_array_discriminants: HashMap::new(),
             function_value_object_array_property_discriminants: HashMap::new(),
+            function_value_object_function_property_discriminants: HashMap::new(),
             bindings: HashMap::new(),
             used_hir_bindings: HashSet::new(),
             next_binding: 0,
@@ -12734,9 +12782,13 @@ impl<'a> FnLowerer<'a> {
                 let Expr::Ident(callee) = callee.as_ref() else {
                     return None;
                 };
-                self.generic_interfaces
-                    .function_object_function_property_discriminants
-                    .get(callee.sym.as_ref())
+                self.function_value_object_function_property_discriminants
+                    .get(&self.resolve_binding(callee.sym.as_ref()))
+                    .or_else(|| {
+                        self.generic_interfaces
+                            .function_object_function_property_discriminants
+                            .get(callee.sym.as_ref())
+                    })
                     .cloned()
             }
             Expr::Cond(conditional) => {
@@ -13046,6 +13098,63 @@ impl<'a> FnLowerer<'a> {
                 let consequent = self
                     .expression_function_object_array_property_discriminants(&conditional.cons)?;
                 (self.expression_function_object_array_property_discriminants(&conditional.alt)?
+                    == consequent)
+                    .then_some(consequent)
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_function_object_function_property_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<ObjectFunctionPropertyDiscriminants> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .function_value_object_function_property_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::Paren(parenthesized) => {
+                self.expression_function_object_function_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsAs(assertion) => {
+                let metadata = function_return_object_function_property_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata = function_return_object_function_property_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::Arrow(arrow) => arrow.return_type.as_ref().and_then(|annotation| {
+                let metadata = object_function_property_discriminants(
+                    &annotation.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }),
+            Expr::Fn(function) => function
+                .function
+                .return_type
+                .as_ref()
+                .and_then(|annotation| {
+                    let metadata = object_function_property_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    (!metadata.is_empty()).then_some(metadata)
+                }),
+            Expr::Cond(conditional) => {
+                let consequent = self.expression_function_object_function_property_discriminants(
+                    &conditional.cons,
+                )?;
+                (self
+                    .expression_function_object_function_property_discriminants(&conditional.alt)?
                     == consequent)
                     .then_some(consequent)
             }
@@ -14743,6 +14852,8 @@ impl<'a> FnLowerer<'a> {
                     self.expression_function_array_discriminants(init);
                 let propagated_function_object_array_property_discriminants =
                     self.expression_function_object_array_property_discriminants(init);
+                let propagated_function_object_function_property_discriminants =
+                    self.expression_function_object_function_property_discriminants(init);
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
@@ -14865,6 +14976,15 @@ impl<'a> FnLowerer<'a> {
                         self.function_value_object_array_property_discriminants
                             .insert(hir_name.clone(), return_property_discriminants);
                     }
+                    let return_function_property_discriminants =
+                        function_return_object_function_property_discriminants(
+                            &annotation.type_ann,
+                            self.generic_interfaces,
+                        );
+                    if !return_function_property_discriminants.is_empty() {
+                        self.function_value_object_function_property_discriminants
+                            .insert(hir_name.clone(), return_function_property_discriminants);
+                    }
                 } else if let Some(discriminants) = propagated_discriminants {
                     self.union_discriminants
                         .insert(hir_name.clone(), discriminants);
@@ -14896,6 +15016,12 @@ impl<'a> FnLowerer<'a> {
                         propagated_function_object_array_property_discriminants
                     {
                         self.function_value_object_array_property_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
+                    if let Some(discriminants) =
+                        propagated_function_object_function_property_discriminants
+                    {
+                        self.function_value_object_function_property_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
                 }
