@@ -12973,6 +12973,8 @@ impl<'a> FnLowerer<'a> {
                 .get(&self.resolve_binding(identifier.sym.as_ref()))
                 .cloned(),
             Expr::Paren(parenthesized) => self.expression_union_discriminants(&parenthesized.expr),
+            Expr::TsSatisfies(assertion) => self.expression_union_discriminants(&assertion.expr),
+            Expr::TsNonNull(assertion) => self.expression_union_discriminants(&assertion.expr),
             Expr::TsAs(assertion) => {
                 let metadata =
                     object_union_discriminants(&assertion.type_ann, self.generic_interfaces);
@@ -13082,6 +13084,12 @@ impl<'a> FnLowerer<'a> {
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_array_element_discriminants(&parenthesized.expr)
+            }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_array_element_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_array_element_discriminants(&assertion.expr)
             }
             Expr::TsAs(assertion) => {
                 let metadata =
@@ -13246,6 +13254,12 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_nested_array_discriminants(&parenthesized.expr)
             }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_nested_array_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_nested_array_discriminants(&assertion.expr)
+            }
             Expr::TsAs(assertion) => {
                 let metadata =
                     nested_array_union_discriminants(&assertion.type_ann, self.generic_interfaces);
@@ -13340,6 +13354,12 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_function_nested_array_discriminants(&parenthesized.expr)
             }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_function_nested_array_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_function_nested_array_discriminants(&assertion.expr)
+            }
             Expr::OptChain(chain) => self.expression_function_nested_array_discriminants(
                 &ordinary_optional_chain_expression(chain),
             ),
@@ -13400,6 +13420,12 @@ impl<'a> FnLowerer<'a> {
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_object_array_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_object_array_property_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_object_array_property_discriminants(&assertion.expr)
             }
             Expr::TsAs(assertion) => {
                 let metadata = object_array_property_discriminants(
@@ -13551,6 +13577,12 @@ impl<'a> FnLowerer<'a> {
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_object_function_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_object_function_property_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_object_function_property_discriminants(&assertion.expr)
             }
             Expr::TsAs(assertion) => {
                 let metadata = object_function_property_discriminants(
@@ -13836,6 +13868,10 @@ impl<'a> FnLowerer<'a> {
             Expr::TsConstAssertion(assertion) => {
                 self.expression_identifier_alias_source(&assertion.expr)
             }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_identifier_alias_source(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => self.expression_identifier_alias_source(&assertion.expr),
             _ => None,
         }
     }
@@ -13858,6 +13894,8 @@ impl<'a> FnLowerer<'a> {
             Expr::TsConstAssertion(assertion) => {
                 self.expression_static_property_path(&assertion.expr)
             }
+            Expr::TsSatisfies(assertion) => self.expression_static_property_path(&assertion.expr),
+            Expr::TsNonNull(assertion) => self.expression_static_property_path(&assertion.expr),
             _ => None,
         }
     }
@@ -13879,6 +13917,8 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(parenthesized) => {
                 self.expression_function_discriminants(&parenthesized.expr)
             }
+            Expr::TsSatisfies(assertion) => self.expression_function_discriminants(&assertion.expr),
+            Expr::TsNonNull(assertion) => self.expression_function_discriminants(&assertion.expr),
             Expr::OptChain(chain) => {
                 self.expression_function_discriminants(&ordinary_optional_chain_expression(chain))
             }
@@ -13934,6 +13974,12 @@ impl<'a> FnLowerer<'a> {
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_array_discriminants(&parenthesized.expr)
+            }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_function_array_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_function_array_discriminants(&assertion.expr)
             }
             Expr::OptChain(chain) => self.expression_function_array_discriminants(
                 &ordinary_optional_chain_expression(chain),
@@ -13998,6 +14044,12 @@ impl<'a> FnLowerer<'a> {
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_object_array_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_function_object_array_property_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_function_object_array_property_discriminants(&assertion.expr)
             }
             Expr::OptChain(chain) => self.expression_function_object_array_property_discriminants(
                 &ordinary_optional_chain_expression(chain),
@@ -14064,6 +14116,12 @@ impl<'a> FnLowerer<'a> {
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_object_function_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsSatisfies(assertion) => {
+                self.expression_function_object_function_property_discriminants(&assertion.expr)
+            }
+            Expr::TsNonNull(assertion) => {
+                self.expression_function_object_function_property_discriminants(&assertion.expr)
             }
             Expr::OptChain(chain) => self
                 .expression_function_object_function_property_discriminants(
@@ -19481,6 +19539,8 @@ impl<'a> FnLowerer<'a> {
             Expr::Paren(paren) => self.lower_expr(&paren.expr),
             Expr::TsAs(assertion) => self.lower_expr(&assertion.expr),
             Expr::TsTypeAssertion(assertion) => self.lower_expr(&assertion.expr),
+            Expr::TsSatisfies(satisfies) => self.lower_satisfies(satisfies),
+            Expr::TsNonNull(assertion) => self.lower_non_null_assertion(assertion),
             Expr::TsConstAssertion(assertion) => self.lower_expr(&assertion.expr),
             Expr::TsInstantiation(instantiation) => {
                 self.lower_generic_instantiation_expression(instantiation)
@@ -20278,6 +20338,46 @@ impl<'a> FnLowerer<'a> {
             other => Err(format!(
                 "unsupported expression {other:?} (Phase 0/1/2 support literals, identifiers, binary ops, calls, arrays, objects, member access, assignment, ++/--)"
             )),
+        }
+    }
+
+    fn lower_satisfies(
+        &mut self,
+        satisfies: &swc_ecma_ast::TsSatisfiesExpr,
+    ) -> Result<HirExpr, String> {
+        let value = self.lower_expr(&satisfies.expr)?;
+        let expected = lower_ts_type(
+            &satisfies.type_ann,
+            self.interfaces,
+            self.generic_interfaces,
+        )?;
+        self.coerce_to_declared(&expected, value.clone())?;
+        Ok(value)
+    }
+
+    fn lower_non_null_assertion(
+        &mut self,
+        assertion: &swc_ecma_ast::TsNonNullExpr,
+    ) -> Result<HirExpr, String> {
+        let value = self.lower_expr(&assertion.expr)?;
+        match self.infer_expr_type(&value)? {
+            HirType::Optional(payload) => Ok(HirExpr::OptionalValue(
+                Box::new(value),
+                payload.as_ref().clone(),
+            )),
+            HirType::Nullable(payload) => Ok(HirExpr::NullableValue(
+                Box::new(value),
+                payload.as_ref().clone(),
+            )),
+            HirType::Nullish(payload) => Ok(HirExpr::NullishValue(
+                Box::new(value),
+                payload.as_ref().clone(),
+            )),
+            HirType::Null | HirType::Undefined => Err(
+                "non-null assertion cannot produce a native value from a statically null or undefined expression"
+                    .into(),
+            ),
+            _ => Ok(value),
         }
     }
 
@@ -28839,6 +28939,32 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert_eq!(error, "cannot assign to constant `answer`");
+    }
+
+    #[test]
+    fn validates_satisfies_without_widening_the_expression() {
+        let program = lower(
+            r#"
+                function main(): void {
+                    const value = { answer: 42 } satisfies { answer: number };
+                    console.log(value.answer);
+                }
+            "#,
+        );
+        assert!(matches!(
+            program.functions[0].body[0],
+            HirStmt::Let(_, HirType::Object(ref fields), _)
+                if fields == &vec![("answer".into(), HirType::F64)]
+        ));
+
+        let module = thaw_parser::parse_typescript(
+            r#"function main(): void {
+                const value = { answer: "wrong" } satisfies { answer: number };
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("expected F64"), "{error}");
     }
 
     #[test]
