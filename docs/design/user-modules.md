@@ -40,7 +40,8 @@ before firing a due timer, so synchronous work, microtasks, and zero-delay
 timers retain their JavaScript ordering. Timers forward trailing arguments and
 can cancel themselves. Text encoding uses UTF-8 `Uint8Array` values and covers
 `encodeInto`, replacement decoding, BOM removal, and fatal decode mode;
-streaming decode remains an explicit error.
+streaming decode retains incomplete UTF-8 sequences across calls, flushes on a
+non-streaming decode, and applies fatal and BOM behavior across chunk boundaries.
 
 ## Compilation model
 
@@ -77,8 +78,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Generic classes, dynamically computed members, non-top-level or differently
-internally named class expressions, top-level
+Generic classes, dynamically computed members, non-top-level class expressions, top-level
 declarations/statements outside the general HIR-supported subset, package multi-capture
 package export keys, and full ESM live bindings are outside the current typed AOT subset.
 Typed fixed-layout class declarations, including inheritance and named or anonymous default
@@ -89,7 +89,8 @@ in source order. Derived classes share the declaring class's static storage thro
 accessors, including assignment, compound updates, prefix/postfix updates, readonly enforcement
 and shadowing by a derived declaration. Static blocks execute in class-body order and can use
 explicit class references plus `super` fields, methods and accessors; runtime constructor-valued
-`this` inside those blocks remains an explicit gap. Constructors, instance/static methods,
+constructor-valued `this` inside those blocks resolves to the owning class.
+Constructors, instance/static methods,
 `super(...)` and super methods expand tuple spreads with source-order preservation before their
 fixed ABI call. Omitted trailing default parameters lower through arity-specific adapters;
 the same adapters cover optional parameters, explicit base calls and implicit derived constructors.
