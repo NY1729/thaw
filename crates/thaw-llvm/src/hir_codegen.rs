@@ -16449,6 +16449,34 @@ mod tests {
                 if (tagAlias === "failure") return payloadAlias + " alias";
                 return payloadAlias ? "pending" : "waiting";
             }
+            function switched(result: Result): string {
+                const { kind, value, detail } = result;
+                switch (kind) {
+                    case "success": return String(value + detail);
+                    case "failure": return value + detail;
+                    case "pending": return value && detail ? "pending" : "waiting";
+                    default: return "unknown";
+                }
+                return "unreachable";
+            }
+            function switchedObject(result: Result): string {
+                switch (result.kind) {
+                    case "success": return String(result.value + 5);
+                    case "failure": return result.value + " switch";
+                    case "pending": return result.value ? "pending" : "waiting";
+                    default: return "unknown";
+                }
+                return "unreachable";
+            }
+            function switchDefault(result: Result): string {
+                const { kind, value } = result;
+                switch (kind) {
+                    case "success": return String(value + 6);
+                    case "failure": return value + " default";
+                    default: return value ? "pending" : "waiting";
+                }
+                return "unreachable";
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 20, detail: 2 };
@@ -16477,6 +16505,12 @@ mod tests {
                 console.log(tupleDefault({ kind: "text", pair: [undefined] }));
                 console.log(aliased({ kind: "success", value: 6, detail: 0 }));
                 console.log(aliased({ kind: "failure", value: "bad", detail: "" }));
+                console.log(switched({ kind: "success", value: 5, detail: 2 }));
+                console.log(switched({ kind: "failure", value: "switch", detail: "!" }));
+                console.log(switched({ kind: "pending", value: true, detail: true }));
+                console.log(switchedObject({ kind: "success", value: 5, detail: 0 }));
+                console.log(switchedObject({ kind: "failure", value: "bad", detail: "" }));
+                console.log(switchDefault({ kind: "pending", value: true, detail: false }));
                 const { kind, value, detail } = await delayed(true);
                 if (kind === "success") console.log(value + detail);
                 const { kind: asyncKind, value: asyncValue, detail: asyncDetail } = await delayed(false);
@@ -16487,7 +16521,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "correlated_object_union_destructuring"),
-            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n10\nbad alias\n22\nasync!\n"
+            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n10\nbad alias\n7\nswitch!\npending\n10\nbad switch\npending\n22\nasync!\n"
         );
     }
 
