@@ -19497,6 +19497,7 @@ mod tests {
                 first<U>(values: U[]): U { return values[0]; }
                 field<U>(value: { item: U }): U { return value.item; }
                 collect<U>(first: U, ...rest: U[]): U { return rest[0]; }
+                keep<U>(ignored: U): T { return this.value; }
                 withDefault<U = string>(value: number = 50): number { return value; }
                 async convertAsync<U>(value: U): Promise<U> { return value; }
                 static identity<U>(value: U): U { return value; }
@@ -19550,11 +19551,13 @@ mod tests {
                 const genericSuper = new GenericSuperDerived();
                 console.log(genericSuper.forward("inferred-super"));
                 console.log(genericSuper.fixed());
+                const rebound = box.keep<string>.bind(new Box(54));
+                console.log(rebound("bound-generic-method"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\n"
         );
     }
 
