@@ -160,6 +160,7 @@ enum GenericTypePattern {
     Record(Vec<Symbol>, Box<GenericTypePattern>),
     Pick(Box<GenericTypePattern>, Vec<Symbol>),
     Omit(Box<GenericTypePattern>, Vec<Symbol>),
+    IndexedAccess(Box<GenericTypePattern>, Vec<Symbol>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6343,6 +6344,25 @@ fn omit_hir_type(ty: HirType, keys: &[Symbol]) -> Result<HirType, String> {
     ))
 }
 
+fn indexed_access_hir_type(ty: HirType, keys: &[Symbol]) -> Result<HirType, String> {
+    let HirType::Object(fields) = ty else {
+        return Err("indexed access requires an object type".into());
+    };
+    let mut selected = Vec::with_capacity(keys.len());
+    for key in keys {
+        let (_, ty) = fields.iter().find(|(name, _)| name == key).ok_or_else(|| {
+            format!("indexed access key `{key}` does not exist on the object type")
+        })?;
+        if !selected.contains(ty) {
+            selected.push(ty.clone());
+        }
+    }
+    match selected.as_slice() {
+        [ty] => Ok(ty.clone()),
+        _ => Ok(HirType::Union(selected)),
+    }
+}
+
 fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
     fn collect(ty: &TsType, keys: &mut Vec<Symbol>) -> Result<(), String> {
         match ty {
@@ -6509,6 +6529,9 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         GenericTypePattern::Pick(inner, _) | GenericTypePattern::Omit(inner, _) => {
             generic_pattern_contains_variable(inner, variable)
         }
+        GenericTypePattern::IndexedAccess(inner, _) => {
+            generic_pattern_contains_variable(inner, variable)
+        }
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
@@ -6561,6 +6584,9 @@ fn instantiate_generic_pattern(
         }
         GenericTypePattern::Omit(inner, keys) => {
             omit_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
+        }
+        GenericTypePattern::IndexedAccess(inner, keys) => {
+            indexed_access_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
         }
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
@@ -6927,6 +6953,23 @@ fn generic_type_pattern(
                 in_progress,
             )?)))
         }
+        TsType::TsIndexedAccessType(indexed) => {
+            let object = Box::new(generic_type_pattern(
+                &indexed.obj_type,
+                substitutions,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?);
+            let keys = generic_utility_keys(
+                &indexed.index_type,
+                substitutions,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            Ok(GenericTypePattern::IndexedAccess(object, keys))
+        }
         TsType::TsTypeLit(literal) => Ok(GenericTypePattern::Object(
             literal
                 .members
@@ -7034,6 +7077,9 @@ fn match_generic_pattern(
         }
         (GenericTypePattern::Pick(expected, _), actual)
         | (GenericTypePattern::Omit(expected, _), actual) => {
+            match_generic_pattern(expected, actual, inferred)
+        }
+        (GenericTypePattern::IndexedAccess(expected, _), actual) => {
             match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
@@ -10502,6 +10548,10 @@ fn lower_ts_type(
                 .map(|element| lower_ts_type(&element.ty, interfaces, generic_interfaces))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        TsType::TsIndexedAccessType(indexed) => indexed_access_hir_type(
+            lower_ts_type(&indexed.obj_type, interfaces, generic_interfaces)?,
+            &utility_keys(&indexed.index_type, interfaces, generic_interfaces)?,
+        ),
         TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
             if function.type_params.is_some() {
                 return Err("generic function types are not supported yet".into());
@@ -11253,6 +11303,22 @@ fn resolve_ts_type_with_substitution(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         )),
+        TsType::TsIndexedAccessType(indexed) => indexed_access_hir_type(
+            resolve_ts_type_with_substitution(
+                &indexed.obj_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?,
+            &substituted_utility_keys(
+                &indexed.index_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?,
+        ),
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
             let mut elements = Vec::new();
             for element in &union.types {
@@ -31181,6 +31247,14 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("key `missing` does not exist"));
+
+        let module = thaw_parser::parse_typescript(
+            "type Bad = { value: number }[\"missing\"]; function bad(value: Bad): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("indexed access key `missing` does not exist"));
     }
 
     #[test]

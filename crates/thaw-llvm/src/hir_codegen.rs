@@ -19924,6 +19924,29 @@ mod tests {
     }
 
     #[test]
+    fn compiles_fixed_object_indexed_access_types() {
+        let source = r#"
+            interface Model { id: number; label: string }
+            type Label = Model["label"];
+            type Value = Model[keyof Model];
+            type GenericValue<T> = T["value"];
+            function read(model: Model): Label { return model.label; }
+            function main(): void {
+                const model: Model = { id: 42, label: "ready" };
+                const label: Label = read(model);
+                const value: Value = label;
+                const generic: GenericValue<{ value: number }> = model.id;
+                console.log(value);
+                console.log(generic);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "fixed_object_indexed_access_types"),
+            "ready\n42\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
