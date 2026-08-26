@@ -1551,8 +1551,10 @@ The workspace crates have narrow responsibilities:
   terminating guards and values returned through async functions. Metadata
   propagates through unannotated identifier aliases, type assertions,
   conditionals, annotated function returns and their synchronous or awaited
-  call results. Destructuring and arbitrary function-value boundaries remain
-  outside this subset
+  call results. Logical `&&` narrows the right operand and true branch, while
+  `||` narrows its right operand and false/terminating-guard continuation
+  without unsafely narrowing the joined branch. Destructuring and arbitrary
+  function-value boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
