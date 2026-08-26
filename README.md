@@ -1594,9 +1594,11 @@ The workspace crates have narrow responsibilities:
   synchronous and asynchronous functions preserve the same service metadata
   in their direct or awaited fixed-object returns. Typed service factories,
   aliases and callback parameters preserve it across synchronous and
-  asynchronous function-value calls. Object destructuring carries typed
-  function properties into renamed or nested function locals and preserves
-  remaining properties in fixed-object rest values.
+  asynchronous function-value calls. Function properties returning services
+  recursively retain the returned service's array and function-property
+  metadata through direct, awaited and higher-order factory calls. Object
+  destructuring carries typed function properties into renamed or nested
+  function locals and preserves remaining properties in fixed-object rest values.
   Monomorphic named functions are first-class native function values in object
   literals and other expression positions; their union/service return metadata
   is read from the named signature without an intermediate typed local.

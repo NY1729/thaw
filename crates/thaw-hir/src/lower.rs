@@ -6966,6 +6966,7 @@ type ObjectArrayPropertyDiscriminants = HashMap<Vec<Symbol>, UnionDiscriminants>
 struct FunctionPropertyDiscriminants {
     array: Option<UnionDiscriminants>,
     object: ObjectArrayPropertyDiscriminants,
+    functions: ObjectFunctionPropertyDiscriminants,
 }
 
 type ObjectFunctionPropertyDiscriminants = HashMap<Vec<Symbol>, FunctionPropertyDiscriminants>;
@@ -7407,6 +7408,25 @@ fn function_return_object_array_property_discriminants(
         .unwrap_or_default()
 }
 
+fn function_return_type_annotation<'a>(
+    ty: &'a TsType,
+    generic: &'a GenericInterfaces<'a>,
+) -> Option<&'a TsType> {
+    match resolve_plain_alias_type(ty, generic)? {
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            Some(function.type_ann.type_ann.as_ref())
+        }
+        TsType::TsTypeLit(literal) => match literal.members.as_slice() {
+            [TsTypeElement::TsCallSignatureDecl(call)] => call
+                .type_ann
+                .as_ref()
+                .map(|annotation| annotation.type_ann.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn function_return_object_function_property_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
@@ -7509,12 +7529,25 @@ fn object_function_property_discriminants(
             let array = function_return_array_discriminants(&annotation.type_ann, generic);
             let object =
                 function_return_object_array_property_discriminants(&annotation.type_ann, generic);
-            if !array.is_empty() || !object.is_empty() {
+            let mut functions = ObjectFunctionPropertyDiscriminants::new();
+            if let Some(return_type) =
+                function_return_type_annotation(&annotation.type_ann, generic)
+            {
+                collect(
+                    return_type,
+                    generic,
+                    &mut Vec::new(),
+                    visiting,
+                    &mut functions,
+                );
+            }
+            if !array.is_empty() || !object.is_empty() || !functions.is_empty() {
                 result.insert(
                     prefix.clone(),
                     FunctionPropertyDiscriminants {
                         array: (!array.is_empty()).then_some(array),
                         object,
+                        functions,
                     },
                 );
             } else {
@@ -12951,6 +12984,12 @@ impl<'a> FnLowerer<'a> {
                     return None;
                 };
                 let callee = ordinary_optional_expression(callee);
+                if matches!(&callee, Expr::Member(_)) {
+                    let metadata = self
+                        .expression_called_function_property_discriminants(&callee)?
+                        .functions;
+                    return (!metadata.is_empty()).then_some(metadata);
+                }
                 let Expr::Ident(callee) = &callee else {
                     return None;
                 };
@@ -12982,8 +13021,16 @@ impl<'a> FnLowerer<'a> {
         let object = self
             .expression_function_object_array_property_discriminants(expression)
             .unwrap_or_default();
-        (array.is_some() || !object.is_empty())
-            .then_some(FunctionPropertyDiscriminants { array, object })
+        let functions = self
+            .expression_function_object_function_property_discriminants(expression)
+            .unwrap_or_default();
+        (array.is_some() || !object.is_empty() || !functions.is_empty()).then_some(
+            FunctionPropertyDiscriminants {
+                array,
+                object,
+                functions,
+            },
+        )
     }
 
     fn insert_object_literal_function_property(
@@ -15422,6 +15469,10 @@ impl<'a> FnLowerer<'a> {
                     if !discriminants.object.is_empty() {
                         self.function_value_object_array_property_discriminants
                             .insert(name.clone(), discriminants.object);
+                    }
+                    if !discriminants.functions.is_empty() {
+                        self.function_value_object_function_property_discriminants
+                            .insert(name.clone(), discriminants.functions);
                     }
                 }
                 if let Some(discriminants) = object_function_discriminants {
