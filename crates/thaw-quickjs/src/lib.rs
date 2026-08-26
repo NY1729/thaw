@@ -4420,15 +4420,16 @@ const PLATFORM_GLOBALS: &str = r#"
       const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? Infinity : Number(descriptor.maximum);
       if (!Number.isInteger(initial) || initial < 0 || initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
       this.__thawElement = descriptor.element === 'externref' ? 'externref' : 'funcref'; this.__thawMaximum = maximum;
-      this.__thawValues = Array(initial).fill(value); this.__thawBindings = [];
+      this.__thawValidate(value); this.__thawValues = Array(initial).fill(value); this.__thawBindings = [];
     }
+    __thawValidate(value) { if (this.__thawElement === 'funcref' && value !== null && (typeof value !== 'function' || value.__thawWasmFuncref === undefined)) throw new TypeError('WebAssembly.Table(): funcref value must be null or an exported WebAssembly function'); }
     get length() { return this.__thawInstance === undefined ? this.__thawValues.length : wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).value; }
     get(index) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return this.__thawInstance === undefined ? this.__thawValues[index] : wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value, this.__thawInstance); }
-    set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeValue(value)))); }
-    grow(delta, value = null) { delta = Number(delta); const previous = this.length; if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError); return previous; }
+    set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); this.__thawValidate(value); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeValue(value)))); }
+    grow(delta, value = null) { delta = Number(delta); const previous = this.length; this.__thawValidate(value); if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError); return previous; }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawSync() { if (this.__thawInstance !== undefined) return; for (const binding of this.__thawBindings) { let size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value; if (size < this.__thawValues.length) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', this.__thawValues.length - size, JSON.stringify(wasmEncodeValue(null))), RangeError); for (let index = 0; index < this.__thawValues.length; index++) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'set', index, JSON.stringify(wasmEncodeValue(this.__thawValues[index])))); } }
-    __thawRefresh(binding) { if (!binding || this.__thawInstance !== undefined) return; const size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value, values = []; for (let index = 0; index < size; index++) values.push(wasmDecodeValue(wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'get', index, undefined)).value)); this.__thawValues = values; this.__thawSync(); }
+    __thawRefresh(binding) { if (!binding || this.__thawInstance !== undefined) return; const size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value, values = []; for (let index = 0; index < size; index++) values.push(wasmDecodeValue(wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'get', index, undefined)).value, binding.instance)); this.__thawValues = values; this.__thawSync(); }
   }
   class WasmInstance {
     constructor(module, imports = {}) {
@@ -7938,6 +7939,36 @@ mod tests {
         assert_eq!(
             call("wasmFunctionTables", "[]"),
             r#"[true,true,10,12,2,3,9,true,true,true]"#
+        );
+    }
+
+    #[test]
+    fn webassembly_imported_funcref_tables_synchronize_same_instance_functions() {
+        assert_eq!(
+            load(
+                "function wasmImportedFunctionTable() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (type $unary (func (param i32) (result i32)))\n\
+                     (import \"env\" \"functions\" (table 1 3 funcref))\n\
+                     (func $square (export \"square\") (type $unary) local.get 0 local.get 0 i32.mul)\n\
+                     (func $triple (type $unary) local.get 0 i32.const 3 i32.mul)\n\
+                     (elem declare func $triple)\n\
+                     (func (export \"install\") i32.const 0 ref.func $triple table.set)\n\
+                     (func (export \"invoke\") (param i32 i32) (result i32) local.get 1 local.get 0 call_indirect (type $unary)))`);\n\
+                   const table = new WebAssembly.Table({ element: 'funcref', initial: 1, maximum: 3 });\n\
+                   const instance = new WebAssembly.Instance(new WebAssembly.Module(source), { env: { functions: table } });\n\
+                   table.set(0, instance.exports.square); const square = instance.exports.invoke(0, 5), stable = table.get(0) === instance.exports.square;\n\
+                   instance.exports.install(); const internal = table.get(0), triple = internal(7), indirect = instance.exports.invoke(0, 4);\n\
+                   const previous = table.grow(1, instance.exports.square), grown = instance.exports.invoke(1, 6);\n\
+                   let invalid = false; try { table.set(0, {}); } catch (error) { invalid = error instanceof TypeError; }\n\
+                   return [square, stable, typeof internal, triple, indirect, previous, table.length, grown, invalid];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("wasmImportedFunctionTable", "[]"),
+            r#"[25,true,"function",21,12,1,2,36,true]"#
         );
     }
 
