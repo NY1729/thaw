@@ -1359,7 +1359,8 @@ The workspace crates have narrow responsibilities:
   source-ordered static blocks using explicit class and `super` references,
   inheritance, `super`
   calls, statically sized tuple spreads for construction/method/super calls,
-  implicit derived-constructor forwarding and structural `implements`
+  inheritance-aware native `instanceof`, implicit derived-constructor forwarding
+  and structural `implements`
   validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
   into one executable. String-literal computed fields, methods, accessors and
