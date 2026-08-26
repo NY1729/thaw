@@ -19504,6 +19504,29 @@ mod tests {
     }
 
     #[test]
+    fn supports_object_type_method_signatures() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            function main(): void {
+                const service: { load(): Result[][] } = {
+                    load: (): Result[][] => [[{ kind: "number", value: 2 }]],
+                };
+                print(service.load().flat()[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_type_method_signature"),
+            "12\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =

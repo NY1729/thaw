@@ -6451,9 +6451,11 @@ fn generic_type_pattern(
                                 method.key.as_ref(),
                                 std::borrow::Cow::Owned(method_signature_function_type(method)?),
                             ),
-                            _ => return Err(format!(
+                            _ => {
+                                return Err(format!(
                                 "generic interface `{name}` only supports properties and methods"
-                            )),
+                            ))
+                            }
                         };
                         let Expr::Ident(field) = key else {
                             return Err(format!(
@@ -6574,20 +6576,34 @@ fn generic_type_pattern(
                 .members
                 .iter()
                 .map(|member| {
-                    let TsTypeElement::TsPropertySignature(property) = member else {
-                        return Err("generic object patterns only support plain properties".into());
+                    let (key, ty) = match member {
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                "generic object property needs a type annotation".to_string()
+                            })?;
+                            (
+                                property.key.as_ref(),
+                                std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                            )
+                        }
+                        TsTypeElement::TsMethodSignature(method) => (
+                            method.key.as_ref(),
+                            std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                        ),
+                        _ => {
+                            return Err(
+                                "generic object patterns only support properties and methods"
+                                    .into(),
+                            )
+                        }
                     };
-                    let Expr::Ident(field) = property.key.as_ref() else {
+                    let Expr::Ident(field) = key else {
                         return Err("generic object pattern has an unsupported key".into());
                     };
-                    let annotation = property
-                        .type_ann
-                        .as_ref()
-                        .ok_or_else(|| format!("field `{}` needs a type annotation", field.sym))?;
                     Ok((
                         field.sym.to_string(),
                         generic_type_pattern(
-                            &annotation.type_ann,
+                            &ty,
                             substitutions,
                             interfaces,
                             generic_interfaces,
@@ -8604,17 +8620,25 @@ fn resolve_type_dependencies(
         }
         TsType::TsTypeLit(literal) => {
             for member in &literal.members {
-                if let TsTypeElement::TsPropertySignature(property) = member {
-                    if let Some(annotation) = &property.type_ann {
-                        resolve_type_dependencies(
-                            &annotation.type_ann,
-                            interfaces,
-                            aliases,
-                            generic,
-                            resolved,
-                            in_progress,
-                        )?;
+                let ty = match member {
+                    TsTypeElement::TsPropertySignature(property) => property
+                        .type_ann
+                        .as_ref()
+                        .map(|value| value.type_ann.clone()),
+                    TsTypeElement::TsMethodSignature(method) => {
+                        Some(Box::new(method_signature_function_type(method)?))
                     }
+                    _ => None,
+                };
+                if let Some(ty) = ty {
+                    resolve_type_dependencies(
+                        &ty,
+                        interfaces,
+                        aliases,
+                        generic,
+                        resolved,
+                        in_progress,
+                    )?;
                 }
             }
         }
@@ -10200,20 +10224,27 @@ fn lower_ts_type(
                 .members
                 .iter()
                 .map(|member| {
-                    let TsTypeElement::TsPropertySignature(prop) = member else {
-                        return Err(
-                            "only plain properties are supported in object type literals (no methods/index signatures)"
-                                .to_string(),
-                        );
+                    let (key, ty) = match member {
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                "object property needs an explicit type annotation".to_string()
+                            })?;
+                            (
+                                property.key.as_ref(),
+                                std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                            )
+                        }
+                        TsTypeElement::TsMethodSignature(method) => (
+                            method.key.as_ref(),
+                            std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                        ),
+                        _ => return Err("object types only support properties and methods".into()),
                     };
-                    let name = match prop.key.as_ref() {
+                    let name = match key {
                         Expr::Ident(ident) => ident.sym.to_string(),
                         _ => return Err("unsupported object type literal key".into()),
                     };
-                    let ann = prop.type_ann.as_ref().ok_or_else(|| {
-                        format!("field `{name}` needs an explicit type annotation")
-                    })?;
-                    Ok((name, lower_ts_type(&ann.type_ann, interfaces, generic_interfaces)?))
+                    Ok((name, lower_ts_type(&ty, interfaces, generic_interfaces)?))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(HirType::Object(fields))
@@ -10801,21 +10832,28 @@ fn resolve_ts_type_with_substitution(
                 .members
                 .iter()
                 .map(|member| {
-                    let TsTypeElement::TsPropertySignature(prop) = member else {
-                        return Err(
-                            "only plain properties are supported in object type literals (no methods/index signatures)"
-                                .to_string(),
-                        );
+                    let (key, ty) = match member {
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                "object property needs an explicit type annotation".to_string()
+                            })?;
+                            (
+                                property.key.as_ref(),
+                                std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                            )
+                        }
+                        TsTypeElement::TsMethodSignature(method) => (
+                            method.key.as_ref(),
+                            std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                        ),
+                        _ => return Err("object types only support properties and methods".into()),
                     };
-                    let name = match prop.key.as_ref() {
+                    let name = match key {
                         Expr::Ident(ident) => ident.sym.to_string(),
                         _ => return Err("unsupported object type literal key".to_string()),
                     };
-                    let ann = prop.type_ann.as_ref().ok_or_else(|| {
-                        format!("field `{name}` needs an explicit type annotation")
-                    })?;
                     let field_ty = resolve_ts_type_with_substitution(
-                        &ann.type_ann,
+                        &ty,
                         substitution,
                         interfaces,
                         generic_interfaces,
