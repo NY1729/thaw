@@ -18931,6 +18931,68 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_class_rest_parameters() {
+        let source = r#"
+            class Base {
+                count: number;
+                first: number;
+                constructor(public seed: number, ...values: number[]) {
+                    this.count = values.length;
+                    this.first = values[0] ?? 0;
+                }
+                size(offset: number, ...values: number[]): number {
+                    return offset + values.length + (values[0] ?? 0);
+                }
+                static total(base: number = 10, ...values: number[]): number {
+                    return base + values.length;
+                }
+                static first(...values: string[]): string {
+                    return values.length > 0 ? values[0] : "empty";
+                }
+                static any(...values: boolean[]): boolean {
+                    return values.length > 0 ? values[0] : false;
+                }
+                static async totalAsync(base: number = 10, ...values: number[]): Promise<number> {
+                    await sleep(1);
+                    return base + values.length;
+                }
+            }
+            class Implicit extends Base {}
+            class Explicit extends Base {
+                constructor() { super(1, ...[2, 3]); }
+                sizeAgain(): number { return super.size(1, ...[2, 3]); }
+                static totalAgain(): number { return super.total(undefined, ...[4, 5]); }
+            }
+            async function main(): Promise<void> {
+                const base = new Base(10, 20, 30);
+                const spread = new Base(...[1, 2, 3, 4]);
+                const implicit = new Implicit(5, 6, 7);
+                const explicit = new Explicit();
+                console.log(base.seed);
+                console.log(base.count);
+                console.log(base.first);
+                console.log(spread.count);
+                console.log(base.size(1, 2, 3));
+                console.log(base.size(1, ...[2, 3, 4]));
+                console.log(implicit.count);
+                console.log(explicit.count);
+                console.log(explicit.sizeAgain());
+                console.log(Base.total(undefined, 1, 2));
+                console.log(Explicit.totalAgain());
+                console.log(Base.first());
+                console.log(Base.first("ready", "ignored"));
+                console.log(Base.any());
+                console.log(Base.any(true, false));
+                console.log(await Base.totalAsync(undefined, 1, 2, 3));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_rest_parameters"),
+            "10\n2\n20\n3\n5\n6\n2\n2\n5\n12\n12\nempty\nready\nfalse\ntrue\n13\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
