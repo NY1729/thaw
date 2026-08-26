@@ -22,7 +22,7 @@
 //! `lower_stmt_seq`, not a single-statement `lower_stmt`.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use swc_common::{BytePos, SourceMap};
@@ -370,6 +370,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     let mut signatures: HashMap<Symbol, FnSignature> = HashMap::new();
     let mut fn_decls = Vec::new();
+    let mut global_decls = Vec::new();
     let mut generic_instantiations: HashMap<Symbol, Vec<Vec<HirType>>> = HashMap::new();
 
     for item in &module.body {
@@ -520,9 +521,25 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(_))) => {}
             ModuleItem::Stmt(Stmt::Decl(Decl::TsEnum(_))) => {}
             ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(_))) => {}
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) => {
+                for declaration in &var_decl.decls {
+                    let Pat::Ident(binding) = &declaration.name else {
+                        return Err(
+                            "top-level destructuring declarations are not supported yet".into(),
+                        );
+                    };
+                    if declaration.init.is_none() {
+                        return Err(format!(
+                            "top-level binding `{}` needs an initializer",
+                            binding.id.sym
+                        ));
+                    }
+                }
+                global_decls.push(var_decl.as_ref());
+            }
             ModuleItem::Stmt(_) => {
                 return Err(
-                    "Phase 0/1/2 only support top-level function, interface, type-alias, and enum declarations; wrap other code in a function"
+                    "top-level statements must be function, variable, interface, type-alias, or enum declarations; wrap executable statements in a function"
                         .into(),
                 )
             }
@@ -532,11 +549,54 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         }
     }
 
-    // Missing parameter/return annotations are type variables. Re-lower against the
+    let mut global_types = HashMap::new();
+    let mut immutable_globals = HashSet::new();
+    for declaration in &global_decls {
+        for declarator in &declaration.decls {
+            let Pat::Ident(binding) = &declarator.name else {
+                unreachable!("top-level patterns were validated above")
+            };
+            let name = binding.id.sym.to_string();
+            if global_types.contains_key(&name) || signatures.contains_key(&name) {
+                return Err(format!("duplicate top-level binding `{name}`"));
+            }
+            let ty = binding
+                .type_ann
+                .as_ref()
+                .map(|annotation| {
+                    lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)
+                })
+                .transpose()?
+                .unwrap_or(HirType::Dynamic);
+            global_types.insert(name, ty);
+            if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
+                immutable_globals.insert(binding.id.sym.to_string());
+            }
+        }
+    }
+
+    // Missing parameter/return annotations and global initializer types are type
+    // variables. Re-lower them together until forward references reach a fixed point.
     // signatures discovered in the previous round until forward calls and
     // mutually recursive functions reach a fixed point.
-    for _ in 0..=(fn_decls.len() * 2 + 1) {
+    for _ in 0..=((fn_decls.len() + global_types.len()) * 2 + 1) {
         let mut changed = false;
+        let globals = lower_global_decls(
+            &global_decls,
+            &global_types,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+        )?;
+        for global in globals {
+            let ty = global_types.get_mut(&global.name).unwrap();
+            if hir_type_contains_dynamic(ty) && *ty != global.ty {
+                *ty = global.ty;
+                changed = true;
+            }
+        }
         let call_constraints = RefCell::new(Vec::new());
         for fn_decl in &fn_decls {
             let name = fn_decl.ident.sym.to_string();
@@ -547,6 +607,8 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 &generic_interfaces,
                 &enum_values,
                 &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
                 Some(&call_constraints),
             )?;
             if signatures[&name].ret == HirType::Dynamic && function.ret != HirType::Dynamic {
@@ -615,6 +677,24 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             signature.source_range.1,
         ));
     }
+    if let Some((name, _)) = global_types
+        .iter()
+        .find(|(_, ty)| hir_type_contains_dynamic(ty))
+    {
+        return Err(format!(
+            "cannot infer the type of top-level binding `{name}`; add an explicit type annotation"
+        ));
+    }
+
+    let globals = lower_global_decls(
+        &global_decls,
+        &global_types,
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+    )?;
 
     let extern_functions = signatures
         .iter()
@@ -646,6 +726,8 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 &generic_interfaces,
                 &enum_values,
                 &enum_reverse_values,
+                &global_types,
+                &immutable_globals,
                 None,
             )
         })
@@ -685,6 +767,8 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             &generic_interfaces,
             &enum_values,
             &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
             Some(&nested_constraints),
         )?;
         completed.push((name, types));
@@ -699,9 +783,96 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     }
 
     Ok(HirProgram {
+        globals,
         functions: specialized,
         extern_functions,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_global_decls(
+    declarations: &[&VarDecl],
+    global_types: &HashMap<Symbol, HirType>,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+) -> Result<Vec<crate::HirGlobal>, String> {
+    let mut lowerer = FnLowerer::new(
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        HirType::Void,
+        None,
+    );
+    let mut globals = Vec::new();
+    for declaration in declarations {
+        for declarator in &declaration.decls {
+            let Pat::Ident(binding) = &declarator.name else {
+                unreachable!("top-level patterns were validated above")
+            };
+            let name = binding.id.sym.to_string();
+            let init = lowerer.lower_expr(
+                declarator
+                    .init
+                    .as_deref()
+                    .expect("top-level initializers were validated above"),
+            )?;
+            let expected = global_types[&name].clone();
+            let inferred = lowerer.infer_expr_type(&init)?;
+            let ty = if expected == HirType::Dynamic {
+                inferred
+            } else {
+                expected
+            };
+            let init = if ty == HirType::Dynamic {
+                init
+            } else {
+                lowerer.coerce_to_declared(&ty, init)?
+            };
+            let scope_type = ty.clone();
+            globals.push(crate::HirGlobal {
+                name: name.clone(),
+                ty,
+                init,
+                mutable: declaration.kind != swc_ecma_ast::VarDeclKind::Const,
+            });
+            lowerer.scope.insert(name.clone(), scope_type);
+            lowerer
+                .bindings
+                .entry(name.clone())
+                .or_default()
+                .push(name.clone());
+            if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
+                lowerer.immutable_bindings.insert(name);
+            }
+        }
+    }
+    Ok(globals)
+}
+
+fn hir_type_contains_dynamic(ty: &HirType) -> bool {
+    match ty {
+        HirType::Dynamic => true,
+        HirType::Promise(inner)
+        | HirType::Array(inner)
+        | HirType::Optional(inner)
+        | HirType::Nullable(inner)
+        | HirType::Nullish(inner) => hir_type_contains_dynamic(inner),
+        HirType::Tuple(elements) | HirType::Union(elements) => {
+            elements.iter().any(hir_type_contains_dynamic)
+        }
+        HirType::Object(fields) => fields
+            .iter()
+            .any(|(_, field)| hir_type_contains_dynamic(field)),
+        HirType::Function(parameters, result) => {
+            parameters.iter().any(hir_type_contains_dynamic) || hir_type_contains_dynamic(result)
+        }
+        _ => false,
+    }
 }
 
 fn supports_ffi_variadic_element(ty: &HirType) -> bool {
@@ -1341,6 +1512,8 @@ fn lower_generic_instance(
     generic_interfaces: &GenericInterfaces,
     enum_values: &EnumValues,
     enum_reverse_values: &EnumReverseValues,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let base_name = fn_decl.ident.sym.to_string();
@@ -1386,7 +1559,9 @@ fn lower_generic_instance(
         ret.clone(),
         call_constraints,
     );
+    seed_global_scope(&mut lowerer, global_types, immutable_globals);
     for param in &params {
+        lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
             .bindings
@@ -2333,6 +2508,7 @@ fn resolve_type_dependencies(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_fn_decl(
     fn_decl: &FnDecl,
     signatures: &HashMap<Symbol, FnSignature>,
@@ -2340,6 +2516,8 @@ fn lower_fn_decl(
     generic_interfaces: &GenericInterfaces,
     enum_values: &EnumValues,
     enum_reverse_values: &EnumReverseValues,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
     call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<HirFunction, String> {
     let name = fn_decl.ident.sym.to_string();
@@ -2379,7 +2557,9 @@ fn lower_fn_decl(
         declared_ret.clone(),
         call_constraints,
     );
+    seed_global_scope(&mut lowerer, global_types, immutable_globals);
     for param in &params {
+        lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
             .bindings
@@ -2412,6 +2592,24 @@ fn lower_fn_decl(
         is_async: func.is_async,
         body,
     })
+}
+
+fn seed_global_scope(
+    lowerer: &mut FnLowerer<'_>,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
+) {
+    for (name, ty) in global_types {
+        lowerer.scope.insert(name.clone(), ty.clone());
+        lowerer
+            .bindings
+            .entry(name.clone())
+            .or_default()
+            .push(name.clone());
+    }
+    lowerer
+        .immutable_bindings
+        .extend(immutable_globals.iter().cloned());
 }
 
 /// Computes a function's *unwrapped* return type: `async function`s must be
@@ -3837,6 +4035,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
 /// object literals against their declared shape.
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
+    immutable_bindings: HashSet<Symbol>,
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,
@@ -3881,6 +4080,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Self {
         Self {
             scope: HashMap::new(),
+            immutable_bindings: HashSet::new(),
             narrowings: HashMap::new(),
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
@@ -8702,6 +8902,11 @@ impl<'a> FnLowerer<'a> {
         }
 
         let mut target = self.lower_assign_target(&assign.left)?;
+        if let Target::Var(name) = &target {
+            if self.immutable_bindings.contains(name) {
+                return Err(format!("cannot assign to constant `{name}`"));
+            }
+        }
         let rhs = self.lower_expr(&assign.right)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
         let assigned_variable = match &target {
@@ -8918,6 +9123,9 @@ impl<'a> FnLowerer<'a> {
         match pattern {
             Pat::Ident(binding) => {
                 let name = self.resolve_binding(binding.id.sym.as_ref());
+                if self.immutable_bindings.contains(&name) {
+                    return Err(format!("cannot assign to constant `{name}`"));
+                }
                 let expected = self
                     .scope
                     .get(&name)
@@ -9117,6 +9325,11 @@ impl<'a> FnLowerer<'a> {
             },
             _ => return Err("unsupported ++/-- target".into()),
         };
+        if let Target::Var(name) = &target {
+            if self.immutable_bindings.contains(name) {
+                return Err(format!("cannot update constant `{name}`"));
+            }
+        }
 
         let op = match update.op {
             UpdateOp::PlusPlus => BinOp::Add,
@@ -14078,6 +14291,67 @@ mod tests {
                 Box::new(HirExpr::Var("b".into())),
             )))]
         );
+    }
+
+    #[test]
+    fn lowers_top_level_bindings_and_exposes_them_to_functions() {
+        let program = lower(
+            r#"
+                const base = 40;
+                let answer: number = base + 2;
+                function read(): number { return answer; }
+                function main(): void { console.log(read()); }
+            "#,
+        );
+        assert_eq!(program.globals.len(), 2);
+        assert_eq!(program.globals[0].name, "base");
+        assert_eq!(program.globals[0].ty, HirType::F64);
+        assert!(!program.globals[0].mutable);
+        assert_eq!(program.globals[1].name, "answer");
+        assert_eq!(program.globals[1].ty, HirType::F64);
+        assert!(program.globals[1].mutable);
+        let read = program
+            .functions
+            .iter()
+            .find(|function| function.name == "read")
+            .unwrap();
+        assert!(matches!(
+            &read.body[0],
+            HirStmt::Return(Some(HirExpr::Var(name))) if name == "answer"
+        ));
+    }
+
+    #[test]
+    fn infers_top_level_initializer_calls_to_forward_functions() {
+        let program = lower(
+            r#"
+                const answer = makeAnswer();
+                function makeAnswer(): number { return 42; }
+                function main(): void { console.log(answer); }
+            "#,
+        );
+        assert_eq!(program.globals[0].ty, HirType::F64);
+        assert!(matches!(program.globals[0].init, HirExpr::Call(_, _)));
+    }
+
+    #[test]
+    fn rejects_top_level_const_reassignment() {
+        let module = thaw_parser::parse_typescript(
+            "const answer = 42; function main(): void { answer = 43; }",
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert_eq!(error, "cannot assign to constant `answer`");
+    }
+
+    #[test]
+    fn rejects_direct_forward_references_between_top_level_bindings() {
+        let module = thaw_parser::parse_typescript(
+            "const answer: number = base + 2; const base = 40; function main(): void {}",
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("unknown variable `base`"), "{error}");
     }
 
     #[test]

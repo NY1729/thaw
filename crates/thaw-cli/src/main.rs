@@ -3453,6 +3453,64 @@ mod tests {
     }
 
     #[test]
+    fn builds_multifile_top_level_bindings_into_one_executable() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-top-level-bindings-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("values.ts"),
+            r#"
+                export const base = 40;
+                export const answer = makeAnswer();
+                export let counter = answer;
+                function makeAnswer(): number { return base + 2; }
+                export function next(): number {
+                    counter = counter + 1;
+                    return counter;
+                }
+            "#,
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { answer, next } from "./values";
+                const label = "answer";
+                const record = { answer };
+                function local(answer: number): number {
+                    answer = answer + 1;
+                    return answer;
+                }
+                function main(): void {
+                    console.log(label);
+                    console.log(record.answer);
+                    console.log(answer);
+                    console.log(local(1));
+                    console.log(next());
+                    console.log(next());
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "answer\n42\n42\n2\n43\n44\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn resolves_and_reports_star_export_ambiguity() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-star-export-ambiguity-{}",

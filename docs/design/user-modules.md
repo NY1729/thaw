@@ -49,10 +49,14 @@ their importers. A second import of the same file reuses the first graph node.
 An import edge to a node currently being visited is reported with the complete
 cycle rather than recursing indefinitely.
 
-Before all AST bodies are joined, module-local function and interface names are
+Before all AST bodies are joined, module-local function, variable and interface names are
 rewritten to stable compiler-private names. Imported aliases map directly to
-the dependency's rewritten export. Calls, generic type references, interface
-references, declarations, and re-exports consequently agree on one symbol.
+the dependency's rewritten export. Expression reads, assignments, calls, generic
+type references, interface references, declarations, and re-exports consequently
+agree on one symbol. Module-scoped `const` and `let` initializers lower to typed
+HIR globals and run in dependency/source order through a guarded LLVM initializer
+before `main` or the Lambda runtime starts. A binding imported by several modules
+therefore has one storage cell and is initialized once.
 The entry module's `main` or `handler` keeps its ABI name. HIR then sees one
 ordinary module, so its existing fixed-point inference, forward-reference
 resolution, generic tuple specialization and specialization deduplication apply
@@ -60,7 +64,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Classes, anonymous default functions, runtime top-level statements, package
+Classes, arbitrary executable top-level statements, package
 multi-capture package export keys, and full ESM live bindings are outside the current typed AOT
 subset. Cyclic user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
@@ -71,7 +75,9 @@ are explicit compatibility limits, not silently rewritten semantics.
 CLI integration tests compile and execute a graph covering extensionless and
 directory resolution, named/default/aliased imports, re-exports, duplicate
 imports, same-named declarations in different modules, forward references and
-multi-argument generic specialization. A separate test compiles and invokes a
+multi-argument generic specialization. Another executable graph covers exported
+`const`/`let` initialization, a forward function call from an initializer and
+shared mutation through an imported function. A separate test compiles and invokes a
 multi-file resumable async `Json` Lambda handler against a mock Runtime API.
 Further E2E coverage imports two registry packages with colliding export names
 from that Lambda and verifies package initialization, async execution and the

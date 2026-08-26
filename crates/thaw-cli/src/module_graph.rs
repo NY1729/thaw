@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use swc_ecma_visit::{VisitMut, VisitMutWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use thaw_parser::ast::{
     Callee, Decl, Expr, ImportSpecifier, Module, ModuleDecl, ModuleExportName, ModuleItem,
     TsEntityName, TsInterfaceDecl, TsTypeRef,
@@ -253,17 +253,92 @@ struct RenameReferences<'a> {
     import_meta_main: bool,
     module_path: &'a Path,
     external_resolutions: &'a HashMap<String, String>,
+    shadowed: HashSet<String>,
+    function_depth: usize,
 }
 
 impl RenameReferences<'_> {
     fn rename_ident(&self, ident: &mut thaw_parser::ast::Ident) {
+        if self.shadowed.contains(ident.sym.as_ref()) {
+            return;
+        }
         if let Some(replacement) = self.names.get(ident.sym.as_ref()) {
             ident.sym = replacement.clone().into();
         }
     }
 }
 
+#[derive(Default)]
+struct LocalBindingCollector {
+    names: HashSet<String>,
+}
+
+struct PatternBindingCollector<'a>(&'a mut HashSet<String>);
+
+impl Visit for PatternBindingCollector<'_> {
+    fn visit_binding_ident(&mut self, binding: &thaw_parser::ast::BindingIdent) {
+        self.0.insert(binding.id.sym.to_string());
+    }
+}
+
+impl Visit for LocalBindingCollector {
+    fn visit_var_declarator(&mut self, declaration: &thaw_parser::ast::VarDeclarator) {
+        declaration
+            .name
+            .visit_with(&mut PatternBindingCollector(&mut self.names));
+    }
+
+    fn visit_fn_decl(&mut self, declaration: &thaw_parser::ast::FnDecl) {
+        self.names.insert(declaration.ident.sym.to_string());
+    }
+
+    fn visit_catch_clause(&mut self, clause: &thaw_parser::ast::CatchClause) {
+        if let Some(parameter) = &clause.param {
+            parameter.visit_with(&mut PatternBindingCollector(&mut self.names));
+        }
+        clause.body.visit_with(self);
+    }
+
+    fn visit_function(&mut self, _function: &thaw_parser::ast::Function) {}
+
+    fn visit_arrow_expr(&mut self, _arrow: &thaw_parser::ast::ArrowExpr) {}
+}
+
 impl VisitMut for RenameReferences<'_> {
+    fn visit_mut_function(&mut self, function: &mut thaw_parser::ast::Function) {
+        let mut collector = LocalBindingCollector::default();
+        for parameter in &function.params {
+            parameter
+                .pat
+                .visit_with(&mut PatternBindingCollector(&mut collector.names));
+        }
+        if let Some(body) = &function.body {
+            body.visit_with(&mut collector);
+        }
+        let saved = self.shadowed.clone();
+        self.shadowed.extend(collector.names);
+        self.function_depth += 1;
+        function.visit_mut_children_with(self);
+        self.function_depth -= 1;
+        self.shadowed = saved;
+    }
+
+    fn visit_mut_arrow_expr(&mut self, arrow: &mut thaw_parser::ast::ArrowExpr) {
+        let mut collector = LocalBindingCollector::default();
+        for parameter in &arrow.params {
+            parameter.visit_with(&mut PatternBindingCollector(&mut collector.names));
+        }
+        if let thaw_parser::ast::ArrowFunctionBody::FunctionBody(body) = &*arrow.body {
+            body.visit_with(&mut collector);
+        }
+        let saved = self.shadowed.clone();
+        self.shadowed.extend(collector.names);
+        self.function_depth += 1;
+        arrow.visit_mut_children_with(self);
+        self.function_depth -= 1;
+        self.shadowed = saved;
+    }
+
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
         if let Expr::Call(call) = expr {
@@ -287,6 +362,10 @@ impl VisitMut for RenameReferences<'_> {
                     }
                 }
             }
+        }
+        if let Expr::Ident(ident) = expr {
+            self.rename_ident(ident);
+            return;
         }
         let Expr::Member(member) = expr else {
             return;
@@ -329,7 +408,14 @@ impl VisitMut for RenameReferences<'_> {
         call.visit_mut_children_with(self);
         if let Callee::Expr(callee) = &mut call.callee {
             match &mut **callee {
-                Expr::Ident(ident) => self.rename_ident(ident),
+                Expr::Ident(ident) => {
+                    // Direct imported/module calls keep the bundler's established
+                    // callee resolution even when a local value has the same text
+                    // name. Non-callee identifier reads remain lexically scoped.
+                    if let Some(replacement) = self.names.get(ident.sym.as_ref()) {
+                        ident.sym = replacement.clone().into();
+                    }
+                }
                 Expr::Member(member) => {
                     if let (Expr::Ident(namespace), thaw_parser::ast::MemberProp::Ident(property)) =
                         (&*member.obj, &member.prop)
@@ -370,7 +456,68 @@ impl VisitMut for RenameReferences<'_> {
 
     fn visit_mut_fn_decl(&mut self, function: &mut thaw_parser::ast::FnDecl) {
         function.function.visit_mut_with(self);
-        self.rename_ident(&mut function.ident);
+        if self.function_depth == 0 {
+            if let Some(replacement) = self.names.get(function.ident.sym.as_ref()) {
+                function.ident.sym = replacement.clone().into();
+            }
+        }
+    }
+
+    fn visit_mut_var_declarator(&mut self, declaration: &mut thaw_parser::ast::VarDeclarator) {
+        declaration.visit_mut_children_with(self);
+        if self.function_depth == 0 {
+            if let thaw_parser::ast::Pat::Ident(binding) = &mut declaration.name {
+                if let Some(replacement) = self.names.get(binding.id.sym.as_ref()) {
+                    binding.id.sym = replacement.clone().into();
+                }
+            }
+        }
+    }
+
+    fn visit_mut_assign_expr(&mut self, assignment: &mut thaw_parser::ast::AssignExpr) {
+        assignment.visit_mut_children_with(self);
+        if let thaw_parser::ast::AssignTarget::Simple(
+            thaw_parser::ast::SimpleAssignTarget::Ident(binding),
+        ) = &mut assignment.left
+        {
+            self.rename_ident(&mut binding.id);
+        }
+    }
+
+    fn visit_mut_prop(&mut self, property: &mut thaw_parser::ast::Prop) {
+        if let thaw_parser::ast::Prop::Shorthand(ident) = property {
+            let original = ident.clone();
+            self.rename_ident(ident);
+            if ident.sym != original.sym {
+                *property = thaw_parser::ast::Prop::KeyValue(thaw_parser::ast::KeyValueProp {
+                    key: thaw_parser::ast::PropName::Ident(thaw_parser::ast::IdentName::new(
+                        original.sym,
+                        original.span,
+                    )),
+                    value: Box::new(thaw_parser::ast::Expr::Ident(ident.clone())),
+                });
+            }
+        } else {
+            property.visit_mut_children_with(self);
+        }
+    }
+}
+
+fn declaration_names(declaration: &Decl) -> Vec<String> {
+    match declaration {
+        Decl::Fn(declaration) if declaration.function.body.is_some() => {
+            vec![declaration.ident.sym.to_string()]
+        }
+        Decl::TsInterface(declaration) => vec![declaration.id.sym.to_string()],
+        Decl::Var(declaration) => declaration
+            .decls
+            .iter()
+            .filter_map(|declarator| match &declarator.name {
+                thaw_parser::ast::Pat::Ident(binding) => Some(binding.id.sym.to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -378,30 +525,25 @@ fn declared_names(module: &Module) -> Vec<String> {
     module
         .body
         .iter()
-        .filter_map(|item| match item {
-            ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Fn(decl)))
-                if decl.function.body.is_some() =>
-            {
-                Some(decl.ident.sym.to_string())
+        .flat_map(|item| match item {
+            ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(declaration)) => {
+                declaration_names(declaration)
             }
-            ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::TsInterface(decl))) => {
-                Some(decl.id.sym.to_string())
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                declaration_names(&export.decl)
             }
-            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
-                Decl::Fn(decl) if decl.function.body.is_some() => Some(decl.ident.sym.to_string()),
-                Decl::TsInterface(decl) => Some(decl.id.sym.to_string()),
-                _ => None,
-            },
             ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => match &export.decl {
-                thaw_parser::ast::DefaultDecl::Fn(function) => {
-                    function.ident.as_ref().map(|ident| ident.sym.to_string())
-                }
+                thaw_parser::ast::DefaultDecl::Fn(function) => function
+                    .ident
+                    .as_ref()
+                    .map(|ident| vec![ident.sym.to_string()])
+                    .unwrap_or_default(),
                 thaw_parser::ast::DefaultDecl::TsInterfaceDecl(interface) => {
-                    Some(interface.id.sym.to_string())
+                    vec![interface.id.sym.to_string()]
                 }
-                _ => None,
+                _ => Vec::new(),
             },
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -558,16 +700,14 @@ pub fn bundle(
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
                         external_resolutions,
+                        shadowed: HashSet::new(),
+                        function_depth: 0,
                     });
                     items.push(ModuleItem::Stmt(statement));
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::Import(_)) => {}
                 ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(mut export)) => {
-                    let original = match &export.decl {
-                        Decl::Fn(decl) => Some(decl.ident.sym.to_string()),
-                        Decl::TsInterface(decl) => Some(decl.id.sym.to_string()),
-                        _ => None,
-                    };
+                    let originals = declaration_names(&export.decl);
                     export.decl.visit_mut_with(&mut RenameReferences {
                         names: &names,
                         namespaces: &namespaces,
@@ -575,8 +715,10 @@ pub fn bundle(
                         import_meta_main: is_entry,
                         module_path: &modules[index].path,
                         external_resolutions,
+                        shadowed: HashSet::new(),
+                        function_depth: 0,
                     });
-                    if let Some(original) = original {
+                    for original in originals {
                         public.insert(original.clone(), names[&original].clone());
                         explicit_exports.insert(original.clone());
                         ambiguous.remove(&original);
@@ -671,6 +813,8 @@ pub fn bundle(
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
                                 external_resolutions,
+                                shadowed: HashSet::new(),
+                                function_depth: 0,
                             });
                             let mut ident = function.ident.take().unwrap_or_else(|| {
                                 thaw_parser::ast::Ident::new_no_ctxt(
@@ -700,6 +844,8 @@ pub fn bundle(
                                 import_meta_main: is_entry,
                                 module_path: &modules[index].path,
                                 external_resolutions,
+                                shadowed: HashSet::new(),
+                                function_depth: 0,
                             });
                             public.insert("default".to_string(), interface.id.sym.to_string());
                             explicit_exports.insert("default".to_string());

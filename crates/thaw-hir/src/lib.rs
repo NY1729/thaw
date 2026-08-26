@@ -371,8 +371,19 @@ pub struct HirFunction {
     pub body: Vec<HirStmt>,
 }
 
+/// A module-scoped binding. Its initializer is evaluated by the generated
+/// module initializer in source order before either `main` or `handler` runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirGlobal {
+    pub name: Symbol,
+    pub ty: HirType,
+    pub init: HirExpr,
+    pub mutable: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HirProgram {
+    pub globals: Vec<HirGlobal>,
     pub functions: Vec<HirFunction>,
     /// Ambient function declarations (`declare function foo(...): T;`, no
     /// body) -- see docs/design/bridge.md section 6. Calls to one of these
