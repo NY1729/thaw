@@ -18852,6 +18852,32 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_inherited_members_and_overrides() {
+        let source = r#"
+            class Base {
+                constructor(public value: number) {}
+                answer(): number { return this.value; }
+                get doubled(): number { return this.value * 2; }
+                set current(next: number) { this.value = next; }
+            }
+            class Derived extends Base {
+                constructor(value: number) { super(value); }
+                answer(): number { return this.value + 1; }
+            }
+            function main(): void {
+                const value = new Derived(20);
+                value.current = 21;
+                console.log(value.doubled);
+                console.log(value.answer());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "inherited_members_and_overrides"),
+            "42\n22\n"
+        );
+    }
+
+    #[test]
     fn await_sleep_is_driven_by_the_runtime_event_loop() {
         let source = r#"
             async function main(): Promise<void> {
