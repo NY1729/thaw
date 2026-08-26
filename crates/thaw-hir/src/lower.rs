@@ -98,6 +98,7 @@ struct FnSignature {
 #[derive(Clone)]
 struct NativeMethodValue {
     symbol: Symbol,
+    receiver: HirType,
 }
 
 #[derive(Default)]
@@ -10378,7 +10379,112 @@ impl<'a> FnLowerer<'a> {
         self.signatures
             .get(&symbol)
             .is_some_and(|signature| signature.uses_this)
-            .then_some(NativeMethodValue { symbol })
+            .then_some(NativeMethodValue { symbol, receiver })
+    }
+
+    fn lower_saved_native_method_bind(
+        &mut self,
+        target: &str,
+        method: &NativeMethodValue,
+        call: &CallExpr,
+    ) -> Result<HirExpr, String> {
+        let signature = self
+            .signatures
+            .get(&method.symbol)
+            .cloned()
+            .expect("saved native method retains its signature");
+        let Some((this_argument, leading_arguments)) = call.args.split_first() else {
+            return Err(format!(
+                "unbound native method `{target}.bind` expects a `thisArg`"
+            ));
+        };
+        if this_argument.spread.is_some() {
+            return Err("unbound native method `.bind()` cannot spread its `thisArg`".into());
+        }
+        let bound = self.lower_expr(&this_argument.expr)?;
+        self.expect_type(&method.receiver, &bound, "unbound method bind `thisArg`")?;
+        let label = format!("unbound native method `{target}.bind`");
+        let (leading_values, leading_bindings) =
+            self.lower_native_spread_values(leading_arguments, &label)?;
+        if leading_values.len() > signature.params.len().saturating_sub(1) {
+            return Err(format!(
+                "unbound native method `{target}.bind` binds {} leading argument(s), but the method accepts {}",
+                leading_values.len(),
+                signature.params.len().saturating_sub(1)
+            ));
+        }
+        let bound_name = format!("__thaw_saved_bound_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope
+            .insert(bound_name.clone(), method.receiver.clone());
+        let mut bindings = vec![(bound_name.clone(), method.receiver.clone(), bound)];
+        bindings.extend(leading_bindings);
+        let mut bound_argument_names = Vec::new();
+        for (index, (value, expected)) in leading_values
+            .iter()
+            .zip(signature.params[1..].iter())
+            .enumerate()
+        {
+            let value = self
+                .coerce_to_declared(expected, value.clone())
+                .map_err(|error| {
+                    format!(
+                        "bound argument {} of `{target}` is invalid: {error}",
+                        index + 1
+                    )
+                })?;
+            let name = format!("__thaw_saved_bound_argument_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), expected.clone());
+            bound_argument_names.push(name.clone());
+            bindings.push((name, expected.clone(), value));
+        }
+        let parameters = signature.params[1 + leading_values.len()..]
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_saved_bound_parameter_{index}"),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut arguments = vec![HirExpr::Var(bound_name.clone())];
+        arguments.extend(bound_argument_names.iter().cloned().map(HirExpr::Var));
+        arguments.extend(
+            parameters
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone())),
+        );
+        let mut captures = vec![HirParam {
+            name: bound_name,
+            ty: method.receiver.clone(),
+        }];
+        captures.extend(
+            bound_argument_names
+                .into_iter()
+                .zip(
+                    signature.params[1..1 + leading_values.len()]
+                        .iter()
+                        .cloned(),
+                )
+                .map(|(name, ty)| HirParam { name, ty }),
+        );
+        let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+            HirType::Promise(Box::new(signature.ret.clone()))
+        } else {
+            signature.ret.clone()
+        };
+        self.wrap_call_argument_bindings(
+            HirExpr::Lambda(
+                captures,
+                parameters,
+                result,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var(method.symbol.clone())),
+                    arguments,
+                )),
+            ),
+            &bindings,
+        )
     }
 
     fn lower_saved_native_method_call_or_apply(
@@ -10392,7 +10498,7 @@ impl<'a> FnLowerer<'a> {
             let binding = self.resolve_binding(identifier.sym.as_ref());
             if self.native_method_values.contains_key(&binding) {
                 return Err(format!(
-                    "unbound native method `{}` requires `.call(thisArg, ...)` or `.apply(thisArg, tuple)`; bind the method before extraction to create an ordinary callable closure",
+                    "unbound native method `{}` requires `.call(thisArg, ...)`, `.apply(thisArg, tuple)`, or `.bind(thisArg, ...)` before ordinary invocation",
                     identifier.sym
                 ));
             }
@@ -10404,7 +10510,7 @@ impl<'a> FnLowerer<'a> {
         let Some(operation_name) = member_property_name(&operation.prop) else {
             return Ok(None);
         };
-        if operation_name != "call" && operation_name != "apply" {
+        if operation_name != "call" && operation_name != "apply" && operation_name != "bind" {
             return Ok(None);
         }
         let Expr::Ident(target) = operation.obj.as_ref() else {
@@ -10414,6 +10520,11 @@ impl<'a> FnLowerer<'a> {
         let Some(method) = self.native_method_values.get(&binding).cloned() else {
             return Ok(None);
         };
+        if operation_name == "bind" {
+            return self
+                .lower_saved_native_method_bind(target.sym.as_ref(), &method, call)
+                .map(Some);
+        }
         let Some((this_argument, supplied)) = call.args.split_first() else {
             return Err(format!(
                 "unbound native method `{}.{operation_name}` expects a `thisArg`",
@@ -26512,8 +26623,11 @@ mod tests {
                 const read = first.read;
                 const alias = read;
                 const args: [string] = ["?"];
+                const boundArgs: [string] = ["!"];
+                const bound = alias.bind(second, ...boundArgs);
                 console.log(read.call(second, "!"));
                 console.log(alias.apply(first, args));
+                console.log(bound());
             }"#,
         );
         let main = program

@@ -19748,14 +19748,19 @@ mod tests {
                 const readAsync = extracted.readAsync;
                 const alias = read;
                 const args: [string] = ["?"];
+                const boundArgs: [string] = ["!"];
+                const bound = alias.bind(new Box("bound"), ...boundArgs);
+                const asyncBound = readAsync.bind(new Box("async-bound"));
                 console.log(read.call(new Box("call"), "!"));
                 console.log(alias.apply(new Box("apply"), args));
                 console.log(await readAsync.call(new Box("async"), "!"));
+                console.log(bound());
+                console.log(await asyncBound("!"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\ncall!\napply?\nasync!\n"
+            "extract-receiver\ncall!\napply?\nasync!\nbound!\nasync-bound!\n"
         );
     }
 
