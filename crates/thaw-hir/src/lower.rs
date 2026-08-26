@@ -3446,6 +3446,15 @@ fn lower_class_constructor(
         None,
     );
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
+    if let Some(base) = &declaration.class.super_class {
+        let Expr::Ident(base) = base.as_ref() else {
+            unreachable!("class layout validation accepts identifier bases only")
+        };
+        lowerer.super_initializer = Some((
+            class_initializer_symbol(base.sym.as_ref()),
+            interfaces[base.sym.as_ref()].clone(),
+        ));
+    }
     lowerer
         .bindings
         .entry("this".into())
@@ -3462,7 +3471,7 @@ fn lower_class_constructor(
             .push(parameter.name.clone());
     }
 
-    let mut initializer_body = Vec::new();
+    let mut own_initializers = Vec::new();
     for member in &declaration.class.body {
         let ClassMember::ClassProp(property) = member else {
             continue;
@@ -3481,7 +3490,7 @@ fn lower_class_constructor(
                 .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
             let value = lowerer.lower_expr(initializer)?;
             let value = lowerer.coerce_to_declared(&expected, value)?;
-            initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
+            own_initializers.push(HirStmt::Expr(HirExpr::PropAssign(
                 Box::new(HirExpr::Var(this_name.clone())),
                 instance_type.clone(),
                 field,
@@ -3494,18 +3503,63 @@ fn lower_class_constructor(
             continue;
         };
         let field = parameter_property_binding(property)?.id.sym.to_string();
-        initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
+        own_initializers.push(HirStmt::Expr(HirExpr::PropAssign(
             Box::new(HirExpr::Var(this_name.clone())),
             instance_type.clone(),
             field,
             Box::new(HirExpr::Var(parameter.name.clone())),
         )));
     }
-    if let Some(constructor) = constructor {
-        let block = constructor.body.as_ref().ok_or_else(|| {
-            format!("class `{class_name}` constructor needs an implementation body")
-        })?;
-        initializer_body.extend(lowerer.lower_stmts(&block.stmts)?);
+    let mut initializer_body = Vec::new();
+    if declaration.class.super_class.is_some() {
+        if let Some(constructor) = constructor {
+            let block = constructor.body.as_ref().ok_or_else(|| {
+                format!("class `{class_name}` constructor needs an implementation body")
+            })?;
+            let mut called_super = false;
+            for statement in &block.stmts {
+                let is_super = matches!(statement, Stmt::Expr(expression) if matches!(expression.expr.as_ref(), Expr::Call(call) if matches!(call.callee, Callee::Super(_))));
+                initializer_body.extend(lowerer.lower_stmt_seq(statement)?);
+                if is_super {
+                    if called_super {
+                        return Err(format!(
+                            "derived class `{class_name}` constructor calls super more than once"
+                        ));
+                    }
+                    called_super = true;
+                    initializer_body.append(&mut own_initializers);
+                }
+            }
+            if !called_super {
+                return Err(format!(
+                    "derived class `{class_name}` constructor must call super(...)"
+                ));
+            }
+        } else {
+            let (base_initializer, _) = lowerer
+                .super_initializer
+                .clone()
+                .expect("derived class has a base initializer");
+            let signature = &signatures[&base_initializer];
+            if signature.params.len() != 1 {
+                return Err(format!(
+                    "derived class `{class_name}` needs an explicit constructor because its base expects arguments"
+                ));
+            }
+            initializer_body.push(HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var(base_initializer)),
+                vec![HirExpr::Var(this_name.clone())],
+            )));
+            initializer_body.append(&mut own_initializers);
+        }
+    } else {
+        initializer_body.append(&mut own_initializers);
+        if let Some(constructor) = constructor {
+            let block = constructor.body.as_ref().ok_or_else(|| {
+                format!("class `{class_name}` constructor needs an implementation body")
+            })?;
+            initializer_body.extend(lowerer.lower_stmts(&block.stmts)?);
+        }
     }
     initializer_body.push(HirStmt::Return(Some(HirExpr::Var(this_name.clone()))));
 
@@ -5192,6 +5246,7 @@ struct FnLowerer<'a> {
     generic_named_templates: HashMap<Symbol, Symbol>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
+    super_initializer: Option<(Symbol, HirType)>,
 }
 
 type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
@@ -5237,6 +5292,7 @@ impl<'a> FnLowerer<'a> {
             generic_named_templates: HashMap::new(),
             loop_depth: 0,
             labels: Vec::new(),
+            super_initializer: None,
         }
     }
 
@@ -12308,6 +12364,38 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
+        if matches!(call.callee, Callee::Super(_)) {
+            let (symbol, _base_type) = self
+                .super_initializer
+                .clone()
+                .ok_or("`super(...)` is only valid in a derived class constructor")?;
+            let signature = self
+                .signatures
+                .get(&symbol)
+                .cloned()
+                .ok_or_else(|| format!("missing base class initializer `{symbol}`"))?;
+            if call.type_args.is_some()
+                || call.args.iter().any(|argument| argument.spread.is_some())
+            {
+                return Err(
+                    "native `super(...)` does not support type or spread arguments yet".into(),
+                );
+            }
+            if call.args.len() + 1 != signature.params.len() {
+                return Err(format!(
+                    "base constructor expects {} argument(s), got {}",
+                    signature.params.len() - 1,
+                    call.args.len()
+                ));
+            }
+            let this_name = self.resolve_binding("this");
+            let mut args = vec![HirExpr::Var(this_name)];
+            for (index, argument) in call.args.iter().enumerate() {
+                let value = self.lower_expr(&argument.expr)?;
+                args.push(self.coerce_to_declared(&signature.params[index + 1], value)?);
+            }
+            return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+        }
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
@@ -19426,5 +19514,33 @@ mod tests {
         assert!(lower_module(&collision)
             .unwrap_err()
             .contains("collides with an inherited or local field"));
+    }
+
+    #[test]
+    fn lowers_super_to_the_base_initializer_on_the_same_instance() {
+        let program = lower(
+            r#"class Derived extends Base {
+                label: string = "ready";
+                constructor(value: number) { super(value); }
+                answer(): number { return this.value; }
+            }
+            class Base { constructor(public value: number) {} }
+            function main(): number { return new Derived(42).answer(); }"#,
+        );
+        let initializer = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Derived_initialize")
+            .unwrap();
+        assert!(matches!(
+            &initializer.body[0],
+            HirStmt::Expr(HirExpr::Call(callee, args))
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Base_initialize")
+                    && matches!(args.first(), Some(HirExpr::Var(name)) if name == "__thaw_this")
+        ));
+        assert!(matches!(
+            &initializer.body[1],
+            HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "label"
+        ));
     }
 }
