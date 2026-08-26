@@ -16239,6 +16239,22 @@ mod tests {
                 if (result.kind === "failure") return result.value + "!";
                 return result.value ? "true" : "false";
             }
+            function make(ok: boolean): Result {
+                if (ok) return { kind: "success", value: 20 };
+                return { kind: "failure", value: "returned" };
+            }
+            function inferred(ok: boolean): string {
+                const returned = make(ok);
+                const alias = returned;
+                if (alias.kind === "success") return String(alias.value + 2);
+                if (alias.kind === "failure") return alias.value + "!";
+                return "boolean";
+            }
+            function asserted(): string {
+                const result = ({ kind: "success", value: 30 } as Result);
+                if (result.kind === "success") return String(result.value + 3);
+                return "wrong";
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 41 };
@@ -16252,13 +16268,18 @@ mod tests {
                 console.log(numeric({ code: 500, value: "error" }));
                 console.log(local(true));
                 console.log(local(false));
+                console.log(inferred(true));
+                console.log(inferred(false));
+                console.log(asserted());
                 console.log(describe(await delayed(true)));
                 console.log(describe(await delayed(false)));
+                const awaited = await delayed(false);
+                if (awaited.kind === "failure") console.log(awaited.value + " inferred");
             }
         "#;
         assert_eq!(
             compile_and_run(source, "literal_object_union_discriminants"),
-            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n42\nasync!\n"
+            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n22\nreturned!\n33\n42\nasync!\nasync inferred\n"
         );
     }
 
