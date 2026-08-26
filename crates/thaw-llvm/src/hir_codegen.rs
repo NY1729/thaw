@@ -15126,7 +15126,7 @@ mod tests {
                 };
                 return mixed[key];
             }
-            function readTagged(key: string) {
+            function readTagged(key: string): number | string | null | undefined {
                 const mixed: {
                     optionalValue: number | undefined;
                     optionalAbsent: number | undefined;
@@ -16056,9 +16056,18 @@ mod tests {
                 console.log(value === null);
                 return "null";
             }
+            function reorder(value: string | null | number): number | string | null {
+                return value;
+            }
             async function delayed(kind: number): Promise<number | string | null> {
                 await sleep(1);
                 return choose(kind);
+            }
+            async function delayedReorder(
+                value: null | string | number
+            ): Promise<string | number | null> {
+                await sleep(1);
+                return value;
             }
             async function main(): Promise<void> {
                 console.log(describe(choose(0)));
@@ -16066,11 +16075,17 @@ mod tests {
                 console.log(describe(choose(2)));
                 console.log(choose(2));
                 console.log(describe(await delayed(2)));
+                console.log(describe(reorder(9)));
+                console.log(describe(reorder("ordered")));
+                console.log(describe(reorder(null)));
+                console.log(describe(await delayedReorder(10)));
+                console.log(describe(await delayedReorder("async")));
+                console.log(describe(await delayedReorder(null)));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "general_union_null_members"),
-            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n"
+            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n"
         );
     }
 

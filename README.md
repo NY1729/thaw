@@ -183,7 +183,9 @@ The workspace crates have narrow responsibilities:
   tagged union directly and can feed annotations, returns, and nested calls.
   General three-or-more-member unions can include `null` and `undefined` as
   ordinary tagged members, preserving comparison, logging, `typeof` narrowing,
-  function boundaries and async suspension
+  function boundaries and async suspension. Union annotations are
+  order-insensitive: assignments, arguments and returns with the same member
+  set retag values into the destination order exactly once
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
