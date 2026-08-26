@@ -12152,6 +12152,9 @@ impl<'a> FnLowerer<'a> {
                 (!metadata.is_empty()).then_some(metadata)
             }
             Expr::Await(awaited) => self.expression_union_discriminants(&awaited.arg),
+            Expr::Member(member) if matches!(member.prop, MemberProp::Computed(_)) => {
+                self.expression_array_element_discriminants(&member.obj)
+            }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
@@ -20224,6 +20227,7 @@ impl<'a> FnLowerer<'a> {
                     return Err("invalid destructuring assignment target".into())
                 }
             };
+            let propagated_discriminants = self.expression_union_discriminants(&assign.right);
             let value = self.lower_expr(&assign.right)?;
             let ty = if matches!(pattern, Pat::Array(_)) {
                 if let HirExpr::ArrayLit(elements) = &value {
@@ -20239,14 +20243,26 @@ impl<'a> FnLowerer<'a> {
             } else {
                 self.infer_expr_type(&value)?
             };
-            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) {
+            let destructurable_union = matches!(
+                &ty,
+                HirType::Union(elements)
+                    if (matches!(pattern, Pat::Object(_))
+                        && elements.iter().all(|element| matches!(element, HirType::Object(_))))
+                        || (matches!(pattern, Pat::Array(_))
+                            && elements.iter().all(|element| matches!(element, HirType::Tuple(_))))
+            );
+            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) && !destructurable_union {
                 return Err(format!(
-                    "destructuring assignment requires a fixed-shape object or tuple, got {ty:?}"
+                    "destructuring assignment requires a fixed-shape object, tuple, or destructurable union, got {ty:?}"
                 ));
             }
             let temporary = format!("__thaw_destructure_assign_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(temporary.clone(), ty.clone());
+            if let Some(discriminants) = propagated_discriminants {
+                self.union_discriminants
+                    .insert(temporary.clone(), discriminants);
+            }
             let mut statements = Vec::new();
             self.lower_assignment_pattern(
                 &pattern,
