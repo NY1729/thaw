@@ -1353,7 +1353,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Null => Ok(self.context.bool_type().into()),
-            HirType::Function(_, _) | HirType::RestFunction(..) => {
+            HirType::Function(_, _) | HirType::CallableFunction(..) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
@@ -9258,7 +9258,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 match self.expr_hir_type(callee)? {
                     HirType::Function(_, ret) => Some(*ret),
-                    HirType::RestFunction(_, _, ret) => Some(*ret),
+                    HirType::CallableFunction(_, _, _, ret) => Some(*ret),
                     _ => None,
                 }
             }
@@ -9479,14 +9479,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     "function expression",
                 );
             }
-            if let Some(HirType::RestFunction(mut params, rest, ret)) = self.expr_hir_type(callee) {
-                params.push(HirType::Array(rest));
+            if let Some(HirType::CallableFunction(mut params, _, rest, ret)) =
+                self.expr_hir_type(callee)
+            {
+                if let Some(rest) = rest {
+                    params.push(HirType::Array(rest));
+                }
                 return self.compile_closure_call(
                     callee,
                     &params,
                     ret.as_ref(),
                     args,
-                    "rest function expression",
+                    "callable function expression",
                 );
             }
             return Err("call target is not a compiled function value".to_string());
@@ -10076,10 +10080,12 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(HirType::Function(params, ret)) = self.variable_hir_types.get(name).cloned() {
             return self.compile_closure_call(callee, &params, &ret, args, name);
         }
-        if let Some(HirType::RestFunction(mut params, rest, ret)) =
+        if let Some(HirType::CallableFunction(mut params, _, rest, ret)) =
             self.variable_hir_types.get(name).cloned()
         {
-            params.push(HirType::Array(rest));
+            if let Some(rest) = rest {
+                params.push(HirType::Array(rest));
+            }
             return self.compile_closure_call(callee, &params, &ret, args, name);
         }
 
@@ -13907,6 +13913,104 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "async_rest_function_boundary"),
             "call:a|b\nbound:a|b|c\n"
+        );
+    }
+
+    #[test]
+    fn calls_optional_function_values_across_typed_boundaries() {
+        let source = r#"
+            interface Holder {
+                run: (prefix: string, value?: number) => string;
+            }
+            function pass(
+                callback: (prefix: string, value?: number) => string
+            ): (prefix: string, value?: number) => string {
+                return callback;
+            }
+            function namedFormat(prefix: string, value: number = 6): string {
+                return prefix + String(value);
+            }
+            function main(): void {
+                const format: (prefix: string, value?: number) => string =
+                    (prefix: string, value: number = 5): string =>
+                        prefix + String(value);
+                const through = pass(format);
+                const named: (prefix: string, value?: number) => string = namedFormat;
+                const passedNamed = pass(namedFormat);
+                const maybe: ((prefix: string, value?: number) => string) | undefined = through;
+                const holder: Holder = { run: through };
+                const one: [string] = ["apply="];
+                const bound = through.bind(null, "bound=");
+                console.log(through("direct="));
+                console.log(through("value=", 7));
+                console.log(holder.run("object="));
+                console.log(through.call(null, "call="));
+                console.log(through.apply(null, one));
+                console.log(bound());
+                console.log(bound(8));
+                console.log(through.bind(null, "immediate=")());
+                console.log(named("named="));
+                console.log(passedNamed("passed="));
+                console.log(maybe?.("chain="));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_function_boundary"),
+            "direct=5\nvalue=7\nobject=5\ncall=5\napply=5\nbound=5\nbound=8\nimmediate=5\nnamed=6\npassed=6\nchain=5\n"
+        );
+    }
+
+    #[test]
+    fn calls_async_default_function_values_across_typed_boundaries() {
+        let source = r#"
+            async function delayed(value: number = 20): Promise<number> {
+                await sleep(1);
+                return value + 22;
+            }
+            function passAsync(
+                callback: (value?: number) => Promise<number>
+            ): (value?: number) => Promise<number> {
+                return callback;
+            }
+            async function main(): Promise<void> {
+                const through = passAsync(delayed);
+                const bound = through.bind(null);
+                console.log(await through());
+                console.log(await through(1));
+                console.log(await through.call(null));
+                console.log(await bound());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "async_default_function_boundary"),
+            "42\n23\n42\n42\n"
+        );
+    }
+
+    #[test]
+    fn combines_optional_and_rest_function_value_abis() {
+        let source = r#"
+            function main(): void {
+                const format: (
+                    prefix: string,
+                    separator?: string,
+                    ...values: string[]
+                ) => string = (
+                    prefix: string,
+                    separator: string = "|",
+                    ...values: string[]
+                ): string => prefix + values.join(separator);
+                const bound = format.bind(null, "bound:");
+                console.log(format("empty:"));
+                console.log(format("values:", undefined, "a", "b"));
+                console.log(format.call(null, "call:", ",", "x", "y"));
+                console.log(bound());
+                console.log(bound("-", "c", "d"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_rest_function_boundary"),
+            "empty:\nvalues:a|b\ncall:x,y\nbound:\nbound:c-d\n"
         );
     }
 

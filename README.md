@@ -1022,6 +1022,13 @@ The workspace crates have narrow responsibilities:
   any omittable position. Default expressions run in declaration order with
   earlier parameters in scope, and async wrappers retain exactly one Promise
   result layer
+- Function values preserve optional/default positions together with an optional
+  trailing rest element in one callable ABI. Contextual arrows and named
+  functions can cross parameter, return and object-field boundaries, then be
+  invoked directly or through `.call()`, typed-tuple `.apply()`, `.bind()` and
+  optional chaining. Omitted slots use tagged `undefined` values; named default
+  functions dispatch those tags to their existing source-level omission
+  wrappers, including async Promise results
 - Named async generic functions specialize for inferred or explicit types and
   retain exactly one Promise layer when used directly, as instantiated function
   values, or as assimilated Promise callbacks

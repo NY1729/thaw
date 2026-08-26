@@ -39,8 +39,8 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
-    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirInitStep, HirLit, HirParam,
-    HirProgram, HirStmt, HirType, Symbol,
+    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirInitStep, HirLit,
+    HirOptionalMask, HirParam, HirProgram, HirStmt, HirType, Symbol,
 };
 
 type LoweredBinding = (Symbol, HirType, HirExpr);
@@ -3935,6 +3935,24 @@ fn optional_parameter_type(ty: HirType) -> HirType {
     }
 }
 
+fn optional_parameter_mask(optional: &[bool]) -> HirOptionalMask {
+    HirOptionalMask::from_bools(optional)
+}
+
+fn is_optional_parameter(mask: &HirOptionalMask, index: usize) -> bool {
+    mask.contains(index)
+}
+
+fn omitted_parameter_value(ty: &HirType) -> Result<HirExpr, String> {
+    match ty {
+        HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
+        HirType::Nullish(payload) => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
+        other => Err(format!(
+            "omittable callable parameter needs an undefined-capable ABI type, got {other:?}"
+        )),
+    }
+}
+
 fn trailing_omittable_start(patterns: &[Pat]) -> Option<usize> {
     let start = patterns
         .iter()
@@ -6078,9 +6096,9 @@ fn hir_type_contains_dynamic(ty: &HirType) -> bool {
         HirType::Function(parameters, result) => {
             parameters.iter().any(hir_type_contains_dynamic) || hir_type_contains_dynamic(result)
         }
-        HirType::RestFunction(parameters, rest, result) => {
+        HirType::CallableFunction(parameters, _, rest, result) => {
             parameters.iter().any(hir_type_contains_dynamic)
-                || hir_type_contains_dynamic(rest)
+                || rest.as_deref().is_some_and(hir_type_contains_dynamic)
                 || hir_type_contains_dynamic(result)
         }
         _ => false,
@@ -9043,6 +9061,7 @@ fn lower_ts_type(
                 return Err("generic function types are not supported yet".into());
             }
             let mut params = Vec::new();
+            let mut optional = Vec::new();
             let mut rest = None;
             for (index, param) in function.params.iter().enumerate() {
                 match param {
@@ -9053,11 +9072,16 @@ fn lower_ts_type(
                                 param.id.sym
                             )
                         })?;
-                        params.push(lower_ts_type(
+                        let mut ty = lower_ts_type(
                             &annotation.type_ann,
                             interfaces,
                             generic_interfaces,
-                        )?);
+                        )?;
+                        if param.id.optional {
+                            ty = optional_parameter_type(ty);
+                        }
+                        params.push(ty);
+                        optional.push(param.id.optional);
                     }
                     TsFnParam::Rest(param) if index + 1 == function.params.len() => {
                         let annotation = param
@@ -9092,8 +9116,13 @@ fn lower_ts_type(
                 interfaces,
                 generic_interfaces,
             )?;
-            Ok(if let Some(rest) = rest {
-                HirType::RestFunction(params, rest, Box::new(ret))
+            Ok(if rest.is_some() || optional.iter().any(|value| *value) {
+                HirType::CallableFunction(
+                    params,
+                    optional_parameter_mask(&optional),
+                    rest,
+                    Box::new(ret),
+                )
             } else {
                 HirType::Function(params, Box::new(ret))
             })
@@ -9698,6 +9727,7 @@ fn resolve_ts_type_with_substitution(
                 return Err("generic function types are not supported yet".into());
             }
             let mut params = Vec::new();
+            let mut optional = Vec::new();
             let mut rest = None;
             for (index, parameter) in function.params.iter().enumerate() {
                 match parameter {
@@ -9708,13 +9738,18 @@ fn resolve_ts_type_with_substitution(
                                 parameter.id.sym
                             )
                         })?;
-                        params.push(resolve_ts_type_with_substitution(
+                        let mut ty = resolve_ts_type_with_substitution(
                             &annotation.type_ann,
                             substitution,
                             interfaces,
                             generic_interfaces,
                             in_progress,
-                        )?);
+                        )?;
+                        if parameter.id.optional {
+                            ty = optional_parameter_type(ty);
+                        }
+                        params.push(ty);
+                        optional.push(parameter.id.optional);
                     }
                     TsFnParam::Rest(parameter) if index + 1 == function.params.len() => {
                         let annotation = parameter
@@ -9751,8 +9786,13 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             )?;
-            Ok(if let Some(rest) = rest {
-                HirType::RestFunction(params, rest, Box::new(ret))
+            Ok(if rest.is_some() || optional.iter().any(|value| *value) {
+                HirType::CallableFunction(
+                    params,
+                    optional_parameter_mask(&optional),
+                    rest,
+                    Box::new(ret),
+                )
             } else {
                 HirType::Function(params, Box::new(ret))
             })
@@ -10310,7 +10350,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         HirType::Str => Some("string"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
-        HirType::RestFunction(..) => Some("function"),
+        HirType::CallableFunction(..) => Some("function"),
         HirType::Array(_)
         | HirType::Tuple(_)
         | HirType::Object(_)
@@ -10942,11 +10982,17 @@ impl<'a> FnLowerer<'a> {
         }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
-        let (params, rest, ret) = match &target_type {
-            HirType::Function(params, ret) => (params.clone(), None, ret.as_ref().clone()),
-            HirType::RestFunction(params, rest, ret) => (
+        let (params, optional, rest, ret) = match &target_type {
+            HirType::Function(params, ret) => (
                 params.clone(),
-                Some(rest.as_ref().clone()),
+                HirOptionalMask::default(),
+                None,
+                ret.as_ref().clone(),
+            ),
+            HirType::CallableFunction(params, optional, rest, ret) => (
+                params.clone(),
+                optional.clone(),
+                rest.as_deref().cloned(),
                 ret.as_ref().clone(),
             ),
             _ => return Ok(None),
@@ -10961,7 +11007,14 @@ impl<'a> FnLowerer<'a> {
         let this_type = self.infer_expr_type(&this_value)?;
         let (leading, spread_bindings) =
             self.lower_native_spread_values(leading, "function .bind()")?;
-        if let Some(rest) = rest {
+        if !optional.is_empty() || rest.is_some() {
+            if rest.is_none() && leading.len() > params.len() {
+                return Err(format!(
+                    "function .bind() binds {} leading argument(s), but the function accepts {}",
+                    leading.len(),
+                    params.len()
+                ));
+            }
             let fixed_bound_count = leading.len().min(params.len());
             let target_name = format!("__thaw_rest_bind_target_{}", self.next_binding);
             self.next_binding += 1;
@@ -10977,7 +11030,10 @@ impl<'a> FnLowerer<'a> {
 
             let mut bound_names = Vec::with_capacity(leading.len());
             for (index, value) in leading.into_iter().enumerate() {
-                let expected = params.get(index).unwrap_or(&rest);
+                let expected = params
+                    .get(index)
+                    .or(rest.as_ref())
+                    .expect("leading callable argument has a fixed or rest type");
                 let value = self.coerce_to_declared(expected, value)?;
                 let name = format!("__thaw_rest_bound_argument_{}", self.next_binding);
                 self.next_binding += 1;
@@ -10995,11 +11051,14 @@ impl<'a> FnLowerer<'a> {
                     ty: ty.clone(),
                 })
                 .collect::<Vec<_>>();
-            let invocation_rest_name = format!("__thaw_rest_bind_invocation_{}", self.next_binding);
-            self.next_binding += 1;
-            closure_params.push(HirParam {
-                name: invocation_rest_name.clone(),
-                ty: HirType::Array(Box::new(rest.clone())),
+            let invocation_rest_name = rest.as_ref().map(|rest| {
+                let name = format!("__thaw_rest_bind_invocation_{}", self.next_binding);
+                self.next_binding += 1;
+                closure_params.push(HirParam {
+                    name: name.clone(),
+                    ty: HirType::Array(Box::new(rest.clone())),
+                });
+                name
             });
 
             let mut arguments = bound_names[..fixed_bound_count]
@@ -11011,24 +11070,26 @@ impl<'a> FnLowerer<'a> {
                     .iter()
                     .map(|parameter| HirExpr::Var(parameter.name.clone())),
             );
-            let bound_rest = bound_names[fixed_bound_count..]
-                .iter()
-                .map(|(name, _)| HirExpr::Var(name.clone()))
-                .collect::<Vec<_>>();
-            let rest_argument = if bound_rest.is_empty() {
-                HirExpr::Var(invocation_rest_name)
-            } else {
-                HirExpr::ArrayConcat(
-                    vec![
-                        HirExpr::ArrayLit(bound_rest),
-                        HirExpr::Var(invocation_rest_name),
-                    ],
-                    rest.clone(),
-                )
-            };
-            arguments.push(rest_argument);
             let mut source_abi = params.clone();
-            source_abi.push(HirType::Array(Box::new(rest.clone())));
+            if let (Some(rest), Some(invocation_rest_name)) = (&rest, invocation_rest_name) {
+                let bound_rest = bound_names[fixed_bound_count..]
+                    .iter()
+                    .map(|(name, _)| HirExpr::Var(name.clone()))
+                    .collect::<Vec<_>>();
+                let rest_argument = if bound_rest.is_empty() {
+                    HirExpr::Var(invocation_rest_name)
+                } else {
+                    HirExpr::ArrayConcat(
+                        vec![
+                            HirExpr::ArrayLit(bound_rest),
+                            HirExpr::Var(invocation_rest_name),
+                        ],
+                        rest.clone(),
+                    )
+                };
+                arguments.push(rest_argument);
+                source_abi.push(HirType::Array(Box::new(rest.clone())));
+            }
             let body = HirExpr::FunctionCallWithThis(
                 Box::new(HirExpr::Var(target_name.clone())),
                 Box::new(HirExpr::Var(this_name.clone())),
@@ -11039,9 +11100,10 @@ impl<'a> FnLowerer<'a> {
             let mut captures = vec![
                 HirParam {
                     name: target_name,
-                    ty: HirType::RestFunction(
+                    ty: HirType::CallableFunction(
                         params.clone(),
-                        Box::new(rest.clone()),
+                        optional.clone(),
+                        rest.clone().map(Box::new),
                         Box::new(ret.clone()),
                     ),
                 },
@@ -11056,7 +11118,12 @@ impl<'a> FnLowerer<'a> {
                     .map(|(name, ty)| HirParam { name, ty }),
             );
             let closure = HirExpr::Lambda(captures, closure_params, ret.clone(), Box::new(body));
-            let logical = HirType::RestFunction(remaining_fixed, Box::new(rest), Box::new(ret));
+            let logical = HirType::CallableFunction(
+                remaining_fixed.clone(),
+                optional.shifted(fixed_bound_count),
+                rest.map(Box::new),
+                Box::new(ret),
+            );
             return self
                 .wrap_call_argument_bindings(
                     HirExpr::TypedClosure(logical, Box::new(closure)),
@@ -11115,11 +11182,17 @@ impl<'a> FnLowerer<'a> {
         }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
-        let (params, rest, ret) = match &target_type {
-            HirType::Function(params, ret) => (params.clone(), None, ret.as_ref().clone()),
-            HirType::RestFunction(params, rest, ret) => (
+        let (params, optional, rest, ret) = match &target_type {
+            HirType::Function(params, ret) => (
                 params.clone(),
-                Some(rest.as_ref().clone()),
+                HirOptionalMask::default(),
+                None,
+                ret.as_ref().clone(),
+            ),
+            HirType::CallableFunction(params, optional, rest, ret) => (
+                params.clone(),
+                optional.clone(),
+                rest.as_deref().cloned(),
                 ret.as_ref().clone(),
             ),
             _ => return Ok(None),
@@ -11153,14 +11226,16 @@ impl<'a> FnLowerer<'a> {
         let label = format!("function .{operation_name}()");
         let (arguments, spread_bindings) = self.lower_native_spread_values(&forwarded, &label)?;
         let mut arguments = arguments;
-        if rest.is_none() && arguments.len() != params.len() {
+        if arguments.len() > params.len() && rest.is_none() {
             return Err(format!(
                 "function .{operation_name}() expects {} argument(s), got {}",
                 params.len(),
                 arguments.len()
             ));
         }
-        if rest.is_some() && arguments.len() < params.len() {
+        if arguments.len() < params.len()
+            && (arguments.len()..params.len()).any(|index| !is_optional_parameter(&optional, index))
+        {
             return Err(format!(
                 "function .{operation_name}() expects at least {} argument(s), got {}",
                 params.len(),
@@ -11171,6 +11246,9 @@ impl<'a> FnLowerer<'a> {
             let values = arguments.split_off(params.len());
             (element, values)
         });
+        for parameter in params.iter().skip(arguments.len()) {
+            arguments.push(omitted_parameter_value(parameter)?);
+        }
         let mut arguments = arguments
             .into_iter()
             .zip(&params)
@@ -11529,21 +11607,25 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         let bound_type = self.infer_expr_type(&bound)?;
-        let (params, rest) = match &bound_type {
-            HirType::Function(params, _) => (params.clone(), None),
-            HirType::RestFunction(params, rest, _) => (params.clone(), Some(rest.as_ref().clone())),
+        let (params, optional, rest) = match &bound_type {
+            HirType::Function(params, _) => (params.clone(), HirOptionalMask::default(), None),
+            HirType::CallableFunction(params, optional, rest, _) => {
+                (params.clone(), optional.clone(), rest.as_deref().cloned())
+            }
             _ => return Ok(None),
         };
         let (mut arguments, argument_bindings) =
             self.lower_native_spread_values(&call.args, "bound function invocation")?;
-        if rest.is_none() && arguments.len() != params.len() {
+        if rest.is_none() && arguments.len() > params.len() {
             return Err(format!(
                 "bound function invocation expects {} argument(s), got {}",
                 params.len(),
                 arguments.len()
             ));
         }
-        if rest.is_some() && arguments.len() < params.len() {
+        if arguments.len() < params.len()
+            && (arguments.len()..params.len()).any(|index| !is_optional_parameter(&optional, index))
+        {
             return Err(format!(
                 "bound function invocation expects at least {} argument(s), got {}",
                 params.len(),
@@ -11554,6 +11636,9 @@ impl<'a> FnLowerer<'a> {
             let values = arguments.split_off(params.len());
             (element, values)
         });
+        for parameter in params.iter().skip(arguments.len()) {
+            arguments.push(omitted_parameter_value(parameter)?);
+        }
         let mut arguments = arguments
             .into_iter()
             .zip(&params)
@@ -12922,20 +13007,49 @@ impl<'a> FnLowerer<'a> {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
                     }
-                    (Expr::Arrow(arrow), Some(HirType::RestFunction(params, rest, ret))) => {
+                    (Expr::Arrow(arrow), Some(HirType::CallableFunction(params, _, rest, ret))) => {
                         let mut abi_params = params.clone();
-                        abi_params.push(HirType::Array(rest.clone()));
+                        if let Some(rest) = rest {
+                            abi_params.push(HirType::Array(rest.clone()));
+                        }
                         self.lower_contextual_arrow(arrow, &abi_params, Some(ret))?
                     }
                     (Expr::Fn(function), Some(HirType::Function(params, ret))) => {
                         let arrow = function_expression_as_arrow(function)?;
                         self.lower_contextual_arrow(&arrow, params, Some(ret))?
                     }
-                    (Expr::Fn(function), Some(HirType::RestFunction(params, rest, ret))) => {
+                    (Expr::Fn(function), Some(HirType::CallableFunction(params, _, rest, ret))) => {
                         let arrow = function_expression_as_arrow(function)?;
                         let mut abi_params = params.clone();
-                        abi_params.push(HirType::Array(rest.clone()));
+                        if let Some(rest) = rest {
+                            abi_params.push(HirType::Array(rest.clone()));
+                        }
                         self.lower_contextual_arrow(&arrow, &abi_params, Some(ret))?
+                    }
+                    (
+                        Expr::Ident(identifier),
+                        Some(HirType::Function(_, _) | HirType::CallableFunction(..)),
+                    ) => {
+                        let source = self.resolve_binding(identifier.sym.as_ref());
+                        if self.scope.contains_key(&source) {
+                            self.lower_expr(init)?
+                        } else {
+                            let signature = self.signatures.get(&source).ok_or_else(|| {
+                                format!("unknown function value `{}`", identifier.sym)
+                            })?;
+                            if signature.is_extern || !signature.generic_type_params.is_empty() {
+                                return Err(format!(
+                                    "function value `{}` needs a monomorphic implementation",
+                                    identifier.sym
+                                ));
+                            }
+                            let ret = if signature.is_async {
+                                HirType::Promise(Box::new(signature.ret.clone()))
+                            } else {
+                                signature.ret.clone()
+                            };
+                            HirExpr::FunctionRef(source, signature.params.clone(), ret)
+                        }
                     }
                     _ => self.lower_expr(init)?,
                 };
@@ -13198,6 +13312,9 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        if let Some(adapted) = self.adapt_named_function_to_callable(declared, &value)? {
+            return Ok(adapted);
+        }
         if let HirType::Union(elements) = declared {
             let actual = self.infer_expr_type(&value)?;
             if &actual == declared {
@@ -13315,6 +13432,164 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::ObjectLit(reordered))
     }
 
+    fn adapt_named_function_to_callable(
+        &self,
+        declared: &HirType,
+        value: &HirExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let HirType::CallableFunction(fixed, optional, rest, ret) = declared else {
+            return Ok(None);
+        };
+        if optional.is_empty() {
+            return Ok(None);
+        }
+        let HirExpr::FunctionRef(symbol, source_params, source_ret) = value else {
+            return Ok(None);
+        };
+        if source_ret != ret.as_ref() {
+            return Ok(None);
+        }
+        let expected_abi_count = fixed.len() + usize::from(rest.is_some());
+        if source_params.len() != expected_abi_count {
+            return Ok(None);
+        }
+        if let Some(rest) = rest {
+            if source_params.last() != Some(&HirType::Array(rest.clone())) {
+                return Ok(None);
+            }
+        }
+        if optional.count() > 16 {
+            return Err("callable values support at most 16 omittable parameters".into());
+        }
+
+        let mut parameters = fixed
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_callable_argument_{index}"),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(rest) = rest {
+            parameters.push(HirParam {
+                name: "__thaw_callable_rest".into(),
+                ty: HirType::Array(rest.clone()),
+            });
+        }
+        let body = HirExpr::Block(self.build_callable_adapter_dispatch(
+            symbol,
+            fixed,
+            optional,
+            rest.as_deref(),
+            &parameters,
+            0,
+            0,
+        )?);
+        let closure = HirExpr::Lambda(Vec::new(), parameters, ret.as_ref().clone(), Box::new(body));
+        Ok(Some(HirExpr::TypedClosure(
+            declared.clone(),
+            Box::new(closure),
+        )))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_callable_adapter_dispatch(
+        &self,
+        symbol: &str,
+        fixed: &[HirType],
+        optional: &HirOptionalMask,
+        rest: Option<&HirType>,
+        parameters: &[HirParam],
+        index: usize,
+        omitted_mask: usize,
+    ) -> Result<Vec<HirStmt>, String> {
+        let Some(next) = optional
+            .first_at_or_after(index)
+            .filter(|next| *next < fixed.len())
+        else {
+            let target = if omitted_mask == 0 {
+                symbol.to_string()
+            } else {
+                omitted_parameter_symbol(symbol, omitted_mask)
+            };
+            let signature = self.signatures.get(&target).ok_or_else(|| {
+                format!(
+                    "function `{symbol}` cannot use this optional callable shape: missing omission adapter `{target}`"
+                )
+            })?;
+            let mut arguments = Vec::with_capacity(signature.params.len());
+            let mut source_index = 0usize;
+            for (position, parameter) in parameters.iter().take(fixed.len()).enumerate() {
+                if omitted_mask & (1usize << position) != 0 {
+                    continue;
+                }
+                let expected = &signature.params[source_index];
+                source_index += 1;
+                let value = HirExpr::Var(parameter.name.clone());
+                let value = match (&parameter.ty, expected) {
+                    (HirType::Optional(payload), expected) if payload.as_ref() == expected => {
+                        HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone())
+                    }
+                    (HirType::Nullish(payload), expected) if payload.as_ref() == expected => {
+                        HirExpr::NullishValue(Box::new(value), payload.as_ref().clone())
+                    }
+                    (actual, expected) if actual == expected => value,
+                    (actual, expected) => {
+                        return Err(format!(
+                            "callable adapter for `{symbol}` cannot convert parameter {} from {actual:?} to {expected:?}",
+                            position + 1
+                        ));
+                    }
+                };
+                arguments.push(value);
+            }
+            if rest.is_some() {
+                arguments.push(HirExpr::Var("__thaw_callable_rest".into()));
+            }
+            return Ok(vec![HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Var(target)),
+                arguments,
+            )))]);
+        };
+
+        let parameter = &parameters[next];
+        let condition = match &parameter.ty {
+            HirType::Optional(payload) => HirExpr::OptionalIsNone(
+                Box::new(HirExpr::Var(parameter.name.clone())),
+                payload.as_ref().clone(),
+            ),
+            HirType::Nullish(payload) => HirExpr::NullishIsUndefined(
+                Box::new(HirExpr::Var(parameter.name.clone())),
+                payload.as_ref().clone(),
+            ),
+            other => {
+                return Err(format!(
+                    "optional callable parameter {} has non-optional ABI type {other:?}",
+                    next + 1
+                ));
+            }
+        };
+        let absent = self.build_callable_adapter_dispatch(
+            symbol,
+            fixed,
+            optional,
+            rest,
+            parameters,
+            next + 1,
+            omitted_mask | (1usize << next),
+        )?;
+        let present = self.build_callable_adapter_dispatch(
+            symbol,
+            fixed,
+            optional,
+            rest,
+            parameters,
+            next + 1,
+            omitted_mask,
+        )?;
+        Ok(vec![HirStmt::If(condition, absent, present)])
+    }
+
     fn expect_type(
         &self,
         expected: &HirType,
@@ -13322,10 +13597,15 @@ impl<'a> FnLowerer<'a> {
         context: &str,
     ) -> Result<(), String> {
         let actual = self.infer_expr_type(value)?;
-        let rest_compatible = match (expected, &actual) {
-            (HirType::RestFunction(fixed, rest, expected_ret), HirType::Function(params, ret)) => {
+        let callable_compatible = match (expected, &actual) {
+            (
+                HirType::CallableFunction(fixed, _, rest, expected_ret),
+                HirType::Function(params, ret),
+            ) => {
                 let mut abi = fixed.clone();
-                abi.push(HirType::Array(rest.clone()));
+                if let Some(rest) = rest {
+                    abi.push(HirType::Array(rest.clone()));
+                }
                 abi == *params && expected_ret == ret
             }
             _ => false,
@@ -13333,7 +13613,7 @@ impl<'a> FnLowerer<'a> {
         if actual == HirType::Dynamic
             || *expected == HirType::Dynamic
             || actual == *expected
-            || rest_compatible
+            || callable_compatible
         {
             Ok(())
         } else {
@@ -13545,8 +13825,10 @@ impl<'a> FnLowerer<'a> {
                 let HirExpr::Var(name) = callee.as_ref() else {
                     let (params, ret) = match self.infer_expr_type(callee)? {
                         HirType::Function(params, ret) => (params, ret),
-                        HirType::RestFunction(mut params, rest, ret) => {
-                            params.push(HirType::Array(rest));
+                        HirType::CallableFunction(mut params, _, rest, ret) => {
+                            if let Some(rest) = rest {
+                                params.push(HirType::Array(rest));
+                            }
                             (params, ret)
                         }
                         _ => return Err("call target is not a function value".into()),
@@ -13947,11 +14229,12 @@ impl<'a> FnLowerer<'a> {
                     }
                     return Ok(ret.as_ref().clone());
                 }
-                if let Some(HirType::RestFunction(params, _, ret)) = self.scope.get(name) {
-                    if params.len() + 1 != args.len() {
+                if let Some(HirType::CallableFunction(params, _, rest, ret)) = self.scope.get(name)
+                {
+                    let abi_count = params.len() + usize::from(rest.is_some());
+                    if abi_count != args.len() {
                         return Err(format!(
-                            "rest function value `{name}` expects {} ABI argument(s), got {}",
-                            params.len() + 1,
+                            "callable function value `{name}` expects {abi_count} ABI argument(s), got {}",
                             args.len()
                         ));
                     }
@@ -14158,7 +14441,7 @@ impl<'a> FnLowerer<'a> {
             | HirType::Object(_)
             | HirType::Promise(_)
             | HirType::Function(_, _)
-            | HirType::RestFunction(..) => Ok(HirExpr::Lit(HirLit::Bool(true))),
+            | HirType::CallableFunction(..) => Ok(HirExpr::Lit(HirLit::Bool(true))),
             other => Err(format!(
                 "logical truthiness is not defined for native type {other:?}"
             )),
@@ -15813,6 +16096,14 @@ impl<'a> FnLowerer<'a> {
             for (pat, ty) in arrow.params.iter().zip(parameter_types) {
                 let source_name = match pat {
                     Pat::Ident(binding) => binding.id.sym.to_string(),
+                    Pat::Assign(assignment) => match assignment.left.as_ref() {
+                        Pat::Ident(binding) => binding.id.sym.to_string(),
+                        _ => {
+                            return Err(
+                                "default callback parameters require an identifier binding".into()
+                            )
+                        }
+                    },
                     Pat::Rest(rest) => match rest.arg.as_ref() {
                         Pat::Ident(binding) => binding.id.sym.to_string(),
                         _ => {
@@ -15985,10 +16276,35 @@ impl<'a> FnLowerer<'a> {
             }
             _ => return Err("Promise callback must be an arrow or function value".into()),
         };
+        let callback = if parameter_types
+            .iter()
+            .any(|ty| matches!(ty, HirType::Optional(_) | HirType::Nullish(_)))
+        {
+            if let Some(expected_return) = expected_return {
+                let optional = parameter_types
+                    .iter()
+                    .map(|ty| matches!(ty, HirType::Optional(_) | HirType::Nullish(_)))
+                    .collect::<Vec<_>>();
+                let declared = HirType::CallableFunction(
+                    parameter_types.to_vec(),
+                    optional_parameter_mask(&optional),
+                    None,
+                    Box::new(expected_return.clone()),
+                );
+                self.adapt_named_function_to_callable(&declared, &callback)?
+                    .unwrap_or(callback)
+            } else {
+                callback
+            }
+        } else {
+            callback
+        };
         let (params, ret) = match self.infer_expr_type(&callback)? {
             HirType::Function(params, ret) => (params, ret),
-            HirType::RestFunction(mut params, rest, ret) => {
-                params.push(HirType::Array(rest));
+            HirType::CallableFunction(mut params, _, rest, ret) => {
+                if let Some(rest) = rest {
+                    params.push(HirType::Array(rest));
+                }
                 (params, ret)
             }
             _ => return Err("Promise callback is not a function value".into()),
@@ -21685,28 +22001,23 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .find(|(name, _)| name == resolved_property)
                             .and_then(|(_, ty)| match ty {
-                                HirType::Function(params, ret) => {
-                                    Some((params.clone(), ret.as_ref().clone(), None))
-                                }
-                                HirType::RestFunction(params, rest, ret) => Some((
+                                HirType::Function(params, ret) => Some((
                                     params.clone(),
                                     ret.as_ref().clone(),
-                                    Some(rest.as_ref().clone()),
+                                    None,
+                                    HirOptionalMask::default(),
+                                )),
+                                HirType::CallableFunction(params, optional, rest, ret) => Some((
+                                    params.clone(),
+                                    ret.as_ref().clone(),
+                                    rest.as_deref().cloned(),
+                                    optional.clone(),
                                 )),
                                 _ => None,
                             }),
                         _ => None,
                     });
-                    if let Some((params, _, rest)) = callable {
-                        if rest.is_none() && params.len() != call.args.len() {
-                            return Err(format!(
-                                "method `{}.{}` expects {} argument(s), got {}",
-                                object.sym,
-                                property,
-                                params.len(),
-                                call.args.len()
-                            ));
-                        }
+                    if let Some((params, _, rest, optional)) = callable {
                         let object_expr = self.lower_expr(&member.obj)?;
                         let callee = HirExpr::PropAccess(
                             Box::new(object_expr),
@@ -21716,7 +22027,10 @@ impl<'a> FnLowerer<'a> {
                         let label = format!("method `{}.{}`", object.sym, property);
                         let (mut args, bindings) =
                             self.lower_native_spread_values(&call.args, &label)?;
-                        if args.len() < params.len() {
+                        if args.len() < params.len()
+                            && (args.len()..params.len())
+                                .any(|index| !is_optional_parameter(&optional, index))
+                        {
                             return Err(format!(
                                 "method `{}.{}` expects at least {} argument(s), got {}",
                                 object.sym,
@@ -21729,6 +22043,9 @@ impl<'a> FnLowerer<'a> {
                             let values = args.split_off(params.len());
                             (element, values)
                         });
+                        for parameter in params.iter().skip(args.len()) {
+                            args.push(omitted_parameter_value(parameter)?);
+                        }
                         let mut args = args
                             .into_iter()
                             .zip(&params)
@@ -22158,14 +22475,22 @@ impl<'a> FnLowerer<'a> {
 
         let mut signature = self.signatures.get(&callee_name).cloned();
         let local_function = self.scope.get(&callee_name).and_then(|ty| match ty {
-            HirType::Function(params, ret) => Some((params.clone(), ret.as_ref().clone(), None)),
-            HirType::RestFunction(params, rest, ret) => {
+            HirType::Function(params, ret) => Some((
+                params.clone(),
+                ret.as_ref().clone(),
+                None,
+                HirOptionalMask::default(),
+            )),
+            HirType::CallableFunction(params, optional, rest, ret) => {
                 let mut abi_params = params.clone();
-                abi_params.push(HirType::Array(rest.clone()));
+                if let Some(rest) = rest {
+                    abi_params.push(HirType::Array(rest.clone()));
+                }
                 Some((
                     abi_params,
                     ret.as_ref().clone(),
-                    Some(rest.as_ref().clone()),
+                    rest.as_deref().cloned(),
+                    optional.clone(),
                 ))
             }
             _ => None,
@@ -22173,7 +22498,11 @@ impl<'a> FnLowerer<'a> {
         let mut param_types = signature
             .as_ref()
             .map(|sig| sig.params.clone())
-            .or_else(|| local_function.as_ref().map(|(params, _, _)| params.clone()));
+            .or_else(|| {
+                local_function
+                    .as_ref()
+                    .map(|(params, _, _, _)| params.clone())
+            });
 
         let mut argument_bindings = Vec::new();
         let mut lowered_arguments = Vec::new();
@@ -22187,9 +22516,11 @@ impl<'a> FnLowerer<'a> {
                         HirType::Function(params, ret) => {
                             Some((params.clone(), ret.as_ref().clone()))
                         }
-                        HirType::RestFunction(params, rest, ret) => {
+                        HirType::CallableFunction(params, _, rest, ret) => {
                             let mut abi_params = params.clone();
-                            abi_params.push(HirType::Array(rest.clone()));
+                            if let Some(rest) = rest {
+                                abi_params.push(HirType::Array(rest.clone()));
+                            }
                             Some((abi_params, ret.as_ref().clone()))
                         }
                         _ => None,
@@ -22273,7 +22604,7 @@ impl<'a> FnLowerer<'a> {
         });
         let local_rest_values = local_function
             .as_ref()
-            .and_then(|(_, _, rest)| rest.clone())
+            .and_then(|(_, _, rest, _)| rest.clone())
             .map(|element| {
                 let fixed_count = param_types
                     .as_ref()
@@ -22285,6 +22616,26 @@ impl<'a> FnLowerer<'a> {
                 };
                 (element, values)
             });
+
+        if let Some((fixed, _, _, optional)) = &local_function {
+            let fixed_count = fixed.len() - usize::from(local_rest_values.is_some());
+            if lowered_arguments.len() < fixed_count {
+                for (index, parameter) in fixed
+                    .iter()
+                    .enumerate()
+                    .take(fixed_count)
+                    .skip(lowered_arguments.len())
+                {
+                    if !is_optional_parameter(optional, index) {
+                        return Err(format!(
+                            "function `{callee_name}` expects argument {}, but it was omitted",
+                            index + 1
+                        ));
+                    }
+                    lowered_arguments.push(omitted_parameter_value(parameter)?);
+                }
+            }
+        }
 
         if let Some(full_signature) = signature.clone() {
             let logical_param_count =
@@ -23244,10 +23595,24 @@ impl<'a> FnLowerer<'a> {
             HirType::Nullish(payload) => (payload, 2),
             _ => return self.lower_call(&CallExpr::from(call.clone())),
         };
-        let HirType::Function(params, return_type) = payload.as_ref() else {
-            return Err(format!(
-                "optional call requires a function payload, got {payload:?}"
-            ));
+        let (params, optional, rest, return_type) = match payload.as_ref() {
+            HirType::Function(params, ret) => (
+                params.clone(),
+                HirOptionalMask::default(),
+                None,
+                ret.as_ref().clone(),
+            ),
+            HirType::CallableFunction(params, optional, rest, ret) => (
+                params.clone(),
+                optional.clone(),
+                rest.as_deref().cloned(),
+                ret.as_ref().clone(),
+            ),
+            _ => {
+                return Err(format!(
+                    "optional call requires a function payload, got {payload:?}"
+                ))
+            }
         };
         if call.type_args.is_some() {
             return Err("optional native calls do not accept type arguments".into());
@@ -23255,22 +23620,50 @@ impl<'a> FnLowerer<'a> {
         if call.args.iter().any(|argument| argument.spread.is_some()) {
             return Err("optional native call spread arguments are not supported".into());
         }
-        if params.len() != call.args.len() {
+        if call.args.len() > params.len() && rest.is_none() {
             return Err(format!(
-                "optional function expects {} argument(s), got {}",
+                "optional function accepts {} argument(s), got {}",
                 params.len(),
                 call.args.len()
             ));
         }
-        let arguments = call
+        if call.args.len() < params.len()
+            && (call.args.len()..params.len()).any(|index| !is_optional_parameter(&optional, index))
+        {
+            return Err(format!(
+                "optional function requires at least {} argument(s), got {}",
+                optional.first_at_or_after(0).unwrap_or(params.len()),
+                call.args.len()
+            ));
+        }
+        let mut arguments = call
             .args
             .iter()
-            .zip(params)
-            .map(|(argument, expected)| {
-                let value = self.lower_expr(&argument.expr)?;
-                self.coerce_to_declared(expected, value)
-            })
+            .map(|argument| self.lower_expr(&argument.expr))
             .collect::<Result<Vec<_>, String>>()?;
+        let rest_values = rest.as_ref().map(|element| {
+            let values = if arguments.len() > params.len() {
+                arguments.split_off(params.len())
+            } else {
+                Vec::new()
+            };
+            (element, values)
+        });
+        for parameter in params.iter().skip(arguments.len()) {
+            arguments.push(omitted_parameter_value(parameter)?);
+        }
+        let mut arguments = arguments
+            .into_iter()
+            .zip(&params)
+            .map(|(value, expected)| self.coerce_to_declared(expected, value))
+            .collect::<Result<Vec<_>, String>>()?;
+        if let Some((element, values)) = rest_values {
+            let values = values
+                .into_iter()
+                .map(|value| self.coerce_to_declared(element, value))
+                .collect::<Result<Vec<_>, _>>()?;
+            arguments.push(native_rest_array(values, element));
+        }
 
         let name = format!("__thaw_optional_callee_{}", self.next_binding);
         self.next_binding += 1;
@@ -23289,7 +23682,7 @@ impl<'a> FnLowerer<'a> {
             2 => HirExpr::NullishIsNone(Box::new(bound), payload.as_ref().clone()),
             _ => unreachable!(),
         };
-        let result = if return_type.as_ref() == &HirType::Void {
+        let result = if return_type == HirType::Void {
             HirExpr::Block(vec![HirStmt::If(
                 is_none(bound),
                 vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))],
@@ -23299,7 +23692,7 @@ impl<'a> FnLowerer<'a> {
                 ],
             )])
         } else {
-            let (result_payload, present) = match return_type.as_ref() {
+            let (result_payload, present) = match &return_type {
                 HirType::Optional(inner) => (inner.as_ref().clone(), invoked),
                 output => (
                     output.clone(),

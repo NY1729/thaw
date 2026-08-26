@@ -29,7 +29,7 @@ use swc_ecma_ast::{
 };
 use thaw_hir::{
     FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi,
-    HirType,
+    HirOptionalMask, HirType,
 };
 
 /// One function signature extracted from a `.d.ts` file, before
@@ -846,9 +846,10 @@ fn classify_ts_type(
                 return DtsType::Unsupported("generic callback types are not supported".into());
             }
             let mut params = Vec::with_capacity(function.params.len());
+            let mut optional = Vec::with_capacity(function.params.len());
             let mut rest = None;
             for (index, parameter) in function.params.iter().enumerate() {
-                let annotation = match parameter {
+                let (annotation, is_optional) = match parameter {
                     TsFnParam::Ident(parameter) => {
                         let Some(annotation) = &parameter.type_ann else {
                             return DtsType::Unsupported(format!(
@@ -856,7 +857,7 @@ fn classify_ts_type(
                                 parameter.id.sym
                             ));
                         };
-                        annotation
+                        (annotation, parameter.id.optional)
                     }
                     TsFnParam::Rest(parameter) if index + 1 == function.params.len() => {
                         let Some(annotation) = &parameter.type_ann else {
@@ -890,7 +891,16 @@ fn classify_ts_type(
                     }
                 };
                 match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
-                    DtsType::Native(ty) => params.push(ty),
+                    DtsType::Native(mut ty) => {
+                        if is_optional {
+                            ty = match ty {
+                                HirType::Optional(_) | HirType::Nullish(_) => ty,
+                                HirType::Nullable(payload) => HirType::Nullish(payload),
+                                other => HirType::Optional(Box::new(other)),
+                            };
+                        }
+                        params.push(ty);
+                    }
                     // Callback values cross the JavaScript/N-API boundary as
                     // dynamic JSON. In real Node declarations the error slot
                     // is normally `Error | null` and result slots are often
@@ -898,13 +908,22 @@ fn classify_ts_type(
                     // faithful dynamic representation at this boundary.
                     DtsType::Unsupported(_) => params.push(HirType::Json),
                 }
+                optional.push(is_optional);
             }
             match classify_ts_type(&function.type_ann.type_ann, interfaces, generic_interfaces) {
-                DtsType::Native(ret) => DtsType::Native(if let Some(rest) = rest {
-                    HirType::RestFunction(params, Box::new(rest), Box::new(ret))
-                } else {
-                    HirType::Function(params, Box::new(ret))
-                }),
+                DtsType::Native(ret) => {
+                    DtsType::Native(if rest.is_some() || optional.iter().any(|value| *value) {
+                        let optional = HirOptionalMask::from_bools(&optional);
+                        HirType::CallableFunction(
+                            params,
+                            optional,
+                            rest.map(Box::new),
+                            Box::new(ret),
+                        )
+                    } else {
+                        HirType::Function(params, Box::new(ret))
+                    })
+                }
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("callback return type: {reason}"))
                 }
@@ -1471,13 +1490,21 @@ fn render_ts_type(ty: &HirType) -> String {
                 .join(", ");
             format!("({params}) => {}", render_ts_type(ret))
         }
-        HirType::RestFunction(params, rest, ret) => {
+        HirType::CallableFunction(params, optional, rest, ret) => {
             let mut params = params
                 .iter()
                 .enumerate()
-                .map(|(index, ty)| format!("arg{index}: {}", render_ts_type(ty)))
+                .map(|(index, ty)| {
+                    format!(
+                        "arg{index}{}: {}",
+                        if optional.contains(index) { "?" } else { "" },
+                        render_ts_type(ty)
+                    )
+                })
                 .collect::<Vec<_>>();
-            params.push(format!("...rest: {}[]", render_ts_type(rest)));
+            if let Some(rest) = rest {
+                params.push(format!("...rest: {}[]", render_ts_type(rest)));
+            }
             format!("({}) => {}", params.join(", "), render_ts_type(ret))
         }
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
@@ -2279,9 +2306,30 @@ mod tests {
         };
         assert_eq!(
             signature.params,
-            vec![HirType::RestFunction(
+            vec![HirType::CallableFunction(
                 vec![HirType::Str],
-                Box::new(HirType::F64),
+                HirOptionalMask::default(),
+                Some(Box::new(HirType::F64)),
+                Box::new(HirType::Str),
+            )]
+        );
+    }
+
+    #[test]
+    fn classifies_typed_optional_callback_parameter_as_fast_path() {
+        let funcs = parse_dts(
+            "export declare function f(cb: (prefix: string, value?: number) => string): void;",
+        )
+        .unwrap();
+        let Classification::FastPath(signature) = classify(&funcs[0]) else {
+            panic!("expected optional callback fast path");
+        };
+        assert_eq!(
+            signature.params,
+            vec![HirType::CallableFunction(
+                vec![HirType::Str, HirType::Optional(Box::new(HirType::F64))],
+                HirOptionalMask::from_bools(&[false, true]),
+                None,
                 Box::new(HirType::Str),
             )]
         );
