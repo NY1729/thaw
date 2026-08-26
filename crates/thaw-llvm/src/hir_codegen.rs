@@ -6103,46 +6103,20 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(value)
     }
 
-    fn compile_lambda(
+    fn allocate_lambda_environment(
         &mut self,
+        function: FunctionValue<'ctx>,
+        this_adapter: FunctionValue<'ctx>,
         captures: &[HirParam],
-        params: &[HirParam],
-        ret: &HirType,
-        body: &HirExpr,
-    ) -> Result<BasicValueEnum<'ctx>, String> {
-        let parent_block = self
-            .builder
-            .get_insert_block()
-            .ok_or("lambda must be emitted inside a function")?;
-        let param_types = params
-            .iter()
-            .map(|param| param.ty.clone())
-            .collect::<Vec<_>>();
-        let function_type = self.function_type(&param_types, ret)?;
-        let name = format!("__thaw_lambda_{}", self.next_lambda);
-        self.next_lambda += 1;
-        let function = self
-            .module
-            .add_function(&name, function_type, Some(Linkage::Internal));
-        let this_adapter = self.compile_ignored_this_adapter(
-            function,
-            &param_types,
-            ret,
-            &format!("{name}__thaw_this_adapter"),
-        )?;
-
-        // Closure layout: `[ordinary entry][this-aware entry][capture 0][capture 1]...`, with
-        // one machine word per entry. The arena gives the environment a
-        // lifetime long enough for callbacks that outlive their creator.
+    ) -> Result<PointerValue<'ctx>, String> {
         let i64_type = self.context.i64_type();
-        let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let closure = self
             .builder
             .build_call(
-                alloc,
+                self.module.get_function("thaw_arena_alloc").unwrap(),
                 &[
                     i64_type
-                        .const_int(CLOSURE_CAPTURE_BASE + (captures.len() as u64 * 8), false)
+                        .const_int(CLOSURE_CAPTURE_BASE + captures.len() as u64 * 8, false)
                         .into(),
                     i64_type.const_int(8, false).into(),
                 ],
@@ -6178,7 +6152,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .get(&capture.name)
                 .copied()
                 .ok_or_else(|| format!("missing captured variable `{}`", capture.name))?;
-            let offset = i64_type.const_int(CLOSURE_CAPTURE_BASE + (index as u64 * 8), false);
+            let offset = i64_type.const_int(CLOSURE_CAPTURE_BASE + index as u64 * 8, false);
             let slot = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), closure, &[offset], "capture_slot")
@@ -6188,6 +6162,172 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(slot, variable_cell)
                 .map_err(|error| error.to_string())?;
         }
+        Ok(closure)
+    }
+
+    fn compile_async_lambda(
+        &mut self,
+        captures: &[HirParam],
+        params: &[HirParam],
+        resolved: &HirType,
+        body: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let parent_block = self
+            .builder
+            .get_insert_block()
+            .ok_or("async lambda must be emitted inside a function")?;
+        let name = format!("__thaw_async_lambda_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let mut lifted_params = captures.to_vec();
+        lifted_params.extend_from_slice(params);
+        let lifted = HirFunction {
+            name: name.clone(),
+            params: lifted_params,
+            ret: resolved.clone(),
+            is_async: true,
+            body: match body {
+                HirExpr::Block(statements) => statements.clone(),
+                expression => vec![HirStmt::Return(Some(expression.clone()))],
+            },
+        };
+        self.frame_async_functions
+            .insert(name.clone(), resolved.clone());
+        self.declare_function(&lifted)
+            .map_err(|error| format!("async lambda `{name}`: {error}"))?;
+
+        let saved_variables = std::mem::take(&mut self.variables);
+        let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
+        let compiled = self.compile_function_body(&lifted);
+        self.variables = saved_variables;
+        self.variable_hir_types = saved_variable_hir_types;
+        self.catch_stack = saved_catch_stack;
+        self.loop_stack = saved_loop_stack;
+        self.builder.position_at_end(parent_block);
+        compiled.map_err(|error| format!("async lambda `{name}`: {error}"))?;
+
+        let promise_type = HirType::Promise(Box::new(resolved.clone()));
+        let param_types = params
+            .iter()
+            .map(|parameter| parameter.ty.clone())
+            .collect::<Vec<_>>();
+        let adapter_name = format!("{name}__closure");
+        let adapter = self.module.add_function(
+            &adapter_name,
+            self.function_type(&param_types, &promise_type)?,
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(adapter, "entry");
+        self.builder.position_at_end(entry);
+        let environment = adapter.get_first_param().unwrap().into_pointer_value();
+        let i64_type = self.context.i64_type();
+        let mut arguments = Vec::with_capacity(captures.len() + params.len());
+        for (index, capture) in captures.iter().enumerate() {
+            let offset = i64_type.const_int(CLOSURE_CAPTURE_BASE + index as u64 * 8, false);
+            let capture_slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        environment,
+                        &[offset],
+                        "async_capture",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let cell = self
+                .builder
+                .build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    capture_slot,
+                    "async_capture_cell",
+                )
+                .map_err(|error| error.to_string())?
+                .into_pointer_value();
+            arguments.push(
+                self.builder
+                    .build_load(self.basic_type(&capture.ty)?, cell, "async_capture_value")
+                    .map_err(|error| error.to_string())?
+                    .into(),
+            );
+        }
+        arguments.extend(
+            adapter
+                .get_param_iter()
+                .skip(1)
+                .map(BasicMetadataValueEnum::from),
+        );
+        let target = self.module.get_function(&name).unwrap();
+        let promise = self
+            .builder
+            .build_call(target, &arguments, "invoke_async_lambda")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("async lambda did not return a promise")?;
+        self.builder
+            .build_return(Some(&promise))
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(parent_block);
+        let this_adapter = self.compile_ignored_this_adapter(
+            adapter,
+            &param_types,
+            &promise_type,
+            &format!("{adapter_name}__thaw_this_adapter"),
+        )?;
+        Ok(self
+            .allocate_lambda_environment(adapter, this_adapter, captures)?
+            .into())
+    }
+
+    fn compile_lambda(
+        &mut self,
+        captures: &[HirParam],
+        params: &[HirParam],
+        ret: &HirType,
+        body: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if let HirType::Promise(resolved) = ret {
+            let frame_functions = self
+                .frame_async_functions
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+            let suspends = match body {
+                HirExpr::Block(statements) => statements
+                    .iter()
+                    .any(|statement| Self::stmt_awaits_frame_source(statement, &frame_functions)),
+                expression => Self::expr_awaits_frame_source(expression, &frame_functions),
+            };
+            if suspends {
+                return self.compile_async_lambda(captures, params, resolved, body);
+            }
+        }
+        let parent_block = self
+            .builder
+            .get_insert_block()
+            .ok_or("lambda must be emitted inside a function")?;
+        let param_types = params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect::<Vec<_>>();
+        let function_type = self.function_type(&param_types, ret)?;
+        let name = format!("__thaw_lambda_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let function = self
+            .module
+            .add_function(&name, function_type, Some(Linkage::Internal));
+        let this_adapter = self.compile_ignored_this_adapter(
+            function,
+            &param_types,
+            ret,
+            &format!("{name}__thaw_this_adapter"),
+        )?;
+
+        let i64_type = self.context.i64_type();
+        // Closure captures retain their variable cells so mutations remain
+        // visible when the function value is invoked later.
+        let closure = self.allocate_lambda_environment(function, this_adapter, captures)?;
 
         let saved_variables = std::mem::take(&mut self.variables);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
@@ -19532,6 +19672,9 @@ mod tests {
                 await sleep(1);
                 return value;
             }
+            async function pause(): Promise<void> {
+                await sleep(1);
+            }
             async function main(): Promise<void> {
                 const offset: number = 2;
                 const double: (value: number) => Promise<number> =
@@ -19558,11 +19701,35 @@ mod tests {
                     return await delayed(0);
                 };
                 console.log(await adoptedBlock(true));
+                const suspended: (value: number) => Promise<number> = async value => {
+                    const loaded: number = await delayed(value);
+                    await sleep(1);
+                    return loaded + offset;
+                };
+                console.log(await suspended(40));
+                const suspendedExpression: (value: number) => Promise<number> =
+                    async value => (await delayed(value)) + offset;
+                console.log(await suspendedExpression(40));
+                const suspendedVoid: () => Promise<void> = async () => {
+                    return await pause();
+                };
+                await suspendedVoid();
+                console.log("void");
+                const catches: () => Promise<string> = async () => {
+                    let message: string = "missed";
+                    try {
+                        await new Promise<number>((resolve, reject) => reject("boom"));
+                    } catch (error) {
+                        message = "caught " + error;
+                    }
+                    return message;
+                };
+                console.log(await catches());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "expression_bodied_async_arrow"),
-            "42\n42\ndone\n42\n42\n42\n"
+            "42\n42\ndone\n42\n42\n42\n42\n42\nvoid\ncaught boom\n"
         );
     }
 
