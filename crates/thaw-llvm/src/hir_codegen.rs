@@ -18834,6 +18834,66 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_native_class_default_parameters() {
+        let source = r#"
+            class Box {
+                constructor(public value: number = 40, public label: string = String(value)) {}
+                add(delta: number = this.value): number { return this.value + delta; }
+                static sum(left: number = 20, right: number = left + 22): number {
+                    return left + right;
+                }
+            }
+            function main(): void {
+                const first = new Box();
+                const second = new Box(41);
+                const third = new Box(42, "explicit");
+                console.log(first.value);
+                console.log(first.label);
+                console.log(second.label);
+                console.log(third.label);
+                console.log(first.add());
+                console.log(Box.sum());
+                console.log(Box.sum(21));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_default_parameters"),
+            "40\n40\n41\nexplicit\n80\n62\n64\n"
+        );
+    }
+
+    #[test]
+    fn compiles_inherited_and_super_native_class_default_parameters() {
+        let source = r#"
+            class Base {
+                constructor(public value: number = 40) {}
+                add(delta: number = this.value): number { return this.value + delta; }
+                static sum(left: number = 20, right: number = left + 22): number {
+                    return left + right;
+                }
+            }
+            class Implicit extends Base {}
+            class Explicit extends Base {
+                constructor() { super(); }
+                addAgain(): number { return super.add(); }
+                static sumAgain(): number { return super.sum(); }
+            }
+            function main(): void {
+                const implicit = new Implicit();
+                const explicit = new Explicit();
+                console.log(implicit.value);
+                console.log(explicit.value);
+                console.log(explicit.addAgain());
+                console.log(Explicit.sumAgain());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_inherited_default_parameters"),
+            "40\n40\n80\n62\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
