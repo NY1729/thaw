@@ -22052,6 +22052,8 @@ impl<'a> FnLowerer<'a> {
                 }
             };
             let propagated_discriminants = self.expression_union_discriminants(&assign.right);
+            let propagated_function_property_discriminants =
+                self.expression_object_function_property_discriminants(&assign.right);
             let value = self.lower_expr(&assign.right)?;
             let ty = if matches!(pattern, Pat::Array(_)) {
                 if let HirExpr::ArrayLit(elements) = &value {
@@ -22085,6 +22087,10 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(temporary.clone(), ty.clone());
             if let Some(discriminants) = propagated_discriminants {
                 self.union_discriminants
+                    .insert(temporary.clone(), discriminants);
+            }
+            if let Some(discriminants) = propagated_function_property_discriminants {
+                self.object_function_property_discriminants
                     .insert(temporary.clone(), discriminants);
             }
             let mut statements = Vec::new();
@@ -22396,6 +22402,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<(), String> {
         match pattern {
             Pat::Ident(binding) => {
+                let function = self.hir_function_property_discriminants(&value);
                 let name = self.resolve_binding(binding.id.sym.as_ref());
                 if self.immutable_bindings.contains(&name) {
                     return Err(format!("cannot assign to constant `{name}`"));
@@ -22407,6 +22414,34 @@ impl<'a> FnLowerer<'a> {
                     .ok_or_else(|| format!("assignment to unknown binding `{name}`"))?;
                 let value = self.coerce_to_declared(&expected, value)?;
                 self.invalidate_destructured_union_correlation(&name);
+                let (result, array, nested_array, object, functions) = function
+                    .map(|metadata| {
+                        (
+                            metadata.value,
+                            metadata.array,
+                            (!metadata.nested_array.is_empty()).then_some(metadata.nested_array),
+                            (!metadata.object.is_empty()).then_some(metadata.object),
+                            (!metadata.functions.is_empty()).then_some(metadata.functions),
+                        )
+                    })
+                    .unwrap_or_default();
+                replace_metadata(&mut self.function_value_discriminants, &name, result);
+                replace_metadata(&mut self.function_value_array_discriminants, &name, array);
+                replace_metadata(
+                    &mut self.function_value_nested_array_discriminants,
+                    &name,
+                    nested_array,
+                );
+                replace_metadata(
+                    &mut self.function_value_object_array_property_discriminants,
+                    &name,
+                    object,
+                );
+                replace_metadata(
+                    &mut self.function_value_object_function_property_discriminants,
+                    &name,
+                    functions,
+                );
                 statements.push(HirStmt::Expr(HirExpr::Assign(name, Box::new(value))));
                 Ok(())
             }
