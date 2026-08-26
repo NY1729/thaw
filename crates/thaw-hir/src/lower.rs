@@ -6807,6 +6807,13 @@ fn lower_generic_instance(
                         .union_discriminants
                         .insert(param.name.clone(), discriminants);
                 }
+                let return_discriminants =
+                    function_return_discriminants(&annotation.type_ann, generic_interfaces);
+                if !return_discriminants.is_empty() {
+                    lowerer
+                        .function_value_discriminants
+                        .insert(param.name.clone(), return_discriminants);
+                }
             }
         }
     }
@@ -6959,6 +6966,31 @@ fn object_union_discriminants(
                 .all(|(index, value)| values[..index].iter().all(|previous| previous != value))
     });
     by_property
+}
+
+fn function_return_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> HashMap<Symbol, Vec<Option<HirLit>>> {
+    let Some(resolved) = resolve_plain_alias_type(ty, generic) else {
+        return HashMap::new();
+    };
+    let result = match resolved {
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            Some(function.type_ann.type_ann.as_ref())
+        }
+        TsType::TsTypeLit(literal) => match literal.members.as_slice() {
+            [TsTypeElement::TsCallSignatureDecl(call)] => call
+                .type_ann
+                .as_ref()
+                .map(|annotation| annotation.type_ann.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    };
+    result
+        .map(|result| object_union_discriminants(result, generic))
+        .unwrap_or_default()
 }
 
 fn function_expression_as_arrow(
@@ -8881,6 +8913,13 @@ fn lower_fn_decl(
                         .union_discriminants
                         .insert(param.name.clone(), discriminants);
                 }
+                let return_discriminants =
+                    function_return_discriminants(&annotation.type_ann, generic_interfaces);
+                if !return_discriminants.is_empty() {
+                    lowerer
+                        .function_value_discriminants
+                        .insert(param.name.clone(), return_discriminants);
+                }
             }
         }
     }
@@ -10521,6 +10560,7 @@ struct FnLowerer<'a> {
     nullish_narrowings: HashMap<Symbol, HirType>,
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -11871,6 +11911,7 @@ impl<'a> FnLowerer<'a> {
             nullish_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
+            function_value_discriminants: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
             signatures,
@@ -11930,14 +11971,63 @@ impl<'a> FnLowerer<'a> {
                 let Expr::Ident(callee) = callee.as_ref() else {
                     return None;
                 };
-                self.generic_interfaces
-                    .function_discriminants
-                    .get(callee.sym.as_ref())
+                self.function_value_discriminants
+                    .get(&self.resolve_binding(callee.sym.as_ref()))
+                    .or_else(|| {
+                        self.generic_interfaces
+                            .function_discriminants
+                            .get(callee.sym.as_ref())
+                    })
                     .cloned()
             }
             Expr::Cond(conditional) => {
                 let consequent = self.expression_union_discriminants(&conditional.cons)?;
                 (self.expression_union_discriminants(&conditional.alt)? == consequent)
+                    .then_some(consequent)
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_function_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<HashMap<Symbol, Vec<Option<HirLit>>>> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .function_value_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::Paren(parenthesized) => {
+                self.expression_function_discriminants(&parenthesized.expr)
+            }
+            Expr::TsAs(assertion) => {
+                let metadata =
+                    function_return_discriminants(&assertion.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata =
+                    function_return_discriminants(&assertion.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::Arrow(arrow) => arrow.return_type.as_ref().and_then(|annotation| {
+                let metadata =
+                    object_union_discriminants(&annotation.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }),
+            Expr::Fn(function) => function
+                .function
+                .return_type
+                .as_ref()
+                .and_then(|annotation| {
+                    let metadata =
+                        object_union_discriminants(&annotation.type_ann, self.generic_interfaces);
+                    (!metadata.is_empty()).then_some(metadata)
+                }),
+            Expr::Cond(conditional) => {
+                let consequent = self.expression_function_discriminants(&conditional.cons)?;
+                (self.expression_function_discriminants(&conditional.alt)? == consequent)
                     .then_some(consequent)
             }
             _ => None,
@@ -13407,6 +13497,8 @@ impl<'a> FnLowerer<'a> {
                         .cloned()
                 });
                 let propagated_discriminants = self.expression_union_discriminants(init);
+                let propagated_function_discriminants =
+                    self.expression_function_discriminants(init);
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
@@ -13477,9 +13569,23 @@ impl<'a> FnLowerer<'a> {
                         self.union_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
+                    let return_discriminants = function_return_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    if !return_discriminants.is_empty() {
+                        self.function_value_discriminants
+                            .insert(hir_name.clone(), return_discriminants);
+                    }
                 } else if let Some(discriminants) = propagated_discriminants {
                     self.union_discriminants
                         .insert(hir_name.clone(), discriminants);
+                }
+                if binding.type_ann.is_none() {
+                    if let Some(discriminants) = propagated_function_discriminants {
+                        self.function_value_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
                 }
                 if let Some(method) = native_method_value {
                     self.native_method_values.insert(hir_name.clone(), method);
