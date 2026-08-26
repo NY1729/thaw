@@ -12679,6 +12679,26 @@ impl<'a> FnLowerer<'a> {
                 let callee = ordinary_optional_expression(callee);
                 if let Expr::Member(member) = &callee {
                     let property = member_property_name(&member.prop)?;
+                    if property == "finally" {
+                        return self.expression_union_discriminants(&member.obj);
+                    }
+                    if property == "then" {
+                        return call.args.first().and_then(|argument| {
+                            self.expression_function_discriminants(&argument.expr)
+                        });
+                    }
+                    if property == "catch" {
+                        let source = self.expression_union_discriminants(&member.obj);
+                        let recovered = call.args.first().and_then(|argument| {
+                            self.expression_function_discriminants(&argument.expr)
+                        });
+                        return match (source, recovered) {
+                            (Some(source), Some(recovered)) if source == recovered => Some(source),
+                            (Some(source), None) => Some(source),
+                            (None, Some(recovered)) => Some(recovered),
+                            _ => None,
+                        };
+                    }
                     if matches!(property.as_str(), "race" | "any")
                         && matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Promise")
                     {
