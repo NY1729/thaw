@@ -821,6 +821,309 @@ fn normalize_private_class_members(module: &Module) -> Module {
     module
 }
 
+#[derive(Clone)]
+struct GenericClassTemplate {
+    declaration: ClassDecl,
+    parameters: Vec<Symbol>,
+}
+
+struct GenericClassUseCollector<'a> {
+    names: &'a HashSet<Symbol>,
+    uses: Vec<(Symbol, Vec<TsType>)>,
+}
+
+fn unbox_types(types: &[Box<TsType>]) -> Vec<TsType> {
+    types.iter().map(|ty| ty.as_ref().clone()).collect()
+}
+
+impl Visit for GenericClassUseCollector<'_> {
+    fn visit_class(&mut self, class: &swc_ecma_ast::Class) {
+        if let (Some(Expr::Ident(super_class)), Some(arguments)) = (
+            class.super_class.as_deref(),
+            class.super_type_params.as_ref(),
+        ) {
+            if self.names.contains(super_class.sym.as_ref()) {
+                self.uses.push((
+                    super_class.sym.to_string(),
+                    arguments
+                        .params
+                        .iter()
+                        .map(|argument| argument.as_ref().clone())
+                        .collect(),
+                ));
+            }
+        }
+        class.visit_children_with(self);
+    }
+
+    fn visit_new_expr(&mut self, expression: &swc_ecma_ast::NewExpr) {
+        if let (Expr::Ident(class), Some(arguments)) =
+            (expression.callee.as_ref(), expression.type_args.as_ref())
+        {
+            if self.names.contains(class.sym.as_ref()) {
+                self.uses
+                    .push((class.sym.to_string(), unbox_types(&arguments.params)));
+            }
+        }
+        expression.visit_children_with(self);
+    }
+
+    fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
+        if let (swc_ecma_ast::TsEntityName::Ident(class), Some(arguments)) =
+            (&reference.type_name, reference.type_params.as_ref())
+        {
+            if self.names.contains(class.sym.as_ref()) {
+                self.uses
+                    .push((class.sym.to_string(), unbox_types(&arguments.params)));
+            }
+        }
+        reference.visit_children_with(self);
+    }
+
+    fn visit_ts_expr_with_type_args(&mut self, expression: &swc_ecma_ast::TsExprWithTypeArgs) {
+        if let (Expr::Ident(class), Some(arguments)) =
+            (expression.expr.as_ref(), expression.type_args.as_ref())
+        {
+            if self.names.contains(class.sym.as_ref()) {
+                self.uses
+                    .push((class.sym.to_string(), unbox_types(&arguments.params)));
+            }
+        }
+        expression.visit_children_with(self);
+    }
+}
+
+struct GenericClassTypeSubstituter<'a> {
+    substitutions: &'a HashMap<Symbol, Box<TsType>>,
+}
+
+impl VisitMut for GenericClassTypeSubstituter<'_> {
+    fn visit_mut_ts_type(&mut self, ty: &mut TsType) {
+        if let TsType::TsTypeRef(reference) = ty {
+            if reference.type_params.is_none() {
+                if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                    if let Some(replacement) = self.substitutions.get(name.sym.as_ref()) {
+                        *ty = replacement.as_ref().clone();
+                        return;
+                    }
+                }
+            }
+        }
+        ty.visit_mut_children_with(self);
+    }
+}
+
+struct GenericClassReferenceRewriter<'a, 'ast> {
+    specializations: &'a [(Symbol, Vec<HirType>, Symbol)],
+    interfaces: &'a HashMap<Symbol, HirType>,
+    generic_interfaces: &'a GenericInterfaces<'ast>,
+    error: Option<String>,
+}
+
+impl GenericClassReferenceRewriter<'_, '_> {
+    fn resolve(&mut self, name: &str, arguments: &[Box<TsType>]) -> Option<Symbol> {
+        let types = arguments
+            .iter()
+            .map(|argument| lower_ts_type(argument, self.interfaces, self.generic_interfaces))
+            .collect::<Result<Vec<_>, _>>();
+        let types = match types {
+            Ok(types) => types,
+            Err(error) => {
+                self.error = Some(format!("cannot specialize generic class `{name}`: {error}"));
+                return None;
+            }
+        };
+        self.specializations
+            .iter()
+            .find_map(|(candidate, candidate_types, symbol)| {
+                (candidate == name && candidate_types == &types).then(|| symbol.clone())
+            })
+    }
+}
+
+impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
+    fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+        class.visit_mut_children_with(self);
+        let Some(arguments) = class
+            .super_type_params
+            .as_ref()
+            .map(|arguments| arguments.params.clone())
+        else {
+            return;
+        };
+        let Some(Expr::Ident(super_class)) = class.super_class.as_deref_mut() else {
+            return;
+        };
+        let name = super_class.sym.to_string();
+        if let Some(symbol) = self.resolve(&name, &arguments) {
+            super_class.sym = symbol.into();
+            class.super_type_params = None;
+        }
+    }
+
+    fn visit_mut_new_expr(&mut self, expression: &mut swc_ecma_ast::NewExpr) {
+        expression.visit_mut_children_with(self);
+        let (Expr::Ident(class), Some(arguments)) =
+            (expression.callee.as_mut(), expression.type_args.as_ref())
+        else {
+            return;
+        };
+        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+            class.sym = symbol.into();
+            expression.type_args = None;
+        }
+    }
+
+    fn visit_mut_ts_type_ref(&mut self, reference: &mut swc_ecma_ast::TsTypeRef) {
+        reference.visit_mut_children_with(self);
+        let (swc_ecma_ast::TsEntityName::Ident(class), Some(arguments)) =
+            (&mut reference.type_name, reference.type_params.as_ref())
+        else {
+            return;
+        };
+        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+            class.sym = symbol.into();
+            reference.type_params = None;
+        }
+    }
+
+    fn visit_mut_ts_expr_with_type_args(
+        &mut self,
+        expression: &mut swc_ecma_ast::TsExprWithTypeArgs,
+    ) {
+        expression.visit_mut_children_with(self);
+        let (Expr::Ident(class), Some(arguments)) =
+            (expression.expr.as_mut(), expression.type_args.as_ref())
+        else {
+            return;
+        };
+        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+            class.sym = symbol.into();
+            expression.type_args = None;
+        }
+    }
+}
+
+fn specialize_generic_classes(
+    module: &Module,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Option<Module>, String> {
+    let mut templates = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let Some(parameters) = declaration.class.type_params.as_ref() else {
+            continue;
+        };
+        validate_trailing_type_parameter_defaults(
+            "generic class",
+            declaration.ident.sym.as_ref(),
+            parameters,
+        )?;
+        if parameters
+            .params
+            .iter()
+            .any(|parameter| parameter.constraint.is_some() || parameter.default.is_some())
+        {
+            return Err(format!(
+                "generic class `{}` constraints and defaults are not specialized yet",
+                declaration.ident.sym
+            ));
+        }
+        templates.insert(
+            declaration.ident.sym.to_string(),
+            GenericClassTemplate {
+                declaration: declaration.clone(),
+                parameters: parameters
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.sym.to_string())
+                    .collect(),
+            },
+        );
+    }
+    if templates.is_empty() {
+        return Ok(None);
+    }
+
+    let names = templates.keys().cloned().collect::<HashSet<_>>();
+    let mut specialized = module.clone();
+    specialized.body.retain(|item| {
+        !matches!(item, ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+            if templates.contains_key(declaration.ident.sym.as_ref()))
+    });
+    let mut instances: Vec<(Symbol, Vec<HirType>, Symbol)> = Vec::new();
+    loop {
+        let mut collector = GenericClassUseCollector {
+            names: &names,
+            uses: Vec::new(),
+        };
+        specialized.visit_with(&mut collector);
+        let mut added = false;
+        for (name, arguments) in collector.uses {
+            let template = &templates[&name];
+            if arguments.len() != template.parameters.len() {
+                return Err(format!(
+                    "generic class `{name}` expects {} type argument(s), got {}",
+                    template.parameters.len(),
+                    arguments.len()
+                ));
+            }
+            let types = arguments
+                .iter()
+                .map(|argument| lower_ts_type(argument, interfaces, generic_interfaces))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(unsupported) = types.iter().find(|ty| !supports_generic_native_layout(ty)) {
+                return Err(format!(
+                    "generic class `{name}` cannot specialize for native layout {unsupported:?}"
+                ));
+            }
+            if instances.iter().any(|(candidate, candidate_types, _)| {
+                candidate == &name && candidate_types == &types
+            }) {
+                continue;
+            }
+            let symbol = specialized_generic_name(&name, &types);
+            let substitutions = template
+                .parameters
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned().map(Box::new))
+                .collect::<HashMap<_, _>>();
+            let mut declaration = template.declaration.clone();
+            declaration.ident.sym = symbol.clone().into();
+            declaration.class.type_params = None;
+            declaration
+                .class
+                .visit_mut_with(&mut GenericClassTypeSubstituter {
+                    substitutions: &substitutions,
+                });
+            specialized
+                .body
+                .push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))));
+            instances.push((name, types, symbol));
+            added = true;
+        }
+        if !added {
+            break;
+        }
+    }
+
+    let mut rewriter = GenericClassReferenceRewriter {
+        specializations: &instances,
+        interfaces,
+        generic_interfaces,
+        error: None,
+    };
+    specialized.visit_mut_with(&mut rewriter);
+    if let Some(error) = rewriter.error {
+        return Err(error);
+    }
+    Ok(Some(specialized))
+}
+
 fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     struct Collector(Vec<String>);
     impl Visit for Collector {
@@ -1376,6 +1679,10 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
+    if let Some(specialized) = specialize_generic_classes(module, &interfaces, &generic_interfaces)?
+    {
+        return lower_normalized_module(&specialized);
+    }
     let (enum_values, enum_reverse_values, enum_types) = collect_enums(module)?;
     for (name, ty) in enum_types {
         if interfaces.insert(name.clone(), ty).is_some() {
@@ -21469,6 +21776,57 @@ mod tests {
                 if matches!(&args[0], HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::PropAccess(_, _, field) if field == "apply"))
         ));
+    }
+
+    #[test]
+    fn specializes_forward_referenced_generic_classes_once_per_type_tuple() {
+        let program = lower(
+            r#"
+            function read(value: Box<number>): number { return value.get(); }
+            function main(): number {
+                const first = new Box<number>(40);
+                const duplicate = new Box<number>(2);
+                const text = new Box<string>("ready");
+                const pair = new Pair<string, number>(text.get(), first.get() + duplicate.get());
+                return read(new Box<number>(pair.second));
+            }
+            class Pair<T, U> {
+                constructor(public first: T, public second: U) {}
+            }
+            class Box<T> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            "#,
+        );
+        let number_box = specialized_generic_name("Box", &[HirType::F64]);
+        let string_box = specialized_generic_name("Box", &[HirType::Str]);
+        let pair = specialized_generic_name("Pair", &[HirType::Str, HirType::F64]);
+        for class_name in [&number_box, &string_box, &pair] {
+            assert_eq!(
+                program
+                    .functions
+                    .iter()
+                    .filter(|function| {
+                        function.name == class_constructor_symbol(class_name.as_ref())
+                    })
+                    .count(),
+                1,
+                "specialization {class_name} must be emitted exactly once"
+            );
+        }
+        let number_getter = program
+            .functions
+            .iter()
+            .find(|function| function.name == class_method_symbol(&number_box, "get"))
+            .expect("number Box method specialization");
+        assert_eq!(number_getter.ret, HirType::F64);
+        let string_getter = program
+            .functions
+            .iter()
+            .find(|function| function.name == class_method_symbol(&string_box, "get"))
+            .expect("string Box method specialization");
+        assert_eq!(string_getter.ret, HirType::Str);
     }
 
     #[test]

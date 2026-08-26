@@ -19210,6 +19210,44 @@ mod tests {
     }
 
     #[test]
+    fn compiles_explicitly_specialized_native_generic_classes() {
+        let source = r#"
+            class Box<T> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+                replace(value: T): T { this.value = value; return this.value; }
+            }
+            class Pair<T, U> {
+                constructor(public first: T, public second: U) {}
+                left(): T { return this.first; }
+                right(): U { return this.second; }
+            }
+            class NumberBox extends Box<number> {
+                double(): number { return this.value * 2; }
+            }
+            function read(value: Box<number>): number { return value.get(); }
+            function main(): void {
+                const first = new Box<number>(40);
+                const duplicate = new Box<number>(41);
+                const text = new Box<string>("ready");
+                const pair = new Pair<string, number>("answer", 42);
+                const derived = new NumberBox(21);
+                console.log(read(first));
+                console.log(duplicate.replace(42));
+                console.log(text.get());
+                console.log(pair.left());
+                console.log(pair.right());
+                console.log(derived.double());
+                console.log(derived.get());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_classes"),
+            "40\n42\nready\nanswer\n42\n42\n21\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {

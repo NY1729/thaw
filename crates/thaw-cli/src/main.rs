@@ -3587,6 +3587,64 @@ mod tests {
     }
 
     #[test]
+    fn builds_generic_class_specializations_across_user_modules() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-user-module-generic-classes-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("models.ts"),
+            r#"
+                export class Box<T> {
+                    constructor(public value: T) {}
+                    get(): T { return this.value; }
+                }
+                export class Pair<T, U> {
+                    constructor(public first: T, public second: U) {}
+                }
+                export class NumberBox extends Box<number> {
+                    double(): number { return this.value * 2; }
+                }
+            "#,
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                import { Box, Pair, NumberBox } from "./models";
+                function read(value: Box<number>): number { return value.get(); }
+                function main(): void {
+                    const first = new Box<number>(40);
+                    const duplicate = new Box<number>(2);
+                    const text = new Box<string>("module");
+                    const pair = new Pair<string, number>(text.get(), read(first) + duplicate.get());
+                    const derived = new NumberBox(21);
+                    console.log(pair.first);
+                    console.log(pair.second);
+                    console.log(derived.double());
+                    console.log(derived.get());
+                }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "module\n42\n42\n21\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn builds_multifile_top_level_bindings_into_one_executable() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-top-level-bindings-{}",
