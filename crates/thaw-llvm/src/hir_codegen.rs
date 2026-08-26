@@ -19478,6 +19478,39 @@ mod tests {
     }
 
     #[test]
+    fn updates_union_metadata_when_reassigning_function_values() {
+        let source = r#"
+            type First =
+                { kind: "a"; value: number } |
+                { kind: "b"; value: string };
+            type Second =
+                { kind: "c"; value: number } |
+                { kind: "d"; value: string };
+            interface FirstService { load: () => First[][]; }
+            interface SecondService { load: () => Second[][]; }
+            function print(item: Second): void {
+                if (item.kind === "c") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            function main(): void {
+                const first: FirstService = {
+                    load: (): First[][] => [[{ kind: "a", value: 1 }]],
+                };
+                const second: SecondService = {
+                    load: (): Second[][] => [[{ kind: "c", value: 2 }]],
+                };
+                let load = first.load;
+                load = second.load;
+                print(load().flat()[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "reassigned_function_union_metadata"),
+            "12\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_of() {
         let source = r#"
             interface Item { value: number; }

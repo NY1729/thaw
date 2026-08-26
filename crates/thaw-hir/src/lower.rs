@@ -6981,6 +6981,14 @@ struct FunctionPropertyDiscriminants {
 
 type ObjectFunctionPropertyDiscriminants = HashMap<Vec<Symbol>, FunctionPropertyDiscriminants>;
 
+fn replace_metadata<T>(metadata: &mut HashMap<Symbol, T>, name: &str, value: Option<T>) {
+    if let Some(value) = value {
+        metadata.insert(name.to_string(), value);
+    } else {
+        metadata.remove(name);
+    }
+}
+
 #[derive(Default)]
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
@@ -22068,6 +22076,16 @@ impl<'a> FnLowerer<'a> {
                     })
             })
             .flatten();
+        let assigned_function_metadata =
+            (assign.op == AssignOp::Assign && assigned_variable.is_some()).then(|| {
+                (
+                    self.expression_function_discriminants(&assign.right),
+                    self.expression_function_array_discriminants(&assign.right),
+                    self.expression_function_nested_array_discriminants(&assign.right),
+                    self.expression_function_object_array_property_discriminants(&assign.right),
+                    self.expression_function_object_function_property_discriminants(&assign.right),
+                )
+            });
         let mut bindings = Vec::new();
 
         if assign.op != AssignOp::Assign {
@@ -22242,6 +22260,25 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     self.native_method_values.remove(name);
                 }
+                let (value, array, nested_array, object, functions) =
+                    assigned_function_metadata.expect("simple assignment metadata was collected");
+                replace_metadata(&mut self.function_value_discriminants, name, value);
+                replace_metadata(&mut self.function_value_array_discriminants, name, array);
+                replace_metadata(
+                    &mut self.function_value_nested_array_discriminants,
+                    name,
+                    nested_array,
+                );
+                replace_metadata(
+                    &mut self.function_value_object_array_property_discriminants,
+                    name,
+                    object,
+                );
+                replace_metadata(
+                    &mut self.function_value_object_function_property_discriminants,
+                    name,
+                    functions,
+                );
             }
         }
         if let Some(name) = assigned_variable.as_ref() {
