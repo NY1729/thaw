@@ -9785,6 +9785,49 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    fn lower_immediately_invoked_class_bind(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Call(binding) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Callee::Expr(bind_callee) = &binding.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(bind) = bind_callee.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&bind.prop).as_deref() != Some("bind") {
+            return Ok(None);
+        }
+        if !matches!(bind.obj.as_ref(), Expr::Member(_)) {
+            return Ok(None);
+        }
+        if binding.type_args.is_some() || call.type_args.is_some() {
+            return Err(
+                "native class method bind invocation does not accept outer type arguments".into(),
+            );
+        }
+        let mut arguments = binding.args.clone();
+        arguments.extend(call.args.iter().cloned());
+        let forwarded = CallExpr {
+            span: call.span,
+            ctxt: call.ctxt,
+            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                span: bind.span,
+                obj: bind.obj.clone(),
+                prop: MemberProp::Ident(IdentName::new("call".into(), bind.span)),
+            }))),
+            args: arguments,
+            type_args: None,
+        };
+        self.lower_native_class_call_or_apply(&forwarded)
+    }
+
     fn stmt_is_iteration(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::While(_) | Stmt::DoWhile(_) | Stmt::For(_) | Stmt::ForIn(_) | Stmt::ForOf(_) => {
@@ -17428,6 +17471,10 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
+
+        if let Some(invoked) = self.lower_immediately_invoked_class_bind(call)? {
+            return Ok(invoked);
+        }
 
         if let Some(bound) = self.lower_native_class_bind(call)? {
             return Ok(bound);
