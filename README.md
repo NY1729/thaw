@@ -1434,6 +1434,8 @@ The workspace crates have narrow responsibilities:
   and prefix/postfix updates through shared static storage with readonly checks.
   Static field initializers use the same declaring-class resolution for source-ordered
   `this.field` reads and explicitly instantiated generic static method calls.
+  Generic static method inference follows declared static field, getter and non-generic
+  method result types through both `this` and class-qualified access, including inheritance.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model

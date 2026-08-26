@@ -19514,7 +19514,9 @@ mod tests {
                 static get score(): number { return this.stored; }
                 static set score(value: number) { this.stored = value; }
                 static { this.count += 2; this.score = 4; this.score++; }
-                static viaStaticThis(): string { return this.identity<string>(this.currentLabel); }
+                static makeLabel(): string { return this.label; }
+                static viaStaticThis(): string { return this.identity(this.currentLabel); }
+                static inferStaticMethodResult(): string { return this.identity(this.makeLabel()); }
                 static forwardStaticThis<U>(value: U): U { return this.identity(value); }
                 static mutateStaticThis(): number {
                     const old = this.count++;
@@ -19538,6 +19540,15 @@ mod tests {
             class GenericSuperDerived extends GenericSuperBase {
                 forward<V>(value: V): V { return super.decorate(value); }
                 fixed(): string { return super.decorate<string>("explicit-super"); }
+            }
+            class StaticGenericBase {
+                static inheritedLabel: string = "inherited-static-inference";
+                static inheritedIdentity<U>(value: U): U { return value; }
+            }
+            class StaticGenericDerived extends StaticGenericBase {
+                static runInherited(): string {
+                    return this.inheritedIdentity(this.inheritedLabel);
+                }
             }
             async function main(): Promise<void> {
                 const box = new Box(40);
@@ -19600,11 +19611,13 @@ mod tests {
                 console.log(Box.forwardStaticThis("nested-static-this-call"));
                 console.log(Box.mutateStaticThis());
                 console.log(Box.initialized);
+                console.log(Box.inferStaticMethodResult());
+                console.log(StaticGenericDerived.runInherited());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\nstatic-this-field\nnested-static-this-call\n14\nstatic-this-field\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\nstatic-this-field\nnested-static-this-call\n14\nstatic-this-field\nstatic-this-field\ninherited-static-inference\n"
         );
     }
 
