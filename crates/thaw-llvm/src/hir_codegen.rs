@@ -19562,11 +19562,13 @@ mod tests {
                 console.log(box.keep<boolean>.call(new Box(55), true));
                 console.log(box.withDefault<number>.call(box));
                 console.log(box.collect<number>.apply(box, applyTuple));
+                console.log(box.withDefault<number>.bind(box)());
+                console.log(box.collect<number>.bind(box, 58)(59));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\n"
         );
     }
 

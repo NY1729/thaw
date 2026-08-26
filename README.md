@@ -1420,6 +1420,8 @@ The workspace crates have narrow responsibilities:
   awaited like other typed function values. Explicitly instantiated methods also support
   `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)`; these reuse ordinary
   default/rest/spread adapters while evaluating the method target before `thisArg`.
+  Immediately invoked bound methods are fused into that same path, so bound leading
+  arguments combine with invocation arguments before default selection and rest packing.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
