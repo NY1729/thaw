@@ -719,6 +719,10 @@ fn class_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_method_{method}")
 }
 
+fn class_static_method_symbol(class: &str, method: &str) -> Symbol {
+    format!("__thaw_class_{class}_static_{method}")
+}
+
 fn class_name_from_type(ty: &HirType) -> Option<&str> {
     let HirType::Object(fields) = ty else {
         return None;
@@ -1021,7 +1025,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     let ClassMember::Method(method) = member else {
                         continue;
                     };
-                    if method.is_static || method.kind != MethodKind::Method {
+                    if method.kind != MethodKind::Method {
                         continue;
                     }
                     if method.function.type_params.is_some() || method.function.is_generator {
@@ -1031,7 +1035,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         ));
                     }
                     let method_name = class_property_name(&method.key)?;
-                    let mut params = vec![instance_type.clone()];
+                    let mut params = if method.is_static {
+                        Vec::new()
+                    } else {
+                        vec![instance_type.clone()]
+                    };
                     params.extend(
                         method
                             .function
@@ -1057,7 +1065,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         &generic_interfaces,
                         &HashMap::new(),
                     )?;
-                    let symbol = class_method_symbol(&name, &method_name);
+                    let symbol = if method.is_static {
+                        class_static_method_symbol(&name, &method_name)
+                    } else {
+                        class_method_symbol(&name, &method_name)
+                    };
                     if signatures.contains_key(&symbol) {
                         return Err(format!(
                             "class `{name}` has duplicate method `{method_name}`"
@@ -3341,16 +3353,25 @@ fn lower_class_methods(
         let ClassMember::Method(method) = member else {
             continue;
         };
-        if method.is_static || method.kind != MethodKind::Method {
+        if method.kind != MethodKind::Method {
             continue;
         }
         let method_name = class_property_name(&method.key)?;
-        let symbol = class_method_symbol(&class_name, &method_name);
+        let symbol = if method.is_static {
+            class_static_method_symbol(&class_name, &method_name)
+        } else {
+            class_method_symbol(&class_name, &method_name)
+        };
         let signature = &signatures[&symbol];
-        let mut params = vec![HirParam {
-            name: "__thaw_this".into(),
-            ty: instance_type.clone(),
-        }];
+        let mut params = if method.is_static {
+            Vec::new()
+        } else {
+            vec![HirParam {
+                name: "__thaw_this".into(),
+                ty: instance_type.clone(),
+            }]
+        };
+        let receiver_offset = usize::from(!method.is_static);
         for (index, parameter) in method.function.params.iter().enumerate() {
             let mut parameter = lower_param(
                 &parameter.pat,
@@ -3359,7 +3380,7 @@ fn lower_class_methods(
                 false,
                 &HashMap::new(),
             )?;
-            parameter.ty = signature.params[index + 1].clone();
+            parameter.ty = signature.params[index + receiver_offset].clone();
             params.push(parameter);
         }
         let body =
@@ -3386,11 +3407,13 @@ fn lower_class_methods(
                 .or_default()
                 .push(parameter.name.clone());
         }
-        lowerer
-            .bindings
-            .entry("this".into())
-            .or_default()
-            .push("__thaw_this".into());
+        if !method.is_static {
+            lowerer
+                .bindings
+                .entry("this".into())
+                .or_default()
+                .push("__thaw_this".into());
+        }
         functions.push(HirFunction {
             name: symbol,
             params,
@@ -12009,6 +12032,38 @@ impl<'a> FnLowerer<'a> {
 
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(property) = &member.prop {
+                if let Expr::Ident(class) = member.obj.as_ref() {
+                    let class_name = class.sym.as_ref();
+                    let symbol = class_static_method_symbol(class_name, property.sym.as_ref());
+                    if let Some(signature) = self.signatures.get(&symbol).cloned() {
+                        if call.type_args.is_some() {
+                            return Err(format!(
+                                "native static method `{class_name}.{}` is not generic",
+                                property.sym
+                            ));
+                        }
+                        if call.args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(
+                                "native static method spread arguments are not supported yet"
+                                    .into(),
+                            );
+                        }
+                        if call.args.len() != signature.params.len() {
+                            return Err(format!(
+                                "static method `{class_name}.{}` expects {} argument(s), got {}",
+                                property.sym,
+                                signature.params.len(),
+                                call.args.len()
+                            ));
+                        }
+                        let mut args = Vec::with_capacity(call.args.len());
+                        for (index, argument) in call.args.iter().enumerate() {
+                            let value = self.lower_expr(&argument.expr)?;
+                            args.push(self.coerce_to_declared(&signature.params[index], value)?);
+                        }
+                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                    }
+                }
                 let known_class_receiver = match member.obj.as_ref() {
                     Expr::Ident(receiver) => {
                         let name = self.resolve_binding(receiver.sym.as_ref());
@@ -18882,6 +18937,30 @@ mod tests {
             .unwrap();
         assert!(format!("{:?}", main.body).contains(
             "Call(Var(\"__thaw_class_Counter_method_add\"), [Var(\"counter\"), Lit(F64(2.0))])"
+        ));
+    }
+
+    #[test]
+    fn lowers_native_class_static_methods_without_a_receiver() {
+        let program = lower(
+            r#"class MathBox {
+                static add(left: number, right: number): number { return left + right; }
+            }
+            function main(): number { return MathBox.add(40, 2); }"#,
+        );
+        let method = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_MathBox_static_add")
+            .expect("native static method");
+        assert_eq!(method.params.len(), 2);
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert!(format!("{:?}", main.body).contains(
+            "Call(Var(\"__thaw_class_MathBox_static_add\"), [Lit(F64(40.0)), Lit(F64(2.0))])"
         ));
     }
 }
