@@ -9697,6 +9697,94 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    fn lower_native_class_call_or_apply(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(operation) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Some(operation_name) = member_property_name(&operation.prop) else {
+            return Ok(None);
+        };
+        if operation_name != "call" && operation_name != "apply" {
+            return Ok(None);
+        }
+        let Expr::Member(method) = operation.obj.as_ref() else {
+            return Ok(None);
+        };
+        let Some(method_name) = member_property_name(&method.prop) else {
+            return Ok(None);
+        };
+        let Some(target_type) = self.native_class_expression_type(&method.obj) else {
+            return Ok(None);
+        };
+        let Some(class_name) = class_name_from_type(&target_type) else {
+            return Ok(None);
+        };
+        if !self
+            .signatures
+            .contains_key(&class_method_symbol(class_name, &method_name))
+        {
+            return Ok(None);
+        }
+        if call.type_args.is_some() {
+            return Err(format!(
+                "native class method `.{operation_name}()` does not accept type arguments"
+            ));
+        }
+        let Some((this_argument, supplied)) = call.args.split_first() else {
+            return Err(format!(
+                "native class method `{class_name}.{method_name}.{operation_name}` expects a `thisArg`"
+            ));
+        };
+        if this_argument.spread.is_some() {
+            return Err(format!(
+                "native class method `.{operation_name}()` cannot spread its `thisArg`"
+            ));
+        }
+        let forwarded = if operation_name == "apply" {
+            let [arguments] = supplied else {
+                return Err(format!(
+                    "native class method `{class_name}.{method_name}.apply` expects exactly a `thisArg` and an argument tuple"
+                ));
+            };
+            if arguments.spread.is_some() {
+                return Err(
+                    "native class method `.apply()` argument tuple cannot be spread".into(),
+                );
+            }
+            vec![swc_ecma_ast::ExprOrSpread {
+                spread: Some(call.span),
+                expr: arguments.expr.clone(),
+            }]
+        } else {
+            supplied.to_vec()
+        };
+        let target = self.lower_expr(&method.obj)?;
+        self.expect_type(&target_type, &target, "method call target")?;
+        let forwarded_call = CallExpr {
+            span: call.span,
+            ctxt: call.ctxt,
+            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                span: call.span,
+                obj: this_argument.expr.clone(),
+                prop: method.prop.clone(),
+            }))),
+            args: forwarded,
+            type_args: None,
+        };
+        let result = self.lower_call(&forwarded_call)?;
+        let target_name = format!("__thaw_method_target_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(target_name.clone(), target_type.clone());
+        self.wrap_call_argument_bindings(result, &[(target_name, target_type, target)])
+            .map(Some)
+    }
+
     fn stmt_is_iteration(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::While(_) | Stmt::DoWhile(_) | Stmt::For(_) | Stmt::ForIn(_) | Stmt::ForOf(_) => {
@@ -17343,6 +17431,9 @@ impl<'a> FnLowerer<'a> {
 
         if let Some(bound) = self.lower_native_class_bind(call)? {
             return Ok(bound);
+        }
+        if let Some(invoked) = self.lower_native_class_call_or_apply(call)? {
+            return Ok(invoked);
         }
 
         if let Expr::Member(member) = callee_expr.as_ref() {
