@@ -1350,6 +1350,8 @@ The workspace crates have narrow responsibilities:
   they reject non-number values, fractions, `NaN` and infinities, preserve
   signed-zero behavior, enforce the ±(2^53−1) safe range, and accept awaited
   number expressions
+- Fixed-arity and variadic native `Math` functions plus non-coercing `Number`
+  predicates accept statically sized tuple spreads in source order
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
