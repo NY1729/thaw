@@ -77,7 +77,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Generic classes, abstract fields, dynamically computed members, non-top-level or differently
+Generic classes, dynamically computed members, non-top-level or differently
 internally named class expressions, top-level
 declarations/statements outside the general HIR-supported subset, package multi-capture
 package export keys, and full ESM live bindings are outside the current typed AOT subset.
@@ -114,6 +114,9 @@ Inherited concrete instance methods are re-lowered against each concrete derived
 than forwarding to one base symbol. Calls through `this` therefore select the final method/getter,
 while `super` retains the declaring method's lexical base; async/default/rest adapters are
 specialized along with the body.
+Abstract instance fields reserve their declaration-ordered base slot. The nearest concrete
+field declaration implements that slot without duplicating layout storage; missing and
+type-incompatible implementations are rejected for every constructible descendant.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
