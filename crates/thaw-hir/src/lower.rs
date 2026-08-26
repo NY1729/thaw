@@ -11245,6 +11245,61 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    fn lower_immediately_invoked_function_bind(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Call(binding) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Callee::Expr(bind_callee) = &binding.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(bind) = bind_callee.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&bind.prop).as_deref() != Some("bind") {
+            return Ok(None);
+        }
+        if binding.type_args.is_some() || call.type_args.is_some() {
+            return Err("function bind invocation does not accept type arguments".into());
+        }
+        let Some(bound) = self.lower_function_bind(binding)? else {
+            return Ok(None);
+        };
+        let bound_type = self.infer_expr_type(&bound)?;
+        let HirType::Function(params, _) = &bound_type else {
+            return Ok(None);
+        };
+        let (arguments, argument_bindings) =
+            self.lower_native_spread_values(&call.args, "bound function invocation")?;
+        if arguments.len() != params.len() {
+            return Err(format!(
+                "bound function invocation expects {} argument(s), got {}",
+                params.len(),
+                arguments.len()
+            ));
+        }
+        let arguments = arguments
+            .into_iter()
+            .zip(params)
+            .map(|(argument, expected)| self.coerce_to_declared(expected, argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_name = format!("__thaw_immediate_bound_function_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(target_name.clone(), bound_type.clone());
+        let mut bindings = vec![(target_name.clone(), bound_type, bound)];
+        bindings.extend(argument_bindings);
+        self.wrap_call_argument_bindings(
+            HirExpr::Call(Box::new(HirExpr::Var(target_name)), arguments),
+            &bindings,
+        )
+        .map(Some)
+    }
+
     fn lower_immediately_invoked_class_bind(
         &mut self,
         call: &CallExpr,
@@ -19317,6 +19372,9 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some(invoked) = self.lower_immediately_invoked_class_bind(call)? {
+            return Ok(invoked);
+        }
+        if let Some(invoked) = self.lower_immediately_invoked_function_bind(call)? {
             return Ok(invoked);
         }
 
