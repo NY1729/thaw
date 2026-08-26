@@ -1544,9 +1544,14 @@ The workspace crates have narrow responsibilities:
   guards and async callers. Shared fields that themselves contain general,
   optional, nullable or three-state nullish unions are recursively flattened
   into one runtime tag space; object literals are structurally coerced into
-  the selected union member before injection. Literal-valued discriminants such as
-  `value.kind === "success"` still require preservation of literal types and
-  remain outside the current narrowing subset
+  the selected union member before injection. Explicitly annotated parameters
+  and locals also retain non-ABI literal metadata from inline or aliased object
+  unions. Direct, reversed, negated and strict-not-equal comparisons against
+  string, number or boolean discriminants narrow the complete object, including
+  terminating guards and values returned through async functions. Propagating
+  literal-discriminant metadata through unannotated inferred bindings,
+  destructuring and arbitrary function-value boundaries remains outside this
+  subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global

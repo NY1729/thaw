@@ -32,7 +32,7 @@ use swc_ecma_ast::{
     KeyValueProp, Lit, MemberExpr, MemberProp, MethodKind, Module, ModuleDecl, ModuleItem,
     ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop,
     PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsFnOrConstructorType, TsFnParam,
-    TsInterfaceDecl, TsKeywordTypeKind, TsParamPropParam, TsType, TsTypeElement,
+    TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsParamPropParam, TsType, TsTypeElement,
     TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -6790,7 +6790,7 @@ fn lower_generic_instance(
         call_constraints,
     );
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
-    for param in &params {
+    for (source, param) in fn_decl.function.params.iter().zip(&params) {
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
@@ -6798,6 +6798,17 @@ fn lower_generic_instance(
             .entry(param.name.clone())
             .or_default()
             .push(param.name.clone());
+        if let Pat::Ident(binding) = &source.pat {
+            if let Some(annotation) = &binding.type_ann {
+                let discriminants =
+                    object_union_discriminants(&annotation.type_ann, generic_interfaces);
+                if !discriminants.is_empty() {
+                    lowerer
+                        .union_discriminants
+                        .insert(param.name.clone(), discriminants);
+                }
+            }
+        }
     }
     let body = lowerer.lower_stmts(
         &fn_decl
@@ -6840,6 +6851,7 @@ fn lower_generic_instance(
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
+    plain_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     function_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     function_alias_chains: HashMap<Symbol, Symbol>,
     function_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
@@ -6857,6 +6869,83 @@ fn strip_parenthesized_ts_type(mut ty: &TsType) -> &TsType {
         ty = &parenthesized.type_ann;
     }
     ty
+}
+
+fn resolve_plain_alias_type<'a>(
+    mut ty: &'a TsType,
+    generic: &'a GenericInterfaces<'a>,
+) -> Option<&'a TsType> {
+    let mut visited = HashSet::new();
+    loop {
+        ty = strip_parenthesized_ts_type(ty);
+        let TsType::TsTypeRef(reference) = ty else {
+            return Some(ty);
+        };
+        if reference.type_params.is_some() {
+            return None;
+        }
+        let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else {
+            return None;
+        };
+        if !visited.insert(name.sym.to_string()) {
+            return None;
+        }
+        ty = &generic.plain_aliases.get(name.sym.as_ref())?.type_ann;
+    }
+}
+
+fn discriminant_literal(ty: &TsType, generic: &GenericInterfaces<'_>) -> Option<HirLit> {
+    let TsType::TsLitType(literal) = resolve_plain_alias_type(ty, generic)? else {
+        return None;
+    };
+    match &literal.lit {
+        TsLit::Str(value) => Some(HirLit::Str(value.value.to_string_lossy().into_owned())),
+        TsLit::Number(value) => Some(HirLit::F64(value.value)),
+        TsLit::Bool(value) => Some(HirLit::Bool(value.value)),
+        _ => None,
+    }
+}
+
+fn object_union_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> HashMap<Symbol, Vec<Option<HirLit>>> {
+    let Some(TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union))) =
+        resolve_plain_alias_type(ty, generic)
+    else {
+        return HashMap::new();
+    };
+    let mut by_property: HashMap<Symbol, Vec<Option<HirLit>>> = HashMap::new();
+    for (index, member) in union.types.iter().enumerate() {
+        let Some(TsType::TsTypeLit(object)) = resolve_plain_alias_type(member, generic) else {
+            return HashMap::new();
+        };
+        for property in &object.members {
+            let TsTypeElement::TsPropertySignature(property) = property else {
+                continue;
+            };
+            let name = match property.key.as_ref() {
+                Expr::Ident(name) => name.sym.to_string(),
+                Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
+                _ => continue,
+            };
+            let literal = property
+                .type_ann
+                .as_ref()
+                .and_then(|annotation| discriminant_literal(&annotation.type_ann, generic));
+            by_property
+                .entry(name)
+                .or_insert_with(|| vec![None; union.types.len()])[index] = literal;
+        }
+    }
+    by_property.retain(|_, values| {
+        values.iter().all(Option::is_some)
+            && values
+                .iter()
+                .enumerate()
+                .all(|(index, value)| values[..index].iter().all(|previous| previous != value))
+    });
+    by_property
 }
 
 fn function_expression_as_arrow(
@@ -7161,6 +7250,7 @@ fn resolve_interfaces(
                     )?;
                     generic.aliases.insert(name, alias.as_ref());
                 } else {
+                    generic.plain_aliases.insert(name.clone(), alias.as_ref());
                     aliases.insert(name, alias.as_ref());
                 }
             }
@@ -8746,7 +8836,7 @@ fn lower_fn_decl(
         call_constraints,
     );
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
-    for param in &params {
+    for (source, param) in func.params.iter().zip(&params) {
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
@@ -8754,6 +8844,17 @@ fn lower_fn_decl(
             .entry(param.name.clone())
             .or_default()
             .push(param.name.clone());
+        if let Pat::Ident(binding) = &source.pat {
+            if let Some(annotation) = &binding.type_ann {
+                let discriminants =
+                    object_union_discriminants(&annotation.type_ann, generic_interfaces);
+                if !discriminants.is_empty() {
+                    lowerer
+                        .union_discriminants
+                        .insert(param.name.clone(), discriminants);
+                }
+            }
+        }
     }
     let mut body = Vec::new();
     for (source, param) in func.params.iter().zip(&params) {
@@ -10391,6 +10492,7 @@ struct FnLowerer<'a> {
     nullable_narrowings: HashMap<Symbol, HirType>,
     nullish_narrowings: HashMap<Symbol, HirType>,
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
+    union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
     signatures: &'a HashMap<Symbol, FnSignature>,
@@ -11740,6 +11842,7 @@ impl<'a> FnLowerer<'a> {
             nullable_narrowings: HashMap::new(),
             nullish_narrowings: HashMap::new(),
             union_narrowings: HashMap::new(),
+            union_discriminants: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
             signatures,
@@ -12180,6 +12283,59 @@ impl<'a> FnLowerer<'a> {
             BinaryOp::NotEqEq => false,
             _ => return None,
         };
+        let literal_value = |value: &Expr| match value {
+            Expr::Lit(Lit::Num(value)) => Some(HirLit::F64(value.value)),
+            Expr::Lit(Lit::Str(value)) => {
+                Some(HirLit::Str(value.value.to_string_lossy().into_owned()))
+            }
+            Expr::Lit(Lit::Bool(value)) => Some(HirLit::Bool(value.value)),
+            _ => None,
+        };
+        let property_target = |value: &Expr| {
+            let Expr::Member(member) = value else {
+                return None;
+            };
+            let Expr::Ident(identifier) = member.obj.as_ref() else {
+                return None;
+            };
+            Some((
+                identifier.sym.to_string(),
+                member_property_name(&member.prop)?,
+            ))
+        };
+        let property_comparison = property_target(&binary.left)
+            .zip(literal_value(&binary.right))
+            .or_else(|| property_target(&binary.right).zip(literal_value(&binary.left)));
+        if let Some(((identifier, property), literal)) = property_comparison {
+            let name = self.resolve_binding(&identifier);
+            let HirType::Union(elements) = self.scope.get(&name)? else {
+                return None;
+            };
+            let values = self.union_discriminants.get(&name)?.get(&property)?;
+            if values.len() != elements.len() {
+                return None;
+            }
+            let allowed = self
+                .union_narrowings
+                .get(&name)
+                .map(|(allowed, _)| allowed.clone())
+                .unwrap_or_else(|| (0..elements.len()).collect());
+            let matching = allowed
+                .iter()
+                .copied()
+                .filter(|index| values[*index].as_ref() == Some(&literal))
+                .collect::<Vec<_>>();
+            return (!matching.is_empty()).then(|| {
+                (
+                    name,
+                    matching,
+                    allowed,
+                    elements.clone(),
+                    equal_when_true,
+                    true,
+                )
+            });
+        }
         let literal_type = |value: &Expr| match value {
             Expr::Lit(Lit::Num(_)) => Some((HirType::F64, false)),
             Expr::Lit(Lit::Str(_)) => Some((HirType::Str, false)),
@@ -13184,6 +13340,14 @@ impl<'a> FnLowerer<'a> {
                 let value = self.coerce_to_declared(&ty, value)?;
 
                 let hir_name = self.bind_local(&name, ty.clone());
+                if let Some(annotation) = &binding.type_ann {
+                    let discriminants =
+                        object_union_discriminants(&annotation.type_ann, self.generic_interfaces);
+                    if !discriminants.is_empty() {
+                        self.union_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
+                }
                 if let Some(method) = native_method_value {
                     self.native_method_values.insert(hir_name.clone(), method);
                 }
@@ -25716,6 +25880,30 @@ mod tests {
                 HirType::Bool,
             ]
         ));
+    }
+
+    #[test]
+    fn narrows_object_unions_by_literal_discriminants() {
+        let program = lower(
+            r#"type Result =
+                   { kind: "success"; value: number } |
+                   { kind: "failure"; value: string } |
+                   { kind: true; value: boolean };
+               function describe(result: Result): string {
+                   if (result.kind === "success") return String(result.value + 1);
+                   if ("failure" === result.kind) return result.value + "!";
+                   return result.value ? "true" : "false";
+               }"#,
+        );
+        let function = &program.functions[0];
+        for (statement, expected_index) in function.body[..2].iter().zip([0, 1]) {
+            let HirStmt::If(_, branch, _) = statement else {
+                panic!("expected discriminant branch")
+            };
+            assert!(format!("{branch:?}")
+                .contains(&format!("UnionValue(Var(\"result\"), {expected_index},")));
+        }
+        assert!(format!("{:?}", function.body[2]).contains("UnionValue(Var(\"result\"), 2,"));
     }
 
     #[test]
