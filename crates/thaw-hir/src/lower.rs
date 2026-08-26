@@ -9707,6 +9707,13 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
                 collect_referenced_bindings(arg, names);
             }
         }
+        HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
+            collect_referenced_bindings(callee, names);
+            collect_referenced_bindings(this_arg, names);
+            for arg in args {
+                collect_referenced_bindings(arg, names);
+            }
+        }
         HirExpr::Await(value)
         | HirExpr::AwaitPromise(value, _)
         | HirExpr::PromiseNew(value, _, _)
@@ -9803,6 +9810,9 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::DynamicPropAccess(left, right, _, _)
         | HirExpr::JsonIndex(left, right) => contains_await(left) || contains_await(right),
         HirExpr::Call(callee, args) => contains_await(callee) || args.iter().any(contains_await),
+        HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
+            contains_await(callee) || contains_await(this_arg) || args.iter().any(contains_await)
+        }
         HirExpr::PromiseAll(values, _)
         | HirExpr::PromiseAllTuple(values, _)
         | HirExpr::PromiseRace(values, _)
@@ -10764,6 +10774,89 @@ impl<'a> FnLowerer<'a> {
             ),
             &bindings,
         )
+    }
+
+    fn lower_function_call_or_apply(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(operation) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Some(operation_name) = member_property_name(&operation.prop) else {
+            return Ok(None);
+        };
+        if operation_name != "call" && operation_name != "apply" {
+            return Ok(None);
+        }
+        let target = self.lower_expr(&operation.obj)?;
+        let target_type = self.infer_expr_type(&target)?;
+        let (params, ret) = match &target_type {
+            HirType::Function(params, ret) => (params.clone(), ret.as_ref().clone()),
+            _ => return Ok(None),
+        };
+        let Some((this_argument, supplied)) = call.args.split_first() else {
+            return Err(format!("function .{operation_name}() expects a thisArg"));
+        };
+        if this_argument.spread.is_some() {
+            return Err(format!(
+                "function .{operation_name}() cannot spread its thisArg"
+            ));
+        }
+        let forwarded = if operation_name == "apply" {
+            let [arguments] = supplied else {
+                return Err(
+                    "function .apply() expects exactly a thisArg and an argument tuple".into(),
+                );
+            };
+            if arguments.spread.is_some() {
+                return Err("function .apply() tuple cannot itself be spread".into());
+            }
+            vec![swc_ecma_ast::ExprOrSpread {
+                spread: Some(call.span),
+                expr: arguments.expr.clone(),
+            }]
+        } else {
+            supplied.to_vec()
+        };
+        let this_value = self.lower_expr(&this_argument.expr)?;
+        let this_type = self.infer_expr_type(&this_value)?;
+        let label = format!("function .{operation_name}()");
+        let (arguments, spread_bindings) = self.lower_native_spread_values(&forwarded, &label)?;
+        if arguments.len() != params.len() {
+            return Err(format!(
+                "function .{operation_name}() expects {} argument(s), got {}",
+                params.len(),
+                arguments.len()
+            ));
+        }
+        let arguments = arguments
+            .into_iter()
+            .zip(&params)
+            .map(|(argument, expected)| self.coerce_to_declared(expected, argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_name = format!("__thaw_function_operation_target_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(target_name.clone(), target_type.clone());
+        let this_name = format!("__thaw_function_operation_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(this_name.clone(), this_type.clone());
+        let mut bindings = vec![
+            (target_name.clone(), target_type, target),
+            (this_name.clone(), this_type, this_value),
+        ];
+        bindings.extend(spread_bindings);
+        self.wrap_call_argument_bindings(
+            HirExpr::FunctionCallWithThis(
+                Box::new(HirExpr::Var(target_name)),
+                Box::new(HirExpr::Var(this_name)),
+                arguments,
+                params,
+                ret,
+            ),
+            &bindings,
+        )
+        .map(Some)
     }
 
     fn lower_saved_native_method_call_or_apply(
@@ -13405,6 +13498,7 @@ impl<'a> FnLowerer<'a> {
                     None => Err(format!("call to unknown function `{name}`")),
                 }
             }
+            HirExpr::FunctionCallWithThis(_, _, _, _, ret) => Ok(ret.clone()),
             HirExpr::PromiseAll(_, element) => Ok(HirType::Promise(Box::new(HirType::Array(
                 Box::new(element.clone()),
             )))),
@@ -19048,6 +19142,9 @@ impl<'a> FnLowerer<'a> {
             return Ok(invoked);
         }
         if let Some(invoked) = self.lower_native_static_call_or_apply(call)? {
+            return Ok(invoked);
+        }
+        if let Some(invoked) = self.lower_function_call_or_apply(call)? {
             return Ok(invoked);
         }
 
