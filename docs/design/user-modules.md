@@ -89,9 +89,11 @@ accessors, including assignment, compound updates, prefix/postfix updates, reado
 and shadowing by a derived declaration. Static blocks execute in class-body order and can use
 explicit class references plus `super` fields, methods and accessors; runtime constructor-valued
 `this` inside those blocks remains an explicit gap. Constructors, instance/static methods,
-`super(...)` and super methods expand
-tuple spreads with source-order preservation before their fixed ABI call. Cyclic
-user-module graphs are diagnosed rather than executed. Missing
+`super(...)` and super methods expand tuple spreads with source-order preservation before their
+fixed ABI call.
+Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
+inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
+Cyclic user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
 are explicit compatibility limits, not silently rewritten semantics.
 

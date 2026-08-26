@@ -18809,6 +18809,31 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_native_instanceof() {
+        let source = r#"
+            let calls: number = 0;
+            class Base {}
+            class Middle extends Base {}
+            class Leaf extends Middle {}
+            class Other {}
+            function make(): Leaf { calls += 1; return new Leaf(); }
+            function main(): void {
+                const value = new Leaf();
+                console.log(value instanceof Leaf);
+                console.log(value instanceof Middle);
+                console.log(value instanceof Base);
+                console.log(value instanceof Other);
+                console.log(make() instanceof Base);
+                console.log(calls);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_instanceof"),
+            "true\ntrue\ntrue\nfalse\ntrue\n1\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {

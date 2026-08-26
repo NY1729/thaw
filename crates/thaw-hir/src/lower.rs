@@ -795,6 +795,19 @@ fn class_name_from_type(ty: &HirType) -> Option<&str> {
         (*ty == HirType::Bool)
             .then(|| name.strip_prefix("__thaw_class_identity_"))
             .flatten()
+            .and_then(|identities| identities.split('$').next())
+    })
+}
+
+fn class_type_has_identity(ty: &HirType, expected: &str) -> bool {
+    let HirType::Object(fields) = ty else {
+        return false;
+    };
+    fields.first().is_some_and(|(name, ty)| {
+        *ty == HirType::Bool
+            && name
+                .strip_prefix("__thaw_class_identity_")
+                .is_some_and(|identities| identities.split('$').any(|name| name == expected))
     })
 }
 
@@ -844,7 +857,8 @@ fn collect_native_classes<'a>(
             .get(name)
             .ok_or_else(|| format!("unknown native class `{name}`"))?;
         active.push(name.to_string());
-        let mut fields = vec![(format!("__thaw_class_identity_{name}"), HirType::Bool)];
+        let mut inherited_fields = Vec::new();
+        let mut identities = vec![name.to_string()];
         if let Some(base) = &declaration.class.super_class {
             let Expr::Ident(base) = base.as_ref() else {
                 return Err(format!(
@@ -868,8 +882,19 @@ fn collect_native_classes<'a>(
             let HirType::Object(base_fields) = &interfaces[base_name] else {
                 unreachable!("native class layouts are objects")
             };
-            fields.extend(base_fields.iter().skip(1).cloned());
+            if let Some((marker, HirType::Bool)) = base_fields.first() {
+                let inherited = marker
+                    .strip_prefix("__thaw_class_identity_")
+                    .expect("base class identity marker");
+                identities.extend(inherited.split('$').map(str::to_owned));
+            }
+            inherited_fields.extend(base_fields.iter().skip(1).cloned());
         }
+        let mut fields = vec![(
+            format!("__thaw_class_identity_{}", identities.join("$")),
+            HirType::Bool,
+        )];
+        fields.extend(inherited_fields);
         for member in &declaration.class.body {
             let ClassMember::ClassProp(property) = member else {
                 continue;
@@ -8816,6 +8841,33 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Bin(bin) => {
+                if bin.op == BinaryOp::InstanceOf {
+                    let Expr::Ident(class) = bin.right.as_ref() else {
+                        return Err(
+                            "native `instanceof` requires a class identifier on the right"
+                                .into(),
+                        );
+                    };
+                    if !self
+                        .signatures
+                        .contains_key(&class_constructor_symbol(class.sym.as_ref()))
+                    {
+                        return Err(format!(
+                            "native `instanceof` right operand `{}` is not a known class",
+                            class.sym
+                        ));
+                    }
+                    let value = self.lower_expr(&bin.left)?;
+                    let value_type = self.infer_expr_type(&value)?;
+                    let result = class_type_has_identity(&value_type, class.sym.as_ref());
+                    let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(name.clone(), value_type.clone());
+                    return self.wrap_call_argument_bindings(
+                        HirExpr::Lit(HirLit::Bool(result)),
+                        &[(name, value_type, value)],
+                    );
+                }
                 let mut lhs = self.lower_expr(&bin.left)?;
                 let rhs_narrowing = self
                     .optional_undefined_narrowing(&bin.left)
@@ -20410,7 +20462,7 @@ mod tests {
         assert_eq!(
             fields,
             &vec![
-                ("__thaw_class_identity_Derived".into(), HirType::Bool),
+                ("__thaw_class_identity_Derived$Base".into(), HirType::Bool),
                 ("value".into(), HirType::F64),
                 ("label".into(), HirType::Str),
             ]
@@ -20945,5 +20997,30 @@ mod tests {
         let debug = format!("{block:?}");
         assert!(debug.contains("__thaw_class_Base_static_setter_current"));
         assert!(debug.contains("__thaw_class_Base_static_field_value"));
+    }
+
+    #[test]
+    fn lowers_native_instanceof_across_the_inheritance_chain() {
+        let program = lower(
+            r#"class Base {}
+            class Middle extends Base {}
+            class Leaf extends Middle {}
+            class Other {}
+            function main(): boolean {
+                const value = new Leaf();
+                return value instanceof Leaf && value instanceof Middle
+                    && value instanceof Base && !(value instanceof Other);
+            }"#,
+        );
+        let HirType::Object(fields) = &program
+            .functions
+            .iter()
+            .find(|function| function.name == class_constructor_symbol("Leaf"))
+            .unwrap()
+            .ret
+        else {
+            panic!("leaf constructor must return an object")
+        };
+        assert_eq!(fields[0].0, "__thaw_class_identity_Leaf$Middle$Base");
     }
 }
