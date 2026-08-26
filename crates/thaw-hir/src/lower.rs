@@ -2553,13 +2553,15 @@ struct GenericClassMethodTemplate {
     parameters: Vec<Symbol>,
     constraints: Vec<Option<Box<TsType>>>,
     defaults: Vec<Option<Box<TsType>>>,
+    parameter_patterns: Vec<GenericTypePattern>,
 }
 
 struct GenericClassMethodUse {
     span: swc_common::Span,
     class: Symbol,
     method: Symbol,
-    arguments: Vec<TsType>,
+    arguments: Option<Vec<TsType>>,
+    actual_params: Option<Vec<HirType>>,
 }
 
 struct GenericClassMethodUseCollector<'a, 'ast> {
@@ -2568,9 +2570,26 @@ struct GenericClassMethodUseCollector<'a, 'ast> {
     generic_interfaces: &'a GenericInterfaces<'ast>,
     scopes: Vec<HashMap<Symbol, HirType>>,
     uses: Vec<GenericClassMethodUse>,
+    call_results: &'a HashMap<Symbol, HirType>,
+    parents: &'a HashMap<Symbol, Symbol>,
+    error: Option<String>,
 }
 
 impl GenericClassMethodUseCollector<'_, '_> {
+    fn template_owner(&self, class: &str, method: &str) -> Option<Symbol> {
+        let mut current = Some(class);
+        while let Some(class) = current {
+            if self
+                .templates
+                .contains_key(&(class.to_string(), method.to_string()))
+            {
+                return Some(class.to_string());
+            }
+            current = self.parents.get(class).map(String::as_str);
+        }
+        None
+    }
+
     fn bind_pattern(&mut self, pattern: &Pat) {
         let Pat::Ident(binding) = pattern else {
             return;
@@ -2691,21 +2710,51 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
     }
 
     fn visit_call_expr(&mut self, call: &CallExpr) {
-        if let (Callee::Expr(callee), Some(arguments)) = (&call.callee, call.type_args.as_ref()) {
+        if let Callee::Expr(callee) = &call.callee {
             if let Expr::Member(member) = callee.as_ref() {
                 if let (Some(class), Some(method)) = (
                     self.receiver_class(&member.obj),
                     member_property_name(&member.prop),
                 ) {
-                    if self
-                        .templates
-                        .contains_key(&(class.clone(), method.clone()))
-                    {
+                    if let Some(owner) = self.template_owner(&class, &method) {
+                        let actual_params = if call.type_args.is_none() {
+                            match call
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    if argument.spread.is_some() {
+                                        return Err("generic class method inference does not support spread arguments".into());
+                                    }
+                                    infer_generic_constructor_expr_type(
+                                        &argument.expr,
+                                        self.interfaces,
+                                        self.generic_interfaces,
+                                        &self.scopes,
+                                        self.call_results,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, String>>()
+                            {
+                                Ok(actual) => Some(actual),
+                                Err(error) => {
+                                    self.error = Some(format!(
+                                        "cannot infer generic method `{owner}.{method}`: {error}"
+                                    ));
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         self.uses.push(GenericClassMethodUse {
                             span: call.span,
-                            class,
+                            class: owner,
                             method,
-                            arguments: unbox_types(&arguments.params),
+                            arguments: call
+                                .type_args
+                                .as_ref()
+                                .map(|arguments| unbox_types(&arguments.params)),
+                            actual_params,
                         });
                     }
                 }
@@ -2719,7 +2768,8 @@ fn resolve_explicit_generic_class_method_types(
     class: &str,
     method: &str,
     template: &GenericClassMethodTemplate,
-    arguments: &[TsType],
+    arguments: Option<&[TsType]>,
+    actual_params: Option<&[HirType]>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Result<(Vec<HirType>, Vec<TsType>), String> {
@@ -2728,7 +2778,8 @@ fn resolve_explicit_generic_class_method_types(
         .iter()
         .filter(|default| default.is_none())
         .count();
-    if arguments.len() < required || arguments.len() > template.parameters.len() {
+    let explicit_count = arguments.map(<[TsType]>::len);
+    if explicit_count.is_some_and(|count| count < required || count > template.parameters.len()) {
         let expected = if required == template.parameters.len() {
             required.to_string()
         } else {
@@ -2736,19 +2787,36 @@ fn resolve_explicit_generic_class_method_types(
         };
         return Err(format!(
             "generic method `{class}.{method}` expects {expected} type argument(s), got {}",
-            arguments.len()
+            explicit_count.unwrap()
         ));
     }
     let mut types = Vec::with_capacity(template.parameters.len());
     let mut concrete_arguments = Vec::with_capacity(template.parameters.len());
     let mut hir_substitution = HashMap::new();
     let mut ast_substitution = HashMap::new();
+    let mut inferred = HashMap::new();
+    if let Some(actual_params) = actual_params.filter(|_| arguments.is_none()) {
+        for (pattern, actual) in template.parameter_patterns.iter().zip(actual_params) {
+            match_generic_pattern(pattern, actual, &mut inferred).map_err(|error| {
+                format!("cannot infer generic method `{class}.{method}`: {error}")
+            })?;
+        }
+    }
     for (index, parameter) in template.parameters.iter().enumerate() {
-        let mut argument = arguments
-            .get(index)
-            .cloned()
-            .or_else(|| template.defaults[index].as_deref().cloned())
-            .expect("validated generic method arity requires a default");
+        let mut argument = if let Some(argument) = arguments.and_then(|values| values.get(index)) {
+            argument.clone()
+        } else if let Some(inferred) = inferred.get(parameter) {
+            hir_type_as_ts_type(inferred)?
+        } else {
+            template.defaults[index]
+                .as_deref()
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "cannot infer generic method `{class}.{method}` type parameter `{parameter}` from its arguments"
+                    )
+                })?
+        };
         argument.visit_mut_with(&mut GenericClassTypeSubstituter {
             substitutions: &ast_substitution,
         });
@@ -2837,6 +2905,48 @@ fn specialize_generic_class_methods(
                 ),
                 parameters,
             )?;
+            let parameter_names = parameters
+                .params
+                .iter()
+                .map(|parameter| parameter.name.sym.to_string())
+                .collect::<Vec<_>>();
+            let substitutions = parameter_names
+                .iter()
+                .map(|parameter| {
+                    (
+                        parameter.clone(),
+                        GenericTypePattern::Variable(parameter.clone()),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            let parameter_patterns = method
+                .function
+                .params
+                .iter()
+                .map(|parameter| {
+                    let Pat::Ident(binding) = &parameter.pat else {
+                        return Err(format!(
+                            "generic method `{}.{}` inference requires identifier parameters",
+                            declaration.ident.sym,
+                            class_property_name(&method.key)?
+                        ));
+                    };
+                    let annotation = binding.type_ann.as_ref().ok_or_else(|| {
+                        format!(
+                            "generic method `{}.{}` inference requires parameter annotations",
+                            declaration.ident.sym,
+                            class_property_name(&method.key).unwrap_or_default()
+                        )
+                    })?;
+                    generic_type_pattern(
+                        &annotation.type_ann,
+                        &substitutions,
+                        interfaces,
+                        generic_interfaces,
+                        &mut Vec::new(),
+                    )
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             templates.insert(
                 (
                     declaration.ident.sym.to_string(),
@@ -2844,11 +2954,7 @@ fn specialize_generic_class_methods(
                 ),
                 GenericClassMethodTemplate {
                     method: method.clone(),
-                    parameters: parameters
-                        .params
-                        .iter()
-                        .map(|parameter| parameter.name.sym.to_string())
-                        .collect(),
+                    parameters: parameter_names,
                     constraints: parameters
                         .params
                         .iter()
@@ -2859,6 +2965,7 @@ fn specialize_generic_class_methods(
                         .iter()
                         .map(|parameter| parameter.default.clone())
                         .collect(),
+                    parameter_patterns,
                 },
             );
         }
@@ -2867,14 +2974,34 @@ fn specialize_generic_class_methods(
         return Ok(None);
     }
 
+    let call_results = generic_constructor_call_results(module, interfaces, generic_interfaces);
+    let parents = module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+                return None;
+            };
+            let Expr::Ident(parent) = declaration.class.super_class.as_deref()? else {
+                return None;
+            };
+            Some((declaration.ident.sym.to_string(), parent.sym.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
     let mut collector = GenericClassMethodUseCollector {
         templates: &templates,
         interfaces,
         generic_interfaces,
         scopes: vec![HashMap::new()],
         uses: Vec::new(),
+        call_results: &call_results,
+        parents: &parents,
+        error: None,
     };
     module.visit_with(&mut collector);
+    if let Some(error) = collector.error {
+        return Err(error);
+    }
     let mut instances = Vec::<(Symbol, Symbol, Vec<HirType>, Symbol)>::new();
     let mut calls = HashMap::new();
     let mut generated = HashMap::<Symbol, Vec<ClassMethod>>::new();
@@ -2884,7 +3011,8 @@ fn specialize_generic_class_methods(
             &usage.class,
             &usage.method,
             template,
-            &usage.arguments,
+            usage.arguments.as_deref(),
+            usage.actual_params.as_deref(),
             interfaces,
             generic_interfaces,
         )?;
@@ -23810,6 +23938,7 @@ mod tests {
                 const box = new Box();
                 console.log(box.convert<string>("first"));
                 console.log(box.convert<string>("second"));
+                console.log(box.convert("inferred"));
                 console.log(box.convert<number>(42));
             }
             "#,
@@ -23840,6 +23969,10 @@ mod tests {
             (
                 "class Box { pair<T, U>(left: T, right: U): T { return left; } } function main(): void { const box = new Box(); box.pair<number>(1, 2); }",
                 "expects 2 type argument(s), got 1",
+            ),
+            (
+                "class Box { numeric<T extends number>(value: T): T { return value; } } function main(): void { const box = new Box(); box.numeric(\"bad\"); }",
+                "does not satisfy constraint F64",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();

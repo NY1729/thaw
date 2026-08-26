@@ -19493,21 +19493,33 @@ mod tests {
                 convert<U>(value: U): U { return value; }
                 second<U, V = string>(first: U, second: V): V { return second; }
                 numeric<U extends number>(value: U): U { return value; }
+                fallback<U = string>(): U { return "fallback"; }
+                first<U>(values: U[]): U { return values[0]; }
+                field<U>(value: { item: U }): U { return value.item; }
                 static identity<U>(value: U): U { return value; }
             }
+            class DerivedBox extends Box<number> {}
             function main(): void {
                 const box = new Box(40);
+                const derived = new DerivedBox(40);
                 console.log(box.convert<string>("converted"));
                 console.log(box.convert<number>(42));
+                console.log(box.convert("inferred"));
                 console.log(box.second<number>(1, "defaulted"));
                 console.log(box.numeric<number>(43));
+                console.log(box.numeric(44));
+                console.log(box.fallback());
+                console.log(box.first([46, 47]));
+                console.log(box.field({ item: "nested" }));
+                console.log(derived.convert("inherited"));
                 console.log(Box.identity<boolean>(true));
                 console.log(Box.identity<string>("static"));
+                console.log(Box.identity(45));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ndefaulted\n43\ntrue\nstatic\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\ninherited\ntrue\nstatic\n45\n"
         );
     }
 
