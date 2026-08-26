@@ -73,6 +73,7 @@ struct FnSignature {
     params: Vec<HirType>,
     variadic: Option<HirType>,
     native_rest: Option<HirType>,
+    abstract_class_constructor: bool,
     ret: HirType,
     is_async: bool,
     /// A function declared with no body (`declare function foo(...): T;`,
@@ -1293,9 +1294,20 @@ fn collect_native_classes<'a>(
                 "ambient class `{name}` cannot use the native class path"
             ));
         }
-        if declaration.class.is_abstract || declaration.class.type_params.is_some() {
+        if declaration.class.type_params.is_some() {
             return Err(format!(
-                "class `{name}` currently requires a concrete, non-generic class"
+                "class `{name}` currently requires a non-generic class"
+            ));
+        }
+        if !declaration.class.is_abstract
+            && declaration.class.body.iter().any(|member| match member {
+                ClassMember::Method(method) => method.is_abstract,
+                ClassMember::ClassProp(property) => property.is_abstract,
+                _ => false,
+            })
+        {
+            return Err(format!(
+                "concrete class `{name}` cannot declare abstract members"
             ));
         }
         if interfaces.contains_key(&name)
@@ -1468,6 +1480,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         params,
                         variadic,
                         native_rest: None,
+                        abstract_class_constructor: false,
                         ret,
                         is_async: func.is_async,
                         is_extern,
@@ -1533,6 +1546,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         params,
                         variadic: None,
                         native_rest: None,
+                        abstract_class_constructor: class_decl.class.is_abstract,
                         ret: instance_type.clone(),
                         is_async: false,
                         is_extern: false,
@@ -1558,6 +1572,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         params: initializer_params,
                         variadic: None,
                         native_rest: None,
+                        abstract_class_constructor: false,
                         ret: instance_type.clone(),
                         is_async: false,
                         is_extern: false,
@@ -1704,6 +1719,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             params,
                             variadic: None,
                             native_rest: None,
+                            abstract_class_constructor: false,
                             ret,
                             is_async: method.function.is_async,
                             is_extern: false,
@@ -1918,7 +1934,36 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     continue;
                 };
                 let key = member_key(method)?;
-                if !seen.insert(key) {
+                let newly_seen = seen.insert(key);
+                if method.is_abstract {
+                    if !newly_seen {
+                        let base_symbol = class_member_symbol(&current_name, method)?;
+                        let derived_symbol = class_member_symbol(&derived_name, method)?;
+                        let base_signature = &signatures[&base_symbol];
+                        let derived_signature = &signatures[&derived_symbol];
+                        let receiver_count = usize::from(!method.is_static);
+                        if base_signature.params[receiver_count..]
+                            != derived_signature.params[receiver_count..]
+                            || base_signature.ret != derived_signature.ret
+                            || base_signature.is_async != derived_signature.is_async
+                            || base_signature.native_rest != derived_signature.native_rest
+                        {
+                            return Err(format!(
+                                "class `{derived_name}` implements abstract member `{}` from `{current_name}` with an incompatible signature",
+                                class_property_name(&method.key)?
+                            ));
+                        }
+                        continue;
+                    }
+                    if !derived.class.is_abstract {
+                        return Err(format!(
+                            "concrete class `{derived_name}` must implement abstract member `{}` from `{current_name}`",
+                            class_property_name(&method.key)?
+                        ));
+                    }
+                    continue;
+                }
+                if !newly_seen {
                     continue;
                 }
                 let base_symbol = class_member_symbol(&current_name, method)?;
@@ -2126,6 +2171,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         params: Vec::new(),
                         variadic: None,
                         native_rest: None,
+                        abstract_class_constructor: false,
                         ret: ty.clone(),
                         is_async: false,
                         is_extern: false,
@@ -2153,6 +2199,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             params: vec![ty.clone()],
                             variadic: None,
                             native_rest: None,
+                            abstract_class_constructor: false,
                             ret: ty.clone(),
                             is_async: false,
                             is_extern: false,
@@ -5121,6 +5168,9 @@ fn lower_class_methods(
             MethodKind::Method => class_method_symbol(&class_name, &method_name),
         };
         let signature = &signatures[&symbol];
+        if method.is_abstract {
+            continue;
+        }
         let mut params = if method.is_static {
             Vec::new()
         } else {
@@ -10435,7 +10485,13 @@ impl<'a> FnLowerer<'a> {
             Expr::New(new_expr) => {
                 if let Expr::Ident(class) = new_expr.callee.as_ref() {
                     let constructor = class_constructor_symbol(class.sym.as_ref());
-                    if self.signatures.contains_key(&constructor) {
+                    if let Some(signature) = self.signatures.get(&constructor) {
+                        if signature.abstract_class_constructor {
+                            return Err(format!(
+                                "cannot construct abstract class `{}`",
+                                class.sym
+                            ));
+                        }
                         let mut callee = class.clone();
                         callee.sym = constructor.into();
                         return self.lower_call(&CallExpr {
@@ -10669,6 +10725,7 @@ impl<'a> FnLowerer<'a> {
                 params: Vec::new(),
                 variadic: None,
                 native_rest: None,
+                abstract_class_constructor: false,
                 ret: HirType::Dynamic,
                 is_async: false,
                 is_extern: false,
@@ -17214,6 +17271,7 @@ impl<'a> FnLowerer<'a> {
             params: Vec::new(),
             variadic: None,
             native_rest: None,
+            abstract_class_constructor: false,
             ret: HirType::Dynamic,
             is_async: false,
             is_extern: false,
@@ -17359,6 +17417,7 @@ impl<'a> FnLowerer<'a> {
             params: Vec::new(),
             variadic: None,
             native_rest: None,
+            abstract_class_constructor: false,
             ret: HirType::Dynamic,
             is_async: false,
             is_extern: false,
@@ -17464,6 +17523,7 @@ impl<'a> FnLowerer<'a> {
             params: Vec::new(),
             variadic: None,
             native_rest: None,
+            abstract_class_constructor: false,
             ret: HirType::Dynamic,
             is_async: false,
             is_extern: false,
@@ -22195,5 +22255,41 @@ mod tests {
                 .iter()
                 .any(|function| function.name == symbol));
         }
+    }
+
+    #[test]
+    fn rejects_constructing_an_abstract_native_class() {
+        let module = thaw_parser::parse_typescript(
+            r#"abstract class Shape { abstract area(): number; }
+            function main(): void { const value = new Shape(); }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("cannot construct abstract class `Shape`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_incompatible_abstract_implementations() {
+        let missing = thaw_parser::parse_typescript(
+            r#"abstract class Shape { abstract area(value: number): number; }
+            class Missing extends Shape {}"#,
+        )
+        .unwrap();
+        let error = lower_module(&missing).unwrap_err();
+        assert!(
+            error.contains("must implement abstract member `area`"),
+            "{error}"
+        );
+
+        let incompatible = thaw_parser::parse_typescript(
+            r#"abstract class Shape { abstract area(value: number): number; }
+            class Wrong extends Shape { area(value: string): number { return 0; } }"#,
+        )
+        .unwrap();
+        let error = lower_module(&incompatible).unwrap_err();
+        assert!(error.contains("incompatible signature"), "{error}");
     }
 }
