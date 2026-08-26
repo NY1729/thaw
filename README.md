@@ -1442,7 +1442,9 @@ The workspace crates have narrow responsibilities:
   mutable assignments; assigning an ordinary same-typed function clears that identity, while assigning another
   native method establishes its new identity. Saved methods
   support synchronous or async `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)` without
-  retaining the extraction receiver. They can also be converted after extraction with
+  retaining the extraction receiver. Their two-entry closure ABI also survives typed function
+  parameters and return values, so instance, static and async methods retain `.call()`/`.apply()` behavior
+  after crossing a function boundary when the declared fixed argument tuple is supplied. They can also be converted after extraction with
   `.bind(thisArg, ...typedTuple)`, including partial application and async results. A plain invocation
   executes through an unbound adapter with `this === undefined`; control flow that does not touch a
   member can complete normally, while a reached `this.member` access raises the corresponding

@@ -919,7 +919,9 @@ target内に`*`が複数現れる場合は同じcaptureをすべてへ適用す�
 関数型はHIRの `Function(params, return)` として保持し、arrow functionはLLVMの
 内部関数へ変換する。関数値はarena上の `[ordinary entry, this-aware entry, captures...]` という
 closure環境を指し、間接呼び出しではその環境を隠し第1引数として渡す。第二entryは通常のtyped closure/FunctionRefでは`thisArg`を無視するadapter、
-native method functionでは明示的`thisArg`を利用するadapterを指す。これにより外側の値を読むclosure、nested closure、Rustからのcallback呼び戻しが可能になった。
+native method functionでは明示的`thisArg`を利用するadapterを指す。 native methodの両entryは
+同じclosure valueとともにtyped parameter/return境界を越えるため、lowering時のlocal alias metadataに
+依存せず`.call`/`.apply`からinstance/static/asyncの元entryを選択できる。これにより外側の値を読むclosure、nested closure、Rustからのcallback呼び戻しが可能になった。
 `serveOnceWith(port, (target) => body)` はこのABIを使い、callbackの戻り値を実際の
 HTTP response bodyとして送信する。capture entryは値のコピーではなくarena上の
 variable cellを指すため、closure生成後に外側で行った代入とclosure内の代入を
