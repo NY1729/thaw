@@ -18878,6 +18878,22 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_super_method_calls() {
+        let source = r#"
+            class Base {
+                constructor(public value: number) {}
+                answer(delta: number): number { return this.value + delta; }
+            }
+            class Derived extends Base {
+                constructor(value: number) { super(value); }
+                answer(delta: number): number { return super.answer(delta) + 1; }
+            }
+            function main(): void { console.log(new Derived(40).answer(1)); }
+        "#;
+        assert_eq!(compile_and_run(source, "super_method_calls"), "42\n");
+    }
+
+    #[test]
     fn await_sleep_is_driven_by_the_runtime_event_loop() {
         let source = r#"
             async function main(): Promise<void> {

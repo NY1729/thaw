@@ -31,9 +31,9 @@ use swc_ecma_ast::{
     ClassMember, ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr,
     MemberProp, MethodKind, Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit,
     ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop, PropName, PropOrSpread,
-    SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind,
-    TsParamPropParam, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl,
-    VarDeclOrExpr,
+    SimpleAssignTarget, Stmt, SuperProp, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl,
+    TsKeywordTypeKind, TsParamPropParam, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp,
+    UpdateOp, VarDecl, VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -3576,6 +3576,7 @@ fn lower_class_constructor(
         lowerer.super_initializer = Some((
             class_initializer_symbol(base.sym.as_ref()),
             interfaces[base.sym.as_ref()].clone(),
+            base.sym.to_string(),
         ));
     }
     lowerer
@@ -3659,7 +3660,7 @@ fn lower_class_constructor(
                 ));
             }
         } else {
-            let (base_initializer, _) = lowerer
+            let (base_initializer, _, _) = lowerer
                 .super_initializer
                 .clone()
                 .expect("derived class has a base initializer");
@@ -3787,6 +3788,16 @@ fn lower_class_methods(
             None,
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        if let Some(base) = &declaration.class.super_class {
+            let Expr::Ident(base) = base.as_ref() else {
+                unreachable!("class layout validation accepts identifier bases only")
+            };
+            lowerer.super_initializer = Some((
+                class_initializer_symbol(base.sym.as_ref()),
+                interfaces[base.sym.as_ref()].clone(),
+                base.sym.to_string(),
+            ));
+        }
         for parameter in &params {
             lowerer
                 .scope
@@ -5369,7 +5380,7 @@ struct FnLowerer<'a> {
     generic_named_templates: HashMap<Symbol, Symbol>,
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
-    super_initializer: Option<(Symbol, HirType)>,
+    super_initializer: Option<(Symbol, HirType, Symbol)>,
 }
 
 type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
@@ -12488,7 +12499,7 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         if matches!(call.callee, Callee::Super(_)) {
-            let (symbol, _base_type) = self
+            let (symbol, _base_type, _base_name) = self
                 .super_initializer
                 .clone()
                 .ok_or("`super(...)` is only valid in a derived class constructor")?;
@@ -12518,6 +12529,49 @@ impl<'a> FnLowerer<'a> {
                 args.push(self.coerce_to_declared(&signature.params[index + 1], value)?);
             }
             return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+        }
+        if let Callee::Expr(callee) = &call.callee {
+            if let Expr::SuperProp(member) = callee.as_ref() {
+                let (_, _, base_name) = self
+                    .super_initializer
+                    .clone()
+                    .ok_or("`super` member access is only valid in a derived class")?;
+                let method_name = match &member.prop {
+                    SuperProp::Ident(name) => name.sym.to_string(),
+                    SuperProp::Computed(computed) => match computed.expr.as_ref() {
+                        Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
+                        _ => {
+                            return Err(
+                                "computed super methods require a string literal name".into()
+                            )
+                        }
+                    },
+                };
+                let symbol = class_method_symbol(&base_name, &method_name);
+                let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
+                    format!("base class `{base_name}` has no method `{method_name}`")
+                })?;
+                if call.type_args.is_some()
+                    || call.args.iter().any(|argument| argument.spread.is_some())
+                {
+                    return Err(
+                        "native super methods do not support type or spread arguments yet".into(),
+                    );
+                }
+                if call.args.len() + 1 != signature.params.len() {
+                    return Err(format!(
+                        "super method `{base_name}.{method_name}` expects {} argument(s), got {}",
+                        signature.params.len() - 1,
+                        call.args.len()
+                    ));
+                }
+                let mut args = vec![HirExpr::Var(self.resolve_binding("this"))];
+                for (index, argument) in call.args.iter().enumerate() {
+                    let value = self.lower_expr(&argument.expr)?;
+                    args.push(self.coerce_to_declared(&signature.params[index + 1], value)?);
+                }
+                return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+            }
         }
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
@@ -19702,5 +19756,28 @@ mod tests {
             .filter(|function| function.name == "__thaw_class_Derived_method_answer")
             .collect::<Vec<_>>();
         assert_eq!(answer.len(), 1, "override must suppress inherited wrapper");
+    }
+
+    #[test]
+    fn lowers_super_method_calls_to_the_direct_base_implementation() {
+        let program = lower(
+            r#"class Base {
+                constructor(public value: number) {}
+                answer(delta: number): number { return this.value + delta; }
+            }
+            class Derived extends Base {
+                constructor(value: number) { super(value); }
+                answer(delta: number): number { return super.answer(delta) + 1; }
+            }
+            function main(): number { return new Derived(40).answer(1); }"#,
+        );
+        let method = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Derived_method_answer")
+            .unwrap();
+        assert!(format!("{:?}", method.body).contains(
+            "Call(Var(\"__thaw_class_Base_method_answer\"), [Var(\"__thaw_this\"), Var(\"delta\")])"
+        ));
     }
 }
