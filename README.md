@@ -1392,6 +1392,8 @@ The workspace crates have narrow responsibilities:
   statically sized outer tuple spread, including heterogeneous `Promise.all`
 - Promise `.then()` and `.catch()` accept a typed callback through a statically
   sized tuple spread while preserving receiver-before-argument evaluation
+- `new Promise(...[executor])` accepts a typed executor through a statically
+  sized tuple spread and can infer its resolved value type
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result

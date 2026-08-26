@@ -2221,6 +2221,26 @@ fn promise_chain_callbacks_accept_tuple_spreads() {
 }
 
 #[test]
+fn promise_constructor_executor_accepts_a_tuple_spread() {
+    let source = r#"
+        function executor(
+            resolve: (value: number) => void,
+            reject: (reason: string) => void,
+        ): void {
+            resolve(23);
+        }
+        async function main(): Promise<void> {
+            const pending = new Promise(...[executor]);
+            console.log(await pending);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_constructor_executor_spread"),
+        "23\n"
+    );
+}
+
+#[test]
 fn frame_split_async_functions_return_objects_arrays_and_tuples_from_branches() {
     let source = r#"
         interface Item { value: number; }
