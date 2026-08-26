@@ -185,6 +185,9 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         "test/reporters" => {
             "export declare function dot(argsArray: any): any;\nexport declare function junit(argsArray: any): any;\nexport declare function lcov(argsArray: any): any;\nexport declare function spec(argsArray: any): any;\nexport declare function tap(argsArray: any): any;\n"
         }
+        "wasi" => {
+            "export declare const WASI: any;\n"
+        }
         "_http_agent" | "_http_client" | "_http_common" | "_http_incoming"
         | "_http_outgoing" | "_http_server" | "_tls_common" | "_tls_wrap" => {
             "export declare const Agent: any;\nexport declare const globalAgent: any;\nexport declare const ClientRequest: any;\nexport declare const IncomingMessage: any;\nexport declare const OutgoingMessage: any;\nexport declare const Server: any;\nexport declare const ServerResponse: any;\nexport declare const HTTPParser: any;\nexport declare const SecureContext: any;\nexport declare const TLSSocket: any;\n"
@@ -3737,6 +3740,26 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { dot: dot, spec: spec, tap: tap, junit: junit, lcov: lcov }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
         ),
+        "wasi" => Some(
+            r#"function validateOptions(options) {
+               options = options || {};
+               if (options.version !== undefined && options.version !== 'preview1') { var error = new TypeError('The "version" option must be "preview1"'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+               var args = options.args === undefined ? [] : options.args;
+               if (!Array.isArray(args) || args.some(function(value) { return typeof value !== 'string'; })) { var argsError = new TypeError('The "args" option must be an array of strings'); argsError.code = 'ERR_INVALID_ARG_TYPE'; throw argsError; }
+               var env = options.env === undefined ? {} : options.env, preopens = options.preopens === undefined ? {} : options.preopens;
+               if (!env || typeof env !== 'object' || Array.isArray(env) || Object.keys(env).some(function(key) { return typeof env[key] !== 'string'; })) { var envError = new TypeError('The "env" option must be an object of strings'); envError.code = 'ERR_INVALID_ARG_TYPE'; throw envError; }
+               if (!preopens || typeof preopens !== 'object' || Array.isArray(preopens) || Object.keys(preopens).some(function(key) { return typeof preopens[key] !== 'string'; })) { var preopenError = new TypeError('The "preopens" option must be an object of strings'); preopenError.code = 'ERR_INVALID_ARG_TYPE'; throw preopenError; }
+               return { args: args.slice(), env: Object.assign({}, env), preopens: Object.assign({}, preopens), returnOnExit: Boolean(options.returnOnExit), version: 'preview1' };
+             }
+             function WASI(options) { if (!(this instanceof WASI)) throw new TypeError("Class constructor WASI cannot be invoked without 'new'"); this._options = validateOptions(options); this._started = false; this._import = Object.freeze({ __thawWasiOptions: JSON.stringify(this._options) }); }
+             WASI.prototype.getImportObject = function() { return { wasi_snapshot_preview1: this._import }; };
+             Object.defineProperty(WASI.prototype, 'wasiImport', { enumerable: true, get: function() { return this._import; } });
+             WASI.prototype._invoke = function(instance, name) { if (!(instance instanceof WebAssembly.Instance)) { var typeError = new TypeError('instance must be a WebAssembly.Instance'); typeError.code = 'ERR_INVALID_ARG_TYPE'; throw typeError; } if (this._started) { var stateError = new Error('WASI instance has already started'); stateError.code = 'ERR_WASI_ALREADY_STARTED'; throw stateError; } if (!(instance.exports.memory instanceof WebAssembly.Memory)) { var memoryError = new Error('WASI instance must export a memory'); memoryError.code = 'ERR_WASI_NOT_STARTED'; throw memoryError; } if (typeof instance.exports[name] !== 'function') { var exportError = new Error('WASI instance does not export ' + name); exportError.code = 'ERR_WASI_NOT_STARTED'; throw exportError; } this._started = true; try { instance.exports[name](); return 0; } catch (error) { if (error && error.__thawWasiExit !== undefined) { var code = Number(error.__thawWasiExit); if (!this._options.returnOnExit) process.exitCode = code; return code; } throw error; } };
+             WASI.prototype.start = function(instance) { var code = this._invoke(instance, '_start'); return this._options.returnOnExit ? code : undefined; };
+             WASI.prototype.initialize = function(instance) { if (instance && instance.exports && typeof instance.exports._start === 'function') { var error = new Error('WASI reactor must not export _start'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } this._invoke(instance, '_initialize'); };
+             module.exports = { WASI: WASI }; module.exports.default = module.exports; module.exports.__esModule = true;
+"#,
+        ),
         "https" => Some(
             "var http = require('node:http'), tls = require('node:tls'); module.exports = http.__createSecureModule(tls); module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
@@ -4063,7 +4086,7 @@ fn builtin_module_source(name: &str) -> Option<&'static str> {
              module.exports = { isatty: isatty, ReadStream: ReadStream, WriteStream: WriteStream }; module.exports.default = module.exports; module.exports.__esModule = true;\n",
         ),
         "module" => Some(
-            "var builtinModules = ['_http_agent','_http_client','_http_common','_http_incoming','_http_outgoing','_http_server','_stream_duplex','_stream_passthrough','_stream_readable','_stream_transform','_stream_wrap','_stream_writable','_tls_common','_tls_wrap','assert','assert/strict','async_hooks','buffer','cluster','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','http2','inspector','inspector/promises','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','repl','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','test','test/reporters','timers','timers/promises','tls','trace_events','tty','url','util','util/types','v8','vm','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
+            "var builtinModules = ['_http_agent','_http_client','_http_common','_http_incoming','_http_outgoing','_http_server','_stream_duplex','_stream_passthrough','_stream_readable','_stream_transform','_stream_wrap','_stream_writable','_tls_common','_tls_wrap','assert','assert/strict','async_hooks','buffer','cluster','console','constants','crypto','dgram','diagnostics_channel','dns','dns/promises','domain','events','fs','fs/promises','http','http2','inspector','inspector/promises','module','net','os','path','path/posix','path/win32','perf_hooks','process','punycode','querystring','readline','readline/promises','repl','stream','stream/consumers','stream/promises','stream/web','string_decoder','sys','test','test/reporters','timers','timers/promises','tls','trace_events','tty','url','util','util/types','v8','vm','wasi','worker_threads','zlib']; var builtinSet = new Set(builtinModules);\n\
              function isBuiltin(name) { var value = String(name); return builtinSet.has(value.replace(/^node:/, '')); }\n\
              function createRequire(filename) { if (typeof globalThis.__thaw_bundle_create_require !== 'function') throw new Error('createRequire is only available inside a Thaw bundle'); return globalThis.__thaw_bundle_create_require(filename); }\n\
              function Module(id, parent) { if (!(this instanceof Module)) return new Module(id, parent); this.id = id === undefined ? '' : String(id); this.path = this.id; this.exports = {}; this.filename = null; this.loaded = false; this.parent = parent || null; this.children = []; this.paths = []; if (parent && parent.children) parent.children.push(this); }\n\
@@ -6691,6 +6714,65 @@ mod tests {
         assert_eq!(
             result,
             r#"["passed",["before","beforeEach","test","afterEach","after"],5,[["test","adds","passed"],["test","skipped","skipped"],["test","later","todo"],["suite","math","passed"]],true,true,true,true,"function"]"#
+        );
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+    }
+
+    #[test]
+    fn node_wasi_runs_preview1_commands_and_reactors() {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_node_wasi");
+        let wasi_source = r#"var WASI = require('node:wasi').WASI;
+               module.exports = function () {
+                 var commandSource = new TextEncoder().encode(`(module
+                   (import "wasi_snapshot_preview1" "args_sizes_get" (func $args_sizes_get (param i32 i32) (result i32)))
+                   (import "wasi_snapshot_preview1" "environ_sizes_get" (func $environ_sizes_get (param i32 i32) (result i32)))
+                   (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
+                   (memory (export "memory") 1)
+                   (func (export "_start")
+                     i32.const 0 i32.const 4 call $args_sizes_get drop
+                     i32.const 8 i32.const 12 call $environ_sizes_get drop
+                     i32.const 7 call $proc_exit))`);
+                 var wasi = new WASI({ version: 'preview1', args: ['alpha', 'beta'], env: { A: '1', B: 'two' }, returnOnExit: true });
+                 var command = new WebAssembly.Instance(new WebAssembly.Module(commandSource), wasi.getImportObject());
+                 var exit = wasi.start(command), words = new Uint32Array(command.exports.memory.buffer, 0, 4), repeated;
+                 try { wasi.start(command); } catch (error) { repeated = error.code; }
+                 var reactorSource = new TextEncoder().encode(`(module (memory (export "memory") 1) (func (export "_initialize")))`);
+                 var reactorWasi = new WASI({ version: 'preview1' });
+                 var reactor = new WebAssembly.Instance(new WebAssembly.Module(reactorSource), reactorWasi.getImportObject());
+                 var initialized = reactorWasi.initialize(reactor), invalid = false;
+                 try { new WASI({ version: 'preview2' }); } catch (error) { invalid = error.code === 'ERR_INVALID_ARG_VALUE'; }
+                 var preopenSource = new TextEncoder().encode(`(module
+                   (import "wasi_snapshot_preview1" "fd_prestat_get" (func $get (param i32 i32) (result i32)))
+                   (import "wasi_snapshot_preview1" "fd_prestat_dir_name" (func $name (param i32 i32 i32) (result i32)))
+                   (memory (export "memory") 1)
+                   (func (export "_start") i32.const 3 i32.const 0 call $get drop i32.const 3 i32.const 16 i32.const 8 call $name drop))`);
+                 var preopenWasi = new WASI({ version: 'preview1', preopens: { '/sandbox': __HOST_PATH__ }, returnOnExit: true });
+                 var preopen = new WebAssembly.Instance(new WebAssembly.Module(preopenSource), preopenWasi.getImportObject()); preopenWasi.start(preopen);
+                 var preopenLength = new Uint32Array(preopen.exports.memory.buffer, 4, 1)[0], preopenName = new TextDecoder().decode(new Uint8Array(preopen.exports.memory.buffer, 16, preopenLength));
+                 return [exit, Array.from(words), repeated, initialized, invalid, wasi.wasiImport === wasi.getImportObject().wasi_snapshot_preview1, preopenLength, preopenName];
+               };"#
+        .replace(
+            "__HOST_PATH__",
+            &serde_json::to_string(dir.to_str().unwrap()).unwrap(),
+        );
+        fs::write(dir.join("index.js"), wasi_source).unwrap();
+        let empty_node_modules = temp_registry("builtin_node_wasi_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        assert_eq!(file_count, 2);
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNodeWasi = module.exports;");
+        let source = CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+        let function = CString::new("exerciseNodeWasi").unwrap();
+        let arguments = CString::new("[]").unwrap();
+        let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+        let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+        assert_eq!(
+            result,
+            r#"[7,[2,11,2,10],"ERR_WASI_ALREADY_STARTED",null,true,true,8,"/sandbox"]"#
         );
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
