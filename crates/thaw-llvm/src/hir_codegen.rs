@@ -19782,6 +19782,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_readonly_and_awaited_utility_types() {
+        let source = r#"
+            type Frozen = Readonly<{ value: number; label: string }>;
+            type FrozenBox<T> = Readonly<{ value: T }>;
+            type Loaded = Awaited<Promise<number>>;
+            type DeepLoaded = Awaited<Promise<Promise<number>>>;
+            type LoadedValue<T> = Awaited<Promise<T>>;
+            function main(): void {
+                const frozen: Frozen = { value: 40, label: "ready" };
+                const box: FrozenBox<string> = { value: frozen.label };
+                const loaded: Loaded = frozen.value + 2;
+                const generic: LoadedValue<number> = loaded;
+                const deep: DeepLoaded = generic;
+                console.log(box.value);
+                console.log(deep);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "readonly_and_awaited_utility_types"),
+            "ready\n42\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =

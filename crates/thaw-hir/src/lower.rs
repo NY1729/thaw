@@ -152,6 +152,7 @@ enum GenericTypePattern {
     Concrete(HirType),
     Array(Box<GenericTypePattern>),
     Promise(Box<GenericTypePattern>),
+    Awaited(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6245,6 +6246,13 @@ fn promise_settled_result_type(value: HirType) -> HirType {
     ])
 }
 
+fn awaited_hir_type(mut ty: HirType) -> HirType {
+    while let HirType::Promise(value) = ty {
+        ty = *value;
+    }
+    ty
+}
+
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     fn fingerprint(ty: &HirType) -> String {
         match ty {
@@ -6282,9 +6290,9 @@ fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
 fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &str) -> bool {
     match pattern {
         GenericTypePattern::Variable(name) => name == variable,
-        GenericTypePattern::Array(inner) | GenericTypePattern::Promise(inner) => {
-            generic_pattern_contains_variable(inner, variable)
-        }
+        GenericTypePattern::Array(inner)
+        | GenericTypePattern::Promise(inner)
+        | GenericTypePattern::Awaited(inner) => generic_pattern_contains_variable(inner, variable),
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
@@ -6308,6 +6316,10 @@ fn instantiate_generic_pattern(
         GenericTypePattern::Promise(inner) => Ok(HirType::Promise(Box::new(
             instantiate_generic_pattern(inner, substitution)?,
         ))),
+        GenericTypePattern::Awaited(inner) => Ok(awaited_hir_type(instantiate_generic_pattern(
+            inner,
+            substitution,
+        )?)),
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
                 .iter()
@@ -6568,6 +6580,8 @@ fn generic_type_pattern(
                 match name {
                     "Array" | "ReadonlyArray" => return Ok(GenericTypePattern::Array(inner)),
                     "Promise" => return Ok(GenericTypePattern::Promise(inner)),
+                    "Readonly" => return Ok(*inner),
+                    "Awaited" => return Ok(GenericTypePattern::Awaited(inner)),
                     _ => {}
                 }
             }
@@ -6665,6 +6679,9 @@ fn match_generic_pattern(
         (GenericTypePattern::Array(expected), HirType::Array(value))
         | (GenericTypePattern::Promise(expected), HirType::Promise(value)) => {
             match_generic_pattern(expected, value, inferred)
+        }
+        (GenericTypePattern::Awaited(expected), actual) => {
+            match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
             if expected.len() == value.len() =>
@@ -10261,6 +10278,16 @@ fn lower_ts_type(
                     interfaces,
                     generic_interfaces,
                 )?))),
+                (Some("Readonly"), Some(inner)) => {
+                    lower_ts_type(inner, interfaces, generic_interfaces)
+                }
+                (Some("Awaited"), Some(inner)) => {
+                    Ok(awaited_hir_type(lower_ts_type(
+                        inner,
+                        interfaces,
+                        generic_interfaces,
+                    )?))
+                }
                 _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
         }
@@ -10664,6 +10691,8 @@ fn resolve_ts_type_with_substitution(
                             return Ok(HirType::Array(Box::new(resolved_elem)))
                         }
                         "Promise" => return Ok(HirType::Promise(Box::new(resolved_elem))),
+                        "Readonly" => return Ok(resolved_elem),
+                        "Awaited" => return Ok(awaited_hir_type(resolved_elem)),
                         _ => {}
                     }
                 }
