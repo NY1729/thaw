@@ -1387,8 +1387,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual TypeScript inference, overload resolution, decorators,
-  non-top-level or differently internally named class
-  expressions, constructor-valued
+  non-top-level class expressions, constructor-valued
   `this` in static initialization, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
@@ -1410,7 +1409,9 @@ The workspace crates have narrow responsibilities:
   validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
   into one executable. Top-level anonymous or self-named class expressions bound
-  to identifiers use the same path, including across exports. Computed fields, methods, accessors and
+  to identifiers use the same path, including across exports. A distinct class-expression
+  self-name is retained inside constructors, methods and type annotations without leaking as a
+  top-level binding. Computed fields, methods, accessors and
   static members use the same fixed-layout dispatch when their names fold from string literals,
   top-level string constants, concatenation, templates, parentheses or type/const assertions;
   the same shadowing-aware constant expressions work in bracket reads, writes and calls, while
