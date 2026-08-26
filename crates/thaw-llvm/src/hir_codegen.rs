@@ -19525,7 +19525,7 @@ mod tests {
     }
 
     #[test]
-    fn compiles_expression_bodied_async_arrows() {
+    fn compiles_async_arrows_without_await() {
         let source = r#"
             interface Worker { run(): Promise<number>; }
             async function main(): Promise<void> {
@@ -19533,6 +19533,15 @@ mod tests {
                 const double: (value: number) => Promise<number> =
                     async value => value * 2;
                 console.log(await double(21));
+                const choose: (enabled: boolean) => Promise<number> = async enabled => {
+                    if (enabled) return 40 + offset;
+                    return 0;
+                };
+                console.log(await choose(true));
+                const finish: () => Promise<void> = async () => {
+                    console.log("done");
+                };
+                await finish();
                 const worker: Worker = {
                     run: async (): Promise<number> => 40 + offset,
                 };
@@ -19541,7 +19550,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "expression_bodied_async_arrow"),
-            "42\n42\n"
+            "42\n42\ndone\n42\n"
         );
     }
 
