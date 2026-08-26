@@ -1400,10 +1400,10 @@ The workspace crates have narrow responsibilities:
   unannotated forward return-call chains, conditional returns, local initializer chains,
   typed arrows/function values and function-valued object properties. Calls whose
   result remains dynamically typed still require an explicit class type argument or
-  type assertion. Instance and static generic methods with explicit type arguments are
-  monomorphized once per method-local type tuple, including constraints, trailing
-  defaults, shared generic static owners and bundled-module receivers. Call-site
-  inference for method-local type parameters remains a separate next step.
+  type assertion. Instance and static generic methods are monomorphized once per
+  method-local type tuple from explicit arguments or call-site inference, including
+  nested parameter patterns, constraints, trailing defaults, inherited instance
+  receivers, shared generic static owners and bundled-module receivers.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
