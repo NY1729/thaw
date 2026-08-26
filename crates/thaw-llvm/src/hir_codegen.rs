@@ -19091,12 +19091,15 @@ mod tests {
         let source = r#"
             abstract class Shape {
                 constructor(public scale: number = 2) {}
+                abstract name: string;
                 abstract area(multiplier?: number): number;
                 abstract get label(): string;
                 describe(): string { return String(this.area()); }
+                fieldName(): string { return this.name; }
             }
             abstract class Deferred extends Shape {}
             class Square extends Shape {
+                name: string = "square-field";
                 constructor(public side: number = 3) { super(); }
                 area(multiplier?: number): number {
                     return this.side * this.side * this.scale * (multiplier ?? 1);
@@ -19104,6 +19107,7 @@ mod tests {
                 get label(): string { return "square"; }
             }
             class Concrete extends Deferred {
+                name: string = "concrete-field";
                 area(multiplier?: number): number { return this.scale * (multiplier ?? 1); }
                 get label(): string { return "concrete"; }
             }
@@ -19111,14 +19115,16 @@ mod tests {
                 const square = new Square();
                 const concrete = new Concrete();
                 console.log(square.label);
+                console.log(square.fieldName());
                 console.log(square.describe());
                 console.log(square.area(2));
                 console.log(concrete.describe());
+                console.log(concrete.fieldName());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_abstract_classes"),
-            "square\n18\n36\n2\n"
+            "square\nsquare-field\n18\n36\n2\nconcrete-field\n"
         );
     }
 
