@@ -19664,6 +19664,41 @@ mod tests {
     }
 
     #[test]
+    fn binds_native_methods_with_typed_tuple_spreads() {
+        let source = r#"
+            class Binder {
+                join(left: string, right: string): string { return left + right; }
+                static join(left: string, right: string): string { return left + right; }
+            }
+            function instanceTuple(): [string] {
+                console.log("instance-tuple");
+                return ["instance-"];
+            }
+            function staticTuple(): [string, string] {
+                console.log("static-tuple");
+                return ["static-", "bound"];
+            }
+            function main(): void {
+                const binder = new Binder();
+                const instanceBound = binder.join.bind(
+                    (console.log("instance-this"), binder),
+                    ...instanceTuple()
+                );
+                console.log(instanceBound("bound"));
+                const staticBound = Binder.join.bind(
+                    (console.log("static-this"), binder),
+                    ...staticTuple()
+                );
+                console.log(staticBound());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_method_bind_tuple_spreads"),
+            "instance-this\ninstance-tuple\ninstance-bound\nstatic-this\nstatic-tuple\nstatic-bound\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {

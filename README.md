@@ -1425,7 +1425,8 @@ The workspace crates have narrow responsibilities:
   Static generic instantiation expressions support the same `.call()` and typed-tuple
   `.apply()` forms; their ignored `thisArg` is still evaluated before ordinary arguments.
   `.bind()` produces synchronous or async typed closures, captures partially applied
-  leading arguments, and evaluates but does not retain its ignored static `thisArg`.
+  leading arguments, accepts statically sized tuple spreads while evaluating each spread
+  source once in JavaScript order, and evaluates but does not retain its ignored static `thisArg`.
   Instance calls through `this` are specialized directly, including calls nested inside
   an enclosing generic method after its outer type tuple has become concrete.
   Static methods resolve `this.field`, `this.getter` and `this.method(...)` against their
