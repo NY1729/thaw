@@ -19390,6 +19390,59 @@ mod tests {
     }
 
     #[test]
+    fn shares_native_generic_class_static_state_across_specializations() {
+        let source = r#"
+            class Box<T> {
+                static count: number = 0;
+                static label: string = "box";
+                static #secret: number = 40;
+                static { Box.count += 1; }
+                constructor(public value: T) { Box.count += 1; }
+                static current(): number { return Box.count; }
+                static describe(): string { return Box.label; }
+                static reveal(): number { return Box.#secret; }
+            }
+            class Counter<T> {
+                static total: number = 1;
+                constructor(public value: T) {}
+            }
+            class DerivedCounter<T> extends Counter<T> {
+                constructor(value: T) { super(value); }
+                static bump(): number {
+                    DerivedCounter.total += 1;
+                    return DerivedCounter.total;
+                }
+            }
+            class Registry<T> {
+                static next: number = 41;
+                static value(): number { Registry.next += 1; return Registry.next; }
+            }
+            function main(): void {
+                const number = new Box(40);
+                const text = new Box("ready");
+                console.log(number.value);
+                console.log(text.value);
+                console.log(Box.count);
+                console.log(Box.current());
+                console.log(Box.describe());
+                console.log(Box.reveal());
+                const derivedNumber = new DerivedCounter(1);
+                const derivedText = new DerivedCounter("two");
+                console.log(DerivedCounter.bump());
+                console.log(Counter.total);
+                console.log(DerivedCounter.total);
+                console.log(derivedNumber.value);
+                console.log(derivedText.value);
+                console.log(Registry.value());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_class_static_state"),
+            "40\nready\n3\n3\nbox\n40\n2\n2\n2\n1\ntwo\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
