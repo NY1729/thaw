@@ -754,12 +754,14 @@ fn compiles_native_class_rest_parameters() {
 fn compiles_top_level_native_class_expressions() {
     let source = r#"
         function make(): Derived { return new Derived(); }
-        const before = 1, Base = class Base {
+        const before = 1, Base = class InternalBase {
             constructor(public value: number = 40) {}
             add(delta: number = this.value): number { return this.value + delta; }
+            clone(): InternalBase { return new InternalBase(this.value + 1); }
         }, after = 2;
-        const Derived = class Derived extends Base {
+        const Derived = class InternalDerived extends Base {
             static label: string = "derived";
+            static make(): InternalDerived { return new InternalDerived(); }
         };
         const Anonymous = class {
             constructor(public text: string) {}
@@ -771,14 +773,16 @@ fn compiles_top_level_native_class_expressions() {
             console.log(after);
             console.log(value.value);
             console.log(value.add());
+            console.log(value.clone().value);
             console.log(value instanceof Base);
             console.log(Derived.label);
+            console.log(Derived.make() instanceof Derived);
             console.log(anonymous.text);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "native_class_expressions"),
-        "1\n2\n40\n80\ntrue\nderived\nready\n"
+        "1\n2\n40\n80\n41\ntrue\nderived\ntrue\nready\n"
     );
 }
 
@@ -1939,4 +1943,3 @@ fn promise_void_constructor_resolves_and_rejects() {
         "executor\nvoid failure\ndone\n"
     );
 }
-
