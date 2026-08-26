@@ -58,7 +58,9 @@ HIR globals and run in dependency/source order through a guarded LLVM initialize
 before `main` or the Lambda runtime starts. A binding imported by several modules
 therefore has one storage cell and is initialized once. A general
 `export default expression` becomes a private module-scoped constant, preserving
-single evaluation for calls, arrays and fixed-shape object expressions.
+single evaluation for calls, arrays and fixed-shape object expressions. Executable
+top-level expressions and supported control flow are interleaved with those global
+stores in the same HIR initializer sequence, rather than being reordered around them.
 The entry module's `main` or `handler` keeps its ABI name. HIR then sees one
 ordinary module, so its existing fixed-point inference, forward-reference
 resolution, generic tuple specialization and specialization deduplication apply
@@ -66,7 +68,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Classes, arbitrary executable top-level statements, package
+Classes, top-level declarations/statements outside the general HIR-supported subset, package
 multi-capture package export keys, and full ESM live bindings are outside the current typed AOT
 subset. Cyclic user-module graphs are diagnosed rather than executed. Missing
 relative or registry modules report the importing file, line and column. These
