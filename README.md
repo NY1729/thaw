@@ -1345,8 +1345,8 @@ The workspace crates have narrow responsibilities:
 
 ### Not yet compatible
 
-- Contextual/generic TypeScript inference, overload resolution, generic
-  classes, decorators, non-top-level or differently internally named class
+- Contextual TypeScript inference, overload resolution, decorators,
+  non-top-level or differently internally named class
   expressions, constructor-valued
   `this` in static initialization, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
@@ -1379,7 +1379,11 @@ The workspace crates have narrow responsibilities:
   preserving virtual method/accessor overrides, lexical `super`, async execution and
   abstract-member dispatch. Abstract fields reserve one inherited layout slot; concrete
   descendants must provide a same-typed field implementation, including through abstract
-  intermediate classes.
+  intermediate classes. Generic classes with explicit type arguments are monomorphized
+  once per concrete type tuple across constructors, fields, methods, inheritance,
+  forward references and bundled user modules. Generic class constraints, default
+  type arguments, constructor-based inference and runtime sharing of generic static
+  state remain outside the native subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
