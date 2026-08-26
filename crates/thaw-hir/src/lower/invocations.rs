@@ -531,14 +531,22 @@ impl<'a> FnLowerer<'a> {
                         });
                     }
                     if object.sym == *"Array" && property.sym == *"from" {
-                        if !(1..=3).contains(&call.args.len()) {
+                        let has_spread = call.args.iter().any(|argument| argument.spread.is_some());
+                        let (spread_arguments, spread_bindings) = if has_spread {
+                            self.lower_native_spread_values(&call.args, "Array.from")?
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
+                        let argument_count = if has_spread {
+                            spread_arguments.len()
+                        } else {
+                            call.args.len()
+                        };
+                        if !(1..=3).contains(&argument_count) {
                             return Err(
                                 "native `Array.from` expects a source, optional mapper and optional thisArg"
                                     .into(),
                             );
-                        }
-                        if call.args.iter().any(|argument| argument.spread.is_some()) {
-                            return Err("Array.from spread arguments are not supported".into());
                         }
                         let explicit_types = call
                             .type_args
@@ -557,7 +565,11 @@ impl<'a> FnLowerer<'a> {
                         if explicit_types.len() > 2 {
                             return Err("`Array.from` expects at most two type arguments".into());
                         }
-                        let source = self.lower_expr(&call.args[0].expr)?;
+                        let source = if has_spread {
+                            spread_arguments[0].clone()
+                        } else {
+                            self.lower_expr(&call.args[0].expr)?
+                        };
                         let source_type = self.infer_expr_type(&source)?;
                         let (source, source_type, element_type) = match source_type {
                             HirType::Array(element) => {
@@ -585,18 +597,40 @@ impl<'a> FnLowerer<'a> {
                                 ));
                             }
                         }
-                        let Some(mapper_argument) = call.args.get(1) else {
-                            return Ok(HirExpr::Call(
+                        if argument_count == 1 {
+                            let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_array_slice".into())),
                                 vec![
                                     source,
                                     HirExpr::Lit(HirLit::F64(0.0)),
                                     HirExpr::Lit(HirLit::F64(f64::INFINITY)),
                                 ],
-                            ));
+                            );
+                            return self.wrap_call_argument_bindings(result, &spread_bindings);
+                        }
+                        let callback = if has_spread {
+                            let callback = spread_arguments[1].clone();
+                            let params = match self.infer_expr_type(&callback)? {
+                                HirType::Function(params, _)
+                                | HirType::CallableFunction(params, _, _, _) => params,
+                                _ => return Err("Array.from mapper is not a function value".into()),
+                            };
+                            if params.len() > 2 {
+                                return Err(format!(
+                                    "Array.from mapper accepts at most two parameters, got {}",
+                                    params.len()
+                                ));
+                            }
+                            let available = [element_type.clone(), HirType::F64];
+                            self.validate_promise_callback_value(
+                                &callback,
+                                &available[..params.len()],
+                                None,
+                            )?;
+                            callback
+                        } else {
+                            self.lower_array_from_callback(&call.args[1].expr, &element_type)?
                         };
-                        let callback =
-                            self.lower_array_from_callback(&mapper_argument.expr, &element_type)?;
                         if let Some(expected) = explicit_types.get(1).or(explicit_types.first()) {
                             let HirType::Function(_, output) = self.infer_expr_type(&callback)?
                             else {
@@ -608,18 +642,22 @@ impl<'a> FnLowerer<'a> {
                                 ));
                             }
                         }
-                        let this_arg = call
-                            .args
-                            .get(2)
-                            .map(|argument| self.lower_expr(&argument.expr))
-                            .transpose()?;
-                        return self.lower_array_map(
+                        let this_arg = if has_spread {
+                            spread_arguments.get(2).cloned()
+                        } else {
+                            call.args
+                                .get(2)
+                                .map(|argument| self.lower_expr(&argument.expr))
+                                .transpose()?
+                        };
+                        let result = self.lower_array_map(
                             source,
                             source_type,
                             element_type,
                             callback,
                             this_arg,
-                        );
+                        )?;
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
                         let (arguments, mut bindings) =
