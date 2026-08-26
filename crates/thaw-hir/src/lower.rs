@@ -13322,6 +13322,56 @@ impl<'a> FnLowerer<'a> {
             if &actual == declared {
                 return Ok(value);
             }
+            if let HirType::Union(source) = &actual {
+                if source.len() == elements.len()
+                    && source.iter().all(|member| elements.contains(member))
+                    && elements.iter().all(|member| source.contains(member))
+                {
+                    let parameter = "__thaw_union_retag_value".to_string();
+                    let mut statements = Vec::with_capacity(source.len());
+                    for (source_index, member) in source.iter().enumerate() {
+                        let target_index = elements
+                            .iter()
+                            .position(|target| target == member)
+                            .expect("equivalent union contains every source member");
+                        let converted = HirExpr::UnionInject(
+                            Box::new(HirExpr::UnionValue(
+                                Box::new(HirExpr::Var(parameter.clone())),
+                                source_index,
+                                source.clone(),
+                            )),
+                            target_index,
+                            elements.clone(),
+                        );
+                        if source_index + 1 == source.len() {
+                            statements.push(HirStmt::Return(Some(converted)));
+                        } else {
+                            statements.push(HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(parameter.clone())),
+                                        source.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(source_index as f64))),
+                                ),
+                                vec![HirStmt::Return(Some(converted))],
+                                Vec::new(),
+                            ));
+                        }
+                    }
+                    let adapter = HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam {
+                            name: parameter,
+                            ty: actual,
+                        }],
+                        declared.clone(),
+                        Box::new(HirExpr::Block(statements)),
+                    );
+                    return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
+                }
+            }
             if let Some(index) = elements.iter().position(|element| element == &actual) {
                 return Ok(HirExpr::UnionInject(
                     Box::new(value),
