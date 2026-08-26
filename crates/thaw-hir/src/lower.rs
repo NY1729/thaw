@@ -6991,6 +6991,7 @@ struct GenericInterfaces<'a> {
     function_interface_chains: HashMap<Symbol, Symbol>,
     function_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    function_nested_array_discriminants: HashMap<Symbol, NestedArrayDiscriminants>,
     function_object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     function_object_function_property_discriminants:
         HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
@@ -7958,6 +7959,13 @@ fn resolve_interfaces(
             generic
                 .function_array_discriminants
                 .insert(function.ident.sym.to_string(), array_discriminants);
+        }
+        let nested_discriminants =
+            nested_array_union_discriminants(&return_type.type_ann, &generic);
+        if !nested_discriminants.is_empty() {
+            generic
+                .function_nested_array_discriminants
+                .insert(function.ident.sym.to_string(), nested_discriminants);
         }
         let property_discriminants =
             object_array_property_discriminants(&return_type.type_ann, &generic);
@@ -13012,7 +13020,14 @@ impl<'a> FnLowerer<'a> {
                 };
                 let callee = ordinary_optional_expression(callee);
                 let Expr::Member(member) = &callee else {
-                    return None;
+                    let Expr::Ident(callee) = &callee else {
+                        return None;
+                    };
+                    return self
+                        .generic_interfaces
+                        .function_nested_array_discriminants
+                        .get(callee.sym.as_ref())
+                        .cloned();
                 };
                 let property = member_property_name(&member.prop)?;
                 if property == "flat" {
