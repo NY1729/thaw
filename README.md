@@ -1305,7 +1305,8 @@ The workspace crates have narrow responsibilities:
   Unicode code point, and can map either source through a typed zero-to-two-
   argument callback into a new element type. Explicit input/output type
   arguments, shallow object identity, empty and awaited sources, named
-  callbacks, captures and optional `thisArg` evaluation are supported
+  callbacks, captures and optional `thisArg` evaluation are supported. Its
+  full one-to-three argument list also accepts statically sized tuple spreads
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
