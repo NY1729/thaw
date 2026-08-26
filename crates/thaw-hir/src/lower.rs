@@ -9697,6 +9697,105 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    fn lower_native_static_bind(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(bind) = callee.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&bind.prop).as_deref() != Some("bind") {
+            return Ok(None);
+        }
+        let Expr::Member(method) = bind.obj.as_ref() else {
+            return Ok(None);
+        };
+        let Expr::Ident(class) = method.obj.as_ref() else {
+            return Ok(None);
+        };
+        let Some(method_name) = member_property_name(&method.prop) else {
+            return Ok(None);
+        };
+        let symbol = class_static_method_symbol(class.sym.as_ref(), &method_name);
+        let Some(signature) = self.signatures.get(&symbol).cloned() else {
+            return Ok(None);
+        };
+        let Some((this_argument, leading_arguments)) = call.args.split_first() else {
+            return Err(format!(
+                "native static method `{}.{method_name}.bind` expects a `thisArg`",
+                class.sym
+            ));
+        };
+        if call.args.iter().any(|argument| argument.spread.is_some()) {
+            return Err("native static method `.bind()` does not support spread arguments".into());
+        }
+        if leading_arguments.len() > signature.params.len() {
+            return Err(format!(
+                "native static method `{}.{method_name}.bind` binds {} leading argument(s), but the method accepts {}",
+                class.sym,
+                leading_arguments.len(),
+                signature.params.len()
+            ));
+        }
+        let this_value = self.lower_expr(&this_argument.expr)?;
+        let this_type = self.infer_expr_type(&this_value)?;
+        let this_name = format!("__thaw_static_bind_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(this_name.clone(), this_type.clone());
+        let mut bindings = vec![(this_name, this_type, this_value)];
+        let mut captures = Vec::new();
+        let mut arguments = Vec::new();
+        for (index, (argument, expected)) in leading_arguments
+            .iter()
+            .zip(signature.params.iter())
+            .enumerate()
+        {
+            let value = self.lower_expr(&argument.expr)?;
+            let value = self.coerce_to_declared(expected, value).map_err(|error| {
+                format!(
+                    "bound argument {} of `{}.{method_name}` is invalid: {error}",
+                    index + 1,
+                    class.sym
+                )
+            })?;
+            let name = format!("__thaw_static_bound_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), expected.clone());
+            bindings.push((name.clone(), expected.clone(), value));
+            captures.push(HirParam {
+                name: name.clone(),
+                ty: expected.clone(),
+            });
+            arguments.push(HirExpr::Var(name));
+        }
+        let parameters = signature.params[leading_arguments.len()..]
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_static_bound_argument_{index}"),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        arguments.extend(
+            parameters
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone())),
+        );
+        let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+            HirType::Promise(Box::new(signature.ret.clone()))
+        } else {
+            signature.ret.clone()
+        };
+        let closure = HirExpr::Lambda(
+            captures,
+            parameters,
+            result,
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
+        );
+        self.wrap_call_argument_bindings(closure, &bindings)
+            .map(Some)
+    }
+
     fn lower_native_class_call_or_apply(
         &mut self,
         call: &CallExpr,
@@ -17553,6 +17652,9 @@ impl<'a> FnLowerer<'a> {
         }
 
         if let Some(bound) = self.lower_native_class_bind(call)? {
+            return Ok(bound);
+        }
+        if let Some(bound) = self.lower_native_static_bind(call)? {
             return Ok(bound);
         }
         if let Some(invoked) = self.lower_native_class_call_or_apply(call)? {
