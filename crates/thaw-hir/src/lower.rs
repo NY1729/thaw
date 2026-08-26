@@ -716,6 +716,10 @@ fn class_constructor_symbol(name: &str) -> Symbol {
     format!("__thaw_class_{name}_constructor")
 }
 
+fn class_initializer_symbol(name: &str) -> Symbol {
+    format!("__thaw_class_{name}_initialize")
+}
+
 fn class_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_method_{method}")
 }
@@ -1084,6 +1088,30 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_return_type: None,
                     },
                 );
+                let mut initializer_params = vec![instance_type.clone()];
+                initializer_params.extend(
+                    signatures[&class_constructor_symbol(&name)]
+                        .params
+                        .iter()
+                        .cloned(),
+                );
+                signatures.insert(
+                    class_initializer_symbol(&name),
+                    FnSignature {
+                        params: initializer_params,
+                        variadic: None,
+                        ret: instance_type.clone(),
+                        is_async: false,
+                        is_extern: false,
+                        source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
+                        generic_type_params: Vec::new(),
+                        generic_type_constraints: Vec::new(),
+                        generic_type_defaults: Vec::new(),
+                        generic_param_patterns: Vec::new(),
+                        generic_param_optional: Vec::new(),
+                        generic_return_type: None,
+                    },
+                );
                 for member in &class_decl.class.body {
                     let ClassMember::Method(method) = member else {
                         continue;
@@ -1420,24 +1448,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         .into_iter()
         .filter(|function| signatures[&function.name].generic_type_params.is_empty())
         .collect::<Vec<_>>();
-    specialized.extend(
-        class_decls
-            .iter()
-            .copied()
-            .map(|declaration| {
-                lower_class_constructor(
-                    declaration,
-                    &signatures,
-                    &interfaces,
-                    &generic_interfaces,
-                    &enum_values,
-                    &enum_reverse_values,
-                    &global_types,
-                    &immutable_globals,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-    );
+    for declaration in &class_decls {
+        specialized.extend(lower_class_constructor(
+            declaration,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
+        )?);
+    }
     for declaration in class_decls {
         specialized.extend(lower_class_methods(
             declaration,
@@ -3315,9 +3337,10 @@ fn lower_class_constructor(
     enum_reverse_values: &EnumReverseValues,
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
-) -> Result<HirFunction, String> {
+) -> Result<Vec<HirFunction>, String> {
     let class_name = declaration.ident.sym.to_string();
-    let symbol = class_constructor_symbol(&class_name);
+    let constructor_symbol = class_constructor_symbol(&class_name);
+    let initializer_symbol = class_initializer_symbol(&class_name);
     let instance_type = interfaces[&class_name].clone();
     let constructor = declaration
         .class
@@ -3340,9 +3363,16 @@ fn lower_class_constructor(
             false,
             &HashMap::new(),
         )?;
-        parameter.ty = signatures[&symbol].params[index].clone();
+        parameter.ty = signatures[&constructor_symbol].params[index].clone();
         params.push(parameter);
     }
+
+    let this_name = "__thaw_this".to_string();
+    let mut initializer_params = vec![HirParam {
+        name: this_name.clone(),
+        ty: instance_type.clone(),
+    }];
+    initializer_params.extend(params.iter().cloned());
 
     let mut lowerer = FnLowerer::new(
         signatures,
@@ -3354,16 +3384,12 @@ fn lower_class_constructor(
         None,
     );
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
-    let this_name = "__thaw_this".to_string();
-    lowerer
-        .scope
-        .insert(this_name.clone(), instance_type.clone());
     lowerer
         .bindings
         .entry("this".into())
         .or_default()
         .push(this_name.clone());
-    for parameter in &params {
+    for parameter in &initializer_params {
         lowerer
             .scope
             .insert(parameter.name.clone(), parameter.ty.clone());
@@ -3374,11 +3400,7 @@ fn lower_class_constructor(
             .push(parameter.name.clone());
     }
 
-    let mut body = vec![HirStmt::Let(
-        this_name.clone(),
-        instance_type.clone(),
-        HirExpr::ObjectAlloc(instance_type.clone()),
-    )];
+    let mut initializer_body = Vec::new();
     for member in &declaration.class.body {
         let ClassMember::ClassProp(property) = member else {
             continue;
@@ -3397,7 +3419,7 @@ fn lower_class_constructor(
                 .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
             let value = lowerer.lower_expr(initializer)?;
             let value = lowerer.coerce_to_declared(&expected, value)?;
-            body.push(HirStmt::Expr(HirExpr::PropAssign(
+            initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
                 Box::new(HirExpr::Var(this_name.clone())),
                 instance_type.clone(),
                 field,
@@ -3410,7 +3432,7 @@ fn lower_class_constructor(
             continue;
         };
         let field = parameter_property_binding(property)?.id.sym.to_string();
-        body.push(HirStmt::Expr(HirExpr::PropAssign(
+        initializer_body.push(HirStmt::Expr(HirExpr::PropAssign(
             Box::new(HirExpr::Var(this_name.clone())),
             instance_type.clone(),
             field,
@@ -3421,16 +3443,41 @@ fn lower_class_constructor(
         let block = constructor.body.as_ref().ok_or_else(|| {
             format!("class `{class_name}` constructor needs an implementation body")
         })?;
-        body.extend(lowerer.lower_stmts(&block.stmts)?);
+        initializer_body.extend(lowerer.lower_stmts(&block.stmts)?);
     }
-    body.push(HirStmt::Return(Some(HirExpr::Var(this_name))));
-    Ok(HirFunction {
-        name: symbol,
-        params,
+    initializer_body.push(HirStmt::Return(Some(HirExpr::Var(this_name.clone()))));
+
+    let mut initialize_args = vec![HirExpr::Var(this_name.clone())];
+    initialize_args.extend(
+        params
+            .iter()
+            .map(|parameter| HirExpr::Var(parameter.name.clone())),
+    );
+    let constructor = HirFunction {
+        name: constructor_symbol,
+        params: params.clone(),
+        ret: instance_type.clone(),
+        is_async: false,
+        body: vec![
+            HirStmt::Let(
+                this_name,
+                instance_type.clone(),
+                HirExpr::ObjectAlloc(instance_type.clone()),
+            ),
+            HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Var(initializer_symbol.clone())),
+                initialize_args,
+            ))),
+        ],
+    };
+    let initializer = HirFunction {
+        name: initializer_symbol,
+        params: initializer_params,
         ret: instance_type,
         is_async: false,
-        body,
-    })
+        body: initializer_body,
+    };
+    Ok(vec![constructor, initializer])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -19060,8 +19107,20 @@ mod tests {
                     && fields.iter().any(|(name, ty)| name == "value" && ty == &HirType::F64)
                     && fields.iter().any(|(name, ty)| name == "label" && ty == &HirType::Str)
         ));
+        let initializer = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Counter_initialize")
+            .expect("native class initializer");
+        assert_eq!(initializer.params[0].name, "__thaw_this");
+        assert!(matches!(
+            constructor.body.last(),
+            Some(HirStmt::Return(Some(HirExpr::Call(callee, args))))
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Counter_initialize")
+                    && matches!(args.first(), Some(HirExpr::Var(name)) if name == "__thaw_this")
+        ));
         assert_eq!(
-            constructor
+            initializer
                 .body
                 .iter()
                 .filter(|statement| matches!(statement, HirStmt::Expr(HirExpr::PropAssign(..))))
@@ -19242,8 +19301,13 @@ mod tests {
         assert!(fields
             .iter()
             .any(|(name, ty)| name == "label" && ty == &HirType::Str));
+        let initializer = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Point_initialize")
+            .unwrap();
         assert_eq!(
-            constructor
+            initializer
                 .body
                 .iter()
                 .filter(|statement| matches!(statement, HirStmt::Expr(HirExpr::PropAssign(..))))
