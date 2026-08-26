@@ -1408,7 +1408,9 @@ The workspace crates have narrow responsibilities:
   class wrappers, and async generic methods preserve specialized `Promise<T>` results.
   Receiver inference follows fixed-layout object member chains, and statically sized
   tuple spreads participate in method-local type inference before ordinary native-call
-  spread expansion.
+  spread expansion. Concrete descendants must implement inherited abstract generic
+  methods with the same canonical parameter, result, constraint, default, optional and
+  async shape; type-parameter spelling may differ.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
