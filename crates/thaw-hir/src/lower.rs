@@ -10569,6 +10569,7 @@ struct FnLowerer<'a> {
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
+    destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     next_binding: usize,
@@ -11948,6 +11949,7 @@ impl<'a> FnLowerer<'a> {
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
             destructured_union_correlations: HashMap::new(),
+            destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
             bindings: HashMap::new(),
             next_binding: 0,
@@ -13792,8 +13794,7 @@ impl<'a> FnLowerer<'a> {
                             let mut binding_type = field_type.clone();
                             if let Some(default) = &property.value {
                                 let default = self.lower_expr(default)?;
-                                field_value =
-                                    self.lower_nullish_coalescing(field_value, default)?;
+                                field_value = self.lower_undefined_default(field_value, default)?;
                                 binding_type = self.infer_expr_type(&field_value)?;
                             }
                             self.lower_binding_pattern(
@@ -13865,6 +13866,16 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Array(pattern) => {
+                if let HirType::Union(elements) = ty {
+                    if elements
+                        .iter()
+                        .all(|element| matches!(element, HirType::Tuple(_)))
+                    {
+                        return self.lower_union_tuple_binding_pattern(
+                            pattern, value, elements, statements,
+                        );
+                    }
+                }
                 let HirType::Tuple(elements) = ty else {
                     return Err(format!(
                         "array pattern requires a fixed-length tuple, got {ty:?}"
@@ -13923,9 +13934,15 @@ impl<'a> FnLowerer<'a> {
             }
             Pat::Assign(assign) => {
                 let default = self.lower_expr(&assign.right)?;
-                let value = self.lower_nullish_coalescing(value, default)?;
+                let default_type = self.infer_expr_type(&default)?;
+                let value = self.lower_undefined_default(value, default)?;
                 let value_type = self.infer_expr_type(&value)?;
-                self.lower_binding_pattern(&assign.left, value, &value_type, statements)
+                self.lower_binding_pattern(&assign.left, value, &value_type, statements)?;
+                if let Pat::Ident(binding) = assign.left.as_ref() {
+                    self.destructuring_default_types
+                        .insert(self.resolve_binding(binding.id.sym.as_ref()), default_type);
+                }
+                Ok(())
             }
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
             _ => Err("unsupported destructuring binding pattern".into()),
@@ -13950,7 +13967,7 @@ impl<'a> FnLowerer<'a> {
             match property {
                 ObjectPatProp::Assign(property) => {
                     let key = property.key.id.sym.to_string();
-                    let source_types =
+                    let mut source_types =
                         Self::union_destructured_property_source_types(elements, &key)?;
                     let mut field_value =
                         self.lower_union_property_read(value.clone(), elements, &key)?;
@@ -13958,8 +13975,13 @@ impl<'a> FnLowerer<'a> {
                     used.insert(key.clone());
                     if let Some(default) = &property.value {
                         let default = self.lower_expr(default)?;
-                        field_value = self.lower_nullish_coalescing(field_value, default)?;
+                        let default_type = self.infer_expr_type(&default)?;
+                        field_value = self.lower_undefined_default(field_value, default)?;
                         field_type = self.infer_expr_type(&field_value)?;
+                        source_types = Self::defaulted_destructured_source_types(
+                            &source_types,
+                            &default_type,
+                        )?;
                     }
                     self.lower_binding_pattern(
                         &Pat::Ident(property.key.clone()),
@@ -13970,12 +13992,12 @@ impl<'a> FnLowerer<'a> {
                     if property.value.is_none() {
                         let name = self.resolve_binding(property.key.id.sym.as_ref());
                         discriminant_bindings.push((key, name.clone()));
-                        extracted.push(CorrelatedDestructuredBinding {
-                            name,
-                            ty: field_type,
-                            source_types,
-                        });
                     }
+                    extracted.push(CorrelatedDestructuredBinding {
+                        name: self.resolve_binding(property.key.id.sym.as_ref()),
+                        ty: field_type,
+                        source_types,
+                    });
                 }
                 ObjectPatProp::KeyValue(property) => {
                     let key = match &property.key {
@@ -14037,6 +14059,205 @@ impl<'a> FnLowerer<'a> {
         Ok(())
     }
 
+    fn lower_union_tuple_binding_pattern(
+        &mut self,
+        pattern: &swc_ecma_ast::ArrayPat,
+        value: HirExpr,
+        elements: &[HirType],
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        for (index, element_pattern) in pattern.elems.iter().enumerate() {
+            let Some(element_pattern) = element_pattern else {
+                continue;
+            };
+            if let Pat::Rest(rest) = element_pattern {
+                let (rest_value, rest_type) =
+                    self.lower_union_tuple_rest(value.clone(), elements, index)?;
+                self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                break;
+            }
+            let element_value =
+                self.lower_union_tuple_index_read(value.clone(), elements, index)?;
+            let element_type = self.infer_expr_type(&element_value)?;
+            self.lower_binding_pattern(element_pattern, element_value, &element_type, statements)?;
+        }
+        Ok(())
+    }
+
+    fn lower_union_tuple_index_read(
+        &self,
+        value: HirExpr,
+        elements: &[HirType],
+        index: usize,
+    ) -> Result<HirExpr, String> {
+        let mut element_types = Vec::new();
+        for element in elements {
+            let HirType::Tuple(tuple) = element else {
+                return Err("union array pattern requires tuple members".into());
+            };
+            let element_type = tuple
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("tuple pattern index {index} is out of bounds"))?;
+            if !element_types.contains(&element_type) {
+                element_types.push(element_type);
+            }
+        }
+        let result_type = match element_types.as_slice() {
+            [element] => element.clone(),
+            element_types => {
+                let mut members = Vec::new();
+                for element_type in element_types {
+                    Self::flatten_property_union_members(element_type, &mut members)?;
+                }
+                match members.as_slice() {
+                    [member] => member.clone(),
+                    _ => HirType::Union(members),
+                }
+            }
+        };
+        let parameter = "__thaw_union_tuple_value".to_string();
+        let mut body = Vec::new();
+        for (source_index, element) in elements.iter().enumerate() {
+            let HirType::Tuple(tuple) = element else {
+                unreachable!()
+            };
+            let element_type = tuple[index].clone();
+            let item = HirExpr::TypedIndex(
+                Box::new(HirExpr::UnionValue(
+                    Box::new(HirExpr::Var(parameter.clone())),
+                    source_index,
+                    elements.to_vec(),
+                )),
+                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                element_type.clone(),
+            );
+            let returns = if element_types.len() == 1 {
+                vec![HirStmt::Return(Some(item))]
+            } else {
+                self.lower_flattened_property_return(item, &element_type, &result_type)?
+            };
+            if source_index + 1 == elements.len() {
+                body.extend(returns);
+            } else {
+                body.push(HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(
+                            Box::new(HirExpr::Var(parameter.clone())),
+                            elements.to_vec(),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(source_index as f64))),
+                    ),
+                    returns,
+                    Vec::new(),
+                ));
+            }
+        }
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: parameter,
+                    ty: HirType::Union(elements.to_vec()),
+                }],
+                result_type,
+                Box::new(HirExpr::Block(body)),
+            )),
+            vec![value],
+        ))
+    }
+
+    fn lower_union_tuple_rest(
+        &self,
+        value: HirExpr,
+        elements: &[HirType],
+        start: usize,
+    ) -> Result<(HirExpr, HirType), String> {
+        let mut rest_types = Vec::new();
+        for element in elements {
+            let HirType::Tuple(tuple) = element else {
+                return Err("union array rest requires tuple members".into());
+            };
+            if start > tuple.len() {
+                return Err(format!("tuple rest index {start} is out of bounds"));
+            }
+            let remaining = tuple[start..].to_vec();
+            let rest_type = if remaining
+                .first()
+                .is_some_and(|first| remaining.iter().all(|element| element == first))
+            {
+                HirType::Array(Box::new(remaining.first().cloned().unwrap_or(HirType::F64)))
+            } else {
+                HirType::Tuple(remaining)
+            };
+            if !rest_types.contains(&rest_type) {
+                rest_types.push(rest_type);
+            }
+        }
+        let result_type = match rest_types.as_slice() {
+            [rest] => rest.clone(),
+            rests => HirType::Union(rests.to_vec()),
+        };
+        let parameter = "__thaw_union_tuple_rest_value".to_string();
+        let mut body = Vec::new();
+        for (source_index, element) in elements.iter().enumerate() {
+            let HirType::Tuple(tuple) = element else {
+                unreachable!()
+            };
+            let member = HirExpr::UnionValue(
+                Box::new(HirExpr::Var(parameter.clone())),
+                source_index,
+                elements.to_vec(),
+            );
+            let rest = HirExpr::ArrayLit(
+                tuple[start..]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, ty)| {
+                        HirExpr::TypedIndex(
+                            Box::new(member.clone()),
+                            Box::new(HirExpr::Lit(HirLit::F64((start + offset) as f64))),
+                            ty.clone(),
+                        )
+                    })
+                    .collect(),
+            );
+            let rest = self.coerce_to_declared(&result_type, rest)?;
+            if source_index + 1 == elements.len() {
+                body.push(HirStmt::Return(Some(rest)));
+            } else {
+                body.push(HirStmt::If(
+                    HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(
+                            Box::new(HirExpr::Var(parameter.clone())),
+                            elements.to_vec(),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(source_index as f64))),
+                    ),
+                    vec![HirStmt::Return(Some(rest))],
+                    Vec::new(),
+                ));
+            }
+        }
+        Ok((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: parameter,
+                        ty: HirType::Union(elements.to_vec()),
+                    }],
+                    result_type.clone(),
+                    Box::new(HirExpr::Block(body)),
+                )),
+                vec![value],
+            ),
+            result_type,
+        ))
+    }
+
     fn union_destructured_property_source_types(
         elements: &[HirType],
         property: &str,
@@ -14073,6 +14294,36 @@ impl<'a> FnLowerer<'a> {
                         .cloned()
                         .collect(),
                 )])
+            })
+            .collect()
+    }
+
+    fn defaulted_destructured_source_types(
+        source_types: &[Vec<HirType>],
+        default_type: &HirType,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        let mut default_members = Vec::new();
+        Self::flatten_property_union_members(default_type, &mut default_members)?;
+        source_types
+            .iter()
+            .map(|source_group| {
+                let mut input_members = Vec::new();
+                for source_type in source_group {
+                    Self::flatten_property_union_members(source_type, &mut input_members)?;
+                }
+                let mut output = Vec::new();
+                for member in input_members {
+                    if member == HirType::Undefined {
+                        for default in &default_members {
+                            if !output.contains(default) {
+                                output.push(default.clone());
+                            }
+                        }
+                    } else if !output.contains(&member) {
+                        output.push(member);
+                    }
+                }
+                Ok(output)
             })
             .collect()
     }
@@ -14159,6 +14410,91 @@ impl<'a> FnLowerer<'a> {
             .collect()
     }
 
+    fn nested_destructured_index_source_types(
+        source_types: &[Vec<HirType>],
+        index: usize,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        source_types
+            .iter()
+            .map(|source_group| {
+                let mut values = Vec::new();
+                for source in source_group {
+                    let options = match source {
+                        HirType::Union(elements)
+                            if elements
+                                .iter()
+                                .all(|element| matches!(element, HirType::Tuple(_))) =>
+                        {
+                            elements.as_slice()
+                        }
+                        other => std::slice::from_ref(other),
+                    };
+                    for option in options {
+                        let HirType::Tuple(tuple) = option else {
+                            return Err(format!(
+                                "nested array pattern cannot destructure {option:?}"
+                            ));
+                        };
+                        let value = tuple.get(index).cloned().ok_or_else(|| {
+                            format!("tuple pattern index {index} is out of bounds")
+                        })?;
+                        if !values.contains(&value) {
+                            values.push(value);
+                        }
+                    }
+                }
+                Ok(values)
+            })
+            .collect()
+    }
+
+    fn nested_destructured_tuple_rest_source_types(
+        source_types: &[Vec<HirType>],
+        start: usize,
+    ) -> Result<Vec<Vec<HirType>>, String> {
+        source_types
+            .iter()
+            .map(|source_group| {
+                let mut rests = Vec::new();
+                for source in source_group {
+                    let options = match source {
+                        HirType::Union(elements)
+                            if elements
+                                .iter()
+                                .all(|element| matches!(element, HirType::Tuple(_))) =>
+                        {
+                            elements.as_slice()
+                        }
+                        other => std::slice::from_ref(other),
+                    };
+                    for option in options {
+                        let HirType::Tuple(tuple) = option else {
+                            return Err(format!("nested array rest cannot destructure {option:?}"));
+                        };
+                        if start > tuple.len() {
+                            return Err(format!("tuple rest index {start} is out of bounds"));
+                        }
+                        let remaining = tuple[start..].to_vec();
+                        let rest = if remaining
+                            .first()
+                            .is_some_and(|first| remaining.iter().all(|element| element == first))
+                        {
+                            HirType::Array(Box::new(
+                                remaining.first().cloned().unwrap_or(HirType::F64),
+                            ))
+                        } else {
+                            HirType::Tuple(remaining)
+                        };
+                        if !rests.contains(&rest) {
+                            rests.push(rest);
+                        }
+                    }
+                }
+                Ok(rests)
+            })
+            .collect()
+    }
+
     fn collect_correlated_destructured_bindings(
         &self,
         pattern: &Pat,
@@ -14231,7 +14567,39 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
-            Pat::Assign(_) | Pat::Array(_) | Pat::Rest(_) => {}
+            Pat::Array(pattern) => {
+                for (index, element) in pattern.elems.iter().enumerate() {
+                    let Some(element) = element else { continue };
+                    if let Pat::Rest(rest) = element {
+                        let nested =
+                            Self::nested_destructured_tuple_rest_source_types(source_types, index)?;
+                        self.collect_correlated_destructured_bindings(
+                            &rest.arg, &nested, bindings,
+                        )?;
+                        break;
+                    }
+                    let nested = Self::nested_destructured_index_source_types(source_types, index)?;
+                    self.collect_correlated_destructured_bindings(element, &nested, bindings)?;
+                }
+            }
+            Pat::Assign(assign) => {
+                let default_type = match assign.left.as_ref() {
+                    Pat::Ident(binding) => self
+                        .destructuring_default_types
+                        .get(&self.resolve_binding(binding.id.sym.as_ref())),
+                    _ => None,
+                };
+                if let Some(default_type) = default_type {
+                    let transformed =
+                        Self::defaulted_destructured_source_types(source_types, default_type)?;
+                    self.collect_correlated_destructured_bindings(
+                        &assign.left,
+                        &transformed,
+                        bindings,
+                    )?;
+                }
+            }
+            Pat::Rest(_) => {}
             _ => {}
         }
         Ok(())
@@ -15872,6 +16240,118 @@ impl<'a> FnLowerer<'a> {
             vec![HirStmt::Return(Some(else_value))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    fn lower_undefined_default(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
+        let lhs_type = self.infer_expr_type(&lhs)?;
+        if lhs_type == HirType::Undefined {
+            return Ok(rhs);
+        }
+        if let HirType::Union(elements) = &lhs_type {
+            if !elements.contains(&HirType::Undefined) {
+                return Ok(lhs);
+            }
+            let rhs_type = self.infer_expr_type(&rhs)?;
+            let mut result_members = elements
+                .iter()
+                .filter(|element| element != &&HirType::Undefined)
+                .cloned()
+                .collect::<Vec<_>>();
+            if !result_members.contains(&rhs_type) {
+                result_members.push(rhs_type);
+            }
+            let result_type = match result_members.as_slice() {
+                [member] => member.clone(),
+                members => HirType::Union(members.to_vec()),
+            };
+            let name = format!("__thaw_default_union_left_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), lhs_type.clone());
+            let left = HirExpr::Var(name.clone());
+            let mut body = Vec::new();
+            for (index, element) in elements.iter().enumerate() {
+                let value = if element == &HirType::Undefined {
+                    self.coerce_to_declared(&result_type, rhs.clone())?
+                } else {
+                    self.coerce_to_declared(
+                        &result_type,
+                        HirExpr::UnionValue(Box::new(left.clone()), index, elements.clone()),
+                    )?
+                };
+                if index + 1 == elements.len() {
+                    body.push(HirStmt::Return(Some(value)));
+                } else {
+                    body.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::UnionTag(Box::new(left.clone()), elements.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ),
+                        vec![HirStmt::Return(Some(value))],
+                        Vec::new(),
+                    ));
+                }
+            }
+            return self
+                .wrap_call_argument_bindings(HirExpr::Block(body), &[(name, lhs_type, lhs)]);
+        }
+        match lhs_type.clone() {
+            HirType::Optional(payload) => {
+                self.expect_type(payload.as_ref(), &rhs, "destructuring default")?;
+                let name = format!("__thaw_default_left_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), lhs_type.clone());
+                let left = HirExpr::Var(name.clone());
+                let result = HirExpr::Block(vec![HirStmt::If(
+                    HirExpr::OptionalIsNone(Box::new(left.clone()), payload.as_ref().clone()),
+                    vec![HirStmt::Return(Some(rhs))],
+                    vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                        Box::new(left),
+                        payload.as_ref().clone(),
+                    )))],
+                )]);
+                self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+            }
+            HirType::Nullish(payload) => {
+                self.expect_type(payload.as_ref(), &rhs, "destructuring default")?;
+                let result_type = HirType::Nullable(payload.clone());
+                let name = format!("__thaw_default_left_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), lhs_type.clone());
+                let left = HirExpr::Var(name.clone());
+                let result = HirExpr::Block(vec![
+                    HirStmt::If(
+                        HirExpr::NullishIsUndefined(
+                            Box::new(left.clone()),
+                            payload.as_ref().clone(),
+                        ),
+                        vec![HirStmt::Return(Some(HirExpr::NullableSome(
+                            Box::new(rhs),
+                            payload.as_ref().clone(),
+                        )))],
+                        Vec::new(),
+                    ),
+                    HirStmt::If(
+                        HirExpr::NullishIsNull(Box::new(left.clone()), payload.as_ref().clone()),
+                        vec![HirStmt::Return(Some(HirExpr::NullableNone(
+                            payload.as_ref().clone(),
+                        )))],
+                        Vec::new(),
+                    ),
+                    HirStmt::Return(Some(HirExpr::NullableSome(
+                        Box::new(HirExpr::NullishValue(
+                            Box::new(left),
+                            payload.as_ref().clone(),
+                        )),
+                        payload.as_ref().clone(),
+                    ))),
+                ]);
+                let result = self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])?;
+                self.expect_type(&result_type, &result, "destructuring default result")?;
+                Ok(result)
+            }
+            _ => Ok(lhs),
+        }
     }
 
     fn lower_nullish_coalescing(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
@@ -19386,8 +19866,7 @@ impl<'a> FnLowerer<'a> {
                             let mut binding_type = field_type.clone();
                             if let Some(default) = &property.value {
                                 let default = self.lower_expr(default)?;
-                                field_value =
-                                    self.lower_nullish_coalescing(field_value, default)?;
+                                field_value = self.lower_undefined_default(field_value, default)?;
                                 binding_type = self.infer_expr_type(&field_value)?;
                             }
                             self.lower_assignment_pattern(
@@ -19519,7 +19998,7 @@ impl<'a> FnLowerer<'a> {
             }
             Pat::Assign(assign) => {
                 let default = self.lower_expr(&assign.right)?;
-                let value = self.lower_nullish_coalescing(value, default)?;
+                let value = self.lower_undefined_default(value, default)?;
                 let value_type = self.infer_expr_type(&value)?;
                 self.lower_assignment_pattern(&assign.left, value, &value_type, statements)
             }

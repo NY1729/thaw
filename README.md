@@ -1562,10 +1562,11 @@ The workspace crates have narrow responsibilities:
   bindings retain their common source correlation: comparisons on a renamed
   string, number or boolean discriminant narrow every union-valued payload in
   branches, logical operands and terminating guards, including after `await`.
-  Nested object bindings and object-rest values participate in the same source
-  correlation. Assigning either side invalidates the affected correlation.
-  Default-transformed bindings, nested array patterns and untyped/dynamically
-  callable boundaries remain outside this subset
+  Nested object/tuple bindings and their object/tuple rest values participate
+  in the same source correlation. Default-transformed bindings retain the map
+  after applying JavaScript's undefined-only fallback (a `null` value is kept),
+  and assigning either side invalidates the affected correlation. Untyped or
+  dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global

@@ -16380,6 +16380,15 @@ mod tests {
             type Nested =
                 { kind: "success"; nested: { value: number }; extra: number } |
                 { kind: "failure"; nested: { value: string }; extra: string };
+            type Defaulted =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string | undefined };
+            type TupleNested =
+                { kind: "number"; pair: [number, number, number] } |
+                { kind: "text"; pair: [string, string, string] };
+            type TupleDefault =
+                { kind: "number"; pair: [number] } |
+                { kind: "text"; pair: [string | undefined] };
             function describe(result: Result): string {
                 const { kind: tag, value, detail } = result;
                 if (tag === "success" && value > 0) {
@@ -16417,6 +16426,21 @@ mod tests {
                 if (kind === "success") return String(value + rest.extra);
                 return value + rest.extra;
             }
+            function defaulted(result: Defaulted): string {
+                const { kind, value = "missing" } = result;
+                if (kind === "number") return String(value + 1);
+                return value + "!";
+            }
+            function tupleNested(result: TupleNested): string {
+                const { kind, pair: [first, ...tail] } = result;
+                if (kind === "number") return String(first + tail[0]);
+                return first + tail[0];
+            }
+            function tupleDefault(result: TupleDefault): string {
+                const { kind, pair: [value = "missing"] } = result;
+                if (kind === "number") return String(value + 2);
+                return value + "!";
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 20, detail: 2 };
@@ -16437,6 +16461,12 @@ mod tests {
                 console.log(parameter({ kind: "failure", value: "bad", detail: "" }));
                 console.log(nested({ kind: "success", nested: { value: 6 }, extra: 4 }));
                 console.log(nested({ kind: "failure", nested: { value: "nested" }, extra: "!" }));
+                console.log(defaulted({ kind: "number", value: 4 }));
+                console.log(defaulted({ kind: "text", value: undefined }));
+                console.log(tupleNested({ kind: "number", pair: [3, 4, 5] }));
+                console.log(tupleNested({ kind: "text", pair: ["tuple", "!", "?"] }));
+                console.log(tupleDefault({ kind: "number", pair: [8] }));
+                console.log(tupleDefault({ kind: "text", pair: [undefined] }));
                 const { kind, value, detail } = await delayed(true);
                 if (kind === "success") console.log(value + detail);
                 const { kind: asyncKind, value: asyncValue, detail: asyncDetail } = await delayed(false);
@@ -16447,7 +16477,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "correlated_object_union_destructuring"),
-            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n22\nasync!\n"
+            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n22\nasync!\n"
         );
     }
 
@@ -16534,11 +16564,20 @@ mod tests {
                 const [notDelayed = await delayedFallback()] = asyncPresent;
                 console.log(delayed);
                 console.log(notDelayed);
+
+                const nullable: [number | null] = [null];
+                const [keptNull = fallback()] = nullable;
+                console.log(keptNull);
+                const nullish: [number | null | undefined, number | null | undefined] =
+                    [null, undefined];
+                const [alsoNull = fallback(), defaultedUndefined = fallback()] = nullish;
+                console.log(alsoNull);
+                console.log(defaultedUndefined);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "destructuring_defaults"),
-            "fallback\n7\ndefault\n3\nok\nfallback\n7\n4\nfallback\n7\n4\n3\ndelayed fallback\n9\n6\n"
+            "fallback\n7\ndefault\n3\nok\nfallback\n7\n4\nfallback\n7\n4\n3\ndelayed fallback\n9\n6\nnull\nfallback\nnull\n7\n"
         );
     }
 
