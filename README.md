@@ -1279,7 +1279,8 @@ The workspace crates have narrow responsibilities:
 - ES2023 `.toSpliced()` returns an arena-owned shallow copy and supports every
   argument form from a no-op copy through delete-to-end and variadic insertion.
   Start/delete values use JavaScript truncation and clamping, source and
-  inserted values are evaluated once in order, and awaited operands work
+  inserted values are evaluated once in order, awaited operands work, and
+  statically sized tuple spreads can provide any suffix of the argument list
 - Homogeneous native arrays implement `.flatMap()` by mapping once and
   flattening exactly one array level into an arena-owned result. Typed named or
   contextual callbacks may change the final element type; captures, empty
