@@ -19406,6 +19406,41 @@ mod tests {
     }
 
     #[test]
+    fn preserves_nested_union_metadata_through_function_values() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function source(): Result[][] {
+                const value: Result = { kind: "number", value: 1 };
+                return [[value]];
+            }
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            function main(): void {
+                const annotated: () => Result[][] = () => {
+                    const value: Result = { kind: "text", value: "arrow" };
+                    return [[value]];
+                };
+                const arrowValues = annotated().flat();
+                print(arrowValues[0]);
+                const alias = source;
+                const aliasedValues = alias().flat();
+                print(aliasedValues[0]);
+                const selected: () => Result[][] = true ? annotated : source;
+                const selectedValues = selected().flat();
+                print(selectedValues[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "function_value_nested_union_array"),
+            "arrow!\n11\narrow!\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_of() {
         let source = r#"
             interface Item { value: number; }
