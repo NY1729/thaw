@@ -11157,7 +11157,7 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
 fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
     fn visit(statements: &[HirStmt], saw_tail_await: &mut bool) -> bool {
         statements.iter().all(|statement| match statement {
-            HirStmt::Return(Some(HirExpr::AwaitPromise(_, _))) => {
+            HirStmt::Return(Some(HirExpr::AwaitPromise(_, _) | HirExpr::Await(_))) => {
                 *saw_tail_await = true;
                 true
             }
@@ -11190,6 +11190,7 @@ fn strip_async_arrow_tail_awaits(statements: Vec<HirStmt>) -> Vec<HirStmt> {
             HirStmt::Return(Some(HirExpr::AwaitPromise(promise, _))) => {
                 HirStmt::Return(Some(*promise))
             }
+            HirStmt::Return(Some(HirExpr::Await(promise))) => HirStmt::Return(Some(*promise)),
             HirStmt::If(condition, then_body, else_body) => HirStmt::If(
                 condition,
                 strip_async_arrow_tail_awaits(then_body),
@@ -14800,9 +14801,16 @@ impl<'a> FnLowerer<'a> {
                     Some(arg) => {
                         let value = self.lower_expr(arg)?;
                         if self.ret_type == HirType::Void {
-                            return Err("a void function cannot return a value".into());
+                            if self.infer_expr_type(&value)? == HirType::Void
+                                && contains_await(&value)
+                            {
+                                Some(value)
+                            } else {
+                                return Err("a void function cannot return a value".into());
+                            }
+                        } else {
+                            Some(self.coerce_to_declared(&self.ret_type.clone(), value)?)
                         }
-                        Some(self.coerce_to_declared(&self.ret_type.clone(), value)?)
                     }
                     None => {
                         if !matches!(self.ret_type, HirType::Void | HirType::Dynamic) {
@@ -20416,6 +20424,9 @@ impl<'a> FnLowerer<'a> {
                         if let HirExpr::AwaitPromise(promise, resolved) = expression {
                             expression = *promise;
                             inferred = HirType::Promise(Box::new(resolved));
+                        } else if let HirExpr::Await(promise) = expression {
+                            expression = *promise;
+                            inferred = HirType::Promise(Box::new(inferred));
                         }
                         let resolved = declared_async_result.clone().unwrap_or_else(|| {
                             if let HirType::Promise(inner) = &inferred {
@@ -20424,50 +20435,58 @@ impl<'a> FnLowerer<'a> {
                                 inferred.clone()
                             }
                         });
-                        let assimilates = matches!(
-                            &inferred,
-                            HirType::Promise(inner) if inner.as_ref() == &resolved
-                        );
-                        if !assimilates {
+                        if contains_await(&expression) {
                             expression = self.coerce_to_declared(&resolved, expression)?;
+                            inferred = HirType::Promise(Box::new(resolved));
+                        } else {
+                            let assimilates = matches!(
+                                &inferred,
+                                HirType::Promise(inner) if inner.as_ref() == &resolved
+                            );
+                            if !assimilates {
+                                expression = self.coerce_to_declared(&resolved, expression)?;
+                            }
+                            let resolve_type = HirType::Function(
+                                vec![if assimilates {
+                                    HirType::Promise(Box::new(resolved.clone()))
+                                } else {
+                                    resolved.clone()
+                                }],
+                                Box::new(HirType::Void),
+                            );
+                            let resolve_name =
+                                format!("__thaw_async_arrow_resolve_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let mut referenced = BTreeSet::new();
+                            collect_referenced_bindings(&expression, &mut referenced);
+                            let executor_captures = referenced
+                                .into_iter()
+                                .filter_map(|name| {
+                                    self.scope
+                                        .get(&name)
+                                        .cloned()
+                                        .map(|ty| HirParam { name, ty })
+                                })
+                                .collect();
+                            let executor = HirExpr::Lambda(
+                                executor_captures,
+                                vec![HirParam {
+                                    name: resolve_name.clone(),
+                                    ty: resolve_type,
+                                }],
+                                HirType::Void,
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var(resolve_name)),
+                                    vec![expression],
+                                )),
+                            );
+                            expression = HirExpr::PromiseNew(
+                                Box::new(executor),
+                                resolved.clone(),
+                                assimilates,
+                            );
+                            inferred = HirType::Promise(Box::new(resolved));
                         }
-                        let resolve_type = HirType::Function(
-                            vec![if assimilates {
-                                HirType::Promise(Box::new(resolved.clone()))
-                            } else {
-                                resolved.clone()
-                            }],
-                            Box::new(HirType::Void),
-                        );
-                        let resolve_name =
-                            format!("__thaw_async_arrow_resolve_{}", self.next_binding);
-                        self.next_binding += 1;
-                        let mut referenced = BTreeSet::new();
-                        collect_referenced_bindings(&expression, &mut referenced);
-                        let executor_captures = referenced
-                            .into_iter()
-                            .filter_map(|name| {
-                                self.scope
-                                    .get(&name)
-                                    .cloned()
-                                    .map(|ty| HirParam { name, ty })
-                            })
-                            .collect();
-                        let executor = HirExpr::Lambda(
-                            executor_captures,
-                            vec![HirParam {
-                                name: resolve_name.clone(),
-                                ty: resolve_type,
-                            }],
-                            HirType::Void,
-                            Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var(resolve_name)),
-                                vec![expression],
-                            )),
-                        );
-                        expression =
-                            HirExpr::PromiseNew(Box::new(executor), resolved.clone(), assimilates);
-                        inferred = HirType::Promise(Box::new(resolved));
                     } else if let Some(expected) = &declared_return {
                         expression = self.coerce_to_declared(expected, expression)?;
                         inferred = self.infer_expr_type(&expression)?;
@@ -20485,66 +20504,71 @@ impl<'a> FnLowerer<'a> {
                     stmts.extend(self.lower_stmts(&block.stmts)?);
                     let inferred = self.infer_return_type(&stmts)?;
                     if arrow.is_async {
-                        let assimilates = if stmts.iter().any(stmt_contains_await) {
-                            if !async_arrow_has_only_tail_await_returns(&stmts) {
-                                return Err(
-                                    "non-tail await in async arrow block bodies is not supported yet"
-                                        .into(),
-                                );
-                            }
-                            stmts = strip_async_arrow_tail_awaits(stmts);
-                            true
-                        } else {
-                            false
-                        };
+                        let has_await = stmts.iter().any(stmt_contains_await);
+                        let only_tail_awaits =
+                            has_await && async_arrow_has_only_tail_await_returns(&stmts);
                         let resolved = declared_async_result.clone().unwrap_or(inferred);
-                        let resolve_type = HirType::Function(
-                            if assimilates {
-                                vec![HirType::Promise(Box::new(resolved.clone()))]
-                            } else if resolved == HirType::Void {
-                                Vec::new()
+                        if has_await && !only_tail_awaits {
+                            (HirExpr::Block(stmts), HirType::Promise(Box::new(resolved)))
+                        } else {
+                            let assimilates = if only_tail_awaits {
+                                stmts = strip_async_arrow_tail_awaits(stmts);
+                                true
                             } else {
-                                vec![resolved.clone()]
-                            },
-                            Box::new(HirType::Void),
-                        );
-                        let resolve_name =
-                            format!("__thaw_async_arrow_resolve_{}", self.next_binding);
-                        self.next_binding += 1;
-                        let mut executor_body =
-                            rewrite_async_arrow_returns(stmts, &resolve_name, &resolved)?;
-                        if resolved == HirType::Void && !assimilates {
-                            executor_body.push(HirStmt::Expr(HirExpr::Call(
-                                Box::new(HirExpr::Var(resolve_name.clone())),
-                                Vec::new(),
-                            )));
+                                false
+                            };
+                            let resolve_type = HirType::Function(
+                                if assimilates {
+                                    vec![HirType::Promise(Box::new(resolved.clone()))]
+                                } else if resolved == HirType::Void {
+                                    Vec::new()
+                                } else {
+                                    vec![resolved.clone()]
+                                },
+                                Box::new(HirType::Void),
+                            );
+                            let resolve_name =
+                                format!("__thaw_async_arrow_resolve_{}", self.next_binding);
+                            self.next_binding += 1;
+                            let mut executor_body =
+                                rewrite_async_arrow_returns(stmts, &resolve_name, &resolved)?;
+                            if resolved == HirType::Void && !assimilates {
+                                executor_body.push(HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var(resolve_name.clone())),
+                                    Vec::new(),
+                                )));
+                            }
+                            let executor_body = HirExpr::Block(executor_body);
+                            let mut referenced = BTreeSet::new();
+                            collect_referenced_bindings(&executor_body, &mut referenced);
+                            let executor_captures = referenced
+                                .into_iter()
+                                .filter(|name| name != &resolve_name)
+                                .filter_map(|name| {
+                                    self.scope
+                                        .get(&name)
+                                        .cloned()
+                                        .map(|ty| HirParam { name, ty })
+                                })
+                                .collect();
+                            let executor = HirExpr::Lambda(
+                                executor_captures,
+                                vec![HirParam {
+                                    name: resolve_name,
+                                    ty: resolve_type,
+                                }],
+                                HirType::Void,
+                                Box::new(executor_body),
+                            );
+                            (
+                                HirExpr::PromiseNew(
+                                    Box::new(executor),
+                                    resolved.clone(),
+                                    assimilates,
+                                ),
+                                HirType::Promise(Box::new(resolved)),
+                            )
                         }
-                        let executor_body = HirExpr::Block(executor_body);
-                        let mut referenced = BTreeSet::new();
-                        collect_referenced_bindings(&executor_body, &mut referenced);
-                        let executor_captures = referenced
-                            .into_iter()
-                            .filter(|name| name != &resolve_name)
-                            .filter_map(|name| {
-                                self.scope
-                                    .get(&name)
-                                    .cloned()
-                                    .map(|ty| HirParam { name, ty })
-                            })
-                            .collect();
-                        let executor = HirExpr::Lambda(
-                            executor_captures,
-                            vec![HirParam {
-                                name: resolve_name,
-                                ty: resolve_type,
-                            }],
-                            HirType::Void,
-                            Box::new(executor_body),
-                        );
-                        (
-                            HirExpr::PromiseNew(Box::new(executor), resolved.clone(), assimilates),
-                            HirType::Promise(Box::new(resolved)),
-                        )
                     } else {
                         (HirExpr::Block(stmts), inferred)
                     }
