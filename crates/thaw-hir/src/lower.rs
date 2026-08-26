@@ -10413,7 +10413,7 @@ struct FnLowerer<'a> {
     unbound_this_context: bool,
 }
 
-type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
+type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool, bool);
 
 impl<'a> FnLowerer<'a> {
     fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
@@ -11834,14 +11834,18 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                     }
-                    if let Some((name, matching, allowed, elements, equal_when_true)) =
+                    if let Some((name, matching, allowed, elements, equal_when_true, complement)) =
                         self.union_narrowing(&if_stmt.test)
                     {
                         let continuing = if equal_when_true {
-                            allowed
-                                .into_iter()
-                                .filter(|index| !matching.contains(index))
-                                .collect::<Vec<_>>()
+                            if complement {
+                                allowed
+                                    .into_iter()
+                                    .filter(|index| !matching.contains(index))
+                                    .collect::<Vec<_>>()
+                            } else {
+                                allowed
+                            }
                         } else {
                             matching
                         };
@@ -12125,7 +12129,16 @@ impl<'a> FnLowerer<'a> {
             .copied()
             .filter(|index| native_typeof_name(&elements[*index]) == Some(type_name.as_ref()))
             .collect::<Vec<_>>();
-        (!matching.is_empty()).then(|| (name, matching, allowed, elements.clone(), equal_when_true))
+        (!matching.is_empty()).then(|| {
+            (
+                name,
+                matching,
+                allowed,
+                elements.clone(),
+                equal_when_true,
+                true,
+            )
+        })
     }
 
     fn union_member_equality_narrowing(&self, expr: &Expr) -> Option<UnionTypeofNarrowing> {
@@ -12135,8 +12148,8 @@ impl<'a> FnLowerer<'a> {
         if let Expr::Unary(unary) = expr {
             if unary.op == UnaryOp::Bang {
                 return self.union_member_equality_narrowing(&unary.arg).map(
-                    |(name, matching, allowed, elements, equal)| {
-                        (name, matching, allowed, elements, !equal)
+                    |(name, matching, allowed, elements, equal, complement)| {
+                        (name, matching, allowed, elements, !equal, complement)
                     },
                 );
             }
@@ -12151,27 +12164,31 @@ impl<'a> FnLowerer<'a> {
             _ => return None,
         };
         let literal_type = |value: &Expr| match value {
-            Expr::Lit(Lit::Null(_)) => Some(HirType::Null),
+            Expr::Lit(Lit::Num(_)) => Some((HirType::F64, false)),
+            Expr::Lit(Lit::Str(_)) => Some((HirType::Str, false)),
+            Expr::Lit(Lit::Bool(_)) => Some((HirType::Bool, false)),
+            Expr::Lit(Lit::Null(_)) => Some((HirType::Null, true)),
             Expr::Ident(identifier)
                 if identifier.sym == *"undefined" && !self.scope.contains_key("undefined") =>
             {
-                Some(HirType::Undefined)
+                Some((HirType::Undefined, true))
             }
             _ => None,
         };
-        let (identifier, member) = if let Expr::Ident(identifier) = binary.left.as_ref() {
-            if let Some(member) = literal_type(&binary.right) {
-                (identifier, member)
+        let (identifier, (member, complement)) =
+            if let Expr::Ident(identifier) = binary.left.as_ref() {
+                if let Some(member) = literal_type(&binary.right) {
+                    (identifier, member)
+                } else if let Expr::Ident(identifier) = binary.right.as_ref() {
+                    (identifier, literal_type(&binary.left)?)
+                } else {
+                    return None;
+                }
             } else if let Expr::Ident(identifier) = binary.right.as_ref() {
                 (identifier, literal_type(&binary.left)?)
             } else {
                 return None;
-            }
-        } else if let Expr::Ident(identifier) = binary.right.as_ref() {
-            (identifier, literal_type(&binary.left)?)
-        } else {
-            return None;
-        };
+            };
         let name = self.resolve_binding(identifier.sym.as_ref());
         let HirType::Union(elements) = self.scope.get(&name)? else {
             return None;
@@ -12191,6 +12208,7 @@ impl<'a> FnLowerer<'a> {
             allowed,
             elements.clone(),
             equal_when_true,
+            complement,
         ))
     }
 
@@ -12264,9 +12282,11 @@ impl<'a> FnLowerer<'a> {
                         (name.clone(), payload.clone(), *nullable)
                     });
                 let then_union = union_narrowing.as_ref().map(
-                    |(name, matching, allowed, elements, equal)| {
+                    |(name, matching, allowed, elements, equal, complement)| {
                         let narrowed = if *equal {
                             matching.clone()
+                        } else if !complement {
+                            allowed.clone()
                         } else {
                             allowed
                                 .iter()
@@ -12278,9 +12298,11 @@ impl<'a> FnLowerer<'a> {
                     },
                 );
                 let else_union = union_narrowing.as_ref().map(
-                    |(name, matching, allowed, elements, equal)| {
+                    |(name, matching, allowed, elements, equal, complement)| {
                         let narrowed = if !*equal {
                             matching.clone()
+                        } else if !complement {
+                            allowed.clone()
                         } else {
                             allowed
                                 .iter()
