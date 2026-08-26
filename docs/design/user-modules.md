@@ -95,6 +95,10 @@ the same adapters cover optional parameters, explicit base calls and implicit de
 Optional parameter properties retain their native `T | undefined` tag in the instance layout.
 Mask-specific adapters apply explicit `undefined` to non-trailing defaults as well, after
 statically sized tuple spreads have been expanded for ordinary and `super` calls.
+Trailing rest parameters use an internal typed-array ABI. Calls pack zero or more expanded
+arguments into that array for constructors, instance/static methods, async methods, explicit
+base calls and inherited implicit constructors; defaults before the rest slot still use the
+same omission masks.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
