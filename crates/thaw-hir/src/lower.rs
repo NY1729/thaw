@@ -901,6 +901,54 @@ fn collect_native_classes<'a>(
                 lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?,
             ));
         }
+        for implementation in &declaration.class.implements {
+            let Expr::Ident(target) = implementation.expr.as_ref() else {
+                return Err(format!(
+                    "class `{name}` requires an identifier in its implements clause"
+                ));
+            };
+            if declarations.contains_key(target.sym.as_ref()) {
+                return Err(format!(
+                    "class `{name}` cannot use native class `{}` as an implements target",
+                    target.sym
+                ));
+            }
+            let reference = TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                span: implementation.span,
+                type_name: swc_ecma_ast::TsEntityName::Ident(target.clone()),
+                type_params: implementation.type_args.clone(),
+            });
+            let required =
+                lower_ts_type(&reference, interfaces, generic_interfaces).map_err(|error| {
+                    format!(
+                        "class `{name}` has invalid implements target `{}`: {error}",
+                        target.sym
+                    )
+                })?;
+            let HirType::Object(required_fields) = required else {
+                return Err(format!(
+                    "class `{name}` implements non-object type `{}`",
+                    target.sym
+                ));
+            };
+            for (field, required_type) in &required_fields {
+                let actual_type = fields
+                    .iter()
+                    .find_map(|(candidate, ty)| (candidate == field).then_some(ty))
+                    .ok_or_else(|| {
+                        format!(
+                            "class `{name}` is missing field `{field}` required by `{}`",
+                            target.sym
+                        )
+                    })?;
+                if actual_type != required_type {
+                    return Err(format!(
+                        "class `{name}` field `{field}` has type {actual_type:?}, but `{}` requires {required_type:?}",
+                        target.sym
+                    ));
+                }
+            }
+        }
         interfaces.insert(name.to_string(), HirType::Object(fields));
         active.pop();
         resolved.insert(name.to_string());
@@ -919,12 +967,9 @@ fn collect_native_classes<'a>(
                 "ambient class `{name}` cannot use the native class path"
             ));
         }
-        if declaration.class.is_abstract
-            || declaration.class.type_params.is_some()
-            || !declaration.class.implements.is_empty()
-        {
+        if declaration.class.is_abstract || declaration.class.type_params.is_some() {
             return Err(format!(
-                "class `{name}` currently requires a concrete, non-generic class without implements"
+                "class `{name}` currently requires a concrete, non-generic class"
             ));
         }
         if interfaces.contains_key(&name)
@@ -20028,5 +20073,55 @@ mod tests {
             .find(|function| function.name == "__thaw_class_Leaf_initialize")
             .unwrap();
         assert!(format!("{:?}", leaf_initializer.body).contains("__thaw_class_Middle_initialize"));
+    }
+
+    #[test]
+    fn validates_native_class_implements_against_inherited_layout() {
+        let program = lower(
+            r#"interface NamedValue<N, V> { name: N; value: V; }
+            class Named {
+                constructor(public name: string) {}
+            }
+            class Value extends Named implements NamedValue<string, number> {
+                constructor(name: string, public value: number) { super(name); }
+            }
+            function main(): number { return new Value("answer", 42).value; }"#,
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "__thaw_class_Value_constructor"));
+    }
+
+    #[test]
+    fn rejects_native_class_missing_an_implemented_field() {
+        let module = thaw_parser::parse_typescript(
+            r#"interface Required { value: number; label: string; }
+            class Incomplete implements Required {
+                constructor(public value: number) {}
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("missing field `label` required by `Required`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_native_class_implemented_field_type_mismatch() {
+        let module = thaw_parser::parse_typescript(
+            r#"type Required = { value: number };
+            class Mismatch implements Required {
+                constructor(public value: string) {}
+            }"#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("field `value` has type Str, but `Required` requires F64"),
+            "{error}"
+        );
     }
 }

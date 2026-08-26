@@ -1355,7 +1355,8 @@ The workspace crates have narrow responsibilities:
   member names and mixed native layouts rejected
 - The typed AOT class subset supports constructors, parameter properties,
   instance fields and methods, accessors, static members, inheritance, `super`
-  calls and implicit derived-constructor forwarding. Named and anonymous default
+  calls, implicit derived-constructor forwarding and structural `implements`
+  validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
   into one executable. Runtime class values, computed members, `new.target`,
   constructor object returns and full JavaScript prototype mutation remain outside
