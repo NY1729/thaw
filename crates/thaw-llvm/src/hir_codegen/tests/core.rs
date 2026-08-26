@@ -970,6 +970,28 @@ fn compiles_parse_float_and_parse_int() {
 }
 
 #[test]
+fn compiles_tuple_spreads_for_math_and_number_builtins() {
+    let source = r#"
+        function numeric(): [string] {
+            console.log("numeric-spread");
+            return ["9"];
+        }
+        function main(): void {
+            console.log(Math.sqrt(...numeric()));
+            console.log(Math.pow(...[2, 3]));
+            console.log(Math.min(...[3, 1, 2]));
+            console.log(Math.hypot(...[3, 4]));
+            console.log(Number.isInteger(...[3]));
+            console.log(Number.isNaN(...["not-number"]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "math_number_tuple_spreads"),
+        "numeric-spread\n3\n8\n1\n5\ntrue\nfalse\n"
+    );
+}
+
+#[test]
 fn nested_finally_blocks_run_inside_out() {
     let source = r#"
         function nested(): string {
