@@ -977,17 +977,15 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 if property.sym == *"charCodeAt" {
-                    if call.args.len() > 1 {
-                        return Err("native `.charCodeAt()` expects zero or one argument".into());
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("charCodeAt spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     self.expect_type(&HirType::Str, &receiver, "charCodeAt receiver")?;
-                    let index = if let Some(argument) = call.args.first() {
-                        let index = self.lower_expr(&argument.expr)?;
-                        self.coerce_primitive_to_number(index)?
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.charCodeAt")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.charCodeAt()` expects zero or one argument".into());
+                    }
+                    let index = if let Some(argument) = arguments.first() {
+                        self.coerce_primitive_to_number(argument.clone())?
                     } else {
                         HirExpr::Lit(HirLit::F64(0.0))
                     };
@@ -1004,42 +1002,46 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(index_name.clone()),
                         ],
                     );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((index_name, HirType::F64, index));
                     return self.wrap_call_argument_bindings(
                         result,
-                        &[
-                            (receiver_name, HirType::Str, receiver),
-                            (index_name, HirType::F64, index),
-                        ],
+                        &bindings,
                     );
                 }
                 if property.sym == *"concat" {
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("native concat spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "native concat")?;
                     if let HirType::Array(element) = receiver_type {
                         let element = element.as_ref().clone();
-                        let mut parts = vec![receiver];
-                        for argument in &call.args {
-                            let value = self.lower_expr(&argument.expr)?;
+                        let array_type = HirType::Array(Box::new(element.clone()));
+                        let receiver_name = format!("__thaw_concat_part_0_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(receiver_name.clone(), array_type.clone());
+                        let mut bindings = vec![(receiver_name.clone(), array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        let mut ordered = vec![HirExpr::Var(receiver_name)];
+                        for (position, value) in arguments.into_iter().enumerate() {
                             let actual = self.infer_expr_type(&value)?;
-                            if actual == HirType::Array(Box::new(element.clone())) {
-                                parts.push(value);
+                            let part = if actual == HirType::Array(Box::new(element.clone())) {
+                                value
                             } else if actual == element {
-                                parts.push(HirExpr::ArrayLit(vec![value]));
+                                HirExpr::ArrayLit(vec![value])
                             } else {
                                 return Err(format!(
                                     "array concat argument has type {actual:?}, expected {element:?} or an array of it"
                                 ));
-                            }
-                        }
-                        let mut bindings = Vec::with_capacity(parts.len());
-                        let mut ordered = Vec::with_capacity(parts.len());
-                        for (position, part) in parts.into_iter().enumerate() {
+                            };
                             let ty = self.infer_expr_type(&part)?;
-                            let name =
-                                format!("__thaw_concat_part_{}_{}", position, self.next_binding);
+                            let name = format!(
+                                "__thaw_concat_part_{}_{}",
+                                position + 1,
+                                self.next_binding
+                            );
                             self.next_binding += 1;
                             self.scope.insert(name.clone(), ty.clone());
                             bindings.push((name.clone(), ty, part));
@@ -1051,18 +1053,20 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                     self.expect_type(&HirType::Str, &receiver, "string concat receiver")?;
-                    let mut sources = vec![receiver];
-                    for argument in &call.args {
-                        let value = self.lower_expr(&argument.expr)?;
-                        let value = self.coerce_primitive_to_string(value)?;
-                        sources.push(value);
-                    }
-                    let mut bindings = Vec::with_capacity(sources.len());
-                    let mut values = Vec::with_capacity(sources.len());
-                    for (position, source) in sources.into_iter().enumerate() {
+                    let receiver_name =
+                        format!("__thaw_string_concat_part_0_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    let mut bindings =
+                        vec![(receiver_name.clone(), HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    let mut values = vec![HirExpr::Var(receiver_name)];
+                    for (position, source) in arguments.into_iter().enumerate() {
+                        let source = self.coerce_primitive_to_string(source)?;
                         let name = format!(
                             "__thaw_string_concat_part_{}_{}",
-                            position, self.next_binding
+                            position + 1,
+                            self.next_binding
                         );
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), HirType::Str);
@@ -1097,16 +1101,14 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if property.sym == *"repeat" {
-                    let [count] = call.args.as_slice() else {
-                        return Err("native `.repeat()` expects exactly one count".into());
-                    };
-                    if count.spread.is_some() {
-                        return Err("string repeat spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     self.expect_type(&HirType::Str, &receiver, "string repeat receiver")?;
-                    let count = self.lower_expr(&count.expr)?;
-                    let count = self.coerce_primitive_to_number(count)?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.repeat")?;
+                    let [count] = arguments.as_slice() else {
+                        return Err("native `.repeat()` expects exactly one count".into());
+                    };
+                    let count = self.coerce_primitive_to_number(count.clone())?;
                     let receiver_name = format!("__thaw_repeat_receiver_{}", self.next_binding);
                     self.next_binding += 1;
                     let count_name = format!("__thaw_repeat_count_{}", self.next_binding);
@@ -1164,13 +1166,10 @@ impl<'a> FnLowerer<'a> {
                             vec![var(&receiver_name), var(&normalized_name)],
                         ))),
                     ]);
-                    return self.wrap_call_argument_bindings(
-                        body,
-                        &[
-                            (receiver_name, HirType::Str, receiver),
-                            (count_name, HirType::F64, count),
-                        ],
-                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((count_name, HirType::F64, count));
+                    return self.wrap_call_argument_bindings(body, &bindings);
                 }
                 if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase") {
                     if !call.args.is_empty() {
@@ -1893,23 +1892,21 @@ impl<'a> FnLowerer<'a> {
                     property.sym.as_ref(),
                     "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith"
                 ) {
-                    if !(1..=2).contains(&call.args.len()) {
+                    let label = format!("native .{}", property.sym);
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, &label)?;
+                    if !(1..=2).contains(&arguments.len()) {
                         return Err(format!(
                             "native `.{}` expects one or two arguments",
                             property.sym
                         ));
                     }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("native search spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     if receiver_type == HirType::Str {
-                        let needle = self.lower_expr(&call.args[0].expr)?;
-                        let needle = self.coerce_primitive_to_string(needle)?;
-                        let position = if let Some(argument) = call.args.get(1) {
-                            let value = self.lower_expr(&argument.expr)?;
-                            self.coerce_primitive_to_number(value)?
+                        let needle = self.coerce_primitive_to_string(arguments[0].clone())?;
+                        let position = if let Some(argument) = arguments.get(1) {
+                            self.coerce_primitive_to_number(argument.clone())?
                         } else if property.sym == *"endsWith" || property.sym == *"lastIndexOf" {
                             HirExpr::Lit(HirLit::F64(f64::INFINITY))
                         } else {
@@ -1943,14 +1940,11 @@ impl<'a> FnLowerer<'a> {
                                 HirExpr::Var(position_name.clone()),
                             ],
                         );
-                        return self.wrap_call_argument_bindings(
-                            result,
-                            &[
-                                (receiver_name, HirType::Str, receiver),
-                                (needle_name, HirType::Str, needle),
-                                (position_name, HirType::F64, position),
-                            ],
-                        );
+                        let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle_name, HirType::Str, needle));
+                        bindings.push((position_name, HirType::F64, position));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if matches!(property.sym.as_ref(), "startsWith" | "endsWith") {
                         return Err(format!(
@@ -1964,11 +1958,10 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     };
-                    let needle = self.lower_expr(&call.args[0].expr)?;
+                    let needle = arguments[0].clone();
                     let needle_type = self.infer_expr_type(&needle)?;
-                    let from_index = if let Some(argument) = call.args.get(1) {
-                        let value = self.lower_expr(&argument.expr)?;
-                        self.coerce_primitive_to_number(value)?
+                    let from_index = if let Some(argument) = arguments.get(1) {
+                        self.coerce_primitive_to_number(argument.clone())?
                     } else if property.sym == *"lastIndexOf" {
                         HirExpr::Lit(HirLit::F64(f64::INFINITY))
                     } else {
@@ -1990,14 +1983,11 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             HirExpr::Lit(HirLit::F64(-1.0))
                         };
-                        return self.wrap_call_argument_bindings(
-                            result,
-                            &[
-                                (receiver_name, receiver_type, receiver),
-                                (needle_name, needle_type, needle),
-                                (start_name, HirType::F64, from_index),
-                            ],
-                        );
+                        let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle_name, needle_type, needle));
+                        bindings.push((start_name, HirType::F64, from_index));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     let prefix = match element.as_ref() {
                         HirType::F64 => "number",
@@ -2033,14 +2023,11 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(start_name.clone()),
                         ],
                     );
-                    return self.wrap_call_argument_bindings(
-                        result,
-                        &[
-                            (receiver_name, receiver_type, receiver),
-                            (needle_name, needle_type, needle),
-                            (start_name, HirType::F64, from_index),
-                        ],
-                    );
+                    let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((needle_name, needle_type, needle));
+                    bindings.push((start_name, HirType::F64, from_index));
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"toString" {
                     if !call.args.is_empty() {
