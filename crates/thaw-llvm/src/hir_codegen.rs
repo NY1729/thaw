@@ -19832,6 +19832,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_finite_record_utility_types() {
+        let source = r#"
+            type Counts = Record<"left" | "right", number>;
+            type Pair<T> = Record<"first" | "second", T>;
+            function total(values: Counts): number {
+                return values.left + values.right;
+            }
+            function main(): void {
+                const counts: Counts = { right: 22, left: 20 };
+                const pair: Pair<string> = { first: "ready", second: "done" };
+                console.log(total(counts));
+                console.log(pair.first);
+                console.log(pair.second);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "finite_record_utility_types"),
+            "42\nready\ndone\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
