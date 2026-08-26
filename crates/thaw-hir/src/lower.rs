@@ -4835,13 +4835,16 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .get_mut(&symbol)
                         .expect("class method signature")
                         .native_rest = native_rest;
-                    if method.kind == MethodKind::Method && signatures[&symbol].uses_this {
+                    let unbound_symbol = (method.kind == MethodKind::Method
+                        && signatures[&symbol].uses_this)
+                        .then(|| unbound_class_method_symbol(&symbol));
+                    if let Some(unbound_symbol) = &unbound_symbol {
                         let mut unbound = signatures[&symbol].clone();
                         if !method.is_static {
                             unbound.params.remove(0);
                         }
                         unbound.uses_this = false;
-                        signatures.insert(unbound_class_method_symbol(&symbol), unbound);
+                        signatures.insert(unbound_symbol.clone(), unbound);
                     }
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
                         let receiver_count = usize::from(!method.is_static);
@@ -4858,6 +4861,22 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         &patterns,
                         usize::from(!method.is_static),
                     )?;
+                    if let Some(unbound_symbol) = unbound_symbol {
+                        if let Some(default_start) = trailing_omittable_start(&patterns) {
+                            for arity in default_start..patterns.len() {
+                                let mut wrapper = signatures[&unbound_symbol].clone();
+                                wrapper.params.truncate(arity);
+                                signatures
+                                    .insert(default_arity_symbol(&unbound_symbol, arity), wrapper);
+                            }
+                        }
+                        insert_omitted_parameter_signatures(
+                            &mut signatures,
+                            &unbound_symbol,
+                            &patterns,
+                            0,
+                        )?;
+                    }
                 }
             }
             // Already consumed by `resolve_interfaces` above.
@@ -5073,6 +5092,20 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     signature.params[0] = derived_type.clone();
                 }
                 signatures.insert(derived_symbol.clone(), signature.clone());
+                if method.kind == MethodKind::Method && signature.uses_this {
+                    let base_unbound = unbound_class_method_symbol(&base_symbol);
+                    let derived_unbound = unbound_class_method_symbol(&derived_symbol);
+                    let mut unbound_signature =
+                        signatures.get(&base_unbound).cloned().unwrap_or_else(|| {
+                            let mut unbound = signature.clone();
+                            if !method.is_static {
+                                unbound.params.remove(0);
+                            }
+                            unbound
+                        });
+                    unbound_signature.uses_this = false;
+                    signatures.insert(derived_unbound, unbound_signature);
+                }
                 if !derived.class.is_abstract {
                     let mut inherited = (*base).clone();
                     inherited.ident = derived.ident.clone();
@@ -5114,6 +5147,26 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         wrapper_signature.params[0] = derived_type.clone();
                     }
                     signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
+                }
+                if method.kind == MethodKind::Method && signature.uses_this {
+                    let base_unbound = unbound_class_method_symbol(&base_symbol);
+                    let derived_unbound = unbound_class_method_symbol(&derived_symbol);
+                    if let Some(default_start) = trailing_omittable_start(&patterns) {
+                        for arity in default_start..patterns.len() {
+                            let base_wrapper = default_arity_symbol(&base_unbound, arity);
+                            let derived_wrapper = default_arity_symbol(&derived_unbound, arity);
+                            if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
+                                signatures.insert(derived_wrapper, wrapper);
+                            }
+                        }
+                    }
+                    for mask in omitted_parameter_masks(&patterns, 0)? {
+                        let base_wrapper = omitted_parameter_symbol(&base_unbound, mask);
+                        let derived_wrapper = omitted_parameter_symbol(&derived_unbound, mask);
+                        if let Some(wrapper) = signatures.get(&base_wrapper).cloned() {
+                            signatures.insert(derived_wrapper, wrapper);
+                        }
+                    }
                 }
             }
             base_name = base
@@ -7590,6 +7643,7 @@ fn lower_class_default_wrappers(
     params: &[HirParam],
     patterns: &[Pat],
     receiver_count: usize,
+    unbound_context: Option<(&str, bool)>,
     ret: &HirType,
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
@@ -7599,10 +7653,18 @@ fn lower_class_default_wrappers(
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
 ) -> Result<Vec<HirFunction>, String> {
-    let is_async = signatures[symbol].is_async;
     let Some(default_start) = trailing_omittable_start(patterns) else {
         return Ok(Vec::new());
     };
+    let is_async = signatures
+        .get(symbol)
+        .or_else(|| {
+            symbol
+                .strip_suffix("__thaw_unbound")
+                .and_then(|original| signatures.get(original))
+        })
+        .ok_or_else(|| format!("missing class wrapper signature for `{symbol}`"))?
+        .is_async;
     let mut wrappers = Vec::new();
     for arity in default_start..patterns.len() {
         let total_arity = receiver_count + arity;
@@ -7617,6 +7679,11 @@ fn lower_class_default_wrappers(
             None,
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        if let Some((class, is_static)) = unbound_context {
+            lowerer.class_context = Some(class.to_string());
+            lowerer.class_static_context = is_static;
+            lowerer.unbound_this_context = true;
+        }
         for parameter in &wrapper_params {
             lowerer
                 .scope
@@ -7711,6 +7778,7 @@ fn lower_class_omitted_parameter_wrappers(
     params: &[HirParam],
     patterns: &[Pat],
     receiver_count: usize,
+    unbound_context: Option<(&str, bool)>,
     ret: &HirType,
     signatures: &HashMap<Symbol, FnSignature>,
     interfaces: &HashMap<Symbol, HirType>,
@@ -7720,9 +7788,21 @@ fn lower_class_omitted_parameter_wrappers(
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
 ) -> Result<Vec<HirFunction>, String> {
-    let is_async = signatures[symbol].is_async;
+    let masks = omitted_parameter_masks(patterns, receiver_count)?;
+    if masks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let is_async = signatures
+        .get(symbol)
+        .or_else(|| {
+            symbol
+                .strip_suffix("__thaw_unbound")
+                .and_then(|original| signatures.get(original))
+        })
+        .ok_or_else(|| format!("missing class wrapper signature for `{symbol}`"))?
+        .is_async;
     let mut wrappers = Vec::new();
-    for mask in omitted_parameter_masks(patterns, receiver_count)? {
+    for mask in masks {
         let wrapper_params = params
             .iter()
             .enumerate()
@@ -7740,6 +7820,11 @@ fn lower_class_omitted_parameter_wrappers(
             None,
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        if let Some((class, is_static)) = unbound_context {
+            lowerer.class_context = Some(class.to_string());
+            lowerer.class_static_context = is_static;
+            lowerer.unbound_this_context = true;
+        }
         if receiver_count == 1 {
             lowerer
                 .scope
@@ -8074,6 +8159,7 @@ fn lower_class_constructor(
         &params,
         &patterns,
         0,
+        None,
         &instance_type,
         signatures,
         interfaces,
@@ -8088,6 +8174,7 @@ fn lower_class_constructor(
         &params,
         &patterns,
         0,
+        None,
         &instance_type,
         signatures,
         interfaces,
@@ -8107,6 +8194,7 @@ fn lower_class_constructor(
         &initializer_wrapper_params,
         &patterns,
         1,
+        None,
         &instance_type,
         signatures,
         interfaces,
@@ -8121,6 +8209,7 @@ fn lower_class_constructor(
         &initializer_wrapper_params,
         &patterns,
         1,
+        None,
         &instance_type,
         signatures,
         interfaces,
@@ -8442,6 +8531,7 @@ fn lower_class_methods(
             &params,
             &patterns,
             receiver_offset,
+            None,
             &signature.ret,
             signatures,
             interfaces,
@@ -8456,6 +8546,7 @@ fn lower_class_methods(
             &params,
             &patterns,
             receiver_offset,
+            None,
             &signature.ret,
             signatures,
             interfaces,
@@ -8465,6 +8556,41 @@ fn lower_class_methods(
             global_types,
             immutable_globals,
         )?);
+        if method.kind == MethodKind::Method && signature.uses_this {
+            let unbound_symbol = unbound_class_method_symbol(&symbol);
+            let unbound_params = params[receiver_offset..].to_vec();
+            let unbound_context = Some((class_name.as_str(), method.is_static));
+            functions.extend(lower_class_default_wrappers(
+                &unbound_symbol,
+                &unbound_params,
+                &patterns,
+                0,
+                unbound_context,
+                &signature.ret,
+                signatures,
+                interfaces,
+                generic_interfaces,
+                enum_values,
+                enum_reverse_values,
+                global_types,
+                immutable_globals,
+            )?);
+            functions.extend(lower_class_omitted_parameter_wrappers(
+                &unbound_symbol,
+                &unbound_params,
+                &patterns,
+                0,
+                unbound_context,
+                &signature.ret,
+                signatures,
+                interfaces,
+                generic_interfaces,
+                enum_values,
+                enum_reverse_values,
+                global_types,
+                immutable_globals,
+            )?);
+        }
     }
     Ok(functions)
 }
@@ -10647,8 +10773,34 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee) = &call.callee else {
             return Ok(None);
         };
-        if matches!(callee.as_ref(), Expr::Ident(_)) {
-            return Ok(None);
+        if let Expr::Ident(target) = callee.as_ref() {
+            let binding = self.resolve_binding(target.sym.as_ref());
+            let Some(method) = self.native_method_values.get(&binding).cloned() else {
+                return Ok(None);
+            };
+            let label = format!("unbound native method `{}`", target.sym);
+            let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
+            let mut symbol = unbound_class_method_symbol(&method.symbol);
+            let mut signature = self.signatures.get(&symbol).cloned().unwrap_or_else(|| {
+                let mut signature = self.signatures[&method.symbol].clone();
+                if method.receiver.is_some() {
+                    signature.params.remove(0);
+                }
+                signature
+            });
+            let arguments = self.select_omitted_class_arguments(
+                &mut symbol,
+                &mut signature,
+                arguments,
+                0,
+                &label,
+            )?;
+            return self
+                .wrap_call_argument_bindings(
+                    HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments),
+                    &bindings,
+                )
+                .map(Some);
         }
         let Expr::Member(operation) = callee.as_ref() else {
             return Ok(None);
