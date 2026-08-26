@@ -1000,6 +1000,10 @@ The workspace crates have narrow responsibilities:
 - Generic instantiation expressions such as `identity<number>` produce ordinary
   monomorphic function values that can be stored, called and passed to array or
   Promise APIs; explicit arity, defaults and constraints are validated
+- Typed closure and named-function values support `.call(thisArg, ...args)` and
+  `.apply(thisArg, typedTuple)` after passing through parameters and return values.
+  The target, `thisArg` and ordinary or tuple-expanded arguments are evaluated once
+  in JavaScript order; ordinary functions ignore the explicit receiver
 - Named async generic functions specialize for inferred or explicit types and
   retain exactly one Promise layer when used directly, as instantiated function
   values, or as assimilated Promise callbacks

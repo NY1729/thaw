@@ -222,6 +222,14 @@ pub enum HirExpr {
     /// Strict equality between two values with the same tagged union type.
     UnionIsEqual(Box<HirExpr>, Box<HirExpr>, Vec<HirType>),
     Call(Box<HirExpr>, Vec<HirExpr>),
+    // Invokes a closure through its second entry with an explicit JavaScript `thisArg`.
+    FunctionCallWithThis(
+        Box<HirExpr>,
+        Box<HirExpr>,
+        Vec<HirExpr>,
+        Vec<HirType>,
+        HirType,
+    ),
     /// A homogeneous `Promise.all` join. The element type is retained so
     /// codegen can copy and later load non-number result slots correctly.
     PromiseAll(Vec<HirExpr>, HirType),
@@ -455,6 +463,13 @@ pub fn set_ffi_error_abi(
                     visit_expr(arg, symbol, abi, found);
                 }
             }
+            HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
+                visit_expr(callee, symbol, abi, found);
+                visit_expr(this_arg, symbol, abi, found);
+                for arg in args {
+                    visit_expr(arg, symbol, abi, found);
+                }
+            }
             HirExpr::DynamicCall(_, args) => {
                 for arg in args {
                     visit_expr(arg, symbol, abi, found);
@@ -618,6 +633,13 @@ pub fn set_ffi_ownership(
             }
             HirExpr::Call(callee, args) => {
                 update_expr(callee, symbol, returns, errors, found);
+                for arg in args {
+                    update_expr(arg, symbol, returns, errors, found);
+                }
+            }
+            HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
+                update_expr(callee, symbol, returns, errors, found);
+                update_expr(this_arg, symbol, returns, errors, found);
                 for arg in args {
                     update_expr(arg, symbol, returns, errors, found);
                 }
@@ -821,6 +843,37 @@ pub fn set_ffi_string_abi(
             HirExpr::Call(callee, values) => {
                 update_expr(
                     callee,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                for value in values {
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
+                }
+            }
+            HirExpr::FunctionCallWithThis(callee, this_arg, values, _, _) => {
+                update_expr(
+                    callee,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    this_arg,
                     symbol,
                     params,
                     returns,
