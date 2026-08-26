@@ -6856,6 +6856,7 @@ struct GenericInterfaces<'a> {
     function_alias_chains: HashMap<Symbol, Symbol>,
     function_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     function_interface_chains: HashMap<Symbol, Symbol>,
+    function_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
 }
 
 impl GenericInterfaces<'_> {
@@ -6910,8 +6911,20 @@ fn object_union_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
 ) -> HashMap<Symbol, Vec<Option<HirLit>>> {
+    let raw = strip_parenthesized_ts_type(ty);
+    let mut resolved = resolve_plain_alias_type(raw, generic);
+    if let TsType::TsTypeRef(reference) = raw {
+        if matches!(&reference.type_name, swc_ecma_ast::TsEntityName::Ident(name) if name.sym == *"Promise")
+        {
+            if let Some(arguments) = &reference.type_params {
+                if let [inner] = arguments.params.as_slice() {
+                    resolved = resolve_plain_alias_type(inner, generic);
+                }
+            }
+        }
+    }
     let Some(TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union))) =
-        resolve_plain_alias_type(ty, generic)
+        resolved
     else {
         return HashMap::new();
     };
@@ -7255,6 +7268,21 @@ fn resolve_interfaces(
                 }
             }
             _ => {}
+        }
+    }
+
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = item else {
+            continue;
+        };
+        let Some(return_type) = &function.function.return_type else {
+            continue;
+        };
+        let discriminants = object_union_discriminants(&return_type.type_ann, &generic);
+        if !discriminants.is_empty() {
+            generic
+                .function_discriminants
+                .insert(function.ident.sym.to_string(), discriminants);
         }
     }
 
@@ -11874,6 +11902,48 @@ impl<'a> FnLowerer<'a> {
             .unwrap_or_else(|| source_name.to_string())
     }
 
+    fn expression_union_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<HashMap<Symbol, Vec<Option<HirLit>>>> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .union_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::Paren(parenthesized) => self.expression_union_discriminants(&parenthesized.expr),
+            Expr::TsAs(assertion) => {
+                let metadata =
+                    object_union_discriminants(&assertion.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata =
+                    object_union_discriminants(&assertion.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::Await(awaited) => self.expression_union_discriminants(&awaited.arg),
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Ident(callee) = callee.as_ref() else {
+                    return None;
+                };
+                self.generic_interfaces
+                    .function_discriminants
+                    .get(callee.sym.as_ref())
+                    .cloned()
+            }
+            Expr::Cond(conditional) => {
+                let consequent = self.expression_union_discriminants(&conditional.cons)?;
+                (self.expression_union_discriminants(&conditional.alt)? == consequent)
+                    .then_some(consequent)
+            }
+            _ => None,
+        }
+    }
+
     fn bind_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
         let hir_name = if self.scope.contains_key(source_name) {
             let name = format!("{source_name}__thaw_{}", self.next_binding);
@@ -13277,6 +13347,7 @@ impl<'a> FnLowerer<'a> {
                         .get(&self.resolve_binding(identifier.sym.as_ref()))
                         .cloned()
                 });
+                let propagated_discriminants = self.expression_union_discriminants(init);
                 let value = match (init, annotated.as_ref()) {
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
@@ -13347,6 +13418,9 @@ impl<'a> FnLowerer<'a> {
                         self.union_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
+                } else if let Some(discriminants) = propagated_discriminants {
+                    self.union_discriminants
+                        .insert(hir_name.clone(), discriminants);
                 }
                 if let Some(method) = native_method_value {
                     self.native_method_values.insert(hir_name.clone(), method);
