@@ -2209,14 +2209,16 @@ fn promise_chain_callbacks_accept_tuple_spreads() {
         async function failure(): Promise<number> { throw "failed"; }
         function double(input: number): number { return input * 2; }
         function recover(reason: string): number { return reason === "failed" ? 7 : 0; }
+        function cleanup(): void { console.log("cleanup"); }
         async function main(): Promise<void> {
             console.log(await value().then(...[double]));
             console.log(await failure().catch(...[recover]));
+            console.log(await value().finally(...[cleanup]));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "promise_chain_callback_spreads"),
-        "40\n7\n"
+        "40\n7\ncleanup\n20\n"
     );
 }
 
