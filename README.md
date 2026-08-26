@@ -1369,8 +1369,10 @@ The workspace crates have narrow responsibilities:
   validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
   into one executable. Top-level anonymous or self-named class expressions bound
-  to identifiers use the same path, including across exports. String-literal computed fields, methods, accessors and
-  static members use the same fixed-layout dispatch through dot or bracket access.
+  to identifiers use the same path, including across exports. Computed fields, methods, accessors and
+  static members use the same fixed-layout dispatch when their names fold from string literals,
+  top-level string constants, concatenation, templates, parentheses or type/const assertions;
+  literal bracket access and ordinary dot access select the resulting member.
   Owner-mangled private instance/static fields, methods and accessors support reads,
   writes, calls, private brand checks and same-spelling members in base/derived classes.
   Abstract classes provide non-constructible base layouts and require compatible
