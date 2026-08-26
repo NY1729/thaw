@@ -765,6 +765,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
+                        if ty == HirType::Json {
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
+                                vec![value],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
                                 "`{label}` currently requires a fixed object, got {ty:?}"

@@ -2181,11 +2181,15 @@ fn compiles_object_keys_for_fixed_objects() {
             console.log(Reflect.ownKeys(await delayed()).join("+"));
             const empty: {} = {};
             console.log(Object.keys(empty).length);
+            const jsonObject: Json = JSON.parse("{\"second\":2,\"first\":1}");
+            console.log(Object.keys(jsonObject).join(","));
+            console.log(Object.getOwnPropertyNames(JSON.parse("[10,20]")).join("|"));
+            console.log(Reflect.ownKeys(JSON.parse("true")).length);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_keys"),
-        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\n"
+        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\n0|1\n0\n"
     );
 }
 
