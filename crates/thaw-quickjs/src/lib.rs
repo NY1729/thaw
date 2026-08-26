@@ -55,6 +55,8 @@ use sha2::{Digest, Sha256, Sha512};
 use wasmi::{Engine as WasmEngine, Extern as WasmExtern, Linker as WasmLinker};
 use wasmi::{Memory as WasmMemory, MemoryType as WasmMemoryType, Module as WasmModule};
 use wasmi::{Store as WasmStore, Val as WasmVal, ValType as WasmValType};
+use wasmi_wasi::sync::{ambient_authority, Dir as WasiDir, WasiCtxBuilder};
+use wasmi_wasi::WasiCtx;
 type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 type TlsStreamTable = (u32, HashMap<u32, TlsStream>);
 type TlsServerStream = StreamOwned<ServerConnection, TcpStream>;
@@ -593,13 +595,18 @@ thread_local! {
 }
 
 struct WasmInstance {
-    store: WasmStore<()>,
+    store: WasmStore<WasmStoreData>,
     instance: wasmi::Instance,
 }
 
 struct StandaloneWasmMemory {
-    store: WasmStore<()>,
+    store: WasmStore<WasmStoreData>,
     memory: WasmMemory,
+}
+
+#[derive(Default)]
+struct WasmStoreData {
+    wasi: Option<WasiCtx>,
 }
 
 struct WasmTable {
@@ -658,17 +665,32 @@ fn wasm_compile(value: String) -> String {
     })
 }
 
-fn wasm_instantiate(module_handle: u32) -> String {
+fn wasm_instantiate(module_handle: u32, wasi_options: Option<String>) -> String {
     WASM.with(|table| {
         let mut table = table.borrow_mut();
         let Some(module) = table.modules.get(&module_handle).cloned() else {
             return serde_json::json!({ "ok": false, "error": "WebAssembly.Module belongs to a released runtime" }).to_string();
         };
-        if let Some(import) = module.imports().next() {
+        if let Some(import) = module
+            .imports()
+            .find(|import| wasi_options.is_none() || import.module() != "wasi_snapshot_preview1")
+        {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not yet linked", import.module(), import.name()) }).to_string();
         }
-        let mut store = WasmStore::new(&table.engine, ());
-        let linker = WasmLinker::new(&table.engine);
+        let wasi = match wasi_options.as_deref().map(wasm_wasi_context).transpose() {
+            Ok(wasi) => wasi,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        };
+        let mut store = WasmStore::new(&table.engine, WasmStoreData { wasi });
+        let mut linker = WasmLinker::new(&table.engine);
+        if store.data().wasi.is_some() {
+            if let Err(error) = wasmi_wasi::add_to_linker(&mut linker, |data: &mut WasmStoreData| {
+                data.wasi.as_mut().expect("WASI context must exist")
+            })
+            {
+                return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+            }
+        }
         let instance = match linker.instantiate_and_start(&mut store, &module) {
             Ok(instance) => instance,
             Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
@@ -696,6 +718,57 @@ fn wasm_instantiate(module_handle: u32) -> String {
         table.instances.insert(handle, WasmInstance { store, instance });
         serde_json::json!({ "ok": true, "handle": handle, "exports": exports }).to_string()
     })
+}
+
+fn wasm_wasi_context(options: &str) -> Result<WasiCtx, String> {
+    let options: serde_json::Value =
+        serde_json::from_str(options).map_err(|error| error.to_string())?;
+    let mut builder = WasiCtxBuilder::new();
+    builder.inherit_stdio();
+    if let Some(arguments) = options.get("args").and_then(serde_json::Value::as_array) {
+        let arguments = arguments
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "WASI arguments must be strings".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        builder
+            .args(&arguments)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(environment) = options.get("env").and_then(serde_json::Value::as_object) {
+        let environment = environment
+            .iter()
+            .map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| (key.clone(), value.to_string()))
+                    .ok_or_else(|| "WASI environment values must be strings".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        builder
+            .envs(&environment)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(preopens) = options
+        .get("preopens")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (guest, host) in preopens {
+            let host = host
+                .as_str()
+                .ok_or_else(|| "WASI preopen paths must be strings".to_string())?;
+            let directory = WasiDir::open_ambient_dir(host, ambient_authority())
+                .map_err(|error| error.to_string())?;
+            builder
+                .preopened_dir(directory, guest)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(builder.build())
 }
 
 fn wasm_number(value: &serde_json::Value, ty: WasmValType) -> Result<WasmVal, String> {
@@ -750,6 +823,9 @@ fn wasm_call(instance_handle: u32, name: String, arguments: String) -> String {
         };
         let mut outputs = ty.results().iter().copied().map(WasmVal::default).collect::<Vec<_>>();
         if let Err(error) = function.call(&mut record.store, &inputs, &mut outputs) {
+            if let Some(exit) = error.i32_exit_status() {
+                return serde_json::json!({ "ok": false, "exit": exit }).to_string();
+            }
             return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
         }
         let values = match outputs.into_iter().map(wasm_value).collect::<Result<Vec<_>, _>>() {
@@ -798,7 +874,7 @@ fn wasm_memory_create(initial: u32, maximum: i64) -> String {
             return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory page limits are invalid" }).to_string();
         }
         let ty = WasmMemoryType::new(initial, maximum);
-        let mut store = WasmStore::new(&table.engine, ());
+        let mut store = WasmStore::new(&table.engine, WasmStoreData::default());
         let memory = match WasmMemory::new(&mut store, ty) {
             Ok(memory) => memory,
             Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
@@ -831,7 +907,7 @@ fn wasm_memory(instance_handle: u32, name: String, operation: String, value: Str
 
 fn wasm_memory_operation(
     memory: &WasmMemory,
-    store: &mut WasmStore<()>,
+    store: &mut WasmStore<WasmStoreData>,
     operation: &str,
     value: &str,
 ) -> String {
@@ -3727,15 +3803,18 @@ const PLATFORM_GLOBALS: &str = r#"
     constructor(module, imports = {}) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Instance(): argument 0 must be a WebAssembly.Module');
       if (imports === null || (typeof imports !== 'object' && typeof imports !== 'function')) throw new TypeError('WebAssembly.Instance(): imports must be an object');
-      const result = wasmResult(__thaw_wasm_instantiate(module.__thawHandle), WebAssembly.LinkError);
+      const wasi = imports && imports.wasi_snapshot_preview1 && imports.wasi_snapshot_preview1.__thawWasiOptions;
+      const result = wasmResult(__thaw_wasm_instantiate(module.__thawHandle, wasi), WebAssembly.LinkError);
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = {}, memories = [];
       for (const item of result.exports) {
         if (item.kind === 'function') {
           const callable = (...args) => {
             for (const memory of memories) memory.__thawSync();
-            const called = wasmResult(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(args.map(wasmEncodeValue))), WebAssembly.RuntimeError);
+            const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(args.map(wasmEncodeValue))));
             for (const memory of memories) memory.__thawRefresh();
+            if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
+            const called = raw.ok ? raw : (() => { throw new WebAssembly.RuntimeError(raw.error); })();
             const values = called.values.map(wasmDecodeValue);
             return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
           };

@@ -4106,6 +4106,53 @@ mod tests {
     }
 
     #[test]
+    fn builds_and_runs_embedded_wasi_preview1_module() {
+        let dir =
+            std::env::temp_dir().join(format!("thaw-cli-wasi-preview1-{}", std::process::id()));
+        let registry = dir.join("modules");
+        let package = registry.join("wasi-fixture");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.d.ts"),
+            "export declare function run(): number;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("bundle.js"),
+            r#"module.exports = { run: function () {
+                 var options = { args: ['embedded'], env: { MODE: 'standalone' }, preopens: {}, returnOnExit: true, version: 'preview1' };
+                 var imports = { wasi_snapshot_preview1: Object.freeze({ __thawWasiOptions: JSON.stringify(options) }) };
+                 var source = new TextEncoder().encode(`(module
+                   (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+                   (memory (export "memory") 1)
+                   (func (export "_start") i32.const 6 call $exit))`);
+                 var instance = new WebAssembly.Instance(new WebAssembly.Module(source), imports);
+                 try { instance.exports._start(); } catch (error) { if (error && error.__thawWasiExit !== undefined) return Number(error.__thawWasiExit); throw error; }
+                 return 0;
+               } };
+"#,
+        )
+        .unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            "import { run } from \"wasi-fixture\"; function main(): void { console.log(run()); }\n",
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+        std::fs::remove_dir_all(&registry).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "6\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn imports_a_scoped_package_subpath_with_default_and_namespace_forms() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-scoped-subpath-import-{}",
