@@ -16851,6 +16851,17 @@ mod tests {
                 }
                 return "empty";
             }
+            function producedService(): ResultService {
+                const load: ResultFactory = producedResults;
+                const holder: HolderFactory = producedHolder;
+                return { load, holder, nested: { load } };
+            }
+            async function delayedService(): Promise<ResultService> {
+                await sleep(1);
+                const load: ResultFactory = producedResults;
+                const holder: HolderFactory = producedHolder;
+                return { load, holder, nested: { load } };
+            }
             async function main(): Promise<void> {
                 const rows = [
                     { x: 1, nested: { flag: true } },
@@ -16987,6 +16998,14 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 2);
                     else console.log(item.value + " inferred holder service");
                 }
+                for (const item of producedService().load()) {
+                    if (item.kind === "number") console.log(item.value + 90);
+                    else console.log(item.value + " returned service");
+                }
+                for (const item of (await delayedService()).holder().results) {
+                    if (item.kind === "number") console.log(item.value + 3);
+                    else console.log(item.value + " async service");
+                }
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -17044,7 +17063,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 

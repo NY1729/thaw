@@ -6959,6 +6959,8 @@ struct GenericInterfaces<'a> {
     function_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
+    function_object_function_property_discriminants:
+        HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
 }
 
 impl GenericInterfaces<'_> {
@@ -7278,8 +7280,23 @@ fn object_function_property_discriminants(
         visiting: &mut HashSet<Symbol>,
         result: &mut ObjectFunctionPropertyDiscriminants,
     ) {
-        let resolved = resolve_plain_alias_type(ty, generic)
-            .unwrap_or_else(|| strip_parenthesized_ts_type(ty));
+        let raw = strip_parenthesized_ts_type(ty);
+        let unwrapped = if let TsType::TsTypeRef(reference) = raw {
+            if matches!(&reference.type_name, swc_ecma_ast::TsEntityName::Ident(name) if name.sym == *"Promise")
+            {
+                reference
+                    .type_params
+                    .as_ref()
+                    .and_then(|arguments| arguments.params.first())
+                    .map(AsRef::as_ref)
+                    .unwrap_or(raw)
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
+        let resolved = resolve_plain_alias_type(unwrapped, generic).unwrap_or(unwrapped);
         let (members, visited_name) = match resolved {
             TsType::TsTypeLit(object) => (object.members.as_slice(), None),
             TsType::TsTypeRef(reference) => {
@@ -7684,6 +7701,16 @@ fn resolve_interfaces(
             generic
                 .function_object_array_property_discriminants
                 .insert(function.ident.sym.to_string(), property_discriminants);
+        }
+        let function_property_discriminants =
+            object_function_property_discriminants(&return_type.type_ann, &generic);
+        if !function_property_discriminants.is_empty() {
+            generic
+                .function_object_function_property_discriminants
+                .insert(
+                    function.ident.sym.to_string(),
+                    function_property_discriminants,
+                );
         }
     }
 
@@ -12684,6 +12711,9 @@ impl<'a> FnLowerer<'a> {
             Expr::TsConstAssertion(assertion) => {
                 self.expression_object_function_property_discriminants(&assertion.expr)
             }
+            Expr::Await(awaited) => {
+                self.expression_object_function_property_discriminants(&awaited.arg)
+            }
             Expr::Member(member) => {
                 let property = member_property_name(&member.prop)?;
                 let nested = self
@@ -12697,6 +12727,18 @@ impl<'a> FnLowerer<'a> {
                 (!nested.is_empty()).then_some(nested)
             }
             Expr::Object(object) => self.object_literal_function_property_discriminants(object),
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                let Expr::Ident(callee) = callee.as_ref() else {
+                    return None;
+                };
+                self.generic_interfaces
+                    .function_object_function_property_discriminants
+                    .get(callee.sym.as_ref())
+                    .cloned()
+            }
             Expr::Cond(conditional) => {
                 let consequent =
                     self.expression_object_function_property_discriminants(&conditional.cons)?;
