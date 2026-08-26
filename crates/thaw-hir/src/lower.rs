@@ -156,6 +156,7 @@ enum GenericTypePattern {
     NonNullable(Box<GenericTypePattern>),
     Partial(Box<GenericTypePattern>),
     Required(Box<GenericTypePattern>),
+    Record(Vec<Symbol>, Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6312,6 +6313,40 @@ fn required_hir_type(ty: HirType) -> Result<HirType, String> {
     ))
 }
 
+fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
+    fn collect(ty: &TsType, keys: &mut Vec<Symbol>) -> Result<(), String> {
+        match ty {
+            TsType::TsParenthesizedType(parenthesized) => collect(&parenthesized.type_ann, keys),
+            TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+                for ty in &union.types {
+                    collect(ty, keys)?;
+                }
+                Ok(())
+            }
+            TsType::TsLitType(literal) => {
+                let key = match &literal.lit {
+                    swc_ecma_ast::TsLit::Str(value) => value.value.to_string_lossy().into_owned(),
+                    swc_ecma_ast::TsLit::Number(value) => value.value.to_string(),
+                    _ => {
+                        return Err(
+                            "utility type keys must be finite string or number literals".into()
+                        )
+                    }
+                };
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+                Ok(())
+            }
+            _ => Err("utility type keys must be a finite string or number literal union".into()),
+        }
+    }
+
+    let mut keys = Vec::new();
+    collect(ty, &mut keys)?;
+    Ok(keys)
+}
+
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     fn fingerprint(ty: &HirType) -> String {
         match ty {
@@ -6355,6 +6390,7 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         | GenericTypePattern::NonNullable(inner)
         | GenericTypePattern::Partial(inner)
         | GenericTypePattern::Required(inner) => generic_pattern_contains_variable(inner, variable),
+        GenericTypePattern::Record(_, value) => generic_pattern_contains_variable(value, variable),
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
@@ -6390,6 +6426,14 @@ fn instantiate_generic_pattern(
         }
         GenericTypePattern::Required(inner) => {
             required_hir_type(instantiate_generic_pattern(inner, substitution)?)
+        }
+        GenericTypePattern::Record(keys, value) => {
+            let value = instantiate_generic_pattern(value, substitution)?;
+            Ok(HirType::Object(
+                keys.iter()
+                    .map(|key| (key.clone(), value.clone()))
+                    .collect(),
+            ))
         }
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
@@ -6636,6 +6680,26 @@ fn generic_type_pattern(
                 in_progress.pop();
                 return result;
             }
+            if name == "Record" {
+                let [keys, value] = reference
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err("Record<K, V> requires exactly two type arguments".into());
+                };
+                return Ok(GenericTypePattern::Record(
+                    finite_property_keys(keys)?,
+                    Box::new(generic_type_pattern(
+                        value,
+                        substitutions,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?),
+                ));
+            }
             if let Some(inner) = reference
                 .type_params
                 .as_ref()
@@ -6763,6 +6827,19 @@ fn match_generic_pattern(
         (GenericTypePattern::Partial(expected), actual)
         | (GenericTypePattern::Required(expected), actual) => {
             match_generic_pattern(expected, actual, inferred)
+        }
+        (GenericTypePattern::Record(keys, expected), HirType::Object(fields))
+            if keys.len() == fields.len() =>
+        {
+            for (key, (name, actual)) in keys.iter().zip(fields) {
+                if key != name {
+                    return Err(format!(
+                        "generic Record key `{name}` does not match `{key}`"
+                    ));
+                }
+                match_generic_pattern(expected, actual, inferred)?;
+            }
+            Ok(())
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
             if expected.len() == value.len() =>
@@ -10339,6 +10416,23 @@ fn lower_ts_type(
             if ref_name == Some("JsValue") && ty_ref.type_params.is_none() {
                 return Ok(HirType::JsValue);
             }
+            if ref_name == Some("Record") {
+                let [keys, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err("Record<K, V> requires exactly two type arguments".into());
+                };
+                let value = lower_ts_type(value, interfaces, generic_interfaces)?;
+                return Ok(HirType::Object(
+                    finite_property_keys(keys)?
+                        .into_iter()
+                        .map(|key| (key, value.clone()))
+                        .collect(),
+                ));
+            }
 
             // Otherwise, accept `Array<T>` / `Promise<T>` as the two
             // other built-in generic spellings we recognize.
@@ -10772,6 +10866,29 @@ fn resolve_ts_type_with_substitution(
                     Some(substitution),
                     in_progress,
                 );
+            }
+            if ref_name == "Record" {
+                let [keys, value] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return Err("Record<K, V> requires exactly two type arguments".into());
+                };
+                let value = resolve_ts_type_with_substitution(
+                    value,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                return Ok(HirType::Object(
+                    finite_property_keys(keys)?
+                        .into_iter()
+                        .map(|key| (key, value.clone()))
+                        .collect(),
+                ));
             }
             if let Some(params) = &ty_ref.type_params {
                 if let [elem] = params.params.as_slice() {
@@ -30750,6 +30867,14 @@ mod tests {
         assert!(lower_module(&module)
             .unwrap_err()
             .contains("NonNullable<T> has no native value"));
+
+        let module = thaw_parser::parse_typescript(
+            "type Dynamic = Record<string, number>; function bad(value: Dynamic): void {}",
+        )
+        .unwrap();
+        assert!(lower_module(&module)
+            .unwrap_err()
+            .contains("keys must be a finite string or number literal union"));
     }
 
     #[test]
