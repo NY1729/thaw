@@ -18706,6 +18706,9 @@ mod tests {
     #[test]
     fn compiles_and_runs_computed_native_class_members() {
         let source = r#"
+            const prefix = "lab";
+            const labelName = `${prefix}el` as const;
+            const readName = ("re" + "ad") as string;
             class Box {
                 ["value"]: number;
                 static ["count"]: number = 40;
@@ -18715,6 +18718,10 @@ mod tests {
                 set ["current"](value: number) { this["value"] = value; }
                 static ["next"](): number { return ++Box["count"]; }
             }
+            class NamedBox {
+                [labelName]: string = "static-computed";
+                [readName](): string { return this.label; }
+            }
             function main(): void {
                 const value = new Box(40);
                 console.log(value["add"](2));
@@ -18722,11 +18729,12 @@ mod tests {
                 console.log(value["current"]);
                 console.log(Box["next"]());
                 console.log(Box["count"]);
+                console.log(new NamedBox().read());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "computed_native_class_members"),
-            "42\n41\n41\n41\n"
+            "42\n41\n41\n41\nstatic-computed\n"
         );
     }
 
