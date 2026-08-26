@@ -5066,6 +5066,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_lambda(captures, params, ret, body)
             }
             HirExpr::FunctionRef(name, params, ret) => self.compile_function_ref(name, params, ret),
+            HirExpr::MethodRef(unbound, explicit, params, ret, is_static) => {
+                self.compile_method_ref(unbound, explicit, params, ret, *is_static)
+            }
             HirExpr::FfiCall(sig, args) => self.compile_ffi_call(sig, args)?.ok_or_else(|| {
                 format!(
                     "the void result of FFI function `{}` cannot be used as a value",
@@ -6193,6 +6196,141 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Allocates `[i64 length][f64 elem0]...[f64 elemN-1]` from the arena
     /// and returns a pointer to the start of the buffer (the array value).
+    fn compile_method_ref(
+        &mut self,
+        unbound: &str,
+        explicit: &str,
+        params: &[HirType],
+        ret: &HirType,
+        is_static: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let unbound_target = self
+            .module
+            .get_function(&Self::llvm_symbol_for(unbound))
+            .ok_or_else(|| format!("unbound method entry `{unbound}` is not declared"))?;
+        let explicit_target = self
+            .module
+            .get_function(&Self::llvm_symbol_for(explicit))
+            .ok_or_else(|| format!("explicit method entry `{explicit}` is not declared"))?;
+        let ordinary_name = format!("__thaw_method_ref_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let ordinary = self.module.add_function(
+            &ordinary_name,
+            self.function_type(params, ret)?,
+            Some(Linkage::Internal),
+        );
+        let parent = self.builder.get_insert_block().unwrap();
+        let entry = self.context.append_basic_block(ordinary, "entry");
+        self.builder.position_at_end(entry);
+        let arguments = ordinary
+            .get_param_iter()
+            .skip(1)
+            .map(BasicMetadataValueEnum::from)
+            .collect::<Vec<_>>();
+        let call = self
+            .builder
+            .build_call(unbound_target, &arguments, "invoke_unbound_method")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void {
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let value = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or("unbound method entry returned no value")?;
+            self.builder
+                .build_return(Some(&value))
+                .map_err(|error| error.to_string())?;
+        }
+        let mut this_params = Vec::with_capacity(params.len() + 1);
+        this_params.push(HirType::I64);
+        this_params.extend_from_slice(params);
+        let this_entry = self.module.add_function(
+            &format!("{ordinary_name}__thaw_this_adapter"),
+            self.function_type(&this_params, ret)?,
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(this_entry, "entry");
+        self.builder.position_at_end(entry);
+        let mut arguments = Vec::with_capacity(params.len() + usize::from(!is_static));
+        if !is_static {
+            let receiver = this_entry.get_nth_param(1).unwrap().into_int_value();
+            let receiver = self
+                .builder
+                .build_int_to_ptr(
+                    receiver,
+                    self.context.ptr_type(AddressSpace::default()),
+                    "method_receiver",
+                )
+                .map_err(|error| error.to_string())?;
+            arguments.push(BasicMetadataValueEnum::from(receiver));
+        }
+        arguments.extend(
+            this_entry
+                .get_param_iter()
+                .skip(2)
+                .map(BasicMetadataValueEnum::from),
+        );
+        let call = self
+            .builder
+            .build_call(explicit_target, &arguments, "invoke_method_with_this")
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void {
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let value = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or("explicit method entry returned no value")?;
+            self.builder
+                .build_return(Some(&value))
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.position_at_end(parent);
+        let closure = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.context
+                        .i64_type()
+                        .const_int(CLOSURE_CAPTURE_BASE, false)
+                        .into(),
+                    self.context.i64_type().const_int(8, false).into(),
+                ],
+                "method_ref_closure",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("method reference closure allocation returned no value")?
+            .into_pointer_value();
+        self.builder
+            .build_store(closure, ordinary.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        let this_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    closure,
+                    &[self
+                        .context
+                        .i64_type()
+                        .const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
+                    "method_ref_this_entry",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(this_slot, this_entry.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        Ok(closure.into())
+    }
+
     fn compile_array_lit(&mut self, elems: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let element_bytes = elems
             .first()
@@ -9076,6 +9214,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 Box::new(ret.clone()),
             )),
             HirExpr::FunctionRef(_, params, ret) => {
+                Some(HirType::Function(params.clone(), Box::new(ret.clone())))
+            }
+            HirExpr::MethodRef(_, _, params, ret, _) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::Call(callee, _) => {
@@ -20107,6 +20248,12 @@ mod tests {
                 console.log("extract-receiver");
                 return new Box("discarded");
             }
+            function passString(callback: (value: string) => string): (value: string) => string {
+                return callback;
+            }
+            function passAsyncString(callback: (value: string) => Promise<string>): (value: string) => Promise<string> {
+                return callback;
+            }
             async function main(): Promise<void> {
                 const read = make().read;
                 const extracted = new Box("ignored");
@@ -20119,6 +20266,9 @@ mod tests {
                 const formatAsync = extracted.formatAsync;
                 const defaultFromThis = extracted.defaultFromThis;
                 const inheritedFormat = new DerivedBox("derived").format;
+                const passedRead = passString(extracted.read);
+                const passedStaticRead = passString(Box.staticRead);
+                const passedReadAsync = passAsyncString(extracted.readAsync);
                 const holderRead = new Holder(new Box("holder")).box.read;
                 const alias = read;
                 const args: [string] = ["?"];
@@ -20168,12 +20318,16 @@ mod tests {
                 console.log(await formatAsync());
                 console.log(defaultFromThis("explicit"));
                 console.log(inheritedFormat());
+                console.log(passedRead.call(new Box("boundary-call"), "!"));
+                console.log(passedRead.apply(new Box("boundary-apply"), args));
+                console.log(passedStaticRead.call((console.log("boundary-static-this"), extracted), "!"));
+                console.log(await passedReadAsync.call(new Box("boundary-async"), "!"));
                 try { defaultFromThis(); } catch (error) { console.log(error); }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nfunction:bound\nundefined:undefined\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nCannot read properties of undefined (reading 'value')\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nfunction:bound\nundefined:undefined\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nboundary-call!\nboundary-apply?\nboundary-static-this\nstatic!\nboundary-async!\nCannot read properties of undefined (reading 'value')\n"
         );
     }
 
