@@ -598,9 +598,11 @@ The workspace crates have narrow responsibilities:
   growth. Standalone Memory, Global and Table values provide their standard
   construction, access and growth surface. `Module.customSections()` returns
   independent ArrayBuffer copies, and streaming compilation validates a
-  successful Response plus its `application/wasm` MIME type. Generic JavaScript
-  import-object linkage and exported/imported tables remain the next
-  interoperability layer
+  successful Response plus its `application/wasm` MIME type. JavaScript
+  function imports are linked by module/name and support scalar parameters,
+  i64 BigInts, void and multi-value results; thrown JavaScript errors trap as
+  `WebAssembly.RuntimeError`. Imported Memory, Global and Table values remain
+  the next interoperability layer
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command
