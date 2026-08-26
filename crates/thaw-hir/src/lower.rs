@@ -14016,6 +14016,26 @@ impl<'a> FnLowerer<'a> {
                 if self.unbound_this_context {
                     return Ok(HirExpr::Lit(HirLit::Undefined));
                 }
+                if self.class_static_context {
+                    let class = self
+                        .class_context
+                        .as_deref()
+                        .ok_or("static `this` is missing its class context")?;
+                    let constructor = class_constructor_symbol(class);
+                    let signature = self.signatures.get(&constructor).ok_or_else(|| {
+                        format!("static `this` constructor `{constructor}` is not declared")
+                    })?;
+                    let result = self
+                        .interfaces
+                        .get(class)
+                        .cloned()
+                        .ok_or_else(|| format!("static `this` class `{class}` has no layout"))?;
+                    return Ok(HirExpr::FunctionRef(
+                        constructor,
+                        signature.params.clone(),
+                        result,
+                    ));
+                }
                 let name = self.resolve_binding("this");
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))
