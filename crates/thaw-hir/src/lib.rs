@@ -10,7 +10,10 @@
 
 mod lower;
 
-pub use lower::{lower_module, lower_module_with_source_map, LowerDiagnostic, SourceRange};
+pub use lower::{
+    lower_module, lower_module_with_source_map, normalize_top_level_destructuring, LowerDiagnostic,
+    SourceRange,
+};
 
 pub type Symbol = String;
 
