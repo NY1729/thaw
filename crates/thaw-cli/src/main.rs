@@ -3611,6 +3611,7 @@ mod tests {
                 export class NumberBox extends Box<number> {
                     double(): number { return this.value * 2; }
                 }
+                export function makeNumber(): number { return 6; }
             "#,
         )
         .unwrap();
@@ -3618,7 +3619,7 @@ mod tests {
         std::fs::write(
             &entry,
             r#"
-                import { Box, Pair, Holder, NumberBox } from "./models";
+                import { Box, Pair, Holder, NumberBox, makeNumber } from "./models";
                 function read(value: Box<number>): number { return value.get(); }
                 function main(): void {
                     const first = new Box<number>(40);
@@ -3630,10 +3631,12 @@ mod tests {
                     const nestedBox = nested.value;
                     const inferredNestedBox = inferredNested.value;
                     const derived = new NumberBox(21);
+                    const fromCall = new Box(makeNumber());
                     console.log(pair.first);
                     console.log(pair.second);
                     console.log(nestedBox.get());
                     console.log(inferredNestedBox.get());
+                    console.log(fromCall.get());
                     console.log(Box.count);
                     console.log(derived.double());
                     console.log(derived.get());
@@ -3651,7 +3654,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "module\n42\n40\n40\n5\n42\n21\n"
+            "module\n42\n40\n40\n6\n6\n42\n21\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

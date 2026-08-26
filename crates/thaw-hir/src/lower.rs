@@ -905,6 +905,7 @@ struct GenericClassUseCollector<'a> {
     uses: Vec<GenericClassUse>,
     scopes: Vec<HashMap<Symbol, HirType>>,
     constructor_symbols: &'a HashMap<swc_common::Span, Symbol>,
+    call_results: &'a HashMap<Symbol, HirType>,
 }
 
 fn unbox_types(types: &[Box<TsType>]) -> Vec<TsType> {
@@ -976,6 +977,7 @@ fn infer_generic_constructor_expr_type(
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
     scopes: &[HashMap<Symbol, HirType>],
+    call_results: &HashMap<Symbol, HirType>,
 ) -> Result<HirType, String> {
     match expression {
         Expr::Lit(Lit::Num(_)) => Ok(HirType::F64),
@@ -997,6 +999,7 @@ fn infer_generic_constructor_expr_type(
             interfaces,
             generic_interfaces,
             scopes,
+            call_results,
         ),
         Expr::TsAs(assertion) => lower_ts_type(
             &assertion.type_ann,
@@ -1020,12 +1023,14 @@ fn infer_generic_constructor_expr_type(
                 interfaces,
                 generic_interfaces,
                 scopes,
+                call_results,
             )?;
             let right = infer_generic_constructor_expr_type(
                 &binary.right,
                 interfaces,
                 generic_interfaces,
                 scopes,
+                call_results,
             )?;
             match binary.op {
                 BinaryOp::EqEq
@@ -1073,6 +1078,7 @@ fn infer_generic_constructor_expr_type(
                 interfaces,
                 generic_interfaces,
                 scopes,
+                call_results,
             )?;
             match (&receiver, &member.prop) {
                 (HirType::Object(fields), MemberProp::Ident(property)) => fields
@@ -1103,6 +1109,124 @@ fn infer_generic_constructor_expr_type(
                 _ => Err("cannot infer this generic class member argument type".into()),
             }
         }
+        Expr::Call(call) => {
+            let Callee::Expr(callee) = &call.callee else {
+                return Err("cannot infer a generic class type from this call target".into());
+            };
+            let Expr::Ident(callee) = callee.as_ref() else {
+                let inferred = infer_generic_constructor_expr_type(
+                    callee,
+                    interfaces,
+                    generic_interfaces,
+                    scopes,
+                    call_results,
+                )?;
+                let HirType::Function(_, result) = inferred else {
+                    return Err("generic class call target is not a typed function".into());
+                };
+                return Ok(result.as_ref().clone());
+            };
+            if let Some(HirType::Function(_, result)) = scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(callee.sym.as_ref()))
+            {
+                return Ok(result.as_ref().clone());
+            }
+            match callee.sym.as_ref() {
+                "String" => Ok(HirType::Str),
+                "Number" => Ok(HirType::F64),
+                "Boolean" => Ok(HirType::Bool),
+                name => call_results.get(name).cloned().ok_or_else(|| {
+                    format!("cannot infer the return type of call `{name}(...)`")
+                }),
+            }
+        }
+        Expr::Arrow(arrow) => {
+            let parameters = arrow
+                .params
+                .iter()
+                .map(|parameter| {
+                    let Pat::Ident(binding) = parameter else {
+                        return Err("call-result inference requires identifier arrow parameters".into());
+                    };
+                    let annotation = binding.type_ann.as_ref().ok_or_else(|| {
+                        "call-result inference requires annotated arrow parameters".to_string()
+                    })?;
+                    lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let result = if let Some(annotation) = arrow.return_type.as_ref() {
+                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?
+            } else {
+                match arrow.body.as_ref() {
+                    ArrowFunctionBody::Expr(expression) => {
+                        infer_generic_constructor_expr_type(
+                            expression,
+                            interfaces,
+                            generic_interfaces,
+                            scopes,
+                            call_results,
+                        )?
+                    }
+                    ArrowFunctionBody::FunctionBody(_) => {
+                        return Err(
+                            "block-bodied arrow call-result inference needs a return annotation"
+                                .into(),
+                        )
+                    }
+                }
+            };
+            Ok(HirType::Function(parameters, Box::new(result)))
+        }
+        Expr::Fn(function) => {
+            let parameters = function
+                .function
+                .params
+                .iter()
+                .map(|parameter| {
+                    let Pat::Ident(binding) = &parameter.pat else {
+                        return Err("call-result inference requires identifier function parameters".into());
+                    };
+                    let annotation = binding.type_ann.as_ref().ok_or_else(|| {
+                        "call-result inference requires annotated function parameters".to_string()
+                    })?;
+                    lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let annotation = function.function.return_type.as_ref().ok_or_else(|| {
+                "function-expression call-result inference needs a return annotation".to_string()
+            })?;
+            let result = lower_ts_type(
+                &annotation.type_ann,
+                interfaces,
+                generic_interfaces,
+            )?;
+            Ok(HirType::Function(parameters, Box::new(result)))
+        }
+        Expr::Cond(conditional) => {
+            let consequent = infer_generic_constructor_expr_type(
+                &conditional.cons,
+                interfaces,
+                generic_interfaces,
+                scopes,
+                call_results,
+            )?;
+            let alternate = infer_generic_constructor_expr_type(
+                &conditional.alt,
+                interfaces,
+                generic_interfaces,
+                scopes,
+                call_results,
+            )?;
+            if consequent == alternate {
+                Ok(consequent)
+            } else {
+                Err(format!(
+                    "conditional constructor argument has incompatible types {consequent:?} and {alternate:?}"
+                ))
+            }
+        }
         Expr::Array(array) => {
             let mut elements = Vec::new();
             for element in &array.elems {
@@ -1119,6 +1243,7 @@ fn infer_generic_constructor_expr_type(
                     interfaces,
                     generic_interfaces,
                     scopes,
+                    call_results,
                 )?);
             }
             let Some(first) = elements.first().cloned() else {
@@ -1146,6 +1271,7 @@ fn infer_generic_constructor_expr_type(
                             interfaces,
                             generic_interfaces,
                             scopes,
+                            call_results,
                         )?,
                     ));
                     continue;
@@ -1171,6 +1297,7 @@ fn infer_generic_constructor_expr_type(
                         interfaces,
                         generic_interfaces,
                         scopes,
+                        call_results,
                     )?,
                 ));
             }
@@ -1181,6 +1308,160 @@ fn infer_generic_constructor_expr_type(
                 .into(),
         ),
     }
+}
+
+fn generic_constructor_call_results(
+    module: &Module,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> HashMap<Symbol, HirType> {
+    struct ReturnTypes<'a, 'ast> {
+        interfaces: &'a HashMap<Symbol, HirType>,
+        generic_interfaces: &'a GenericInterfaces<'ast>,
+        call_results: &'a HashMap<Symbol, HirType>,
+        scopes: Vec<HashMap<Symbol, HirType>>,
+        returned: Vec<HirType>,
+        failed: bool,
+    }
+    impl Visit for ReturnTypes<'_, '_> {
+        fn visit_return_stmt(&mut self, statement: &swc_ecma_ast::ReturnStmt) {
+            if let Some(argument) = statement.arg.as_deref() {
+                match infer_generic_constructor_expr_type(
+                    argument,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    &self.scopes,
+                    self.call_results,
+                ) {
+                    Ok(ty) => self.returned.push(ty),
+                    Err(_) => self.failed = true,
+                }
+            }
+        }
+
+        fn visit_function(&mut self, _function: &swc_ecma_ast::Function) {}
+
+        fn visit_arrow_expr(&mut self, _arrow: &swc_ecma_ast::ArrowExpr) {}
+
+        fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
+            self.scopes.push(HashMap::new());
+            block.visit_children_with(self);
+            self.scopes.pop();
+        }
+
+        fn visit_var_decl(&mut self, declaration: &swc_ecma_ast::VarDecl) {
+            for declarator in &declaration.decls {
+                let Pat::Ident(binding) = &declarator.name else {
+                    continue;
+                };
+                let inferred = binding
+                    .type_ann
+                    .as_ref()
+                    .map(|annotation| {
+                        lower_ts_type(
+                            &annotation.type_ann,
+                            self.interfaces,
+                            self.generic_interfaces,
+                        )
+                    })
+                    .or_else(|| {
+                        declarator.init.as_deref().map(|initializer| {
+                            infer_generic_constructor_expr_type(
+                                initializer,
+                                self.interfaces,
+                                self.generic_interfaces,
+                                &self.scopes,
+                                self.call_results,
+                            )
+                        })
+                    });
+                if let Some(Ok(ty)) = inferred {
+                    self.scopes
+                        .last_mut()
+                        .expect("return inference always has a scope")
+                        .insert(binding.id.sym.to_string(), ty);
+                }
+            }
+        }
+    }
+
+    let functions = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(declaration))) => Some(declaration),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut results = HashMap::new();
+    for function in &functions {
+        let Some(annotation) = function.function.return_type.as_ref() else {
+            continue;
+        };
+        if let Ok(ty) = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
+            results.insert(function.ident.sym.to_string(), ty);
+        }
+    }
+    for _ in 0..=functions.len() {
+        let mut changed = false;
+        for function in &functions {
+            if results.contains_key(function.ident.sym.as_ref()) {
+                continue;
+            }
+            let Some(body) = function.function.body.as_ref() else {
+                continue;
+            };
+            let mut scope = HashMap::new();
+            let mut complete_params = true;
+            for parameter in &function.function.params {
+                let Pat::Ident(binding) = &parameter.pat else {
+                    complete_params = false;
+                    break;
+                };
+                let Some(annotation) = binding.type_ann.as_ref() else {
+                    complete_params = false;
+                    break;
+                };
+                let Ok(ty) = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                else {
+                    complete_params = false;
+                    break;
+                };
+                scope.insert(binding.id.sym.to_string(), ty);
+            }
+            if !complete_params {
+                continue;
+            }
+            let mut returned = ReturnTypes {
+                interfaces,
+                generic_interfaces,
+                call_results: &results,
+                scopes: vec![scope],
+                returned: Vec::new(),
+                failed: false,
+            };
+            body.visit_children_with(&mut returned);
+            if returned.returned.is_empty() && !returned.failed {
+                results.insert(function.ident.sym.to_string(), HirType::Void);
+                changed = true;
+                continue;
+            }
+            if returned.failed {
+                continue;
+            }
+            let Some(first) = returned.returned.first() else {
+                continue;
+            };
+            if returned.returned.iter().all(|candidate| candidate == first) {
+                results.insert(function.ident.sym.to_string(), first.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    results
 }
 
 impl GenericClassUseCollector<'_> {
@@ -1268,6 +1549,7 @@ impl Visit for GenericClassUseCollector<'_> {
                             self.interfaces,
                             self.generic_interfaces,
                             &self.scopes,
+                            self.call_results,
                         )
                     })
                 });
@@ -1314,6 +1596,7 @@ impl Visit for GenericClassUseCollector<'_> {
                                     self.interfaces,
                                     self.generic_interfaces,
                                     &self.scopes,
+                                    self.call_results,
                                 )
                             })
                             .collect::<Result<Vec<_>, String>>()
@@ -1916,6 +2199,7 @@ fn specialize_generic_classes(
     }
 
     let names = templates.keys().cloned().collect::<HashSet<_>>();
+    let call_results = generic_constructor_call_results(module, interfaces, generic_interfaces);
     let declared_class_names = module
         .body
         .iter()
@@ -2016,6 +2300,7 @@ fn specialize_generic_classes(
             uses: Vec::new(),
             scopes: vec![HashMap::new()],
             constructor_symbols: &constructor_symbols,
+            call_results: &call_results,
         };
         specialized.visit_with(&mut collector);
         let mut added = false;
