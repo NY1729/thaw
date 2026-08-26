@@ -2337,6 +2337,26 @@ fn compiles_object_is_same_value_comparisons() {
 }
 
 #[test]
+fn compiles_tuple_spreads_for_reflection_builtins() {
+    let source = r#"
+        function main(): void {
+            console.log(Array.isArray(...[[1, 2]]));
+            console.log(Object.keys(...[{ first: 1, second: 2 }]).join(","));
+            console.log(Object.getOwnPropertyNames(...[{ first: 1 }]).join(","));
+            console.log(Reflect.ownKeys(...[{ first: 1 }]).join(","));
+            console.log(Object.values(...[{ first: 1, second: 2 }]).join(","));
+            console.log(Object.entries(...[{ first: 1, second: 2 }]).length);
+            console.log(Object.hasOwn(...[{ first: 1 }, "first"]));
+            console.log(Object.is(...[NaN, NaN]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "reflection_builtin_tuple_spreads"),
+        "true\nfirst,second\nfirst\nfirst\n1,2\n2\ntrue\ntrue\n"
+    );
+}
+
+#[test]
 fn compiles_object_literals_field_access_and_mutation() {
     let source = r#"
         function dist(p: { x: number; y: number }): number {
