@@ -1589,6 +1589,8 @@ The workspace crates have narrow responsibilities:
   destructured parameters. Typed function properties on fixed objects preserve
   union-array or fixed-object return metadata through direct and nested member
   calls, parameter boundaries and local aliases.
+  Inferred object literals retain typed function-property results through
+  shorthand/key-value fields, nested fixed objects and object spreads.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
