@@ -921,7 +921,7 @@ target内に`*`が複数現れる場合は同じcaptureをすべてへ適用す�
 closure環境を指し、間接呼び出しではその環境を隠し第1引数として渡す。第二entryは通常のtyped closure/FunctionRefでは`thisArg`を無視するadapter、
 native method functionでは明示的`thisArg`を利用するadapterを指す。 native methodの両entryは
 同じclosure valueとともにtyped parameter/return境界を越えるため、lowering時のlocal alias metadataに
-依存せず`.call`/`.apply`からinstance/static/asyncの元entryを選択できる。境界通過後の`.bind(thisArg, ...leadingArgs)`は元closure、receiver、部分適用引数を新しいdual-entry closureへ格納し、通常呼び出しと再度の`.call()`の両方で固定receiverを維持する。これにより外側の値を読むclosure、nested closure、Rustからのcallback呼び戻しが可能になった。
+依存せず`.call`/`.apply`からinstance/static/asyncの元entryを選択できる。境界通過後の`.bind(thisArg, ...leadingArgs)`は元closure、receiver、部分適用引数を新しいdual-entry closureへ格納し、通常呼び出しと再度の`.call()`の両方で固定receiverを維持する。 `.bind(...)(...)`の即時連結形もcallee、`thisArg`、bound引数、invocation引数の順に一度ずつ評価して同じclosureを呼ぶ。これにより外側の値を読むclosure、nested closure、Rustからのcallback呼び戻しが可能になった。
 `serveOnceWith(port, (target) => body)` はこのABIを使い、callbackの戻り値を実際の
 HTTP response bodyとして送信する。capture entryは値のコピーではなくarena上の
 variable cellを指すため、closure生成後に外側で行った代入とclosure内の代入を
