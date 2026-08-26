@@ -5246,7 +5246,9 @@ fn lower_top_level_initializers(
                 let class_name = declaration.ident.sym.as_ref();
                 let saved_super = lowerer.super_initializer.clone();
                 let saved_static_context = lowerer.class_static_context;
+                let saved_class_context = lowerer.class_context.clone();
                 lowerer.class_static_context = true;
+                lowerer.class_context = Some(class_name.to_string());
                 lowerer.super_initializer =
                     declaration
                         .class
@@ -5298,6 +5300,7 @@ fn lower_top_level_initializers(
                 }
                 lowerer.super_initializer = saved_super;
                 lowerer.class_static_context = saved_static_context;
+                lowerer.class_context = saved_class_context;
             }
             ModuleItem::Stmt(Stmt::Decl(
                 Decl::Fn(_) | Decl::TsInterface(_) | Decl::TsEnum(_) | Decl::TsTypeAlias(_),
@@ -5420,7 +5423,9 @@ fn lower_static_class_globals(
         let class_name = declaration.ident.sym.as_ref();
         let saved_super = lowerer.super_initializer.clone();
         let saved_static_context = lowerer.class_static_context;
+        let saved_class_context = lowerer.class_context.clone();
         lowerer.class_static_context = true;
+        lowerer.class_context = Some(class_name.to_string());
         lowerer.super_initializer =
             declaration
                 .class
@@ -5466,6 +5471,7 @@ fn lower_static_class_globals(
         }
         lowerer.super_initializer = saved_super;
         lowerer.class_static_context = saved_static_context;
+        lowerer.class_context = saved_class_context;
     }
     Ok(globals)
 }
@@ -7885,6 +7891,7 @@ fn lower_class_methods(
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
         lowerer.class_static_context = method.is_static;
+        lowerer.class_context = Some(class_name.clone());
         if let Some(base) = &declaration.class.super_class {
             let Expr::Ident(base) = base.as_ref() else {
                 unreachable!("class layout validation accepts identifier bases only")
@@ -9547,6 +9554,7 @@ struct FnLowerer<'a> {
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
     class_static_context: bool,
+    class_context: Option<Symbol>,
 }
 
 type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
@@ -10046,6 +10054,7 @@ impl<'a> FnLowerer<'a> {
             labels: Vec::new(),
             super_initializer: None,
             class_static_context: false,
+            class_context: None,
         }
     }
 
@@ -14548,6 +14557,20 @@ impl<'a> FnLowerer<'a> {
             }
         }
         if let Some(property) = member_property_name(&member.prop) {
+            if matches!(member.obj.as_ref(), Expr::This(_)) && self.class_static_context {
+                let class = self
+                    .class_context
+                    .as_deref()
+                    .expect("static class lowering retains its class context");
+                let field_symbol = class_static_field_symbol(class, &property);
+                if self.scope.contains_key(&field_symbol) {
+                    return Ok(HirExpr::Var(field_symbol));
+                }
+                let getter = class_getter_symbol(class, &property, true);
+                if self.signatures.contains_key(&getter) {
+                    return Ok(HirExpr::Call(Box::new(HirExpr::Var(getter)), Vec::new()));
+                }
+            }
             if let Expr::Ident(receiver) = member.obj.as_ref() {
                 let field_symbol = class_static_field_symbol(receiver.sym.as_ref(), &property);
                 if self.scope.contains_key(&field_symbol) {
@@ -17667,6 +17690,29 @@ impl<'a> FnLowerer<'a> {
 
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let Some(property) = member_property_name(&member.prop) {
+                if matches!(member.obj.as_ref(), Expr::This(_)) && self.class_static_context {
+                    let class_name = self
+                        .class_context
+                        .as_deref()
+                        .expect("static class lowering retains its class context");
+                    let symbol = class_static_method_symbol(class_name, &property);
+                    if self.signatures.contains_key(&symbol) {
+                        if call.type_args.is_some() {
+                            return Err(format!(
+                                "native static method `{class_name}.{property}` is not generic"
+                            ));
+                        }
+                        return self.lower_call(&CallExpr {
+                            span: call.span,
+                            ctxt: call.ctxt,
+                            callee: Callee::Expr(Box::new(Expr::Ident(
+                                swc_ecma_ast::Ident::new_no_ctxt(symbol.into(), call.span),
+                            ))),
+                            args: call.args.clone(),
+                            type_args: None,
+                        });
+                    }
+                }
                 if let Expr::Ident(class) = member.obj.as_ref() {
                     let class_name = class.sym.as_ref();
                     let symbol = class_static_method_symbol(class_name, &property);
