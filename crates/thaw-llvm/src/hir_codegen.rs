@@ -19318,6 +19318,38 @@ mod tests {
     }
 
     #[test]
+    fn infers_native_generic_classes_through_scoped_bindings() {
+        let source = r#"
+            class Box<T> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            function show(input: number, label: string): void {
+                const forwarded = input + 2;
+                const record = { count: forwarded, label };
+                const fromParameter = new Box(input);
+                const fromInitializer = new Box(forwarded);
+                const fromMember = new Box(record.label);
+                console.log(fromParameter.get());
+                console.log(fromInitializer.get());
+                console.log(fromMember.get());
+                {
+                    const forwarded = "shadowed";
+                    const fromShadow = new Box(forwarded);
+                    console.log(fromShadow.get());
+                }
+                const afterShadow = new Box(record.count + 0);
+                console.log(afterShadow.get());
+            }
+            function main(): void { show(40, "ready"); }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_class_binding_inference"),
+            "40\n42\nready\nshadowed\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
