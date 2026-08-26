@@ -1266,6 +1266,18 @@ fn hir_type_as_ts_type(ty: &HirType) -> Result<TsType, String> {
         HirType::F64 | HirType::I64 => keyword(TsKeywordTypeKind::TsNumberKeyword),
         HirType::Str => keyword(TsKeywordTypeKind::TsStringKeyword),
         HirType::Bool => keyword(TsKeywordTypeKind::TsBooleanKeyword),
+        HirType::Void => keyword(TsKeywordTypeKind::TsVoidKeyword),
+        HirType::Promise(result) => TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+            span: swc_common::DUMMY_SP,
+            type_name: swc_ecma_ast::TsEntityName::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                "Promise".into(),
+                swc_common::DUMMY_SP,
+            )),
+            type_params: Some(Box::new(swc_ecma_ast::TsTypeParamInstantiation {
+                span: swc_common::DUMMY_SP,
+                params: vec![Box::new(hir_type_as_ts_type(result)?)],
+            })),
+        }),
         HirType::Array(element) => TsType::TsArrayType(swc_ecma_ast::TsArrayType {
             span: swc_common::DUMMY_SP,
             elem_type: Box::new(hir_type_as_ts_type(element)?),
@@ -15714,10 +15726,6 @@ impl<'a> FnLowerer<'a> {
                 let propagated_function_object_function_property_discriminants =
                     self.expression_function_object_function_property_discriminants(init);
                 let value = match (init, annotated.as_ref()) {
-                    (
-                        Expr::Arrow(arrow),
-                        Some(HirType::Function(_, _) | HirType::CallableFunction(..)),
-                    ) if arrow.is_async => self.lower_arrow(arrow)?,
                     (Expr::Arrow(arrow), Some(HirType::Function(params, ret))) => {
                         self.lower_contextual_arrow(arrow, params, Some(ret))?
                     }
@@ -20543,15 +20551,46 @@ impl<'a> FnLowerer<'a> {
         parameter_types: &[HirType],
         expected_return: Option<&HirType>,
     ) -> Result<HirExpr, String> {
-        if arrow.is_async || arrow.is_generator {
-            return Err("async and generator Promise callbacks are not supported".into());
-        }
         if arrow.params.len() != parameter_types.len() {
             return Err(format!(
                 "Promise callback expects {} parameter(s), got {}",
                 parameter_types.len(),
                 arrow.params.len()
             ));
+        }
+        if arrow.is_async {
+            if arrow.is_generator {
+                return Err("async generator arrow functions are not supported".into());
+            }
+            let mut contextual = arrow.clone();
+            for (parameter, ty) in contextual.params.iter_mut().zip(parameter_types) {
+                let annotation = match parameter {
+                    Pat::Ident(binding) => &mut binding.type_ann,
+                    Pat::Rest(rest) => &mut rest.type_ann,
+                    _ => return Err(
+                        "contextual async arrows currently require identifier or rest parameters"
+                            .into(),
+                    ),
+                };
+                if annotation.is_none() {
+                    *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                        span: swc_common::DUMMY_SP,
+                        type_ann: Box::new(hir_type_as_ts_type(ty)?),
+                    }));
+                }
+            }
+            if contextual.return_type.is_none() {
+                if let Some(expected) = expected_return {
+                    contextual.return_type = Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                        span: swc_common::DUMMY_SP,
+                        type_ann: Box::new(hir_type_as_ts_type(expected)?),
+                    }));
+                }
+            }
+            return self.lower_arrow(&contextual);
+        }
+        if arrow.is_generator {
+            return Err("generator Promise callbacks are not supported".into());
         }
         let generic_return = if let Some(type_params) = &arrow.type_params {
             validate_trailing_type_parameter_defaults(
