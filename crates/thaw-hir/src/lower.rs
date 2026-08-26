@@ -17003,6 +17003,8 @@ impl<'a> FnLowerer<'a> {
                                         | HirType::Tuple(_)
                                         | HirType::Object(_)
                                         | HirType::Function(_, _)
+                                        | HirType::Null
+                                        | HirType::Undefined
                                 )
                             }) {
                                 return Err(
@@ -17016,7 +17018,9 @@ impl<'a> FnLowerer<'a> {
                                     members.push(ty.clone());
                                 }
                             }
-                            members.push(HirType::Undefined);
+                            if !members.contains(&HirType::Undefined) {
+                                members.push(HirType::Undefined);
+                            }
                             let key = self.lower_expr(&computed.expr)?;
                             self.expect_type(&HirType::Str, &key, "computed object key")?;
                             return Ok(HirExpr::DynamicPropAccess(
@@ -24932,8 +24936,8 @@ mod tests {
     #[test]
     fn dynamic_computed_object_reads_form_heterogeneous_unions() {
         let program = lower(
-            r#"function read(key: string): number | string | undefined {
-                const mixed = { value: 1, label: "one" };
+            r#"function read(key: string): number | string | null | undefined {
+                const mixed = { value: 1, label: "one", empty: null, absent: undefined };
                 return mixed[key];
             }"#,
         );
@@ -24946,7 +24950,12 @@ mod tests {
         assert_eq!(fields[1].1, HirType::Str);
         assert_eq!(
             result,
-            &HirType::Union(vec![HirType::F64, HirType::Str, HirType::Undefined])
+            &HirType::Union(vec![
+                HirType::F64,
+                HirType::Str,
+                HirType::Null,
+                HirType::Undefined
+            ])
         );
     }
 
