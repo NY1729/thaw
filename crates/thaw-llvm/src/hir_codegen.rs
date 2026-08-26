@@ -16730,6 +16730,8 @@ mod tests {
             type Result =
                 { kind: "number"; value: number } |
                 { kind: "text"; value: string };
+            type ResultFactory = () => Result[];
+            type AsyncResultFactory = () => Promise<Result[]>;
             async function result(number: boolean): Promise<Result> {
                 await sleep(1);
                 if (number) return { kind: "number", value: 8 };
@@ -16746,6 +16748,13 @@ mod tests {
                 for (const { kind, value } of results) {
                     if (kind === "number") return String(value + 4);
                     return value + " parameter";
+                }
+                return "empty";
+            }
+            function consumeFactory(factory: ResultFactory): string {
+                for (const item of factory()) {
+                    if (item.kind === "number") return String(item.value + 4);
+                    return item.value + " factory";
                 }
                 return "empty";
             }
@@ -16797,6 +16806,21 @@ mod tests {
                     if (kind === "number") console.log(value + 3);
                     else console.log(value + "!");
                 }
+                const factory: ResultFactory = producedResults;
+                console.log(consumeFactory(factory));
+                const inlineFactory = (): Result[] => [
+                    { kind: "text", value: "inline" }
+                ];
+                const factoryAlias = inlineFactory;
+                for (const { kind, value } of factoryAlias()) {
+                    if (kind === "number") console.log(value + 5);
+                    else console.log(value + "!");
+                }
+                const asyncFactory: AsyncResultFactory = delayedResults;
+                for (const item of await asyncFactory()) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + "!");
+                }
                 const pendingResults: Promise<Result>[] = [result(true), result(false)];
                 for await (const { kind, value } of pendingResults) {
                     if (kind === "number") console.log(value + 3);
@@ -16806,7 +16830,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\nloop parameter\n10\n11\nreturned!\n11\nasync!\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\n"
         );
     }
 
