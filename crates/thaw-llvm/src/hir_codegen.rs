@@ -16901,6 +16901,14 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 1);
                     else console.log(item.value + " nested factory");
                 }
+                const inferredHolder = { results: producedResults() };
+                const payload = inferredHolder;
+                const inferredNestedHolder = { payload };
+                const spreadNestedHolder = { ...inferredNestedHolder };
+                for (const item of spreadNestedHolder.payload.results) {
+                    if (item.kind === "number") console.log(item.value + 30);
+                    else console.log(item.value + " inferred holder");
+                }
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -16958,7 +16966,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
