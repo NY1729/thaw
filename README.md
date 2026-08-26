@@ -1381,8 +1381,9 @@ The workspace crates have narrow responsibilities:
   descendants must provide a same-typed field implementation, including through abstract
   intermediate classes. Generic classes with explicit type arguments are monomorphized
   once per concrete type tuple across constructors, fields, methods, inheritance,
-  forward references and bundled user modules. Generic class constraints, default
-  type arguments, constructor-based inference and runtime sharing of generic static
+  forward references and bundled user modules. Type constraints and trailing default
+  type arguments, including dependencies on earlier parameters, are validated during
+  specialization. Constructor-based inference and runtime sharing of generic static
   state remain outside the native subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript

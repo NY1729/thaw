@@ -19248,6 +19248,38 @@ mod tests {
     }
 
     #[test]
+    fn compiles_constrained_and_defaulted_native_generic_classes() {
+        let source = r#"
+            class Box<T extends number = number> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            class Pair<T = string, U extends T = T> {
+                constructor(public first: T, public second: U) {}
+            }
+            class DefaultBox extends Box {
+                double(): number { return this.value * 2; }
+            }
+            function read(value: Box): number { return value.get(); }
+            function main(): void {
+                const inferredDefault = new Box(40);
+                const explicit = new Box<number>(2);
+                const pair = new Pair("left", "right");
+                const derived = new DefaultBox(21);
+                console.log(read(inferredDefault) + explicit.get());
+                console.log(pair.first);
+                console.log(pair.second);
+                console.log(derived.double());
+                console.log(derived.get());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_generic_class_defaults"),
+            "42\nleft\nright\n42\n21\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
