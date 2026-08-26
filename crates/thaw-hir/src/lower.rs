@@ -741,6 +741,10 @@ fn default_arity_symbol(symbol: &str, arity: usize) -> Symbol {
     format!("{symbol}__thawdefault_arity_{arity}")
 }
 
+fn omitted_parameter_symbol(symbol: &str, mask: usize) -> Symbol {
+    format!("{symbol}__thawomitted_mask_{mask:x}")
+}
+
 fn pattern_is_omittable(pattern: &Pat) -> bool {
     matches!(pattern, Pat::Assign(_))
         || matches!(pattern, Pat::Ident(binding) if binding.id.optional)
@@ -760,6 +764,50 @@ fn trailing_omittable_start(patterns: &[Pat]) -> Option<usize> {
         .rposition(|pattern| !pattern_is_omittable(pattern))
         .map_or(0, |index| index + 1);
     (start < patterns.len()).then_some(start)
+}
+
+fn omitted_parameter_masks(patterns: &[Pat], receiver_count: usize) -> Result<Vec<usize>, String> {
+    let omittable = patterns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pattern)| {
+            pattern_is_omittable(pattern).then_some(index + receiver_count)
+        })
+        .collect::<Vec<_>>();
+    if omittable.len() > 16 {
+        return Err("native class callables support at most 16 omittable parameters".into());
+    }
+    let mut masks = Vec::with_capacity((1usize << omittable.len()).saturating_sub(1));
+    for subset in 1usize..(1usize << omittable.len()) {
+        let mut mask = 0usize;
+        for (bit, parameter) in omittable.iter().enumerate() {
+            if subset & (1usize << bit) != 0 {
+                mask |= 1usize << parameter;
+            }
+        }
+        masks.push(mask);
+    }
+    Ok(masks)
+}
+
+fn insert_omitted_parameter_signatures(
+    signatures: &mut HashMap<Symbol, FnSignature>,
+    symbol: &str,
+    patterns: &[Pat],
+    receiver_count: usize,
+) -> Result<(), String> {
+    let full = signatures[symbol].clone();
+    for mask in omitted_parameter_masks(patterns, receiver_count)? {
+        let mut wrapper = full.clone();
+        wrapper.params = wrapper
+            .params
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| (mask & (1usize << index) == 0).then_some(parameter))
+            .collect();
+        signatures.insert(omitted_parameter_symbol(symbol, mask), wrapper);
+    }
+    Ok(())
 }
 
 fn class_method_symbol(class: &str, method: &str) -> Symbol {
@@ -1339,6 +1387,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             );
                         }
                     }
+                    insert_omitted_parameter_signatures(
+                        &mut signatures,
+                        &class_constructor_symbol(&name),
+                        &patterns,
+                        0,
+                    )?;
+                    insert_omitted_parameter_signatures(
+                        &mut signatures,
+                        &class_initializer_symbol(&name),
+                        &patterns,
+                        1,
+                    )?;
                 }
                 for member in &class_decl.class.body {
                     let ClassMember::Method(method) = member else {
@@ -1454,6 +1514,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             signatures.insert(default_arity_symbol(&symbol, total_arity), wrapper);
                         }
                     }
+                    insert_omitted_parameter_signatures(
+                        &mut signatures,
+                        &class_member_symbol(&name, method)?,
+                        &patterns,
+                        usize::from(!method.is_static),
+                    )?;
                 }
             }
             // Already consumed by `resolve_interfaces` above.
@@ -1539,6 +1605,39 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         default_arity_symbol(&class_initializer_symbol(derived_name), arity + 1),
                         derived_wrapper,
                     );
+                }
+            }
+            if base_params.len() <= 16 {
+                for mask in 1usize..(1usize << base_params.len()) {
+                    let base_constructor = omitted_parameter_symbol(
+                        &class_constructor_symbol(base.sym.as_ref()),
+                        mask,
+                    );
+                    if let Some(base_wrapper) = signatures.get(&base_constructor).cloned() {
+                        let mut derived_wrapper = base_wrapper;
+                        derived_wrapper.ret = interfaces[derived_name].clone();
+                        signatures.insert(
+                            omitted_parameter_symbol(&class_constructor_symbol(derived_name), mask),
+                            derived_wrapper,
+                        );
+                    }
+                    let initializer_mask = mask << 1;
+                    let base_initializer = omitted_parameter_symbol(
+                        &class_initializer_symbol(base.sym.as_ref()),
+                        initializer_mask,
+                    );
+                    if let Some(base_wrapper) = signatures.get(&base_initializer).cloned() {
+                        let mut derived_wrapper = base_wrapper;
+                        derived_wrapper.params[0] = interfaces[derived_name].clone();
+                        derived_wrapper.ret = interfaces[derived_name].clone();
+                        signatures.insert(
+                            omitted_parameter_symbol(
+                                &class_initializer_symbol(derived_name),
+                                initializer_mask,
+                            ),
+                            derived_wrapper,
+                        );
+                    }
                 }
             }
         }
@@ -4176,6 +4275,124 @@ fn lower_class_default_wrappers(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn lower_class_omitted_parameter_wrappers(
+    symbol: &str,
+    params: &[HirParam],
+    patterns: &[Pat],
+    receiver_count: usize,
+    ret: &HirType,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+    global_types: &HashMap<Symbol, HirType>,
+    immutable_globals: &HashSet<Symbol>,
+) -> Result<Vec<HirFunction>, String> {
+    let mut wrappers = Vec::new();
+    for mask in omitted_parameter_masks(patterns, receiver_count)? {
+        let wrapper_params = params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, parameter)| {
+                (mask & (1usize << index) == 0).then_some(parameter.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut lowerer = FnLowerer::new(
+            signatures,
+            interfaces,
+            generic_interfaces,
+            enum_values,
+            enum_reverse_values,
+            ret.clone(),
+            None,
+        );
+        seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        if receiver_count == 1 {
+            lowerer
+                .scope
+                .insert(params[0].name.clone(), params[0].ty.clone());
+            lowerer
+                .bindings
+                .entry("this".into())
+                .or_default()
+                .push(params[0].name.clone());
+        }
+        let mut body = Vec::new();
+        for (index, pattern) in patterns.iter().enumerate() {
+            let parameter_index = receiver_count + index;
+            let parameter = &params[parameter_index];
+            if mask & (1usize << parameter_index) == 0 {
+                lowerer
+                    .scope
+                    .insert(parameter.name.clone(), parameter.ty.clone());
+                lowerer
+                    .bindings
+                    .entry(parameter.name.clone())
+                    .or_default()
+                    .push(parameter.name.clone());
+                continue;
+            }
+            let value = match pattern {
+                Pat::Assign(default) => {
+                    let value = lowerer.lower_expr(&default.right)?;
+                    lowerer.coerce_to_declared(&parameter.ty, value)?
+                }
+                Pat::Ident(binding) if binding.id.optional => match &parameter.ty {
+                    HirType::Optional(payload) => {
+                        HirExpr::OptionalNone(payload.as_ref().clone())
+                    }
+                    HirType::Nullish(payload) => {
+                        HirExpr::NullishUndefined(payload.as_ref().clone())
+                    }
+                    other => {
+                        return Err(format!(
+                            "optional parameter `{}` of `{symbol}` needs an undefined-capable type, got {other:?}",
+                            parameter.name
+                        ))
+                    }
+                },
+                _ => unreachable!("omission masks contain only omittable parameters"),
+            };
+            body.push(HirStmt::Let(
+                parameter.name.clone(),
+                parameter.ty.clone(),
+                value,
+            ));
+            lowerer
+                .scope
+                .insert(parameter.name.clone(), parameter.ty.clone());
+            lowerer
+                .bindings
+                .entry(parameter.name.clone())
+                .or_default()
+                .push(parameter.name.clone());
+        }
+        let call = HirExpr::Call(
+            Box::new(HirExpr::Var(symbol.to_string())),
+            params
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone()))
+                .collect(),
+        );
+        if *ret == HirType::Void {
+            body.push(HirStmt::Expr(call));
+            body.push(HirStmt::Return(None));
+        } else {
+            body.push(HirStmt::Return(Some(call)));
+        }
+        wrappers.push(HirFunction {
+            name: omitted_parameter_symbol(symbol, mask),
+            params: wrapper_params,
+            ret: ret.clone(),
+            is_async: false,
+            body,
+        });
+    }
+    Ok(wrappers)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn lower_class_constructor(
     declaration: &ClassDecl,
     signatures: &HashMap<Symbol, FnSignature>,
@@ -4418,12 +4635,40 @@ fn lower_class_constructor(
         global_types,
         immutable_globals,
     )?);
+    functions.extend(lower_class_omitted_parameter_wrappers(
+        &constructor_symbol,
+        &params,
+        &patterns,
+        0,
+        &instance_type,
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        global_types,
+        immutable_globals,
+    )?);
     let mut initializer_wrapper_params = vec![HirParam {
         name: this_name,
         ty: instance_type.clone(),
     }];
     initializer_wrapper_params.extend(params.iter().cloned());
     functions.extend(lower_class_default_wrappers(
+        &initializer_symbol,
+        &initializer_wrapper_params,
+        &patterns,
+        1,
+        &instance_type,
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        global_types,
+        immutable_globals,
+    )?);
+    functions.extend(lower_class_omitted_parameter_wrappers(
         &initializer_symbol,
         &initializer_wrapper_params,
         &patterns,
@@ -4500,6 +4745,80 @@ fn lower_class_constructor(
                     is_async: false,
                     body,
                 });
+            }
+            if params.len() <= 16 {
+                for mask in 1usize..(1usize << params.len()) {
+                    let derived_constructor_wrapper =
+                        omitted_parameter_symbol(&constructor_symbol, mask);
+                    let initializer_mask = mask << 1;
+                    let derived_initializer_wrapper =
+                        omitted_parameter_symbol(&initializer_symbol, initializer_mask);
+                    if !signatures.contains_key(&derived_constructor_wrapper)
+                        || !signatures.contains_key(&derived_initializer_wrapper)
+                    {
+                        continue;
+                    }
+                    let wrapper_params = params
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, parameter)| {
+                            (mask & (1usize << index) == 0).then_some(parameter.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    let wrapper_this = "__thaw_this".to_string();
+                    let mut initialize_args = vec![HirExpr::Var(wrapper_this.clone())];
+                    initialize_args.extend(
+                        wrapper_params
+                            .iter()
+                            .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                    );
+                    functions.push(HirFunction {
+                        name: derived_constructor_wrapper,
+                        params: wrapper_params.clone(),
+                        ret: instance_type.clone(),
+                        is_async: false,
+                        body: vec![
+                            HirStmt::Let(
+                                wrapper_this.clone(),
+                                instance_type.clone(),
+                                HirExpr::ObjectAlloc(instance_type.clone()),
+                            ),
+                            HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var(derived_initializer_wrapper.clone())),
+                                initialize_args,
+                            ))),
+                        ],
+                    });
+
+                    let mut initializer_params = vec![HirParam {
+                        name: wrapper_this.clone(),
+                        ty: instance_type.clone(),
+                    }];
+                    initializer_params.extend(wrapper_params);
+                    let base_initializer_wrapper = omitted_parameter_symbol(
+                        &class_initializer_symbol(base.sym.as_ref()),
+                        initializer_mask,
+                    );
+                    let mut base_args = vec![HirExpr::Var(wrapper_this.clone())];
+                    base_args.extend(
+                        initializer_params[1..]
+                            .iter()
+                            .map(|parameter| HirExpr::Var(parameter.name.clone())),
+                    );
+                    let mut body = vec![HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var(base_initializer_wrapper)),
+                        base_args,
+                    ))];
+                    body.extend(implicit_own_initializers.iter().cloned());
+                    body.push(HirStmt::Return(Some(HirExpr::Var(wrapper_this))));
+                    functions.push(HirFunction {
+                        name: derived_initializer_wrapper,
+                        params: initializer_params,
+                        ret: instance_type.clone(),
+                        is_async: false,
+                        body,
+                    });
+                }
             }
         }
     }
@@ -4622,6 +4941,20 @@ fn lower_class_methods(
             .map(|parameter| parameter.pat.clone())
             .collect::<Vec<_>>();
         functions.extend(lower_class_default_wrappers(
+            &symbol,
+            &params,
+            &patterns,
+            receiver_offset,
+            &signature.ret,
+            signatures,
+            interfaces,
+            generic_interfaces,
+            enum_values,
+            enum_reverse_values,
+            global_types,
+            immutable_globals,
+        )?);
+        functions.extend(lower_class_omitted_parameter_wrappers(
             &symbol,
             &params,
             &patterns,
@@ -13594,10 +13927,9 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
-    fn lower_native_spread_arguments(
+    fn lower_native_spread_values(
         &mut self,
         arguments: &[swc_ecma_ast::ExprOrSpread],
-        expected: &[HirType],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
         let lowered = arguments
@@ -13652,19 +13984,66 @@ impl<'a> FnLowerer<'a> {
                 )
             }));
         }
-        if values.len() != expected.len() {
+        Ok((values, bindings))
+    }
+
+    fn select_omitted_class_arguments(
+        &mut self,
+        symbol: &mut Symbol,
+        signature: &mut FnSignature,
+        mut arguments: Vec<HirExpr>,
+        receiver_count: usize,
+        label: &str,
+    ) -> Result<Vec<HirExpr>, String> {
+        if signature.params.len() < usize::BITS as usize
+            && arguments.len() + receiver_count <= signature.params.len()
+        {
+            let mut omitted_mask = 0usize;
+            for index in receiver_count..signature.params.len() {
+                let omitted = match arguments.get(index - receiver_count) {
+                    None => true,
+                    Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
+                };
+                if omitted {
+                    omitted_mask |= 1usize << index;
+                }
+            }
+            let wrapper = omitted_parameter_symbol(symbol, omitted_mask);
+            if omitted_mask != 0 {
+                if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                    arguments = arguments
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, argument)| {
+                            (omitted_mask & (1usize << (index + receiver_count)) == 0)
+                                .then_some(argument)
+                        })
+                        .collect();
+                    *symbol = wrapper;
+                    *signature = wrapper_signature;
+                }
+            }
+        }
+        if arguments.len() + receiver_count != signature.params.len() {
+            let wrapper = default_arity_symbol(symbol, arguments.len() + receiver_count);
+            if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                *symbol = wrapper;
+                *signature = wrapper_signature;
+            }
+        }
+        let expected = &signature.params[receiver_count..];
+        if arguments.len() != expected.len() {
             return Err(format!(
                 "{label} expects {} argument(s), got {}",
                 expected.len(),
-                values.len()
+                arguments.len()
             ));
         }
-        let values = values
+        arguments
             .into_iter()
             .zip(expected)
             .map(|(value, expected)| self.coerce_to_declared(expected, value))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((values, bindings))
+            .collect()
     }
 
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
@@ -13681,20 +14060,15 @@ impl<'a> FnLowerer<'a> {
             if call.type_args.is_some() {
                 return Err("native `super(...)` does not support type arguments".into());
             }
-            if call.args.iter().all(|argument| argument.spread.is_none())
-                && call.args.len() + 1 != signature.params.len()
-            {
-                let wrapper = default_arity_symbol(&symbol, call.args.len() + 1);
-                if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
-                    symbol = wrapper;
-                    signature = wrapper_signature;
-                }
-            }
             let this_name = self.resolve_binding("this");
             let mut args = vec![HirExpr::Var(this_name)];
-            let (arguments, bindings) = self.lower_native_spread_arguments(
-                &call.args,
-                &signature.params[1..],
+            let (arguments, bindings) =
+                self.lower_native_spread_values(&call.args, "base constructor")?;
+            let arguments = self.select_omitted_class_arguments(
+                &mut symbol,
+                &mut signature,
+                arguments,
+                1,
                 "base constructor",
             )?;
             args.extend(arguments);
@@ -13730,24 +14104,18 @@ impl<'a> FnLowerer<'a> {
                     return Err("native super methods do not support type arguments".into());
                 }
                 let receiver_count = usize::from(!self.class_static_context);
-                if call.args.iter().all(|argument| argument.spread.is_none())
-                    && call.args.len() + receiver_count != signature.params.len()
-                {
-                    let wrapper = default_arity_symbol(&symbol, call.args.len() + receiver_count);
-                    if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
-                        symbol = wrapper;
-                        signature = wrapper_signature;
-                    }
-                }
                 let mut args = if self.class_static_context {
                     Vec::new()
                 } else {
                     vec![HirExpr::Var(self.resolve_binding("this"))]
                 };
                 let label = format!("super method `{base_name}.{method_name}`");
-                let (arguments, bindings) = self.lower_native_spread_arguments(
-                    &call.args,
-                    &signature.params[receiver_count..],
+                let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
+                let arguments = self.select_omitted_class_arguments(
+                    &mut symbol,
+                    &mut signature,
+                    arguments,
+                    receiver_count,
                     &label,
                 )?;
                 args.extend(arguments);
@@ -16127,6 +16495,38 @@ impl<'a> FnLowerer<'a> {
                     element,
                 )
             }));
+        }
+
+        if let Some(full_signature) = signature.clone() {
+            if full_signature.variadic.is_none()
+                && lowered_arguments.len() <= full_signature.params.len()
+            {
+                let mut omitted_mask = 0usize;
+                for index in 0..full_signature.params.len() {
+                    let omitted = match lowered_arguments.get(index) {
+                        None => true,
+                        Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
+                    };
+                    if omitted {
+                        omitted_mask |= 1usize << index;
+                    }
+                }
+                if omitted_mask != 0 {
+                    let wrapper = omitted_parameter_symbol(&callee_name, omitted_mask);
+                    if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
+                        lowered_arguments = lowered_arguments
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(index, argument)| {
+                                (omitted_mask & (1usize << index) == 0).then_some(argument)
+                            })
+                            .collect();
+                        callee_name = wrapper;
+                        param_types = Some(wrapper_signature.params.clone());
+                        signature = Some(wrapper_signature);
+                    }
+                }
+            }
         }
 
         if signature.as_ref().is_some_and(|signature| {
