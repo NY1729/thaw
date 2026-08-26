@@ -1572,9 +1572,10 @@ The workspace crates have narrow responsibilities:
   invalidates the affected correlation. `switch` applies the same narrowing to
   isolated literal cases and computes the remaining members for `default`,
   while conservatively dropping it across reachable fallthrough. Annotated
-  arrays preserve element discriminants through aliases and named synchronous
-  or asynchronous function returns into `for...of` or `for await...of`,
-  including direct item variables and object destructuring.
+  arrays preserve element discriminants through aliases, named synchronous or
+  asynchronous function returns, typed function values and callback parameters
+  into `for...of` or `for await...of`, including direct item variables and
+  object destructuring.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
