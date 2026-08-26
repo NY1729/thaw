@@ -830,13 +830,21 @@ struct GenericClassTemplate {
     constructor_patterns: Vec<GenericTypePattern>,
 }
 
+struct GenericClassUse {
+    name: Symbol,
+    arguments: Vec<TsType>,
+    actual_params: Option<Vec<HirType>>,
+    constructor_span: Option<swc_common::Span>,
+}
+
 struct GenericClassUseCollector<'a> {
     names: &'a HashSet<Symbol>,
     templates: &'a HashMap<Symbol, GenericClassTemplate>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'a>,
-    uses: Vec<(Symbol, Vec<TsType>, Option<Vec<HirType>>)>,
+    uses: Vec<GenericClassUse>,
     error: Option<String>,
+    scopes: Vec<HashMap<Symbol, HirType>>,
 }
 
 fn unbox_types(types: &[Box<TsType>]) -> Vec<TsType> {
@@ -907,16 +915,28 @@ fn infer_generic_constructor_expr_type(
     expression: &Expr,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
+    scopes: &[HashMap<Symbol, HirType>],
 ) -> Result<HirType, String> {
     match expression {
         Expr::Lit(Lit::Num(_)) => Ok(HirType::F64),
         Expr::Lit(Lit::Str(_)) => Ok(HirType::Str),
         Expr::Tpl(template) if template.exprs.is_empty() => Ok(HirType::Str),
         Expr::Lit(Lit::Bool(_)) => Ok(HirType::Bool),
+        Expr::Ident(identifier) => scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(identifier.sym.as_ref()).cloned())
+            .ok_or_else(|| {
+                format!(
+                    "cannot infer a generic class type from identifier `{}`",
+                    identifier.sym
+                )
+            }),
         Expr::Paren(parenthesized) => infer_generic_constructor_expr_type(
             &parenthesized.expr,
             interfaces,
             generic_interfaces,
+            scopes,
         ),
         Expr::TsAs(assertion) => lower_ts_type(
             &assertion.type_ann,
@@ -928,6 +948,101 @@ fn infer_generic_constructor_expr_type(
             interfaces,
             generic_interfaces,
         ),
+        Expr::Unary(unary) => match unary.op {
+            UnaryOp::Bang => Ok(HirType::Bool),
+            UnaryOp::TypeOf => Ok(HirType::Str),
+            UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Tilde => Ok(HirType::F64),
+            _ => Err("cannot infer this unary constructor argument type".into()),
+        },
+        Expr::Bin(binary) => {
+            let left = infer_generic_constructor_expr_type(
+                &binary.left,
+                interfaces,
+                generic_interfaces,
+                scopes,
+            )?;
+            let right = infer_generic_constructor_expr_type(
+                &binary.right,
+                interfaces,
+                generic_interfaces,
+                scopes,
+            )?;
+            match binary.op {
+                BinaryOp::EqEq
+                | BinaryOp::NotEq
+                | BinaryOp::EqEqEq
+                | BinaryOp::NotEqEq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq
+                | BinaryOp::In
+                | BinaryOp::InstanceOf => Ok(HirType::Bool),
+                BinaryOp::Add if left == HirType::Str || right == HirType::Str => {
+                    Ok(HirType::Str)
+                }
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::Exp
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitAnd
+                | BinaryOp::LShift
+                | BinaryOp::RShift
+                | BinaryOp::ZeroFillRShift
+                    if left == HirType::F64 && right == HirType::F64 =>
+                {
+                    Ok(HirType::F64)
+                }
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing
+                    if left == right =>
+                {
+                    Ok(left)
+                }
+                _ => Err(format!(
+                    "cannot infer generic class type from binary operands {left:?} and {right:?}"
+                )),
+            }
+        }
+        Expr::Member(member) => {
+            let receiver = infer_generic_constructor_expr_type(
+                &member.obj,
+                interfaces,
+                generic_interfaces,
+                scopes,
+            )?;
+            match (&receiver, &member.prop) {
+                (HirType::Object(fields), MemberProp::Ident(property)) => fields
+                    .iter()
+                    .find_map(|(name, ty)| (name == property.sym.as_ref()).then(|| ty.clone()))
+                    .ok_or_else(|| {
+                        format!("inferred object has no field `{}`", property.sym)
+                    }),
+                (HirType::Array(_), MemberProp::Ident(property))
+                    if property.sym == *"length" =>
+                {
+                    Ok(HirType::F64)
+                }
+                (HirType::Tuple(elements), MemberProp::Computed(property)) => {
+                    let Expr::Lit(Lit::Num(index)) = property.expr.as_ref() else {
+                        return Err("tuple inference requires a literal index".into());
+                    };
+                    elements
+                        .get(index.value as usize)
+                        .cloned()
+                        .ok_or_else(|| "tuple inference index is out of bounds".into())
+                }
+                (HirType::Array(element), MemberProp::Computed(property))
+                    if matches!(property.expr.as_ref(), Expr::Lit(Lit::Num(_))) =>
+                {
+                    Ok(element.as_ref().clone())
+                }
+                _ => Err("cannot infer this generic class member argument type".into()),
+            }
+        }
         Expr::Array(array) => {
             let mut elements = Vec::new();
             for element in &array.elems {
@@ -943,6 +1058,7 @@ fn infer_generic_constructor_expr_type(
                     &element.expr,
                     interfaces,
                     generic_interfaces,
+                    scopes,
                 )?);
             }
             let Some(first) = elements.first().cloned() else {
@@ -962,9 +1078,21 @@ fn infer_generic_constructor_expr_type(
                         "cannot infer a generic class type from an object spread".into(),
                     );
                 };
+                if let Prop::Shorthand(identifier) = property.as_ref() {
+                    fields.push((
+                        identifier.sym.to_string(),
+                        infer_generic_constructor_expr_type(
+                            &Expr::Ident(identifier.clone()),
+                            interfaces,
+                            generic_interfaces,
+                            scopes,
+                        )?,
+                    ));
+                    continue;
+                }
                 let Prop::KeyValue(property) = property.as_ref() else {
                     return Err(
-                        "generic class object inference requires key/value properties".into(),
+                        "generic class object inference requires data properties".into(),
                     );
                 };
                 let name = match &property.key {
@@ -982,6 +1110,7 @@ fn infer_generic_constructor_expr_type(
                         &property.value,
                         interfaces,
                         generic_interfaces,
+                        scopes,
                     )?,
                 ));
             }
@@ -994,19 +1123,104 @@ fn infer_generic_constructor_expr_type(
     }
 }
 
+impl GenericClassUseCollector<'_> {
+    fn bind_typed_pattern(&mut self, pattern: &Pat) {
+        let Pat::Ident(binding) = pattern else {
+            return;
+        };
+        let Some(annotation) = binding.type_ann.as_ref() else {
+            return;
+        };
+        let Ok(ty) = lower_ts_type(
+            &annotation.type_ann,
+            self.interfaces,
+            self.generic_interfaces,
+        ) else {
+            return;
+        };
+        self.scopes
+            .last_mut()
+            .expect("generic class collector always has a scope")
+            .insert(binding.id.sym.to_string(), ty);
+    }
+}
+
 impl Visit for GenericClassUseCollector<'_> {
+    fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+        self.scopes.push(HashMap::new());
+        for parameter in &function.params {
+            self.bind_typed_pattern(&parameter.pat);
+        }
+        function.visit_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+        self.scopes.push(HashMap::new());
+        for parameter in &arrow.params {
+            self.bind_typed_pattern(parameter);
+        }
+        arrow.visit_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_block_stmt(&mut self, block: &swc_ecma_ast::BlockStmt) {
+        self.scopes.push(HashMap::new());
+        block.visit_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_var_decl(&mut self, declaration: &swc_ecma_ast::VarDecl) {
+        for declarator in &declaration.decls {
+            declarator.name.visit_with(self);
+            if let Some(initializer) = declarator.init.as_deref() {
+                initializer.visit_with(self);
+            }
+            let Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            let inferred = binding
+                .type_ann
+                .as_ref()
+                .map(|annotation| {
+                    lower_ts_type(
+                        &annotation.type_ann,
+                        self.interfaces,
+                        self.generic_interfaces,
+                    )
+                })
+                .or_else(|| {
+                    declarator.init.as_deref().map(|initializer| {
+                        infer_generic_constructor_expr_type(
+                            initializer,
+                            self.interfaces,
+                            self.generic_interfaces,
+                            &self.scopes,
+                        )
+                    })
+                });
+            if let Some(Ok(ty)) = inferred {
+                self.scopes
+                    .last_mut()
+                    .expect("generic class collector always has a scope")
+                    .insert(binding.id.sym.to_string(), ty);
+            }
+        }
+    }
+
     fn visit_class(&mut self, class: &swc_ecma_ast::Class) {
         if let Some(Expr::Ident(super_class)) = class.super_class.as_deref() {
             if self.names.contains(super_class.sym.as_ref()) {
-                self.uses.push((
-                    super_class.sym.to_string(),
-                    class
+                self.uses.push(GenericClassUse {
+                    name: super_class.sym.to_string(),
+                    arguments: class
                         .super_type_params
                         .as_ref()
                         .map(|arguments| unbox_types(&arguments.params))
                         .unwrap_or_default(),
-                    None,
-                ));
+                    actual_params: None,
+                    constructor_span: None,
+                });
             }
         }
         class.visit_children_with(self);
@@ -1027,6 +1241,7 @@ impl Visit for GenericClassUseCollector<'_> {
                                     &argument.expr,
                                     self.interfaces,
                                     self.generic_interfaces,
+                                    &self.scopes,
                                 )
                             })
                             .collect::<Result<Vec<_>, String>>()
@@ -1050,15 +1265,16 @@ impl Visit for GenericClassUseCollector<'_> {
                         None
                     }
                 };
-                self.uses.push((
-                    class.sym.to_string(),
-                    expression
+                self.uses.push(GenericClassUse {
+                    name: class.sym.to_string(),
+                    arguments: expression
                         .type_args
                         .as_ref()
                         .map(|arguments| unbox_types(&arguments.params))
                         .unwrap_or_default(),
-                    inferred,
-                ));
+                    actual_params: inferred,
+                    constructor_span: Some(expression.span),
+                });
             }
         }
         expression.visit_children_with(self);
@@ -1067,15 +1283,16 @@ impl Visit for GenericClassUseCollector<'_> {
     fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
         if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
             if self.names.contains(class.sym.as_ref()) {
-                self.uses.push((
-                    class.sym.to_string(),
-                    reference
+                self.uses.push(GenericClassUse {
+                    name: class.sym.to_string(),
+                    arguments: reference
                         .type_params
                         .as_ref()
                         .map(|arguments| unbox_types(&arguments.params))
                         .unwrap_or_default(),
-                    None,
-                ));
+                    actual_params: None,
+                    constructor_span: None,
+                });
             }
         }
         reference.visit_children_with(self);
@@ -1084,15 +1301,16 @@ impl Visit for GenericClassUseCollector<'_> {
     fn visit_ts_expr_with_type_args(&mut self, expression: &swc_ecma_ast::TsExprWithTypeArgs) {
         if let Expr::Ident(class) = expression.expr.as_ref() {
             if self.names.contains(class.sym.as_ref()) {
-                self.uses.push((
-                    class.sym.to_string(),
-                    expression
+                self.uses.push(GenericClassUse {
+                    name: class.sym.to_string(),
+                    arguments: expression
                         .type_args
                         .as_ref()
                         .map(|arguments| unbox_types(&arguments.params))
                         .unwrap_or_default(),
-                    None,
-                ));
+                    actual_params: None,
+                    constructor_span: None,
+                });
             }
         }
         expression.visit_children_with(self);
@@ -1218,6 +1436,7 @@ struct GenericClassReferenceRewriter<'a, 'ast> {
     templates: &'a HashMap<Symbol, GenericClassTemplate>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'ast>,
+    constructor_actuals: &'a HashMap<swc_common::Span, Vec<HirType>>,
     error: Option<String>,
 }
 
@@ -1278,39 +1497,10 @@ impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
         else {
             return;
         };
-        let Some(template) = self.templates.get(&class_name) else {
+        let Some(_template) = self.templates.get(&class_name) else {
             return;
         };
-        let actual_params = if expression.type_args.is_none() {
-            match expression.args.as_ref().map(|arguments| {
-                arguments
-                    .iter()
-                    .map(|argument| {
-                        if argument.spread.is_some() {
-                            return Err("generic class constructor inference does not support spread arguments".into());
-                        }
-                        infer_generic_constructor_expr_type(
-                            &argument.expr,
-                            self.interfaces,
-                            self.generic_interfaces,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, String>>()
-            }).transpose() {
-                Ok(actual) => actual,
-                Err(error) => {
-                    if template.defaults.iter().any(Option::is_none) {
-                        self.error = Some(format!(
-                            "cannot infer generic class `{class_name}`: {error}"
-                        ));
-                        return;
-                    }
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let actual_params = self.constructor_actuals.get(&expression.span);
         let Expr::Ident(class) = expression.callee.as_mut() else {
             return;
         };
@@ -1320,7 +1510,7 @@ impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
                 .type_args
                 .as_ref()
                 .map(|arguments| arguments.params.as_slice()),
-            actual_params.as_deref(),
+            actual_params.map(Vec::as_slice),
         ) {
             class.sym = symbol.into();
             expression.type_args = None;
@@ -1466,6 +1656,7 @@ fn specialize_generic_classes(
             if templates.contains_key(declaration.ident.sym.as_ref()))
     });
     let mut instances: Vec<(Symbol, Vec<HirType>, Symbol)> = Vec::new();
+    let mut constructor_actuals = HashMap::new();
     loop {
         let mut collector = GenericClassUseCollector {
             names: &names,
@@ -1474,13 +1665,17 @@ fn specialize_generic_classes(
             generic_interfaces,
             uses: Vec::new(),
             error: None,
+            scopes: vec![HashMap::new()],
         };
         specialized.visit_with(&mut collector);
         if let Some(error) = collector.error {
             return Err(error);
         }
         let mut added = false;
-        for (name, arguments, actual_params) in collector.uses {
+        for usage in collector.uses {
+            let name = usage.name;
+            let arguments = usage.arguments;
+            let actual_params = usage.actual_params;
             let template = &templates[&name];
             let (types, arguments) = resolve_generic_class_type_tuple(
                 &name,
@@ -1490,6 +1685,11 @@ fn specialize_generic_classes(
                 interfaces,
                 generic_interfaces,
             )?;
+            if let (Some(span), Some(actual_params)) =
+                (usage.constructor_span, actual_params.as_ref())
+            {
+                constructor_actuals.insert(span, actual_params.clone());
+            }
             if let Some(unsupported) = types.iter().find(|ty| !supports_generic_native_layout(ty)) {
                 return Err(format!(
                     "generic class `{name}` cannot specialize for native layout {unsupported:?}"
@@ -1531,6 +1731,7 @@ fn specialize_generic_classes(
         templates: &templates,
         interfaces,
         generic_interfaces,
+        constructor_actuals: &constructor_actuals,
         error: None,
     };
     specialized.visit_mut_with(&mut rewriter);
