@@ -19550,6 +19550,17 @@ mod tests {
                     return this.inheritedIdentity(this.inheritedLabel);
                 }
             }
+            class StaticThisBase {
+                static selected: string = "base-static-this";
+                static readSelected(): string { return this.selected; }
+                static selectMethod(): string { return "base-static-method"; }
+                static dispatchMethod(): string { return this.selectMethod(); }
+            }
+            class StaticThisMiddle extends StaticThisBase {}
+            class StaticThisDerived extends StaticThisMiddle {
+                static selected: string = "derived-static-this";
+                static selectMethod(): string { return "derived-static-method"; }
+            }
             async function main(): Promise<void> {
                 const box = new Box(40);
                 const derived = new DerivedBox(40);
@@ -19613,11 +19624,13 @@ mod tests {
                 console.log(Box.initialized);
                 console.log(Box.inferStaticMethodResult());
                 console.log(StaticGenericDerived.runInherited());
+                console.log(StaticThisDerived.readSelected());
+                console.log(StaticThisDerived.dispatchMethod());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\nstatic-this-field\nnested-static-this-call\n14\nstatic-this-field\nstatic-this-field\ninherited-static-inference\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\nthis-call\nnested-this-call\nstatic-this-field\nnested-static-this-call\n14\nstatic-this-field\nstatic-this-field\ninherited-static-inference\nderived-static-this\nderived-static-method\n"
         );
     }
 
