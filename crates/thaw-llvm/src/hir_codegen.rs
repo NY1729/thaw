@@ -19734,6 +19734,30 @@ mod tests {
     }
 
     #[test]
+    fn compiles_satisfies_and_non_null_assertions() {
+        let source = r#"
+            function main(): void {
+                const config = { label: "ready", port: 40 } satisfies {
+                    label: string;
+                    port: number;
+                };
+                console.log(config.label);
+                console.log(config.port + 2);
+                const optional: number | undefined = 40;
+                const nullable: number | null = 41;
+                const nullish: number | null | undefined = 42;
+                console.log(optional! + 2);
+                console.log(nullable! + 1);
+                console.log(nullish!);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "satisfies_and_non_null"),
+            "ready\n42\n42\n42\n42\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
