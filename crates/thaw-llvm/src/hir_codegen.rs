@@ -18681,6 +18681,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_native_static_initialization_blocks() {
+        let source = r#"
+            let trace: string = "";
+            class Counter {
+                static value: number = 1;
+                static { Counter.value += 40; trace += "A"; }
+                static result: number = Counter.value + 1;
+                static { trace += "B"; }
+            }
+            function main(): void {
+                console.log(Counter.value);
+                console.log(Counter.result);
+                console.log(trace);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_static_initialization_blocks"),
+            "41\n42\nAB\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
