@@ -127,6 +127,9 @@ The workspace crates have narrow responsibilities:
   async functions, and preserve shared `let` mutation across module boundaries.
   Executable top-level expressions and supported control-flow statements share the
   same dependency-ordered, exactly-once initializer sequence
+- An uncaught exception from registry/native/module initialization stops later
+  initializers, skips `main` or the Lambda polling loop, and makes the native
+  process exit unsuccessfully instead of running user code with a pending error
 - `number`, `string`, `boolean`, `null`, `void`, `Json`, number arrays and fixed-shape
   objects; function types may be parenthesized where TypeScript grammar
   requires it (including `FunctionType | undefined`)
