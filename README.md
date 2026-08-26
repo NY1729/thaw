@@ -603,8 +603,10 @@ The workspace crates have narrow responsibilities:
   i64 BigInts, void and multi-value results; thrown JavaScript errors trap as
   `WebAssembly.RuntimeError`. Imported Memory and mutable Global objects are
   synchronized before and after calls, including growth and sharing the same
-  JavaScript object across multiple instances. Imported Table values remain
-  the next interoperability layer
+  JavaScript object across multiple instances. `externref` values preserve
+  JavaScript identity through exported functions and mutable globals. Imported
+  and exported `externref` Tables share values and growth across instances;
+  function-reference Tables remain the next interoperability layer
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
   directories, exposes both `getImportObject()` and `wasiImport`, runs command
