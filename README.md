@@ -590,6 +590,16 @@ The workspace crates have narrow responsibilities:
 - QuickJS bundles expose a `Uint8Array`-compatible global `Buffer`, shared by
   `node:buffer`, with UTF-8/hex/Base64/Latin-1/UTF-16 conversion, allocation,
   concatenation, shared slices, copying, filling, search and integer access
+- QuickJS bundles expose a real `WebAssembly` runtime backed by wasmi. Binary
+  modules can be validated, compiled and instantiated synchronously or through
+  the standard Promise helpers; exported scalar functions support multi-value
+  results and i64 BigInts, mutable globals retain their Wasm types, and linear
+  memory stays synchronized with JavaScript ArrayBuffer views across calls and
+  growth. Standalone Memory, Global and Table values provide their standard
+  construction, access and growth surface. Generic JavaScript import-object
+  linkage, exported/imported tables and custom-section extraction remain the
+  next interoperability layer; WASI imports are handled separately by
+  `node:wasi`
 - QuickJS bundles expose `performance.timeOrigin` and elapsed-millisecond
   `performance.now()` values scoped to the shared JavaScript context
 - The Performance Timeline adds mark/measure entries, queries, clearing,
