@@ -19350,6 +19350,46 @@ mod tests {
     }
 
     #[test]
+    fn compiles_nested_native_generic_class_specializations() {
+        let source = r#"
+            class Box<T> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            class Holder<T> {
+                constructor(public value: T) {}
+                get(): T { return this.value; }
+            }
+            class Pair<T, U> {
+                constructor(public first: T, public second: U) {}
+            }
+            function read(value: Holder<Box<number>>): number {
+                const inner = value.get();
+                return inner.get();
+            }
+            function main(): void {
+                const boxed = new Box(42);
+                const explicit = new Holder<Box<number>>(boxed);
+                const inferred = new Holder(boxed);
+                const pair = new Pair<Holder<Box<number>>, Box<string>>(
+                    explicit,
+                    new Box("nested")
+                );
+                const pairFirst = pair.first;
+                const pairSecond = pair.second;
+                console.log(read(explicit));
+                console.log(read(inferred));
+                console.log(read(pairFirst));
+                console.log(pairSecond.get());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_nested_generic_classes"),
+            "42\n42\n42\nnested\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
