@@ -19776,11 +19776,17 @@ mod tests {
                 console.log(await staticReadAsync.apply(extracted, args));
                 console.log(staticBound());
                 console.log(holderRead.call(new Box("chain"), "!"));
+                let mutable = read;
+                const ordinary = (value: string): string => value;
+                mutable = ordinary;
+                console.log(mutable("ordinary"));
+                mutable = extracted.read;
+                console.log(mutable.call(new Box("reassigned"), "!"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\n"
         );
     }
 

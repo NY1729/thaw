@@ -1435,6 +1435,8 @@ The workspace crates have narrow responsibilities:
   receiver typing follows annotated function/method results, native object field chains,
   parentheses, assertions, sequences and same-typed conditional branches.
   saved instance and static methods that observe `this` retain their method identity through local aliases and
+  mutable assignments; assigning an ordinary same-typed function clears that identity, while assigning another
+  native method establishes its new identity. Saved methods
   support synchronous or async `.call(thisArg, ...args)` and `.apply(thisArg, typedTuple)` without
   retaining the extraction receiver. They can also be converted after extraction with
   `.bind(thisArg, ...typedTuple)`, including partial application and async results. A plain invocation

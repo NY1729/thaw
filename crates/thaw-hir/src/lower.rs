@@ -16150,6 +16150,19 @@ impl<'a> FnLowerer<'a> {
             Target::Var(name) => Some(name.clone()),
             _ => None,
         };
+        let assigned_method_value = (assign.op == AssignOp::Assign)
+            .then(|| {
+                self.native_instance_method_value(&assign.right)
+                    .or_else(|| {
+                        let Expr::Ident(identifier) = assign.right.as_ref() else {
+                            return None;
+                        };
+                        self.native_method_values
+                            .get(&self.resolve_binding(identifier.sym.as_ref()))
+                            .cloned()
+                    })
+            })
+            .flatten();
         let mut bindings = Vec::new();
 
         if assign.op != AssignOp::Assign {
@@ -16317,6 +16330,15 @@ impl<'a> FnLowerer<'a> {
         };
 
         let result = build_assign(target, value);
+        if assign.op == AssignOp::Assign {
+            if let Some(name) = assigned_variable.as_ref() {
+                if let Some(method) = assigned_method_value {
+                    self.native_method_values.insert(name.clone(), method);
+                } else {
+                    self.native_method_values.remove(name);
+                }
+            }
+        }
         if let Some(name) = assigned_variable {
             if let Some(HirType::Optional(payload)) = self.scope.get(&name) {
                 if rhs_type == **payload || assign.op != AssignOp::Assign {
