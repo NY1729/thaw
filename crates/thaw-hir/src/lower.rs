@@ -6437,23 +6437,33 @@ fn generic_type_pattern(
                     .body
                     .iter()
                     .map(|member| {
-                        let TsTypeElement::TsPropertySignature(property) = member else {
-                            return Err(format!(
-                                "generic interface `{name}` only supports plain properties"
-                            ));
+                        let (key, ty) = match member {
+                            TsTypeElement::TsPropertySignature(property) => {
+                                let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                    "generic interface property needs a type annotation".to_string()
+                                })?;
+                                (
+                                    property.key.as_ref(),
+                                    std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                )
+                            }
+                            TsTypeElement::TsMethodSignature(method) => (
+                                method.key.as_ref(),
+                                std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                            ),
+                            _ => return Err(format!(
+                                "generic interface `{name}` only supports properties and methods"
+                            )),
                         };
-                        let Expr::Ident(field) = property.key.as_ref() else {
+                        let Expr::Ident(field) = key else {
                             return Err(format!(
                                 "generic interface `{name}` has an unsupported property key"
                             ));
                         };
-                        let annotation = property.type_ann.as_ref().ok_or_else(|| {
-                            format!("field `{}` needs a type annotation", field.sym)
-                        })?;
                         Ok((
                             field.sym.to_string(),
                             generic_type_pattern(
-                                &annotation.type_ann,
+                                &ty,
                                 &nested_substitutions,
                                 interfaces,
                                 generic_interfaces,
@@ -10361,12 +10371,27 @@ fn resolve_generic_interface(
         }
     }
     for member in &decl.body.body {
-        let TsTypeElement::TsPropertySignature(prop) = member else {
-            return Err(format!(
-                "interface `{name}` has an unsupported member (only plain properties are supported, no methods/index signatures)"
-            ));
+        let (key, ty) = match member {
+            TsTypeElement::TsPropertySignature(property) => {
+                let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                    "generic interface property needs an explicit type annotation".to_string()
+                })?;
+                (
+                    property.key.as_ref(),
+                    std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                )
+            }
+            TsTypeElement::TsMethodSignature(method) => (
+                method.key.as_ref(),
+                std::borrow::Cow::Owned(method_signature_function_type(method)?),
+            ),
+            _ => {
+                return Err(format!(
+                    "interface `{name}` has an unsupported member (properties and methods are supported; index signatures are not)"
+                ))
+            }
         };
-        let field_name = match prop.key.as_ref() {
+        let field_name = match key {
             Expr::Ident(ident) => ident.sym.to_string(),
             _ => {
                 return Err(format!(
@@ -10374,11 +10399,8 @@ fn resolve_generic_interface(
                 ))
             }
         };
-        let ann = prop.type_ann.as_ref().ok_or_else(|| {
-            format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
-        })?;
         let field_ty = resolve_ts_type_with_substitution(
-            &ann.type_ann,
+            &ty,
             &substitution,
             interfaces,
             generic_interfaces,
