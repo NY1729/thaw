@@ -81,6 +81,10 @@ impl<'a> FnLowerer<'a> {
             }
             if let HirExpr::ArrayLit(elements) = value {
                 for element in elements {
+                    if matches!(element, HirExpr::Lit(_)) {
+                        values.push(element);
+                        continue;
+                    }
                     let ty = self.infer_expr_type(&element)?;
                     let name = format!("__thaw_native_arg_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1405,12 +1409,6 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"at" {
-                    let [index] = call.args.as_slice() else {
-                        return Err("native array `.at()` expects exactly one index".into());
-                    };
-                    if index.spread.is_some() {
-                        return Err("array at spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1419,17 +1417,27 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
-                    let index = self.lower_expr(&index.expr)?;
-                    let index = self.coerce_primitive_to_number(index)?;
-                    return self.lower_array_at(receiver, array_type, element_type, index);
+                    let receiver_name = format!("__thaw_at_source_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), array_type.clone());
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.at")?;
+                    let [index] = arguments.as_slice() else {
+                        return Err("native array `.at()` expects exactly one index".into());
+                    };
+                    let index = self.coerce_primitive_to_number(index.clone())?;
+                    let result = self.lower_array_at(
+                        HirExpr::Var(receiver_name.clone()),
+                        array_type.clone(),
+                        element_type,
+                        index,
+                    )?;
+                    let mut bindings = vec![(receiver_name, array_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"with" {
-                    let [index, value] = call.args.as_slice() else {
-                        return Err("native `.with()` expects an index and value".into());
-                    };
-                    if index.spread.is_some() || value.spread.is_some() {
-                        return Err("array with spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1438,19 +1446,31 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
-                    let index = self.lower_expr(&index.expr)?;
+                    let receiver_name = format!("__thaw_with_source_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(receiver_name.clone(), array_type.clone());
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.with")?;
+                    let [index, value] = arguments.as_slice() else {
+                        return Err("native `.with()` expects an index and value".into());
+                    };
+                    let index = index.clone();
                     self.expect_type(&HirType::F64, &index, "array with index")?;
-                    let value = self.lower_expr(&value.expr)?;
+                    let value = value.clone();
                     self.expect_type(&element_type, &value, "array with value")?;
-                    return self.lower_array_with(receiver, array_type, element_type, index, value);
+                    let result = self.lower_array_with(
+                        HirExpr::Var(receiver_name.clone()),
+                        array_type.clone(),
+                        element_type,
+                        index,
+                        value,
+                    )?;
+                    let mut bindings = vec![(receiver_name, array_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"flat" {
-                    if call.args.len() > 1 {
-                        return Err("native `.flat()` expects zero or one depth".into());
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array flat spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let mut current_type = self.infer_expr_type(&receiver)?;
                     if !matches!(current_type, HirType::Array(_)) {
@@ -1458,8 +1478,18 @@ impl<'a> FnLowerer<'a> {
                             "`.flat()` requires a homogeneous array, got {current_type:?}"
                         ));
                     }
-                    let depth = if let Some(argument) = call.args.first() {
-                        let value = self.lower_expr(&argument.expr)?;
+                    let source_type = current_type.clone();
+                    let source_name = format!("__thaw_flat_source_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(source_name.clone(), current_type.clone());
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.flat")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.flat()` expects zero or one depth".into());
+                    }
+                    let depth = if let Some(argument) = arguments.first() {
+                        let value = argument.clone();
                         self.expect_type(&HirType::F64, &value, "array flat depth")?;
                         let constant = match value {
                             HirExpr::Lit(HirLit::F64(value)) => Some(value),
@@ -1492,7 +1522,7 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         1
                     };
-                    let mut result = receiver;
+                    let mut result = HirExpr::Var(source_name.clone());
                     let mut flattened = false;
                     for _ in 0..depth {
                         let HirType::Array(element) = &current_type else {
@@ -1516,7 +1546,9 @@ impl<'a> FnLowerer<'a> {
                             ],
                         );
                     }
-                    return Ok(result);
+                    let mut bindings = vec![(source_name, source_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"flatMap" {
                     if !(1..=2).contains(&call.args.len()) {
@@ -1831,21 +1863,23 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if property.sym == *"join" {
-                    if call.args.len() > 1 {
-                        return Err("native `.join()` expects zero or one argument".into());
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array join spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
-                    let separator = if let Some(argument) = call.args.first() {
-                        let value = self.lower_expr(&argument.expr)?;
-                        self.coerce_primitive_to_string(value)?
+                    let source_name = format!("__thaw_join_source_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(source_name.clone(), receiver_type.clone());
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.join")?;
+                    if arguments.len() > 1 {
+                        return Err("native `.join()` expects zero or one argument".into());
+                    }
+                    let separator = if let Some(argument) = arguments.first() {
+                        self.coerce_primitive_to_string(argument.clone())?
                     } else {
                         HirExpr::Lit(HirLit::Str(",".to_string()))
                     };
-                    return match receiver_type {
+                    let result = match receiver_type.clone() {
                         HirType::Array(element) => {
                             let array_type = HirType::Array(element.clone());
                             let builtin = match element.as_ref() {
@@ -1877,16 +1911,27 @@ impl<'a> FnLowerer<'a> {
                             self.wrap_call_argument_bindings(
                                 result,
                                 &[
-                                    (receiver_name, array_type, receiver),
+                                    (
+                                        receiver_name,
+                                        array_type,
+                                        HirExpr::Var(source_name.clone()),
+                                    ),
                                     (separator_name, HirType::Str, separator),
                                 ],
                             )
                         }
-                        HirType::Tuple(elements) => self.join_tuple(receiver, elements, separator),
+                        HirType::Tuple(elements) => self.join_tuple(
+                            HirExpr::Var(source_name.clone()),
+                            elements,
+                            separator,
+                        ),
                         other => Err(format!(
                             "`.join()` requires an array receiver, got {other:?}"
                         )),
-                    };
+                    }?;
+                    let mut bindings = vec![(source_name, receiver_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if matches!(
                     property.sym.as_ref(),
