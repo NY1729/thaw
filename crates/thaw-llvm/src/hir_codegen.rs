@@ -784,6 +784,18 @@ impl<'ctx> HirCompiler<'ctx> {
             );
             self.module.add_function(name, ty, Some(Linkage::External));
         }
+        let array_fill_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module
+            .add_function("thaw_array_fill", array_fill_type, Some(Linkage::External));
         let array_slice_type = i8_ptr.fn_type(
             &[
                 i8_ptr.into(),
@@ -9847,6 +9859,52 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("array fill returned no value".to_string());
             }
+            "__thaw_array_fill" => {
+                if args.len() != 4 {
+                    return Err("array fill expects four operands".to_string());
+                }
+                let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
+                    return Err("array fill requires a homogeneous array".to_string());
+                };
+                let array = self.compile_expr(&args[0])?;
+                let value = self.compile_expr(&args[1])?;
+                let value_slot = self
+                    .builder
+                    .build_alloca(value.get_type(), "array_fill_value")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_store(value_slot, value)
+                    .map_err(|error| error.to_string())?;
+                let value_bytes = self
+                    .builder
+                    .build_pointer_cast(
+                        value_slot,
+                        self.context.ptr_type(AddressSpace::default()),
+                        "array_fill_value_bytes",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let arguments = [
+                    array.into(),
+                    value_bytes.into(),
+                    self.context
+                        .i64_type()
+                        .const_int(array_element_storage_bytes(&element), false)
+                        .into(),
+                    self.compile_expr(&args[2])?.into(),
+                    self.compile_expr(&args[3])?.into(),
+                ];
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_fill").unwrap(),
+                        &arguments,
+                        "array_fill",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array fill returned no value".to_string());
+            }
             "__thaw_array_slice" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
@@ -18107,6 +18165,32 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "array_fill"),
             "1,9,9,4\naxx\nfalse-false-false\n8\n"
+        );
+    }
+
+    #[test]
+    fn compiles_union_array_fill_without_losing_discriminants() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function main(): void {
+                const replacement: Result = { kind: "text", value: "filled" };
+                const results: Result[] = [
+                    { kind: "number", value: 1 },
+                    { kind: "number", value: 2 },
+                    { kind: "number", value: 3 }
+                ];
+                const filled = results.fill(replacement, 1);
+                for (const item of filled) {
+                    if (item.kind === "number") console.log(item.value + 10);
+                    else console.log(item.value + "!");
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "union_array_fill"),
+            "11\nfilled!\nfilled!\n"
         );
     }
 

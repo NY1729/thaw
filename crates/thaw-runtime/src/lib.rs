@@ -627,6 +627,40 @@ pub unsafe extern "C" fn thaw_bool_array_fill(
 }
 
 #[no_mangle]
+/// Fills a native array range by copying one complete element into every slot.
+///
+/// # Safety
+/// `array` must point to a writable Thaw array whose elements occupy
+/// `element_width` bytes. `value` must point to at least `element_width`
+/// readable bytes and must not overlap `array`.
+pub unsafe extern "C" fn thaw_array_fill(
+    array: *mut u8,
+    value: *const u8,
+    element_width: usize,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    let Some(length) = (unsafe { native_array_length(array) }) else {
+        return std::ptr::null_mut();
+    };
+    if value.is_null() || element_width == 0 {
+        return std::ptr::null_mut();
+    }
+    let start = relative_array_index(start, length);
+    let end = relative_array_index(end, length);
+    for index in start..end {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                value,
+                array.add(8 + index * element_width),
+                element_width,
+            );
+        }
+    }
+    array
+}
+
+#[no_mangle]
 /// Returns an arena-owned shallow copy of a native array range.
 ///
 /// # Safety
