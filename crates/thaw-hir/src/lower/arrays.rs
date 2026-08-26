@@ -26,28 +26,25 @@ impl<'a> FnLowerer<'a> {
     fn lower_parse_call(&mut self, call: &CallExpr, parse_int: bool) -> Result<HirExpr, String> {
         let label = if parse_int { "parseInt" } else { "parseFloat" };
         let expected = if parse_int { 1..=2 } else { 1..=1 };
-        if !expected.contains(&call.args.len()) {
+        let (arguments, bindings) = self.lower_native_spread_values(&call.args, label)?;
+        if !expected.contains(&arguments.len()) {
             return Err(format!(
                 "`{label}` expects one{} argument",
                 if parse_int { " or two" } else { "" }
             ));
         }
-        if call.args.iter().any(|argument| argument.spread.is_some()) {
-            return Err("parse function spread is not supported".into());
-        }
-        let text = self.lower_expr(&call.args[0].expr)?;
+        let text = arguments[0].clone();
         let text = self.coerce_primitive_to_string(text)?;
-        let mut arguments = vec![text];
+        let mut lowered = vec![text];
         if parse_int {
-            let radix = if let Some(argument) = call.args.get(1) {
-                let value = self.lower_expr(&argument.expr)?;
-                self.coerce_primitive_to_number(value)?
+            let radix = if let Some(argument) = arguments.get(1) {
+                self.coerce_primitive_to_number(argument.clone())?
             } else {
                 HirExpr::Lit(HirLit::F64(0.0))
             };
-            arguments.push(radix);
+            lowered.push(radix);
         }
-        Ok(HirExpr::Call(
+        let call = HirExpr::Call(
             Box::new(HirExpr::Var(
                 if parse_int {
                     "__thaw_parse_int"
@@ -56,8 +53,9 @@ impl<'a> FnLowerer<'a> {
                 }
                 .to_string(),
             )),
-            arguments,
-        ))
+            lowered,
+        );
+        self.wrap_call_argument_bindings(call, &bindings)
     }
 
     fn lower_array_sort_comparator(

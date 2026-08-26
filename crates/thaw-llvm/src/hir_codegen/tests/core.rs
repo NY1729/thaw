@@ -943,6 +943,10 @@ fn compiles_parse_float_and_parse_int() {
             console.log("awaited-parse");
             return "101tail";
         }
+        function parseArgs(): [string, number] {
+            console.log("parse-spread");
+            return ["ff", 16];
+        }
         async function main(): Promise<void> {
             console.log(parseFloat("  -12.5px"));
             console.log(parseFloat("1e+"));
@@ -955,11 +959,13 @@ fn compiles_parse_float_and_parse_int() {
             console.log(parseInt(await delayed(), 2));
             console.log(Number.parseFloat("3.5tail"));
             console.log(Number.parseInt("ff", 16));
+            console.log(parseFloat(...["2.5tail"]));
+            console.log(Number.parseInt(...parseArgs()));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "parse_float_int"),
-        "-12.5\n1\nnan\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n3.5\n255\n"
+        "-12.5\n1\nnan\n32\n3\n15\ntrue\ntrue\nawaited-parse\n5\n3.5\n255\n2.5\nparse-spread\n255\n"
     );
 }
 
@@ -1182,4 +1188,3 @@ fn unset_env_var_reads_as_empty_string_not_a_crash() {
     "#;
     assert_eq!(compile_and_run(source, "envvar_unset"), "\nstill alive\n");
 }
-
