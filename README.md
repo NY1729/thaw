@@ -1597,6 +1597,9 @@ The workspace crates have narrow responsibilities:
   asynchronous function-value calls. Object destructuring carries typed
   function properties into renamed or nested function locals and preserves
   remaining properties in fixed-object rest values.
+  Monomorphic named functions are first-class native function values in object
+  literals and other expression positions; their union/service return metadata
+  is read from the named signature without an intermediate typed local.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
