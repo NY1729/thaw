@@ -695,6 +695,46 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
     Ok(normalized)
 }
 
+fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, String> {
+    let mut body = Vec::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) = item else {
+            body.push(item.clone());
+            continue;
+        };
+        for declarator in &declaration.decls {
+            let Some(Expr::Class(expression)) = declarator.init.as_deref() else {
+                let mut declaration = declaration.as_ref().clone();
+                declaration.decls = vec![declarator.clone()];
+                body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(
+                    declaration,
+                )))));
+                continue;
+            };
+            let Pat::Ident(binding) = &declarator.name else {
+                return Err("top-level class expressions require an identifier binding".into());
+            };
+            if let Some(internal) = &expression.ident {
+                if internal.sym != binding.id.sym {
+                    return Err(format!(
+                        "class expression `{}` assigned to `{}` needs a matching internal name or no internal name",
+                        internal.sym, binding.id.sym
+                    ));
+                }
+            }
+            body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(ClassDecl {
+                ident: binding.id.clone(),
+                declare: false,
+                class: expression.class.clone(),
+            }))));
+        }
+    }
+    Ok(Module {
+        body,
+        ..module.clone()
+    })
+}
+
 fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     struct Collector(Vec<String>);
     impl Visit for Collector {
@@ -880,6 +920,51 @@ fn class_member_symbol(class: &str, member: &swc_ecma_ast::ClassMethod) -> Resul
         MethodKind::Method if member.is_static => class_static_method_symbol(class, &name),
         MethodKind::Method => class_method_symbol(class, &name),
     })
+}
+
+fn inherited_class_forwarder(
+    base_symbol: Symbol,
+    derived_symbol: Symbol,
+    signature: &FnSignature,
+    is_static: bool,
+) -> HirFunction {
+    let params = signature
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| HirParam {
+            name: if !is_static && index == 0 {
+                "__thaw_this".into()
+            } else {
+                format!("__thaw_inherited_arg_{index}")
+            },
+            ty: ty.clone(),
+        })
+        .collect::<Vec<_>>();
+    let call = HirExpr::Call(
+        Box::new(HirExpr::Var(base_symbol)),
+        params
+            .iter()
+            .map(|parameter| HirExpr::Var(parameter.name.clone()))
+            .collect(),
+    );
+    let call = if signature.is_async {
+        HirExpr::Await(Box::new(call))
+    } else {
+        call
+    };
+    let body = if signature.ret == HirType::Void {
+        vec![HirStmt::Expr(call), HirStmt::Return(None)]
+    } else {
+        vec![HirStmt::Return(Some(call))]
+    };
+    HirFunction {
+        name: derived_symbol,
+        params,
+        ret: signature.ret.clone(),
+        is_async: signature.is_async,
+        body,
+    }
 }
 
 fn super_property_name(property: &SuperProp) -> Result<Symbol, String> {
@@ -1153,6 +1238,7 @@ fn collect_native_classes<'a>(
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_top_level_destructuring(module)?;
+    let normalized = normalize_top_level_class_expressions(&normalized)?;
     lower_normalized_module(&normalized)
 }
 
@@ -1756,38 +1842,58 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     signature.params[0] = derived_type.clone();
                 }
                 signatures.insert(derived_symbol.clone(), signature.clone());
-                let params = signature
+                inherited_class_functions.push(inherited_class_forwarder(
+                    base_symbol.clone(),
+                    derived_symbol.clone(),
+                    &signature,
+                    method.is_static,
+                ));
+
+                let patterns = method
+                    .function
                     .params
                     .iter()
-                    .enumerate()
-                    .map(|(index, ty)| HirParam {
-                        name: if !method.is_static && index == 0 {
-                            "__thaw_this".into()
-                        } else {
-                            format!("__thaw_inherited_arg_{index}")
-                        },
-                        ty: ty.clone(),
-                    })
+                    .map(|parameter| parameter.pat.clone())
                     .collect::<Vec<_>>();
-                let call = HirExpr::Call(
-                    Box::new(HirExpr::Var(base_symbol)),
-                    params
-                        .iter()
-                        .map(|parameter| HirExpr::Var(parameter.name.clone()))
-                        .collect(),
-                );
-                let body = if signature.ret == HirType::Void {
-                    vec![HirStmt::Expr(call), HirStmt::Return(None)]
-                } else {
-                    vec![HirStmt::Return(Some(call))]
-                };
-                inherited_class_functions.push(HirFunction {
-                    name: derived_symbol,
-                    params,
-                    ret: signature.ret,
-                    is_async: signature.is_async,
-                    body,
-                });
+                let receiver_count = usize::from(!method.is_static);
+                if let Some(default_start) = trailing_omittable_start(&patterns) {
+                    for arity in default_start..patterns.len() {
+                        let total_arity = arity + receiver_count;
+                        let base_wrapper = default_arity_symbol(&base_symbol, total_arity);
+                        let derived_wrapper = default_arity_symbol(&derived_symbol, total_arity);
+                        let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned()
+                        else {
+                            continue;
+                        };
+                        if !method.is_static {
+                            wrapper_signature.params[0] = derived_type.clone();
+                        }
+                        signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
+                        inherited_class_functions.push(inherited_class_forwarder(
+                            base_wrapper,
+                            derived_wrapper,
+                            &wrapper_signature,
+                            method.is_static,
+                        ));
+                    }
+                }
+                for mask in omitted_parameter_masks(&patterns, receiver_count)? {
+                    let base_wrapper = omitted_parameter_symbol(&base_symbol, mask);
+                    let derived_wrapper = omitted_parameter_symbol(&derived_symbol, mask);
+                    let Some(mut wrapper_signature) = signatures.get(&base_wrapper).cloned() else {
+                        continue;
+                    };
+                    if !method.is_static {
+                        wrapper_signature.params[0] = derived_type.clone();
+                    }
+                    signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
+                    inherited_class_functions.push(inherited_class_forwarder(
+                        base_wrapper,
+                        derived_wrapper,
+                        &wrapper_signature,
+                        method.is_static,
+                    ));
+                }
             }
             base_name = base
                 .class

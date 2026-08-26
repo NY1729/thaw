@@ -18914,19 +18914,22 @@ mod tests {
                 read(): number { return this.value ?? 40; }
                 add(delta?: number | null): number { return (this.value ?? 40) + (delta ?? 2); }
             }
+            class OptionalDerived extends OptionalBox {}
             function main(): void {
                 const empty = new OptionalBox();
                 const filled = new OptionalBox(5);
+                const derived = new OptionalDerived();
                 console.log(empty.read());
                 console.log(filled.read());
                 console.log(empty.add());
                 console.log(filled.add(null));
                 console.log(filled.add(3));
+                console.log(derived.add());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_class_optional_parameters"),
-            "40\n5\n42\n7\n8\n"
+            "40\n5\n42\n7\n8\n42\n"
         );
     }
 
@@ -18975,6 +18978,7 @@ mod tests {
                 console.log(base.size(1, 2, 3));
                 console.log(base.size(1, ...[2, 3, 4]));
                 console.log(implicit.count);
+                console.log(implicit.size(1, 2, 3));
                 console.log(explicit.count);
                 console.log(explicit.sizeAgain());
                 console.log(Base.total(undefined, 1, 2));
@@ -18984,11 +18988,44 @@ mod tests {
                 console.log(Base.any());
                 console.log(Base.any(true, false));
                 console.log(await Base.totalAsync(undefined, 1, 2, 3));
+                console.log(await Implicit.totalAsync(undefined, 1));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_class_rest_parameters"),
-            "10\n2\n20\n3\n5\n6\n2\n2\n5\n12\n12\nempty\nready\nfalse\ntrue\n13\n"
+            "10\n2\n20\n3\n5\n6\n2\n5\n2\n5\n12\n12\nempty\nready\nfalse\ntrue\n13\n11\n"
+        );
+    }
+
+    #[test]
+    fn compiles_top_level_native_class_expressions() {
+        let source = r#"
+            function make(): Derived { return new Derived(); }
+            const before = 1, Base = class Base {
+                constructor(public value: number = 40) {}
+                add(delta: number = this.value): number { return this.value + delta; }
+            }, after = 2;
+            const Derived = class Derived extends Base {
+                static label: string = "derived";
+            };
+            const Anonymous = class {
+                constructor(public text: string) {}
+            };
+            function main(): void {
+                const value = make();
+                const anonymous = new Anonymous("ready");
+                console.log(before);
+                console.log(after);
+                console.log(value.value);
+                console.log(value.add());
+                console.log(value instanceof Base);
+                console.log(Derived.label);
+                console.log(anonymous.text);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_expressions"),
+            "1\n2\n40\n80\ntrue\nderived\nready\n"
         );
     }
 
