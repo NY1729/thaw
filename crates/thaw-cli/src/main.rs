@@ -3502,7 +3502,8 @@ mod tests {
             r#"
                 export const Base = class Base {
                     constructor(public value: number) {}
-                    answer(): number { return this.value; }
+                    #answer(): number { return this.value; }
+                    answer(): number { return this.#answer(); }
                 };
             "#,
         )

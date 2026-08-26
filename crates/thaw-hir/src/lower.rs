@@ -28,14 +28,14 @@ use std::fmt;
 use swc_common::{BytePos, SourceMap};
 use swc_ecma_ast::{
     ArrowFunctionBody, AssignOp, AssignTarget, AwaitExpr, BinaryOp, CallExpr, Callee, ClassDecl,
-    ClassMember, ComputedPropName, Decl, Expr, FnDecl, ForHead, KeyValueProp, Lit, MemberExpr,
-    MemberProp, MethodKind, Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit,
-    ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop, PropName, PropOrSpread,
-    SimpleAssignTarget, Stmt, SuperProp, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl,
-    TsKeywordTypeKind, TsParamPropParam, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp,
-    UpdateOp, VarDecl, VarDeclOrExpr,
+    ClassMember, ClassMethod, ClassProp, ComputedPropName, Decl, Expr, FnDecl, ForHead, IdentName,
+    KeyValueProp, Lit, MemberExpr, MemberProp, MethodKind, Module, ModuleDecl, ModuleItem,
+    ObjectLit as SwcObjectLit, ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop,
+    PropName, PropOrSpread, SimpleAssignTarget, Stmt, SuperProp, TsFnOrConstructorType, TsFnParam,
+    TsInterfaceDecl, TsKeywordTypeKind, TsParamPropParam, TsType, TsTypeElement,
+    TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
 };
-use swc_ecma_visit::{Visit, VisitWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
@@ -735,6 +735,91 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
     })
 }
 
+fn private_member_name(owner: &str, name: &str) -> Symbol {
+    format!("__thaw_private_{owner}_{name}")
+}
+
+struct PrivateMemberNormalizer<'a> {
+    owner: &'a str,
+}
+
+impl VisitMut for PrivateMemberNormalizer<'_> {
+    fn visit_mut_expr(&mut self, expression: &mut Expr) {
+        if let Expr::PrivateName(name) = expression {
+            *expression = Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                span: name.span,
+                value: private_member_name(self.owner, name.name.as_ref()).into(),
+                raw: None,
+            }));
+            return;
+        }
+        expression.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_member_prop(&mut self, property: &mut MemberProp) {
+        if let MemberProp::PrivateName(name) = property {
+            *property = MemberProp::Ident(IdentName::new(
+                private_member_name(self.owner, name.name.as_ref()).into(),
+                name.span,
+            ));
+            return;
+        }
+        property.visit_mut_children_with(self);
+    }
+}
+
+fn normalize_private_class_members(module: &Module) -> Module {
+    let mut module = module.clone();
+    for item in &mut module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let owner = declaration.ident.sym.to_string();
+        declaration.class.body = std::mem::take(&mut declaration.class.body)
+            .into_iter()
+            .map(|member| match member {
+                ClassMember::PrivateProp(property) => ClassMember::ClassProp(ClassProp {
+                    span: property.span,
+                    key: PropName::Ident(IdentName::new(
+                        private_member_name(&owner, property.key.name.as_ref()).into(),
+                        property.key.span,
+                    )),
+                    value: property.value,
+                    type_ann: property.type_ann,
+                    is_static: property.is_static,
+                    decorators: property.decorators,
+                    accessibility: property.accessibility,
+                    is_abstract: false,
+                    is_optional: property.is_optional,
+                    is_override: property.is_override,
+                    readonly: property.readonly,
+                    declare: false,
+                    definite: property.definite,
+                }),
+                ClassMember::PrivateMethod(method) => ClassMember::Method(ClassMethod {
+                    span: method.span,
+                    key: PropName::Ident(IdentName::new(
+                        private_member_name(&owner, method.key.name.as_ref()).into(),
+                        method.key.span,
+                    )),
+                    function: method.function,
+                    kind: method.kind,
+                    is_static: method.is_static,
+                    accessibility: method.accessibility,
+                    is_abstract: method.is_abstract,
+                    is_optional: method.is_optional,
+                    is_override: method.is_override,
+                }),
+                other => other,
+            })
+            .collect();
+        declaration
+            .class
+            .visit_mut_with(&mut PrivateMemberNormalizer { owner: &owner });
+    }
+    module
+}
+
 fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     struct Collector(Vec<String>);
     impl Visit for Collector {
@@ -1239,6 +1324,7 @@ fn collect_native_classes<'a>(
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_top_level_destructuring(module)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
+    let normalized = normalize_private_class_members(&normalized);
     lower_normalized_module(&normalized)
 }
 
@@ -11299,6 +11385,20 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+            if matches!(member.obj.as_ref(), Expr::This(_)) {
+                let binding = self.resolve_binding("this");
+                if let Some(receiver_type) = self.scope.get(&binding).cloned() {
+                    if let Some(class_name) = class_name_from_type(&receiver_type) {
+                        let symbol = class_getter_symbol(class_name, &property, false);
+                        if self.signatures.contains_key(&symbol) {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var(symbol)),
+                                vec![HirExpr::Var(binding)],
+                            ));
+                        }
+                    }
+                }
+            }
         }
         // `process.env.NAME` -- checked before the general cases since it's
         // a fixed two-level member chain, not a general property access.
@@ -11810,6 +11910,26 @@ impl<'a> FnLowerer<'a> {
                         }
                         args.push(rhs);
                         return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
+                    }
+                }
+                if let (Expr::This(_), Some(property)) =
+                    (member.obj.as_ref(), member_property_name(&member.prop))
+                {
+                    let binding = self.resolve_binding("this");
+                    let symbol = self.scope.get(&binding).and_then(|ty| {
+                        class_name_from_type(ty)
+                            .map(|class_name| class_setter_symbol(class_name, &property, false))
+                    });
+                    if let Some(symbol) =
+                        symbol.filter(|symbol| self.signatures.contains_key(symbol))
+                    {
+                        let signature = self.signatures[&symbol].clone();
+                        let rhs = self.lower_expr(&assign.right)?;
+                        let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var(symbol)),
+                            vec![HirExpr::Var(binding), rhs],
+                        ));
                     }
                 }
             }
@@ -14373,6 +14493,11 @@ impl<'a> FnLowerer<'a> {
                     Expr::New(construction) => {
                         matches!(construction.callee.as_ref(), Expr::Ident(class) if self.signatures.contains_key(&class_constructor_symbol(class.sym.as_ref())))
                     }
+                    Expr::This(_) => self
+                        .scope
+                        .get(&self.resolve_binding("this"))
+                        .and_then(class_name_from_type)
+                        .is_some(),
                     _ => false,
                 };
                 if known_class_receiver {

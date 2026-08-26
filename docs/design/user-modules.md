@@ -77,7 +77,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Generic/abstract classes, private or dynamically computed members, non-top-level or differently
+Generic/abstract classes, dynamically computed members, non-top-level or differently
 internally named class expressions, top-level
 declarations/statements outside the general HIR-supported subset, package multi-capture
 package export keys, and full ESM live bindings are outside the current typed AOT subset.
@@ -104,6 +104,9 @@ Top-level `const Name = class {}` and `const Name = class Name {}` forms normali
 same fixed-layout model before HIR collection. Module bundling renames the outer and self-name
 together, so exported class expressions retain forward references and cross-file inheritance.
 Inherited method forwarders also copy default/optional/rest adapters and preserve async awaiting.
+Private fields, methods and accessors normalize to owner-qualified fixed-layout names before
+class collection. This preserves distinct base/derived slots, static storage, private calls and
+`#name in value` checks without exposing a source-level spelling outside the declaring class.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
