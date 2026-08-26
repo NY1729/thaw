@@ -732,7 +732,9 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
             )?;
             for declaration in declarations {
                 let is_temporary = declaration.decls.first().is_some_and(|declarator| {
-                    matches!(&declarator.name, Pat::Ident(binding) if binding.id.sym.starts_with("__thaw_top_destructure_"))
+                    matches!(&declarator.name, Pat::Ident(binding)
+                        if binding.id.sym.starts_with("__thaw_top_destructure_")
+                            || binding.id.sym.starts_with("__thaw_top_default_"))
                 });
                 if exported && !is_temporary {
                     items.push(ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(
@@ -26206,6 +26208,47 @@ mod tests {
                 ("code".into(), HirType::F64),
             ])
         );
+    }
+
+    #[test]
+    fn keeps_top_level_default_temporaries_private_when_exporting() {
+        let module = thaw_parser::parse_typescript(
+            "export const { value = 42 }: { value: number | undefined } = { value: undefined };",
+        )
+        .unwrap();
+        let normalized = normalize_top_level_destructuring(&module).unwrap();
+        let mut exported = Vec::new();
+        let mut private_temporaries = Vec::new();
+        for item in normalized.body {
+            match item {
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                    if let Decl::Var(declaration) = export.decl {
+                        for declarator in declaration.decls {
+                            if let Pat::Ident(binding) = declarator.name {
+                                exported.push(binding.id.sym.to_string());
+                            }
+                        }
+                    }
+                }
+                ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => {
+                    for declarator in declaration.decls {
+                        if let Pat::Ident(binding) = declarator.name {
+                            if binding.id.sym.starts_with("__thaw_top_") {
+                                private_temporaries.push(binding.id.sym.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(exported, ["value"]);
+        assert!(private_temporaries
+            .iter()
+            .any(|name| name.starts_with("__thaw_top_default_")));
+        assert!(private_temporaries
+            .iter()
+            .any(|name| name.starts_with("__thaw_top_destructure_")));
     }
 
     #[test]
