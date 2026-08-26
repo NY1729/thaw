@@ -19374,6 +19374,38 @@ mod tests {
     }
 
     #[test]
+    fn preserves_nested_union_metadata_through_function_returns() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function syncValues(): Result[][] {
+                const number: Result = { kind: "number", value: 1 };
+                return [[number]];
+            }
+            async function asyncValues(): Promise<Result[][][]> {
+                await sleep(1);
+                const text: Result = { kind: "text", value: "returned" };
+                return [[[text]]];
+            }
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            async function main(): Promise<void> {
+                const sync = syncValues().flat();
+                print(sync[0]);
+                const asynchronous = (await asyncValues()).flat(2);
+                print(asynchronous[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "returned_nested_union_array"),
+            "11\nreturned!\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_of() {
         let source = r#"
             interface Item { value: number; }
