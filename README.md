@@ -1388,6 +1388,8 @@ The workspace crates have narrow responsibilities:
   `{ status, value, reason }` objects. Rejections are values rather than parent
   failures; literals, Promise array variables, empty inputs, repeated handles,
   and every native value shape are supported
+- All four Promise combinators accept their single array argument through a
+  statically sized outer tuple spread, including heterogeneous `Promise.all`
 - Non-throwing `try/finally` can suspend: normal completion and explicit
   `return` execute the finalizer in the order already established by HIR
 - QuickJS throws and Promise rejections use a native `{ value, error }` result

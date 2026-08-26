@@ -49,6 +49,86 @@ impl<'a> FnLowerer<'a> {
         Ok((values, *element))
     }
 
+    fn lower_spread_promise_combinator(
+        &self,
+        value: HirExpr,
+        combinator: &str,
+    ) -> Result<HirExpr, String> {
+        match self.infer_expr_type(&value)? {
+            HirType::Array(element) => {
+                let HirType::Promise(resolved) = *element else {
+                    return Err(format!(
+                        "`Promise.{combinator}` expects an array of promises"
+                    ));
+                };
+                if *resolved == HirType::Void {
+                    return Err(format!(
+                        "`Promise.{combinator}` elements must not resolve to void"
+                    ));
+                }
+                Ok(match combinator {
+                    "all" => HirExpr::PromiseAllArray(Box::new(value), *resolved),
+                    "allSettled" => {
+                        HirExpr::PromiseAllSettledArray(Box::new(value), *resolved)
+                    }
+                    "race" => HirExpr::PromiseRaceArray(Box::new(value), *resolved),
+                    "any" => HirExpr::PromiseAnyArray(Box::new(value), *resolved),
+                    _ => unreachable!(),
+                })
+            }
+            HirType::Tuple(elements) => {
+                if elements.is_empty() && matches!(combinator, "race" | "any") {
+                    return Err(format!(
+                        "`Promise.{combinator}` requires at least one promise"
+                    ));
+                }
+                let mut resolved = Vec::with_capacity(elements.len());
+                let mut promises = Vec::with_capacity(elements.len());
+                for (index, element) in elements.into_iter().enumerate() {
+                    let HirType::Promise(payload) = &element else {
+                        return Err(format!(
+                            "Promise.{combinator} element {index} must be a Promise, got {element:?}"
+                        ));
+                    };
+                    if payload.as_ref() == &HirType::Void {
+                        return Err(format!(
+                            "Promise.{combinator} element {index} resolves to void"
+                        ));
+                    }
+                    resolved.push(payload.as_ref().clone());
+                    promises.push(HirExpr::TypedIndex(
+                        Box::new(value.clone()),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        element,
+                    ));
+                }
+                let first = resolved.first().cloned().unwrap_or(HirType::F64);
+                if combinator == "all" && resolved.iter().any(|element| element != &first) {
+                    return Ok(HirExpr::PromiseAllTuple(promises, resolved));
+                }
+                if let Some((index, actual)) = resolved
+                    .iter()
+                    .enumerate()
+                    .find(|(_, element)| *element != &first)
+                {
+                    return Err(format!(
+                        "Promise.{combinator} element {index} resolves to {actual:?}, expected {first:?}"
+                    ));
+                }
+                Ok(match combinator {
+                    "all" => HirExpr::PromiseAll(promises, first),
+                    "allSettled" => HirExpr::PromiseAllSettled(promises, first),
+                    "race" => HirExpr::PromiseRace(promises, first),
+                    "any" => HirExpr::PromiseAny(promises, first),
+                    _ => unreachable!(),
+                })
+            }
+            other => Err(format!(
+                "`Promise.{combinator}` expects an array of promises, got {other:?}"
+            )),
+        }
+    }
+
     fn lower_parse_call(&mut self, call: &CallExpr, parse_int: bool) -> Result<HirExpr, String> {
         let label = if parse_int { "parseInt" } else { "parseFloat" };
         let expected = if parse_int { 1..=2 } else { 1..=1 };
