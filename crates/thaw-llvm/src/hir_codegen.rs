@@ -19530,6 +19530,9 @@ mod tests {
             interface Worker { run(): Promise<number>; }
             async function main(): Promise<void> {
                 const offset: number = 2;
+                const double: (value: number) => Promise<number> =
+                    async (value: number) => value * 2;
+                console.log(await double(21));
                 const worker: Worker = {
                     run: async (): Promise<number> => 40 + offset,
                 };
@@ -19538,7 +19541,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "expression_bodied_async_arrow"),
-            "42\n"
+            "42\n42\n"
         );
     }
 
