@@ -1188,10 +1188,10 @@ fn rewrite_external_class_methods_with_static(
 ) -> Result<String, String> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
-        ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, CallExpr, Callee, Expr,
-        FnDecl, ForStmt, FunctionBody, IfStmt, Lit, MemberProp, Pat, Prop, PropName, PropOrSpread,
-        ReturnStmt, SimpleAssignTarget, TryStmt, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator,
-        WhileStmt,
+        ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
+        Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
+        Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt,
+        SwitchStmt, TryStmt, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -1767,6 +1767,8 @@ fn rewrite_external_class_methods_with_static(
         function_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
+        switch_break_depth: usize,
+        switch_break_exits: Vec<FlowState>,
     }
 
     #[derive(Clone)]
@@ -1866,7 +1868,9 @@ fn rewrite_external_class_methods_with_static(
         fn visit_while_stmt(&mut self, statement: &WhileStmt) {
             statement.test.visit_with(self);
             let zero_iterations = self.flow_state();
+            self.switch_break_depth += usize::from(self.switch_break_depth > 0);
             statement.body.visit_with(self);
+            self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
             self.join_current_flow_with(&zero_iterations);
         }
 
@@ -1878,11 +1882,108 @@ fn rewrite_external_class_methods_with_static(
                 test.visit_with(self);
             }
             let zero_iterations = self.flow_state();
+            self.switch_break_depth += usize::from(self.switch_break_depth > 0);
             statement.body.visit_with(self);
+            self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
             if let Some(update) = &statement.update {
                 update.visit_with(self);
             }
             self.join_current_flow_with(&zero_iterations);
+        }
+
+        fn visit_do_while_stmt(&mut self, statement: &DoWhileStmt) {
+            self.switch_break_depth += usize::from(self.switch_break_depth > 0);
+            statement.body.visit_with(self);
+            self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+            statement.test.visit_with(self);
+        }
+
+        fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+            statement.right.visit_with(self);
+            statement.left.visit_with(self);
+            self.switch_break_depth += usize::from(self.switch_break_depth > 0);
+            statement.body.visit_with(self);
+            self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+        }
+
+        fn visit_for_of_stmt(&mut self, statement: &ForOfStmt) {
+            statement.right.visit_with(self);
+            statement.left.visit_with(self);
+            self.switch_break_depth += usize::from(self.switch_break_depth > 0);
+            statement.body.visit_with(self);
+            self.switch_break_depth = self.switch_break_depth.saturating_sub(1);
+        }
+
+        fn visit_break_stmt(&mut self, statement: &BreakStmt) {
+            if statement.label.is_none() && self.switch_break_depth == 1 {
+                self.switch_break_exits.push(self.flow_state());
+            }
+        }
+
+        fn visit_switch_stmt(&mut self, statement: &SwitchStmt) {
+            let outer_break_depth = std::mem::replace(&mut self.switch_break_depth, 1);
+            let outer_break_exits = std::mem::take(&mut self.switch_break_exits);
+            statement.discriminant.visit_with(self);
+            let base = self.flow_state();
+            let mut direct_entries = vec![None; statement.cases.len()];
+
+            // Case tests execute in source order until one matches. Visiting
+            // each test once gives the exact incoming state for that direct
+            // entry without duplicating source rewrites across possible paths.
+            for (index, case) in statement.cases.iter().enumerate() {
+                if let Some(test) = &case.test {
+                    test.visit_with(self);
+                    direct_entries[index] = Some(self.flow_state());
+                }
+            }
+            let after_tests = self.flow_state();
+            if let Some(default) = statement.cases.iter().position(|case| case.test.is_none()) {
+                direct_entries[default] = Some(after_tests.clone());
+            }
+
+            let mut exits = Vec::new();
+            if statement.cases.iter().all(|case| case.test.is_some()) {
+                exits.push(after_tests);
+            }
+            let mut fallthrough: Option<FlowState> = None;
+
+            for (case, direct) in statement.cases.iter().zip(direct_entries) {
+                let mut incoming = direct.expect("every switch case has a direct entry");
+                if let Some(previous) = fallthrough.take() {
+                    self.restore_flow_state(incoming);
+                    self.join_current_flow_with(&previous);
+                    incoming = self.flow_state();
+                }
+                self.restore_flow_state(incoming);
+
+                let mut terminated = false;
+                for consequent in &case.cons {
+                    consequent.visit_with(self);
+                    if matches!(consequent, Stmt::Break(statement) if statement.label.is_none()) {
+                        terminated = true;
+                        break;
+                    }
+                }
+                if !terminated {
+                    fallthrough = Some(self.flow_state());
+                }
+            }
+            if let Some(fallthrough) = fallthrough {
+                exits.push(fallthrough);
+            }
+            exits.append(&mut self.switch_break_exits);
+            self.switch_break_exits = outer_break_exits;
+            self.switch_break_depth = outer_break_depth;
+
+            let mut exits = exits.into_iter();
+            let Some(first) = exits.next() else {
+                self.restore_flow_state(base);
+                return;
+            };
+            self.restore_flow_state(first);
+            for exit in exits {
+                self.join_current_flow_with(&exit);
+            }
         }
 
         fn visit_try_stmt(&mut self, statement: &TryStmt) {
@@ -2261,6 +2362,8 @@ fn rewrite_external_class_methods_with_static(
         function_types: &function_types.types,
         callbacks: std::collections::HashSet::new(),
         edits: Vec::new(),
+        switch_break_depth: 0,
+        switch_break_exits: Vec::new(),
     };
     module.visit_with(&mut finder);
     let mut edits = finder
@@ -6341,6 +6444,69 @@ mod tests {
         assert!(rewritten.contains("conflict = 2; __set_number(box, conflict)"));
         assert!(rewritten.contains("} __set_unknown(box, conflict)"));
         assert!(rewritten.contains("} __set_unknown(box, oneSided)"));
+    }
+
+    #[test]
+    fn joins_switch_fallthrough_break_and_no_match_paths() {
+        let source = r#"const choice = 1; const flag = true; const box = new NativeBox(1); let stable = 1; switch (choice) { case 0: stable = 2; break; default: stable = 3; } box.set(stable); let conflict = 1; switch (choice) { case 0: conflict = "text"; break; default: conflict = 2; } box.set(conflict); let noDefault = 1; switch (choice) { case 0: noDefault = "text"; break; } box.set(noDefault); let fallen = 1; switch (choice) { case 0: fallen = "temporary"; case 1: fallen = 2; break; default: fallen = 3; } box.set(fallen); let guarded = 1; switch (choice) { case 0: if (flag) { guarded = "text"; break; guarded = 4; } guarded = 2; break; default: guarded = 3; } box.set(guarded); let loopBreak = 1; switch (choice) { case 0: while (flag) { break; } loopBreak = 2; break; default: loopBreak = 3; } box.set(loopBreak); let stableCallback = (): void => {}; switch (choice) { case 0: stableCallback = (): void => {}; break; default: stableCallback = (): void => {}; } box.use(stableCallback); let conflictCallback = (): void => {}; switch (choice) { case 0: conflictCallback = 1; break; default: conflictCallback = (): void => {}; } box.use(conflictCallback); let stableBox = new NativeBox(1); switch (choice) { case 0: stableBox = new NativeBox(2); break; default: stableBox = new NativeBox(3); } stableBox.get(); let conflictBox = new NativeBox(1); switch (choice) { case 0: conflictBox = "text"; break; default: conflictBox = new NativeBox(3); } conflictBox.get();"#;
+        let rewritten = rewrite_external_class_methods(
+            source,
+            &[("addon".into(), "NativeBox".into())],
+            &[
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_unknown".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Bool],
+                ),
+                (
+                    "NativeBox".into(),
+                    "set".into(),
+                    "__set_number".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::F64],
+                ),
+                (
+                    "NativeBox".into(),
+                    "use".into(),
+                    "__use_value".into(),
+                    1,
+                    false,
+                    vec![thaw_hir::HirType::Json],
+                ),
+                (
+                    "NativeBox".into(),
+                    "use".into(),
+                    "__use_callback".into(),
+                    1,
+                    true,
+                    vec![thaw_hir::HirType::Json],
+                ),
+                (
+                    "NativeBox".into(),
+                    "get".into(),
+                    "__get".into(),
+                    0,
+                    false,
+                    Vec::new(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("__set_number(box, stable)"));
+        assert!(rewritten.contains("__set_unknown(box, conflict)"));
+        assert!(rewritten.contains("__set_unknown(box, noDefault)"));
+        assert!(rewritten.contains("__set_number(box, fallen)"));
+        assert!(rewritten.contains("__set_unknown(box, guarded)"));
+        assert!(rewritten.contains("__set_number(box, loopBreak)"));
+        assert!(rewritten.contains("__use_callback(box, stableCallback)"));
+        assert!(rewritten.contains("__use_value(box, conflictCallback)"));
+        assert!(rewritten.contains("__get(stableBox)"));
+        assert!(rewritten.contains("conflictBox.get()"));
     }
 
     #[test]

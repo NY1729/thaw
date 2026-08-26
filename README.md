@@ -1923,7 +1923,10 @@ joins normal exit with a catch entry that retains only facts unchanged by the
 try block; `finally` then applies to the merged state and can establish facts
 on every continuing path. `switch` evaluates its discriminant once, short-circuits
 case tests after the first match, and preserves default placement, fallthrough,
-break, case-local bindings, and awaits in case tests/bodies.
+break, case-local bindings, and awaits in case tests/bodies. Native overload
+flow analysis joins direct case selection, fallthrough, no-match and break
+exits, retaining value, class-instance and callback facts only when every
+continuing switch path agrees.
 Compiled programs can pass a `(Json, Json) => Json` closure through
 `callNativeAddonWithCallback(name, args, callback)`. Callback environments stay
 alive until async-work drain, and N-API error/result values are converted back
