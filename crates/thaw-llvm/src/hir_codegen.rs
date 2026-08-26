@@ -19521,6 +19521,7 @@ mod tests {
                 { kind: "d"; value: string };
             interface Service { load: () => First[][]; }
             interface Replacement { load: () => Second[][]; }
+            interface Container { service: Service; }
             function print(item: Second): void {
                 if (item.kind === "c") console.log(item.value + 10);
                 else console.log(item.value + "!");
@@ -19534,11 +19535,17 @@ mod tests {
                 };
                 service.load = replacement.load;
                 print(service.load().flat()[0]);
+                const nestedService: Service = {
+                    load: (): First[][] => [[{ kind: "b", value: "old" }]],
+                };
+                const container: Container = { service: nestedService };
+                container.service.load = replacement.load;
+                print(container.service.load().flat()[0]);
             }
         "#;
         assert_eq!(
             compile_and_run(source, "reassigned_function_property_union_metadata"),
-            "12\n"
+            "12\n12\n"
         );
     }
 
