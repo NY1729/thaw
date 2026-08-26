@@ -1347,7 +1347,7 @@ The workspace crates have narrow responsibilities:
 
 - Contextual/generic TypeScript inference, overload resolution, generic/abstract
   classes, private fields, decorators, class expressions, static initialization
-  blocks, incompatible/non-object intersections, multi-capture export keys and the
+  through `this`/`super`, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant
@@ -1356,7 +1356,7 @@ The workspace crates have narrow responsibilities:
 - The typed AOT class subset supports constructors, parameter properties,
   instance fields and methods, accessors, initialized typed static fields and
   static methods, inherited static-field reads/writes with shared base storage,
-  inheritance, `super`
+  source-ordered static blocks using explicit class references, inheritance, `super`
   calls, implicit derived-constructor forwarding and structural `implements`
   validation for object types and generic interfaces. Named and anonymous default
   classes can be imported, namespace-imported and re-exported across user modules
