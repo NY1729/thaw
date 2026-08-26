@@ -16798,6 +16798,14 @@ mod tests {
                     if (assignedKind === "number") console.log(assignedValue + 10);
                     else console.log(assignedValue + " assigned");
                 }
+                let ordinaryKind: string = "text";
+                let ordinaryValue: number | string = "initial";
+                ({ kind: ordinaryKind, value: ordinaryValue } = results[0]);
+                if (ordinaryKind === "number") console.log(ordinaryValue + 20);
+                else console.log(ordinaryValue + " ordinary");
+                ({ kind: ordinaryKind, value: ordinaryValue } = results[1]);
+                if (ordinaryKind === "number") console.log(ordinaryValue + 20);
+                else console.log(ordinaryValue + " ordinary");
                 console.log(consumeResults([{ kind: "text", value: "loop" }]));
                 for (const item of producedResults()) {
                     if (item.kind === "number") console.log(item.value + 1);
@@ -16841,7 +16849,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n16\nsync assigned\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
