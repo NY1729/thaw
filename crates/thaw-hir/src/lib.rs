@@ -381,9 +381,17 @@ pub struct HirGlobal {
     pub mutable: bool,
 }
 
+/// One source-ordered action performed by the guarded module initializer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HirInitStep {
+    StoreGlobal(Symbol, HirExpr),
+    Statement(HirStmt),
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct HirProgram {
     pub globals: Vec<HirGlobal>,
+    pub initializers: Vec<HirInitStep>,
     pub functions: Vec<HirFunction>,
     /// Ambient function declarations (`declare function foo(...): T;`, no
     /// body) -- see docs/design/bridge.md section 6. Calls to one of these

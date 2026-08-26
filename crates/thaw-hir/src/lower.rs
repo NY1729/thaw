@@ -38,8 +38,8 @@ use swc_ecma_visit::{Visit, VisitWith};
 
 use crate::{
     BinOp, DynamicBackend, DynamicSignature, FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi,
-    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirLit, HirParam, HirProgram,
-    HirStmt, HirType, Symbol,
+    FfiOwnership, FfiSignature, FfiStringAbi, HirExpr, HirFunction, HirInitStep, HirLit, HirParam,
+    HirProgram, HirStmt, HirType, Symbol,
 };
 
 fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
@@ -525,7 +525,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 for declaration in &var_decl.decls {
                     let Pat::Ident(binding) = &declaration.name else {
                         return Err(
-                            "top-level destructuring declarations are not supported yet".into(),
+                            "top-level destructuring declarations are not supported yet".into()
                         );
                     };
                     if declaration.init.is_none() {
@@ -537,12 +537,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 }
                 global_decls.push(var_decl.as_ref());
             }
-            ModuleItem::Stmt(_) => {
-                return Err(
-                    "top-level statements must be function, variable, interface, type-alias, or enum declarations; wrap executable statements in a function"
-                        .into(),
-                )
-            }
+            ModuleItem::Stmt(_) => {}
             ModuleItem::ModuleDecl(_) => {
                 return Err("import/export declarations are not supported yet".into())
             }
@@ -581,6 +576,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     // mutually recursive functions reach a fixed point.
     for _ in 0..=((fn_decls.len() + global_types.len()) * 2 + 1) {
         let mut changed = false;
+        let call_constraints = RefCell::new(Vec::new());
         let globals = lower_global_decls(
             &global_decls,
             &global_types,
@@ -589,6 +585,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
             &generic_interfaces,
             &enum_values,
             &enum_reverse_values,
+            Some(&call_constraints),
         )?;
         for global in globals {
             let ty = global_types.get_mut(&global.name).unwrap();
@@ -597,7 +594,16 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
                 changed = true;
             }
         }
-        let call_constraints = RefCell::new(Vec::new());
+        let _ = lower_top_level_initializers(
+            module,
+            &global_types,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            Some(&call_constraints),
+        )?;
         for fn_decl in &fn_decls {
             let name = fn_decl.ident.sym.to_string();
             let function = lower_fn_decl(
@@ -694,6 +700,17 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
         &generic_interfaces,
         &enum_values,
         &enum_reverse_values,
+        None,
+    )?;
+    let initializers = lower_top_level_initializers(
+        module,
+        &global_types,
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+        None,
     )?;
 
     let extern_functions = signatures
@@ -784,9 +801,87 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
     Ok(HirProgram {
         globals,
+        initializers,
         functions: specialized,
         extern_functions,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_top_level_initializers(
+    module: &Module,
+    global_types: &HashMap<Symbol, HirType>,
+    signatures: &HashMap<Symbol, FnSignature>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    enum_values: &EnumValues,
+    enum_reverse_values: &EnumReverseValues,
+    call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
+) -> Result<Vec<HirInitStep>, String> {
+    let mut lowerer = FnLowerer::new(
+        signatures,
+        interfaces,
+        generic_interfaces,
+        enum_values,
+        enum_reverse_values,
+        HirType::Void,
+        call_constraints,
+    );
+    let mut steps = Vec::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => {
+                for declarator in &declaration.decls {
+                    let Pat::Ident(binding) = &declarator.name else {
+                        unreachable!("top-level patterns were validated above")
+                    };
+                    let name = binding.id.sym.to_string();
+                    let expected = global_types[&name].clone();
+                    let init = lowerer.lower_expr(
+                        declarator
+                            .init
+                            .as_deref()
+                            .expect("top-level initializers were validated above"),
+                    )?;
+                    let ty = if expected == HirType::Dynamic {
+                        lowerer.infer_expr_type(&init)?
+                    } else {
+                        expected
+                    };
+                    let init = if ty == HirType::Dynamic {
+                        init
+                    } else {
+                        lowerer.coerce_to_declared(&ty, init)?
+                    };
+                    steps.push(HirInitStep::StoreGlobal(name.clone(), init));
+                    lowerer.scope.insert(name.clone(), ty);
+                    lowerer
+                        .bindings
+                        .entry(name.clone())
+                        .or_default()
+                        .push(name.clone());
+                    if declaration.kind == swc_ecma_ast::VarDeclKind::Const {
+                        lowerer.immutable_bindings.insert(name);
+                    }
+                }
+            }
+            ModuleItem::Stmt(Stmt::Decl(
+                Decl::Fn(_) | Decl::TsInterface(_) | Decl::TsEnum(_) | Decl::TsTypeAlias(_),
+            )) => {}
+            ModuleItem::Stmt(statement) => {
+                steps.extend(
+                    lowerer
+                        .lower_stmt_seq(statement)?
+                        .into_iter()
+                        .map(HirInitStep::Statement),
+                );
+            }
+            ModuleItem::ModuleDecl(_) => {
+                return Err("import/export declarations are not supported yet".into())
+            }
+        }
+    }
+    Ok(steps)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -798,6 +893,7 @@ fn lower_global_decls(
     generic_interfaces: &GenericInterfaces,
     enum_values: &EnumValues,
     enum_reverse_values: &EnumReverseValues,
+    call_constraints: Option<&RefCell<Vec<CallConstraint>>>,
 ) -> Result<Vec<crate::HirGlobal>, String> {
     let mut lowerer = FnLowerer::new(
         signatures,
@@ -806,7 +902,7 @@ fn lower_global_decls(
         enum_values,
         enum_reverse_values,
         HirType::Void,
-        None,
+        call_constraints,
     );
     let mut globals = Vec::new();
     for declaration in declarations {
@@ -14352,6 +14448,49 @@ mod tests {
         .unwrap();
         let error = lower_module(&module).unwrap_err();
         assert!(error.contains("unknown variable `base`"), "{error}");
+    }
+
+    #[test]
+    fn preserves_top_level_executable_statements_in_initializer_order() {
+        let program = lower(
+            r#"
+                let answer = 40;
+                answer = answer + 1;
+                if (true) { answer++; }
+                function main(): void { console.log(answer); }
+            "#,
+        );
+        assert_eq!(program.initializers.len(), 3);
+        assert!(matches!(
+            program.initializers[0],
+            HirInitStep::StoreGlobal(ref name, _) if name == "answer"
+        ));
+        assert!(matches!(
+            program.initializers[1],
+            HirInitStep::Statement(HirStmt::Expr(HirExpr::Assign(ref name, _)))
+                if name == "answer"
+        ));
+        assert!(matches!(
+            program.initializers[2],
+            HirInitStep::Statement(HirStmt::If(_, _, _))
+        ));
+    }
+
+    #[test]
+    fn top_level_calls_constrain_unannotated_function_parameters() {
+        let program = lower(
+            r#"
+                function configure(value): void { console.log(value); }
+                configure(42);
+                function main(): void {}
+            "#,
+        );
+        let configure = program
+            .functions
+            .iter()
+            .find(|function| function.name == "configure")
+            .unwrap();
+        assert_eq!(configure.params[0].ty, HirType::F64);
     }
 
     #[test]
