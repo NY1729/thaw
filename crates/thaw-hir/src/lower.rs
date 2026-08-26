@@ -12540,6 +12540,38 @@ impl<'a> FnLowerer<'a> {
         (!metadata.is_empty()).then_some(metadata)
     }
 
+    fn hir_array_element_discriminants(&self, expression: &HirExpr) -> Option<UnionDiscriminants> {
+        match expression {
+            HirExpr::Var(name) => self.array_element_discriminants.get(name).cloned(),
+            HirExpr::PropAccess(object, _, property) => self
+                .hir_object_array_property_discriminants(object)?
+                .get(std::slice::from_ref(property))
+                .cloned(),
+            _ => None,
+        }
+    }
+
+    fn hir_object_array_property_discriminants(
+        &self,
+        expression: &HirExpr,
+    ) -> Option<ObjectArrayPropertyDiscriminants> {
+        match expression {
+            HirExpr::Var(name) => self.object_array_property_discriminants.get(name).cloned(),
+            HirExpr::PropAccess(object, _, property) => {
+                let nested = self
+                    .hir_object_array_property_discriminants(object)?
+                    .into_iter()
+                    .filter_map(|(path, discriminants)| {
+                        (path.first() == Some(property) && path.len() > 1)
+                            .then(|| (path[1..].to_vec(), discriminants))
+                    })
+                    .collect::<ObjectArrayPropertyDiscriminants>();
+                (!nested.is_empty()).then_some(nested)
+            }
+            _ => None,
+        }
+    }
+
     fn expression_identifier_alias_source(&self, expression: &Expr) -> Option<Symbol> {
         match expression {
             Expr::Ident(identifier) => Some(self.resolve_binding(identifier.sym.as_ref())),
@@ -14554,6 +14586,8 @@ impl<'a> FnLowerer<'a> {
                 .as_deref()
                 .ok_or("destructuring declarations need an initializer")?;
             let propagated_discriminants = self.expression_union_discriminants(init);
+            let propagated_property_discriminants =
+                self.expression_object_array_property_discriminants(init);
             let mut value = self.lower_expr(init)?;
             let annotation = match &decl.name {
                 Pat::Array(pattern) => pattern.type_ann.as_ref(),
@@ -14605,6 +14639,19 @@ impl<'a> FnLowerer<'a> {
                 self.union_discriminants
                     .insert(temporary.clone(), discriminants);
             }
+            let declared_property_discriminants = annotation.and_then(|annotation| {
+                let discriminants = object_array_property_discriminants(
+                    &annotation.type_ann,
+                    self.generic_interfaces,
+                );
+                (!discriminants.is_empty()).then_some(discriminants)
+            });
+            if let Some(discriminants) =
+                declared_property_discriminants.or(propagated_property_discriminants)
+            {
+                self.object_array_property_discriminants
+                    .insert(temporary.clone(), discriminants);
+            }
             statements.push(HirStmt::Let(temporary.clone(), ty.clone(), value));
             self.lower_binding_pattern(&decl.name, HirExpr::Var(temporary), &ty, &mut statements)?;
         }
@@ -14620,6 +14667,8 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<(), String> {
         match pattern {
             Pat::Ident(binding) => {
+                let array_discriminants = self.hir_array_element_discriminants(&value);
+                let property_discriminants = self.hir_object_array_property_discriminants(&value);
                 let binding_type = if let Some(annotation) = &binding.type_ann {
                     let annotated = lower_ts_type(
                         &annotation.type_ann,
@@ -14632,6 +14681,14 @@ impl<'a> FnLowerer<'a> {
                     ty.clone()
                 };
                 let name = self.bind_local(binding.id.sym.as_ref(), binding_type.clone());
+                if let Some(discriminants) = array_discriminants {
+                    self.array_element_discriminants
+                        .insert(name.clone(), discriminants);
+                }
+                if let Some(discriminants) = property_discriminants {
+                    self.object_array_property_discriminants
+                        .insert(name.clone(), discriminants);
+                }
                 statements.push(HirStmt::Let(name, binding_type, value));
                 Ok(())
             }
