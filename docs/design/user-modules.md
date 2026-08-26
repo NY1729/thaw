@@ -93,6 +93,8 @@ explicit class references plus `super` fields, methods and accessors; runtime co
 fixed ABI call. Omitted trailing default parameters lower through arity-specific adapters;
 the same adapters cover optional parameters, explicit base calls and implicit derived constructors.
 Optional parameter properties retain their native `T | undefined` tag in the instance layout.
+Mask-specific adapters apply explicit `undefined` to non-trailing defaults as well, after
+statically sized tuple spreads have been expanded for ordinary and `super` calls.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
