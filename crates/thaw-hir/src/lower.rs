@@ -20251,10 +20251,11 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_arrow(&mut self, arrow: &swc_ecma_ast::ArrowExpr) -> Result<HirExpr, String> {
-        if arrow.is_async || arrow.is_generator || arrow.type_params.is_some() {
-            return Err(
-                "async, generator, and generic arrow functions are not supported yet".into(),
-            );
+        if arrow.is_generator || arrow.type_params.is_some() {
+            return Err("generator and generic arrow functions are not supported yet".into());
+        }
+        if arrow.is_async && !matches!(arrow.body.as_ref(), ArrowFunctionBody::Expr(_)) {
+            return Err("async arrow block bodies are not supported yet".into());
         }
         let source_params = arrow
             .params
@@ -20292,15 +20293,83 @@ impl<'a> FnLowerer<'a> {
             for (pattern, name, ty) in destructuring {
                 self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }
-            self.ret_type = declared_return.clone().unwrap_or(HirType::Dynamic);
+            let declared_async_result = if arrow.is_async {
+                match &declared_return {
+                    Some(HirType::Promise(result)) => Some(result.as_ref().clone()),
+                    Some(other) => {
+                        return Err(format!(
+                            "async arrow return annotation must be Promise<T>, got {other:?}"
+                        ))
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            self.ret_type = declared_async_result
+                .clone()
+                .or_else(|| declared_return.clone())
+                .unwrap_or(HirType::Dynamic);
             let (body, inferred_return) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
-                    let expression = self.lower_expr(expr)?;
-                    let expression = match &declared_return {
-                        Some(expected) => self.coerce_to_declared(expected, expression)?,
-                        None => expression,
-                    };
-                    let inferred = self.infer_expr_type(&expression)?;
+                    let mut expression = self.lower_expr(expr)?;
+                    let mut inferred = self.infer_expr_type(&expression)?;
+                    if arrow.is_async {
+                        let resolved = declared_async_result.clone().unwrap_or_else(|| {
+                            if let HirType::Promise(inner) = &inferred {
+                                inner.as_ref().clone()
+                            } else {
+                                inferred.clone()
+                            }
+                        });
+                        let assimilates = matches!(
+                            &inferred,
+                            HirType::Promise(inner) if inner.as_ref() == &resolved
+                        );
+                        if !assimilates {
+                            expression = self.coerce_to_declared(&resolved, expression)?;
+                        }
+                        let resolve_type = HirType::Function(
+                            vec![if assimilates {
+                                HirType::Promise(Box::new(resolved.clone()))
+                            } else {
+                                resolved.clone()
+                            }],
+                            Box::new(HirType::Void),
+                        );
+                        let resolve_name =
+                            format!("__thaw_async_arrow_resolve_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&expression, &mut referenced);
+                        let executor_captures = referenced
+                            .into_iter()
+                            .filter_map(|name| {
+                                self.scope
+                                    .get(&name)
+                                    .cloned()
+                                    .map(|ty| HirParam { name, ty })
+                            })
+                            .collect();
+                        let executor = HirExpr::Lambda(
+                            executor_captures,
+                            vec![HirParam {
+                                name: resolve_name.clone(),
+                                ty: resolve_type,
+                            }],
+                            HirType::Void,
+                            Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var(resolve_name)),
+                                vec![expression],
+                            )),
+                        );
+                        expression =
+                            HirExpr::PromiseNew(Box::new(executor), resolved.clone(), assimilates);
+                        inferred = HirType::Promise(Box::new(resolved));
+                    } else if let Some(expected) = &declared_return {
+                        expression = self.coerce_to_declared(expected, expression)?;
+                        inferred = self.infer_expr_type(&expression)?;
+                    }
                     let body = if prefix.is_empty() {
                         expression
                     } else {
