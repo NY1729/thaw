@@ -19876,6 +19876,29 @@ mod tests {
     }
 
     #[test]
+    fn compiles_optional_object_and_interface_properties() {
+        let source = r#"
+            interface Config { label: string; retries?: number }
+            interface Box<T> { value?: T }
+            type Inline = { note?: string };
+            type Complete = Required<Config>;
+            function main(): void {
+                const config: Config = { label: "ready" };
+                const box: Box<number> = {};
+                const inline: Inline = {};
+                const complete: Complete = { label: config.label, retries: 42 };
+                console.log(config.retries ?? 0);
+                console.log(box.value ?? complete.retries);
+                console.log(inline.note ?? complete.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "optional_object_and_interface_properties"),
+            "0\n42\nready\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
