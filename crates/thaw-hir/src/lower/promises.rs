@@ -119,7 +119,17 @@ impl<'a> FnLowerer<'a> {
         } else {
             callback
         };
-        let (params, ret) = match self.infer_expr_type(&callback)? {
+        self.validate_promise_callback_value(&callback, parameter_types, expected_return)?;
+        Ok(callback)
+    }
+
+    fn validate_promise_callback_value(
+        &mut self,
+        callback: &HirExpr,
+        parameter_types: &[HirType],
+        expected_return: Option<&HirType>,
+    ) -> Result<(), String> {
+        let (params, ret) = match self.infer_expr_type(callback)? {
             HirType::Function(params, ret) => (params, ret),
             HirType::CallableFunction(mut params, _, rest, ret) => {
                 if let Some(rest) = rest {
@@ -142,7 +152,7 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
         }
-        Ok(callback)
+        Ok(())
     }
 
     fn callback_parameter_count(&self, expr: &Expr, label: &str) -> Result<usize, String> {

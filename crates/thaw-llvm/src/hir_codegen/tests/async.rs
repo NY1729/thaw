@@ -2203,6 +2203,24 @@ fn promise_chains_preserve_union_values_and_discriminants() {
 }
 
 #[test]
+fn promise_chain_callbacks_accept_tuple_spreads() {
+    let source = r#"
+        async function value(): Promise<number> { return 20; }
+        async function failure(): Promise<number> { throw "failed"; }
+        function double(input: number): number { return input * 2; }
+        function recover(reason: string): number { return reason === "failed" ? 7 : 0; }
+        async function main(): Promise<void> {
+            console.log(await value().then(...[double]));
+            console.log(await failure().catch(...[recover]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "promise_chain_callback_spreads"),
+        "40\n7\n"
+    );
+}
+
+#[test]
 fn frame_split_async_functions_return_objects_arrays_and_tuples_from_branches() {
     let source = r#"
         interface Item { value: number; }
