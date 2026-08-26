@@ -1388,7 +1388,11 @@ The workspace crates have narrow responsibilities:
   types over defaults, and share specializations with equivalent explicit calls.
   Function parameters, annotated or initializer-inferred local bindings, lexical
   shadowing, member access and common unary/binary expressions propagate the same
-  inference. Inference through arbitrary call results and runtime sharing of generic
+  inference. Nested class arguments such as `Holder<Box<number>>` are resolved from
+  the innermost fixed layout outward, including inferred constructor-result bindings
+  and bundled modules; equivalent explicit and inferred nests share one specialization.
+  Recursive by-value generic class fields are rejected because they have no finite
+  native layout. Inference through arbitrary call results and runtime sharing of generic
   static state remain outside the native subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript

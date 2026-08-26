@@ -839,12 +839,11 @@ struct GenericClassUse {
 
 struct GenericClassUseCollector<'a> {
     names: &'a HashSet<Symbol>,
-    templates: &'a HashMap<Symbol, GenericClassTemplate>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'a>,
     uses: Vec<GenericClassUse>,
-    error: Option<String>,
     scopes: Vec<HashMap<Symbol, HirType>>,
+    constructor_symbols: &'a HashMap<swc_common::Span, Symbol>,
 }
 
 fn unbox_types(types: &[Box<TsType>]) -> Vec<TsType> {
@@ -1190,6 +1189,18 @@ impl Visit for GenericClassUseCollector<'_> {
                     )
                 })
                 .or_else(|| {
+                    declarator.init.as_deref().and_then(|initializer| {
+                        let Expr::New(construction) = initializer else {
+                            return None;
+                        };
+                        self.constructor_symbols
+                            .get(&construction.span)
+                            .and_then(|symbol| self.interfaces.get(symbol))
+                            .cloned()
+                            .map(Ok)
+                    })
+                })
+                .or_else(|| {
                     declarator.init.as_deref().map(|initializer| {
                         infer_generic_constructor_expr_type(
                             initializer,
@@ -1252,16 +1263,7 @@ impl Visit for GenericClassUseCollector<'_> {
                 let inferred = match inferred.transpose() {
                     Ok(inferred) => inferred,
                     Err(error) => {
-                        if self.templates[class.sym.as_ref()]
-                            .defaults
-                            .iter()
-                            .any(Option::is_none)
-                        {
-                            self.error = Some(format!(
-                                "cannot infer generic class `{}`: {error}",
-                                class.sym
-                            ));
-                        }
+                        let _ = error;
                         None
                     }
                 };
@@ -1429,6 +1431,209 @@ fn resolve_generic_class_type_tuple(
         }
     }
     Ok((types, concrete_arguments))
+}
+
+struct KnownGenericClassTypeRewriter<'a, 'ast> {
+    specializations: &'a [(Symbol, Vec<HirType>, Symbol)],
+    templates: &'a HashMap<Symbol, GenericClassTemplate>,
+    interfaces: &'a HashMap<Symbol, HirType>,
+    generic_interfaces: &'a GenericInterfaces<'ast>,
+}
+
+impl KnownGenericClassTypeRewriter<'_, '_> {
+    fn resolve(&self, name: &str, arguments: &[Box<TsType>]) -> Option<Symbol> {
+        let template = self.templates.get(name)?;
+        let arguments = unbox_types(arguments);
+        let (types, _) = resolve_generic_class_type_tuple(
+            name,
+            template,
+            &arguments,
+            None,
+            self.interfaces,
+            self.generic_interfaces,
+        )
+        .ok()?;
+        self.specializations
+            .iter()
+            .find_map(|(candidate, candidate_types, symbol)| {
+                (candidate == name && candidate_types == &types).then(|| symbol.clone())
+            })
+    }
+}
+
+impl VisitMut for KnownGenericClassTypeRewriter<'_, '_> {
+    fn visit_mut_ts_type_ref(&mut self, reference: &mut swc_ecma_ast::TsTypeRef) {
+        reference.visit_mut_children_with(self);
+        let Some(arguments) = reference.type_params.as_ref() else {
+            return;
+        };
+        let swc_ecma_ast::TsEntityName::Ident(class) = &mut reference.type_name else {
+            return;
+        };
+        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+            class.sym = symbol.into();
+            reference.type_params = None;
+        }
+    }
+
+    fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+        class.visit_mut_children_with(self);
+        let Some(arguments) = class.super_type_params.as_ref() else {
+            return;
+        };
+        let Some(Expr::Ident(base)) = class.super_class.as_deref_mut() else {
+            return;
+        };
+        if let Some(symbol) = self.resolve(base.sym.as_ref(), &arguments.params) {
+            base.sym = symbol.into();
+            class.super_type_params = None;
+        }
+    }
+}
+
+fn rewrite_known_generic_class_types(
+    arguments: &mut [TsType],
+    specializations: &[(Symbol, Vec<HirType>, Symbol)],
+    templates: &HashMap<Symbol, GenericClassTemplate>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) {
+    let mut rewriter = KnownGenericClassTypeRewriter {
+        specializations,
+        templates,
+        interfaces,
+        generic_interfaces,
+    };
+    for argument in arguments {
+        argument.visit_mut_with(&mut rewriter);
+    }
+}
+
+fn class_contains_unresolved_generic_type(
+    class: &swc_ecma_ast::Class,
+    names: &HashSet<Symbol>,
+) -> bool {
+    struct Detector<'a> {
+        names: &'a HashSet<Symbol>,
+        found: bool,
+    }
+    impl Visit for Detector<'_> {
+        fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
+            if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                if self.names.contains(name.sym.as_ref()) {
+                    self.found = true;
+                    return;
+                }
+            }
+            reference.visit_children_with(self);
+        }
+
+        fn visit_class(&mut self, class: &swc_ecma_ast::Class) {
+            if let Some(Expr::Ident(base)) = class.super_class.as_deref() {
+                if self.names.contains(base.sym.as_ref()) {
+                    self.found = true;
+                    return;
+                }
+            }
+            class.visit_children_with(self);
+        }
+    }
+    let mut detector = Detector {
+        names,
+        found: false,
+    };
+    class.visit_with(&mut detector);
+    detector.found
+}
+
+fn class_field_layout_cycle(module: &Module) -> Option<Vec<Symbol>> {
+    struct References<'a> {
+        classes: &'a HashSet<Symbol>,
+        names: Vec<Symbol>,
+    }
+    impl Visit for References<'_> {
+        fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
+            if let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name {
+                if self.classes.contains(name.sym.as_ref()) {
+                    self.names.push(name.sym.to_string());
+                }
+            }
+            reference.visit_children_with(self);
+        }
+    }
+
+    let declarations = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
+                Some((declaration.ident.sym.to_string(), declaration))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let names = declarations.keys().cloned().collect::<HashSet<_>>();
+    let mut edges = HashMap::<Symbol, Vec<Symbol>>::new();
+    for (name, declaration) in &declarations {
+        let mut references = References {
+            classes: &names,
+            names: Vec::new(),
+        };
+        for member in &declaration.class.body {
+            match member {
+                ClassMember::ClassProp(property) if !property.is_static => {
+                    property.type_ann.visit_with(&mut references);
+                }
+                ClassMember::PrivateProp(property) if !property.is_static => {
+                    property.type_ann.visit_with(&mut references);
+                }
+                ClassMember::Constructor(constructor) => {
+                    for parameter in &constructor.params {
+                        if matches!(parameter, ParamOrTsParamProp::TsParamProp(_)) {
+                            class_constructor_param_pattern(parameter).visit_with(&mut references);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        references.names.sort();
+        references.names.dedup();
+        edges.insert(name.clone(), references.names);
+    }
+
+    fn visit(
+        name: &str,
+        edges: &HashMap<Symbol, Vec<Symbol>>,
+        complete: &mut HashSet<Symbol>,
+        active: &mut Vec<Symbol>,
+    ) -> Option<Vec<Symbol>> {
+        if let Some(index) = active.iter().position(|candidate| candidate == name) {
+            let mut cycle = active[index..].to_vec();
+            cycle.push(name.to_string());
+            return Some(cycle);
+        }
+        if complete.contains(name) {
+            return None;
+        }
+        active.push(name.to_string());
+        for dependency in edges.get(name).into_iter().flatten() {
+            if let Some(cycle) = visit(dependency, edges, complete, active) {
+                return Some(cycle);
+            }
+        }
+        active.pop();
+        complete.insert(name.to_string());
+        None
+    }
+
+    let mut complete = HashSet::new();
+    for name in declarations.keys() {
+        if let Some(cycle) = visit(name, &edges, &mut complete, &mut Vec::new()) {
+            return Some(cycle);
+        }
+    }
+    None
 }
 
 struct GenericClassReferenceRewriter<'a, 'ast> {
@@ -1657,37 +1862,55 @@ fn specialize_generic_classes(
     });
     let mut instances: Vec<(Symbol, Vec<HirType>, Symbol)> = Vec::new();
     let mut constructor_actuals = HashMap::new();
+    let mut constructor_symbols = HashMap::new();
+    let mut specialization_interfaces = interfaces.clone();
     loop {
         let mut collector = GenericClassUseCollector {
             names: &names,
-            templates: &templates,
-            interfaces,
+            interfaces: &specialization_interfaces,
             generic_interfaces,
             uses: Vec::new(),
-            error: None,
             scopes: vec![HashMap::new()],
+            constructor_symbols: &constructor_symbols,
         };
         specialized.visit_with(&mut collector);
-        if let Some(error) = collector.error {
-            return Err(error);
-        }
         let mut added = false;
+        let mut deferred_error = None;
         for usage in collector.uses {
             let name = usage.name;
-            let arguments = usage.arguments;
+            let mut arguments = usage.arguments;
             let actual_params = usage.actual_params;
+            let constructor_span = usage.constructor_span;
             let template = &templates[&name];
-            let (types, arguments) = resolve_generic_class_type_tuple(
+            rewrite_known_generic_class_types(
+                &mut arguments,
+                &instances,
+                &templates,
+                &specialization_interfaces,
+                generic_interfaces,
+            );
+            let can_defer_inference = constructor_span.is_some() && arguments.is_empty();
+            let resolved = resolve_generic_class_type_tuple(
                 &name,
                 template,
                 &arguments,
                 actual_params.as_deref(),
-                interfaces,
+                &specialization_interfaces,
                 generic_interfaces,
-            )?;
-            if let (Some(span), Some(actual_params)) =
-                (usage.constructor_span, actual_params.as_ref())
-            {
+            );
+            let (types, arguments) = match resolved {
+                Ok(resolved) => resolved,
+                Err(error)
+                    if error.contains("generics are not supported yet")
+                        || error.contains("cannot infer generic class")
+                        || (can_defer_inference && error.contains("type argument(s), got 0")) =>
+                {
+                    deferred_error.get_or_insert(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let (Some(span), Some(actual_params)) = (constructor_span, actual_params.as_ref()) {
                 constructor_actuals.insert(span, actual_params.clone());
             }
             if let Some(unsupported) = types.iter().find(|ty| !supports_generic_native_layout(ty)) {
@@ -1695,12 +1918,20 @@ fn specialize_generic_classes(
                     "generic class `{name}` cannot specialize for native layout {unsupported:?}"
                 ));
             }
-            if instances.iter().any(|(candidate, candidate_types, _)| {
-                candidate == &name && candidate_types == &types
-            }) {
+            let existing = instances
+                .iter()
+                .find_map(|(candidate, candidate_types, symbol)| {
+                    (candidate == &name && candidate_types == &types).then(|| symbol.clone())
+                });
+            let symbol = existing
+                .clone()
+                .unwrap_or_else(|| specialized_generic_name(&name, &types));
+            if let Some(span) = constructor_span {
+                constructor_symbols.insert(span, symbol.clone());
+            }
+            if existing.is_some() {
                 continue;
             }
-            let symbol = specialized_generic_name(&name, &types);
             let substitutions = template
                 .parameters
                 .iter()
@@ -1722,21 +1953,124 @@ fn specialize_generic_classes(
             added = true;
         }
         if !added {
+            if let Some(error) = deferred_error {
+                return Err(format!(
+                    "cannot resolve nested generic class specialization: {error}"
+                ));
+            }
             break;
         }
+        let mut layout_module = specialized.clone();
+        layout_module.visit_mut_with(&mut KnownGenericClassTypeRewriter {
+            specializations: &instances,
+            templates: &templates,
+            interfaces: &specialization_interfaces,
+            generic_interfaces,
+        });
+        layout_module.body.retain(|item| {
+            !matches!(
+                item,
+                ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+                    if declaration.class.super_type_params.is_some()
+                        || class_contains_unresolved_generic_type(&declaration.class, &names)
+            )
+        });
+        let mut updated_interfaces = interfaces.clone();
+        collect_native_classes(&layout_module, &mut updated_interfaces, generic_interfaces)
+            .map_err(|error| {
+                if error.contains("unsupported type reference")
+                    || error.contains("unknown type reference")
+                {
+                    format!(
+                        "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
+                    )
+                } else {
+                    error
+                }
+            })?;
+        specialization_interfaces = updated_interfaces;
     }
 
     let mut rewriter = GenericClassReferenceRewriter {
         specializations: &instances,
         templates: &templates,
-        interfaces,
+        interfaces: &specialization_interfaces,
         generic_interfaces,
         constructor_actuals: &constructor_actuals,
         error: None,
     };
     specialized.visit_mut_with(&mut rewriter);
     if let Some(error) = rewriter.error {
+        if error.contains("generics are not supported yet") {
+            return Err(format!(
+                "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
+            ));
+        }
         return Err(error);
+    }
+    if specialized.body.iter().any(|item| {
+        matches!(
+            item,
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration)))
+                if class_contains_unresolved_generic_type(&declaration.class, &names)
+        )
+    }) {
+        return Err(
+            "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout"
+                .into(),
+        );
+    }
+    if let Some(cycle) = class_field_layout_cycle(&specialized) {
+        return Err(format!(
+            "recursive generic class field layout `{}` cannot use Thaw's fixed-size native layout",
+            cycle.join(" -> ")
+        ));
+    }
+    for item in &specialized.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        if !declaration.ident.sym.contains("__thaw_") {
+            continue;
+        }
+        let validate = |annotation: &TsType| {
+            lower_ts_type(annotation, &specialization_interfaces, generic_interfaces).map_err(
+                |error| {
+                    format!(
+                        "recursive or unresolved generic class field layout in `{}` cannot use Thaw's fixed-size native layout: {error}",
+                        declaration.ident.sym
+                    )
+                },
+            )
+        };
+        for member in &declaration.class.body {
+            match member {
+                ClassMember::ClassProp(property) if !property.is_static => {
+                    if let Some(annotation) = property.type_ann.as_ref() {
+                        validate(&annotation.type_ann)?;
+                    }
+                }
+                ClassMember::PrivateProp(property) if !property.is_static => {
+                    if let Some(annotation) = property.type_ann.as_ref() {
+                        validate(&annotation.type_ann)?;
+                    }
+                }
+                ClassMember::Constructor(constructor) => {
+                    for parameter in &constructor.params {
+                        if !matches!(parameter, ParamOrTsParamProp::TsParamProp(_)) {
+                            continue;
+                        }
+                        let Pat::Ident(binding) = class_constructor_param_pattern(parameter) else {
+                            continue;
+                        };
+                        if let Some(annotation) = binding.type_ann {
+                            validate(&annotation.type_ann)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     Ok(Some(specialized))
 }
@@ -2296,9 +2630,26 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
 
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
-    if let Some(specialized) = specialize_generic_classes(module, &interfaces, &generic_interfaces)?
-    {
-        return lower_normalized_module(&specialized);
+    let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
+        .map_err(|error| {
+            if error.contains("generics are not supported yet") {
+                format!(
+                    "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
+                )
+            } else {
+                error
+            }
+        })?;
+    if let Some(specialized) = specialized {
+        return lower_normalized_module(&specialized).map_err(|error| {
+            if error.contains("generics are not supported yet") {
+                format!(
+                    "recursive or unresolved generic class type cannot use Thaw's fixed-size native layout: {error}"
+                )
+            } else {
+                error
+            }
+        });
     }
     let (enum_values, enum_reverse_values, enum_types) = collect_enums(module)?;
     for (name, ty) in enum_types {
@@ -22475,6 +22826,46 @@ mod tests {
             let error = lower_module(&module).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn deduplicates_explicit_and_inferred_nested_generic_classes() {
+        let program = lower(
+            r#"
+            class Box<T> { constructor(public value: T) {} }
+            class Holder<T> { constructor(public value: T) {} }
+            function main(): void {
+                const boxed = new Box(42);
+                const explicit = new Holder<Box<number>>(boxed);
+                const inferred = new Holder(boxed);
+                console.log(explicit.value.value + inferred.value.value);
+            }
+            "#,
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| {
+                    function.name.starts_with("__thaw_class_Holder__thaw_")
+                        && function.name.ends_with("_constructor")
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn diagnoses_recursive_native_generic_class_layouts() {
+        let module = thaw_parser::parse_typescript(
+            r#"
+            class Loop<T> { constructor(public next: Loop<T>) {} }
+            function consume(value: Loop<number>): void {}
+            "#,
+        )
+        .unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("fixed-size native layout"), "{error}");
     }
 
     #[test]
