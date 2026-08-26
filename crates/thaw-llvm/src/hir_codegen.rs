@@ -19166,6 +19166,50 @@ mod tests {
     }
 
     #[test]
+    fn compiles_uninitialized_optional_native_class_fields() {
+        let source = r#"
+            class State {
+                value?: number;
+                label: string | undefined;
+                #secret?: string;
+                static count?: number;
+                static title: string | undefined;
+                read(): number { return this.value ?? 40; }
+                readLabel(): string { return this.label ?? "missing"; }
+                readSecret(): string { return this.#secret ?? "private-missing"; }
+                set(value: number, label: string, secret: string): void {
+                    this.value = value;
+                    this.label = label;
+                    this.#secret = secret;
+                }
+            }
+            class Derived extends State {}
+            function main(): void {
+                const state = new State();
+                const derived = new Derived();
+                console.log(state.read());
+                console.log(state.readLabel());
+                console.log(state.readSecret());
+                console.log(State.count ?? 41);
+                console.log(Derived.title ?? "untitled");
+                state.set(2, "ready", "private-ready");
+                State.count = 3;
+                Derived.title = "shared";
+                console.log(state.read());
+                console.log(state.readLabel());
+                console.log(state.readSecret());
+                console.log(Derived.count ?? 0);
+                console.log(State.title ?? "missing");
+                console.log(derived.read());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_uninitialized_optional_fields"),
+            "40\nmissing\nprivate-missing\n41\nuntitled\n2\nready\nprivate-ready\n3\nshared\n40\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
