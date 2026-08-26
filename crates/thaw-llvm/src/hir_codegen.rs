@@ -19455,14 +19455,12 @@ mod tests {
                 if (item.kind === "number") console.log(item.value + 10);
                 else console.log(item.value + "!");
             }
-            async function loadAsync(): Promise<Result[][]> {
-                return [[{ kind: "text", value: "async" } as Result]];
-            }
             async function main(): Promise<void> {
                 const service: Service = {
                     get: (): Result => ({ kind: "text", value: "direct" }),
                     load: (): Result[][] => [[{ kind: "number", value: 1 } as Result]],
-                    loadAsync,
+                    loadAsync: async (): Promise<Result[][]> =>
+                        [[{ kind: "text", value: "async" } as Result]],
                 };
                 print(service.get());
                 const load = service.load;
@@ -19523,6 +19521,24 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "object_type_method_signature"),
             "12\n"
+        );
+    }
+
+    #[test]
+    fn compiles_expression_bodied_async_arrows() {
+        let source = r#"
+            interface Worker { run(): Promise<number>; }
+            async function main(): Promise<void> {
+                const offset: number = 2;
+                const worker: Worker = {
+                    run: async (): Promise<number> => 40 + offset,
+                };
+                console.log(await worker.run());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "expression_bodied_async_arrow"),
+            "42\n"
         );
     }
 
