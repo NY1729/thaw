@@ -161,6 +161,7 @@ enum GenericTypePattern {
     Pick(Box<GenericTypePattern>, Vec<Symbol>),
     Omit(Box<GenericTypePattern>, Vec<Symbol>),
     IndexedAccess(Box<GenericTypePattern>, Vec<Symbol>),
+    Dictionary(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6363,6 +6364,50 @@ fn indexed_access_hir_type(ty: HirType, keys: &[Symbol]) -> Result<HirType, Stri
     }
 }
 
+fn index_signature_value(signature: &swc_ecma_ast::TsIndexSignature) -> Result<&TsType, String> {
+    let [TsFnParam::Ident(key)] = signature.params.as_slice() else {
+        return Err("index signature requires one identifier key".into());
+    };
+    let key_type = key
+        .type_ann
+        .as_ref()
+        .ok_or("index signature key needs a type annotation")?;
+    if !matches!(
+        key_type.type_ann.as_ref(),
+        TsType::TsKeywordType(keyword)
+            if keyword.kind == TsKeywordTypeKind::TsStringKeyword
+    ) {
+        return Err("native dictionary index signatures require a string key".into());
+    }
+    signature
+        .type_ann
+        .as_ref()
+        .map(|annotation| annotation.type_ann.as_ref())
+        .ok_or_else(|| "index signature needs a value type annotation".into())
+}
+
+fn type_literal_index_signature(
+    literal: &swc_ecma_ast::TsTypeLit,
+) -> Result<Option<&swc_ecma_ast::TsIndexSignature>, String> {
+    let mut signatures = literal.members.iter().filter_map(|member| match member {
+        TsTypeElement::TsIndexSignature(signature) => Some(signature),
+        _ => None,
+    });
+    let first = signatures.next();
+    if signatures.next().is_some() {
+        return Err("native dictionary types support one index signature".into());
+    }
+    Ok(first)
+}
+
+fn is_string_keyword(ty: &TsType) -> bool {
+    matches!(
+        ty,
+        TsType::TsKeywordType(keyword)
+            if keyword.kind == TsKeywordTypeKind::TsStringKeyword
+    )
+}
+
 fn finite_property_keys(ty: &TsType) -> Result<Vec<Symbol>, String> {
     fn collect(ty: &TsType, keys: &mut Vec<Symbol>) -> Result<(), String> {
         match ty {
@@ -6524,7 +6569,10 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         | GenericTypePattern::Awaited(inner)
         | GenericTypePattern::NonNullable(inner)
         | GenericTypePattern::Partial(inner)
-        | GenericTypePattern::Required(inner) => generic_pattern_contains_variable(inner, variable),
+        | GenericTypePattern::Required(inner)
+        | GenericTypePattern::Dictionary(inner) => {
+            generic_pattern_contains_variable(inner, variable)
+        }
         GenericTypePattern::Record(_, value) => generic_pattern_contains_variable(value, variable),
         GenericTypePattern::Pick(inner, _) | GenericTypePattern::Omit(inner, _) => {
             generic_pattern_contains_variable(inner, variable)
@@ -6588,6 +6636,9 @@ fn instantiate_generic_pattern(
         GenericTypePattern::IndexedAccess(inner, keys) => {
             indexed_access_hir_type(instantiate_generic_pattern(inner, substitution)?, keys)
         }
+        GenericTypePattern::Dictionary(inner) => Ok(HirType::Dictionary(Box::new(
+            instantiate_generic_pattern(inner, substitution)?,
+        ))),
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
                 .iter()
@@ -6685,6 +6736,7 @@ fn generic_type_pattern(
                 }
                 in_progress.push(name.to_string());
                 let mut fields = Vec::new();
+                let mut dictionary = None;
                 for base in &interface.extends {
                     let Expr::Ident(base_ident) = base.expr.as_ref() else {
                         return Err(format!(
@@ -6709,6 +6761,31 @@ fn generic_type_pattern(
                             .into_iter()
                             .map(|(field, ty)| (field, GenericTypePattern::Concrete(ty)))
                             .collect(),
+                        GenericTypePattern::Dictionary(element) => {
+                            if dictionary
+                                .as_ref()
+                                .is_some_and(|existing| existing != element.as_ref())
+                            {
+                                return Err(format!(
+                                    "generic interface `{name}` inherits incompatible dictionary value types"
+                                ));
+                            }
+                            dictionary = Some(*element);
+                            Vec::new()
+                        }
+                        GenericTypePattern::Concrete(HirType::Dictionary(element)) => {
+                            let element = GenericTypePattern::Concrete(*element);
+                            if dictionary
+                                .as_ref()
+                                .is_some_and(|existing| existing != &element)
+                            {
+                                return Err(format!(
+                                    "generic interface `{name}` inherits incompatible dictionary value types"
+                                ));
+                            }
+                            dictionary = Some(element);
+                            Vec::new()
+                        }
                         _ => {
                             return Err(format!(
                             "generic interface `{name}` can only extend an object-shaped interface"
@@ -6724,55 +6801,77 @@ fn generic_type_pattern(
                         fields.push((field_name, field_ty));
                     }
                 }
-                let own_fields = interface
-                    .body
-                    .body
-                    .iter()
-                    .map(|member| {
-                        let (key, ty, optional) = match member {
-                            TsTypeElement::TsPropertySignature(property) => {
-                                let annotation = property.type_ann.as_ref().ok_or_else(|| {
-                                    "generic interface property needs a type annotation".to_string()
-                                })?;
-                                (
-                                    property.key.as_ref(),
-                                    std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
-                                    property.optional,
-                                )
-                            }
-                            TsTypeElement::TsMethodSignature(method) => (
-                                method.key.as_ref(),
-                                std::borrow::Cow::Owned(method_signature_function_type(method)?),
-                                false,
-                            ),
-                            _ => {
-                                return Err(format!(
-                                "generic interface `{name}` only supports properties and methods"
-                            ))
-                            }
-                        };
-                        let Expr::Ident(field) = key else {
-                            return Err(format!(
-                                "generic interface `{name}` has an unsupported property key"
-                            ));
-                        };
-                        let ty = generic_type_pattern(
-                            &ty,
+                let mut own_fields = Vec::new();
+                for member in &interface.body.body {
+                    if let TsTypeElement::TsIndexSignature(signature) = member {
+                        let value = generic_type_pattern(
+                            index_signature_value(signature)?,
                             &nested_substitutions,
                             interfaces,
                             generic_interfaces,
                             in_progress,
                         )?;
-                        Ok((
-                            field.sym.to_string(),
-                            if optional {
-                                GenericTypePattern::Optional(Box::new(ty))
-                            } else {
-                                ty
-                            },
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
+                        if dictionary
+                            .as_ref()
+                            .is_some_and(|existing| existing != &value)
+                        {
+                            return Err(format!(
+                                "generic interface `{name}` declares an incompatible dictionary value type"
+                            ));
+                        }
+                        dictionary = Some(value);
+                        continue;
+                    }
+                    let (key, ty, optional) = match member {
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                "generic interface property needs a type annotation".to_string()
+                            })?;
+                            (
+                                property.key.as_ref(),
+                                std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                property.optional,
+                            )
+                        }
+                        TsTypeElement::TsMethodSignature(method) => (
+                            method.key.as_ref(),
+                            std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                            false,
+                        ),
+                        _ => {
+                            return Err(format!(
+                                "generic interface `{name}` only supports properties and methods"
+                            ))
+                        }
+                    };
+                    let Expr::Ident(field) = key else {
+                        return Err(format!(
+                            "generic interface `{name}` has an unsupported property key"
+                        ));
+                    };
+                    let ty = generic_type_pattern(
+                        &ty,
+                        &nested_substitutions,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
+                    let field_ty = if optional {
+                        GenericTypePattern::Optional(Box::new(ty))
+                    } else {
+                        ty
+                    };
+                    if dictionary
+                        .as_ref()
+                        .is_some_and(|element| element != &field_ty)
+                    {
+                        return Err(format!(
+                                "generic interface `{name}` property `{}` does not match its index value type",
+                                field.sym
+                            ));
+                    }
+                    own_fields.push((field.sym.to_string(), field_ty));
+                }
                 for (field_name, field_ty) in own_fields {
                     if fields.iter().any(|(existing, _)| existing == &field_name) {
                         return Err(format!(
@@ -6782,7 +6881,11 @@ fn generic_type_pattern(
                     fields.push((field_name, field_ty));
                 }
                 in_progress.pop();
-                return Ok(GenericTypePattern::Object(fields));
+                return Ok(if let Some(element) = dictionary {
+                    GenericTypePattern::Dictionary(Box::new(element))
+                } else {
+                    GenericTypePattern::Object(fields)
+                });
             }
             if let Some(alias) = generic_interfaces.aliases.get(name) {
                 if in_progress.iter().any(|active| active == name) {
@@ -6849,6 +6952,16 @@ fn generic_type_pattern(
                 else {
                     return Err("Record<K, V> requires exactly two type arguments".into());
                 };
+                let value = Box::new(generic_type_pattern(
+                    value,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?);
+                if is_string_keyword(keys) {
+                    return Ok(GenericTypePattern::Dictionary(value));
+                }
                 return Ok(GenericTypePattern::Record(
                     generic_utility_keys(
                         keys,
@@ -6857,13 +6970,7 @@ fn generic_type_pattern(
                         generic_interfaces,
                         in_progress,
                     )?,
-                    Box::new(generic_type_pattern(
-                        value,
-                        substitutions,
-                        interfaces,
-                        generic_interfaces,
-                        in_progress,
-                    )?),
+                    value,
                 ));
             }
             if name == "Pick" || name == "Omit" {
@@ -6970,55 +7077,90 @@ fn generic_type_pattern(
             )?;
             Ok(GenericTypePattern::IndexedAccess(object, keys))
         }
-        TsType::TsTypeLit(literal) => Ok(GenericTypePattern::Object(
-            literal
-                .members
-                .iter()
-                .map(|member| {
-                    let (key, ty, optional) = match member {
+        TsType::TsTypeLit(literal) => {
+            if let Some(signature) = type_literal_index_signature(literal)? {
+                let value = generic_type_pattern(
+                    index_signature_value(signature)?,
+                    substitutions,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                for member in &literal.members {
+                    match member {
+                        TsTypeElement::TsIndexSignature(_) => {}
                         TsTypeElement::TsPropertySignature(property) => {
                             let annotation = property.type_ann.as_ref().ok_or_else(|| {
-                                "generic object property needs a type annotation".to_string()
+                                "dictionary property needs a type annotation".to_string()
                             })?;
-                            (
-                                property.key.as_ref(),
-                                std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
-                                property.optional,
-                            )
+                            let field = generic_type_pattern(
+                                &annotation.type_ann,
+                                substitutions,
+                                interfaces,
+                                generic_interfaces,
+                                in_progress,
+                            )?;
+                            if property.optional || field != value {
+                                return Err(
+                                    "dictionary properties must match the index value type".into(),
+                                );
+                            }
                         }
-                        TsTypeElement::TsMethodSignature(method) => (
-                            method.key.as_ref(),
-                            std::borrow::Cow::Owned(method_signature_function_type(method)?),
-                            false,
-                        ),
-                        _ => {
-                            return Err(
-                                "generic object patterns only support properties and methods"
-                                    .into(),
-                            )
-                        }
-                    };
-                    let Expr::Ident(field) = key else {
-                        return Err("generic object pattern has an unsupported key".into());
-                    };
-                    let ty = generic_type_pattern(
-                        &ty,
-                        substitutions,
-                        interfaces,
-                        generic_interfaces,
-                        in_progress,
-                    )?;
-                    Ok((
-                        field.sym.to_string(),
-                        if optional {
-                            GenericTypePattern::Optional(Box::new(ty))
-                        } else {
-                            ty
-                        },
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        )),
+                        _ => return Err("dictionary types only support properties".into()),
+                    }
+                }
+                return Ok(GenericTypePattern::Dictionary(Box::new(value)));
+            }
+            Ok(GenericTypePattern::Object(
+                literal
+                    .members
+                    .iter()
+                    .map(|member| {
+                        let (key, ty, optional) = match member {
+                            TsTypeElement::TsPropertySignature(property) => {
+                                let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                    "generic object property needs a type annotation".to_string()
+                                })?;
+                                (
+                                    property.key.as_ref(),
+                                    std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                    property.optional,
+                                )
+                            }
+                            TsTypeElement::TsMethodSignature(method) => (
+                                method.key.as_ref(),
+                                std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                                false,
+                            ),
+                            _ => {
+                                return Err(
+                                    "generic object patterns only support properties and methods"
+                                        .into(),
+                                )
+                            }
+                        };
+                        let Expr::Ident(field) = key else {
+                            return Err("generic object pattern has an unsupported key".into());
+                        };
+                        let ty = generic_type_pattern(
+                            &ty,
+                            substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )?;
+                        Ok((
+                            field.sym.to_string(),
+                            if optional {
+                                GenericTypePattern::Optional(Box::new(ty))
+                            } else {
+                                ty
+                            },
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            ))
+        }
         other => Ok(GenericTypePattern::Concrete(lower_ts_type(
             other,
             interfaces,
@@ -7080,6 +7222,9 @@ fn match_generic_pattern(
             match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::IndexedAccess(expected, _), actual) => {
+            match_generic_pattern(expected, actual, inferred)
+        }
+        (GenericTypePattern::Dictionary(expected), HirType::Dictionary(actual)) => {
             match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
@@ -8759,6 +8904,7 @@ fn resolve_interface(
     // or between a base and this interface's own body) is rejected rather
     // than guessing an override/merge rule.
     let mut fields: Vec<(Symbol, HirType)> = Vec::new();
+    let mut dictionary = None;
     for base in &iface.extends {
         let Expr::Ident(base_ident) = base.expr.as_ref() else {
             return Err(format!(
@@ -8822,10 +8968,25 @@ fn resolve_interface(
             }
             resolve_interface(&base_name, raw, aliases, generic, resolved, in_progress)?
         };
-        let HirType::Object(base_fields) = base_ty else {
-            return Err(format!(
-                "interface `{name}` can only extend object-shaped interface `{base_name}`"
-            ));
+        let base_fields = match base_ty {
+            HirType::Object(fields) => fields,
+            HirType::Dictionary(element) => {
+                if dictionary
+                    .as_ref()
+                    .is_some_and(|existing| existing != element.as_ref())
+                {
+                    return Err(format!(
+                        "interface `{name}` inherits incompatible dictionary value types"
+                    ));
+                }
+                dictionary = Some(*element);
+                Vec::new()
+            }
+            _ => {
+                return Err(format!(
+                    "interface `{name}` can only extend object-shaped interface `{base_name}`"
+                ))
+            }
         };
         for (field_name, field_ty) in base_fields {
             if fields.iter().any(|(n, _)| *n == field_name) {
@@ -8838,6 +8999,26 @@ fn resolve_interface(
     }
 
     for member in &iface.body.body {
+        if let TsTypeElement::TsIndexSignature(signature) = member {
+            let value = resolve_type_with_interfaces(
+                index_signature_value(signature)?,
+                raw,
+                aliases,
+                generic,
+                resolved,
+                in_progress,
+            )?;
+            if dictionary
+                .as_ref()
+                .is_some_and(|existing| existing != &value)
+            {
+                return Err(format!(
+                    "interface `{name}` declares an incompatible dictionary value type"
+                ));
+            }
+            dictionary = Some(value);
+            continue;
+        }
         let (key, field_type, optional) = match member {
             TsTypeElement::TsPropertySignature(property) => {
                 let annotation = property.type_ann.as_ref().ok_or_else(|| {
@@ -8884,12 +9065,24 @@ fn resolve_interface(
         if optional {
             field_ty = optional_parameter_type(field_ty);
         }
+        if dictionary
+            .as_ref()
+            .is_some_and(|element| element != &field_ty)
+        {
+            return Err(format!(
+                "interface `{name}` property `{field_name}` does not match its index value type"
+            ));
+        }
         fields.push((field_name, field_ty));
     }
 
     in_progress.pop();
 
-    let hir_ty = HirType::Object(fields);
+    let hir_ty = if let Some(element) = dictionary {
+        HirType::Dictionary(Box::new(element))
+    } else {
+        HirType::Object(fields)
+    };
     resolved.insert(name.to_string(), hir_ty.clone());
     Ok(hir_ty)
 }
@@ -10689,6 +10882,9 @@ fn lower_ts_type(
                     return Err("Record<K, V> requires exactly two type arguments".into());
                 };
                 let value = lower_ts_type(value, interfaces, generic_interfaces)?;
+                if is_string_keyword(keys) {
+                    return Ok(HirType::Dictionary(Box::new(value)));
+                }
                 return Ok(HirType::Object(
                     utility_keys(keys, interfaces, generic_interfaces)?
                         .into_iter()
@@ -10765,6 +10961,35 @@ fn lower_ts_type(
             }
         }
         TsType::TsTypeLit(type_lit) => {
+            if let Some(signature) = type_literal_index_signature(type_lit)? {
+                let value = lower_ts_type(
+                    index_signature_value(signature)?,
+                    interfaces,
+                    generic_interfaces,
+                )?;
+                for member in &type_lit.members {
+                    match member {
+                        TsTypeElement::TsIndexSignature(_) => {}
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                "dictionary property needs an explicit type annotation".to_string()
+                            })?;
+                            let field = lower_ts_type(
+                                &annotation.type_ann,
+                                interfaces,
+                                generic_interfaces,
+                            )?;
+                            if property.optional || field != value {
+                                return Err(
+                                    "dictionary properties must match the index value type".into(),
+                                );
+                            }
+                        }
+                        _ => return Err("dictionary types only support properties".into()),
+                    }
+                }
+                return Ok(HirType::Dictionary(Box::new(value)));
+            }
             let fields = type_lit
                 .members
                 .iter()
@@ -10905,6 +11130,7 @@ fn resolve_generic_interface(
     in_progress.push(name.to_string());
 
     let mut fields = Vec::with_capacity(decl.body.body.len());
+    let mut dictionary = None;
     for base in &decl.extends {
         let Expr::Ident(base_ident) = base.expr.as_ref() else {
             return Err(format!(
@@ -10938,10 +11164,25 @@ fn resolve_generic_interface(
                 .cloned()
                 .ok_or_else(|| format!("unknown base interface `{base_name}` for `{name}`"))?
         };
-        let HirType::Object(base_fields) = base_ty else {
-            return Err(format!(
-                "interface `{name}` can only extend object-shaped interface `{base_name}`"
-            ));
+        let base_fields = match base_ty {
+            HirType::Object(fields) => fields,
+            HirType::Dictionary(element) => {
+                if dictionary
+                    .as_ref()
+                    .is_some_and(|existing| existing != element.as_ref())
+                {
+                    return Err(format!(
+                        "interface `{name}` inherits incompatible dictionary value types"
+                    ));
+                }
+                dictionary = Some(*element);
+                Vec::new()
+            }
+            _ => {
+                return Err(format!(
+                    "interface `{name}` can only extend object-shaped interface `{base_name}`"
+                ))
+            }
         };
         for (field_name, field_ty) in base_fields {
             if fields.iter().any(|(existing, _)| existing == &field_name) {
@@ -10953,6 +11194,25 @@ fn resolve_generic_interface(
         }
     }
     for member in &decl.body.body {
+        if let TsTypeElement::TsIndexSignature(signature) = member {
+            let value = resolve_ts_type_with_substitution(
+                index_signature_value(signature)?,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )?;
+            if dictionary
+                .as_ref()
+                .is_some_and(|existing| existing != &value)
+            {
+                return Err(format!(
+                    "interface `{name}` declares an incompatible dictionary value type"
+                ));
+            }
+            dictionary = Some(value);
+            continue;
+        }
         let (key, ty, optional) = match member {
             TsTypeElement::TsPropertySignature(property) => {
                 let annotation = property.type_ann.as_ref().ok_or_else(|| {
@@ -10993,6 +11253,14 @@ fn resolve_generic_interface(
         if optional {
             field_ty = optional_parameter_type(field_ty);
         }
+        if dictionary
+            .as_ref()
+            .is_some_and(|element| element != &field_ty)
+        {
+            return Err(format!(
+                "interface `{name}` property `{field_name}` does not match its index value type"
+            ));
+        }
         if fields.iter().any(|(existing, _)| existing == &field_name) {
             return Err(format!(
                 "interface `{name}` declares field `{field_name}`, which collides with an inherited field"
@@ -11003,7 +11271,11 @@ fn resolve_generic_interface(
 
     in_progress.pop();
 
-    Ok(HirType::Object(fields))
+    if let Some(element) = dictionary {
+        Ok(HirType::Dictionary(Box::new(element)))
+    } else {
+        Ok(HirType::Object(fields))
+    }
 }
 
 fn resolve_generic_alias(
@@ -11177,6 +11449,9 @@ fn resolve_ts_type_with_substitution(
                     generic_interfaces,
                     in_progress,
                 )?;
+                if is_string_keyword(keys) {
+                    return Ok(HirType::Dictionary(Box::new(value)));
+                }
                 return Ok(HirType::Object(
                     substituted_utility_keys(
                         keys,
@@ -11490,6 +11765,39 @@ fn resolve_ts_type_with_substitution(
             })
         }
         TsType::TsTypeLit(type_lit) => {
+            if let Some(signature) = type_literal_index_signature(type_lit)? {
+                let value = resolve_ts_type_with_substitution(
+                    index_signature_value(signature)?,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )?;
+                for member in &type_lit.members {
+                    match member {
+                        TsTypeElement::TsIndexSignature(_) => {}
+                        TsTypeElement::TsPropertySignature(property) => {
+                            let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                                "dictionary property needs an explicit type annotation".to_string()
+                            })?;
+                            let field = resolve_ts_type_with_substitution(
+                                &annotation.type_ann,
+                                substitution,
+                                interfaces,
+                                generic_interfaces,
+                                in_progress,
+                            )?;
+                            if property.optional || field != value {
+                                return Err(
+                                    "dictionary properties must match the index value type".into(),
+                                );
+                            }
+                        }
+                        _ => return Err("dictionary types only support properties".into()),
+                    }
+                }
+                return Ok(HirType::Dictionary(Box::new(value)));
+            }
             let fields = type_lit
                 .members
                 .iter()
@@ -11542,6 +11850,7 @@ enum Target {
     Var(Symbol),
     Index(HirExpr, Box<HirExpr>),
     Prop(HirExpr, HirType, Symbol),
+    Dictionary(HirExpr, Box<HirExpr>, HirType),
 }
 
 #[derive(Clone, Copy)]
@@ -11554,14 +11863,30 @@ enum ArrayPredicateMode {
     FindLastIndex,
 }
 
-fn target_to_read_expr(target: &Target) -> HirExpr {
-    match target {
+fn target_to_read_expr(target: &Target) -> Result<HirExpr, String> {
+    Ok(match target {
         Target::Var(name) => HirExpr::Var(name.clone()),
         Target::Index(arr, idx) => HirExpr::Index(Box::new(arr.clone()), idx.clone()),
         Target::Prop(obj, ty, field) => {
             HirExpr::PropAccess(Box::new(obj.clone()), ty.clone(), field.clone())
         }
-    }
+        Target::Dictionary(object, key, element) => match element {
+            HirType::F64 => HirExpr::JsonAsNumber(Box::new(HirExpr::JsonKey(
+                Box::new(object.clone()),
+                key.clone(),
+            ))),
+            HirType::Str => HirExpr::JsonAsString(Box::new(HirExpr::JsonKey(
+                Box::new(object.clone()),
+                key.clone(),
+            ))),
+            HirType::Bool => HirExpr::JsonAsBool(Box::new(HirExpr::JsonKey(
+                Box::new(object.clone()),
+                key.clone(),
+            ))),
+            HirType::Json => HirExpr::JsonKey(Box::new(object.clone()), key.clone()),
+            other => return Err(format!("unsupported dictionary value type {other:?}")),
+        },
+    })
 }
 
 fn build_assign(target: Target, value: HirExpr) -> HirExpr {
@@ -11570,6 +11895,9 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
         Target::Index(arr, idx) => HirExpr::IndexAssign(Box::new(arr), idx, Box::new(value)),
         Target::Prop(obj, ty, field) => {
             HirExpr::PropAssign(Box::new(obj), ty, field, Box::new(value))
+        }
+        Target::Dictionary(object, key, element) => {
+            HirExpr::JsonSet(Box::new(object), key, Box::new(value), element)
         }
     }
 }
@@ -11589,9 +11917,15 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::Index(left, right)
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
-        | HirExpr::DynamicPropAccess(left, right, _, _) => {
+        | HirExpr::DynamicPropAccess(left, right, _, _)
+        | HirExpr::JsonKey(left, right) => {
             collect_referenced_bindings(left, names);
             collect_referenced_bindings(right, names);
+        }
+        HirExpr::JsonSet(object, key, value, _) => {
+            collect_referenced_bindings(object, names);
+            collect_referenced_bindings(key, names);
+            collect_referenced_bindings(value, names);
         }
         HirExpr::Call(callee, args) => {
             collect_referenced_bindings(callee, names);
@@ -11681,6 +12015,11 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
                 collect_referenced_bindings(value, names);
             }
         }
+        HirExpr::JsonObjectLit(fields, _) => {
+            for (_, value) in fields {
+                collect_referenced_bindings(value, names);
+            }
+        }
         HirExpr::PropAccess(object, _, _) | HirExpr::JsonGet(object, _) => {
             collect_referenced_bindings(object, names);
         }
@@ -11710,7 +12049,11 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
         | HirExpr::DynamicPropAccess(left, right, _, _)
-        | HirExpr::JsonIndex(left, right) => contains_await(left) || contains_await(right),
+        | HirExpr::JsonIndex(left, right)
+        | HirExpr::JsonKey(left, right) => contains_await(left) || contains_await(right),
+        HirExpr::JsonSet(object, key, value, _) => {
+            contains_await(object) || contains_await(key) || contains_await(value)
+        }
         HirExpr::Call(callee, args) => contains_await(callee) || args.iter().any(contains_await),
         HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
             contains_await(callee) || contains_await(this_arg) || args.iter().any(contains_await)
@@ -11763,7 +12106,9 @@ fn contains_await(expr: &HirExpr) -> bool {
             contains_await(array) || contains_await(index) || contains_await(value)
         }
         HirExpr::PropAssign(object, _, _, value) => contains_await(object) || contains_await(value),
-        HirExpr::ObjectLit(fields) => fields.iter().any(|(_, value)| contains_await(value)),
+        HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
+            fields.iter().any(|(_, value)| contains_await(value))
+        }
         HirExpr::ThrowValue(error, fallback) => contains_await(error) || contains_await(fallback),
         HirExpr::Block(stmts) => stmts.iter().any(stmt_contains_await),
         // A closure body runs only when the closure is invoked, not when the
@@ -12149,6 +12494,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         | HirType::Tuple(_)
         | HirType::Object(_)
         | HirType::Json
+        | HirType::Dictionary(_)
         | HirType::Promise(_) => Some("object"),
         HirType::Union(elements) => {
             let first = elements.first().and_then(native_typeof_name)?;
@@ -18082,6 +18428,21 @@ impl<'a> FnLowerer<'a> {
         if let Some(adapted) = self.adapt_named_function_to_callable(declared, &value)? {
             return Ok(adapted);
         }
+        if let HirType::Dictionary(element) = declared {
+            if self.infer_expr_type(&value)? == *declared {
+                return Ok(value);
+            }
+            let HirExpr::ObjectLit(fields) = value else {
+                return Err(format!(
+                    "dictionary value must be an object literal with {element:?} values"
+                ));
+            };
+            let fields = fields
+                .into_iter()
+                .map(|(name, value)| Ok((name, self.coerce_to_declared(element.as_ref(), value)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(HirExpr::JsonObjectLit(fields, element.as_ref().clone()));
+        }
         if let HirType::Union(elements) = declared {
             let actual = self.infer_expr_type(&value)?;
             if &actual == declared {
@@ -19447,7 +19808,13 @@ impl<'a> FnLowerer<'a> {
             },
             HirExpr::DynamicPropAccess(_, _, _, result) => Ok(result.clone()),
             HirExpr::PropAssign(_, _, _, value) => self.infer_expr_type(value),
-            HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) => Ok(HirType::Json),
+            HirExpr::JsonObjectLit(_, element) => {
+                Ok(HirType::Dictionary(Box::new(element.clone())))
+            }
+            HirExpr::JsonGet(_, _) | HirExpr::JsonIndex(_, _) | HirExpr::JsonKey(_, _) => {
+                Ok(HirType::Json)
+            }
+            HirExpr::JsonSet(_, _, _, element) => Ok(element.clone()),
             HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
             HirExpr::JsonAsString(_) => Ok(HirType::Str),
             HirExpr::JsonAsBool(_) => Ok(HirType::Bool),
@@ -22406,6 +22773,18 @@ impl<'a> FnLowerer<'a> {
         self.lower_unbound_this_error(property, &ty)
     }
 
+    fn typed_dictionary_read(value: HirExpr, element: &HirType) -> Result<HirExpr, String> {
+        match element {
+            HirType::F64 => Ok(HirExpr::JsonAsNumber(Box::new(value))),
+            HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
+            HirType::Bool => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            HirType::Json => Ok(value),
+            other => Err(format!(
+                "dictionary reads do not yet support value type {other:?}"
+            )),
+        }
+    }
+
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
         if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
             let property = member_property_name(&member.prop)
@@ -22648,6 +23027,14 @@ impl<'a> FnLowerer<'a> {
                             result,
                         ))
                     }
+                    HirType::Dictionary(element) => {
+                        let key = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::Str, &key, "dictionary key")?;
+                        Self::typed_dictionary_read(
+                            HirExpr::JsonKey(Box::new(obj), Box::new(key)),
+                            element.as_ref(),
+                        )
+                    }
                     HirType::Json => match computed.expr.as_ref() {
                         Expr::Lit(Lit::Str(key)) => Ok(HirExpr::JsonGet(
                             Box::new(obj),
@@ -22720,6 +23107,10 @@ impl<'a> FnLowerer<'a> {
                         self.lower_union_property_read(obj, elements, prop.sym.as_ref())
                     }
                     HirType::Json => Ok(HirExpr::JsonGet(Box::new(obj), prop.sym.to_string())),
+                    HirType::Dictionary(element) => Self::typed_dictionary_read(
+                        HirExpr::JsonGet(Box::new(obj), prop.sym.to_string()),
+                        element.as_ref(),
+                    ),
                     other => Err(format!(
                         "unsupported property access `.{}` on a value of type {other:?}",
                         prop.sym
@@ -22877,6 +23268,20 @@ impl<'a> FnLowerer<'a> {
                     Err(format!("object has no field `{key}`"))
                 }
             }
+            HirType::Dictionary(element) => {
+                let key = self.lower_expr(&computed.expr)?;
+                self.expect_type(&HirType::Str, &key, "dictionary assignment key")?;
+                if !matches!(
+                    element.as_ref(),
+                    HirType::F64 | HirType::Str | HirType::Bool | HirType::Json
+                ) {
+                    return Err(format!(
+                        "unsupported dictionary value type {:?}",
+                        element.as_ref()
+                    ));
+                }
+                Ok(Target::Dictionary(object, Box::new(key), *element.clone()))
+            }
             _ => Err(format!(
                 "cannot assign through a computed key on a value of type {object_type:?}"
             )),
@@ -22929,6 +23334,18 @@ impl<'a> FnLowerer<'a> {
                                 if fields.iter().any(|(n, _)| n == prop.sym.as_str()) =>
                             {
                                 Ok(Target::Prop(obj, obj_ty.clone(), prop.sym.to_string()))
+                            }
+                            HirType::Dictionary(element)
+                                if matches!(
+                                    element.as_ref(),
+                                    HirType::F64 | HirType::Str | HirType::Bool | HirType::Json
+                                ) =>
+                            {
+                                Ok(Target::Dictionary(
+                                    obj,
+                                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                    *element.clone(),
+                                ))
                             }
                             other => Err(format!(
                                 "cannot assign to `.{}` on a value of type {other:?}",
@@ -23310,11 +23727,28 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((object_name.clone(), object_type.clone(), object));
                     Target::Prop(HirExpr::Var(object_name), object_type, field)
                 }
+                Target::Dictionary(object, key, element) => {
+                    let object_name = format!("__thaw_assign_dictionary_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let object_type = HirType::Dictionary(Box::new(element.clone()));
+                    self.scope.insert(object_name.clone(), object_type.clone());
+                    bindings.push((object_name.clone(), object_type, object));
+
+                    let key_name = format!("__thaw_assign_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(key_name.clone(), HirType::Str);
+                    bindings.push((key_name.clone(), HirType::Str, *key));
+                    Target::Dictionary(
+                        HirExpr::Var(object_name),
+                        Box::new(HirExpr::Var(key_name)),
+                        element,
+                    )
+                }
             };
         }
 
         if assign.op == AssignOp::NullishAssign {
-            let current = target_to_read_expr(&target);
+            let current = target_to_read_expr(&target)?;
             let current_type = self.infer_expr_type(&current)?;
             let (payload, absence_kind) = match current_type.clone() {
                 HirType::Optional(payload) => (payload, 0),
@@ -23400,7 +23834,7 @@ impl<'a> FnLowerer<'a> {
         let value = if assign.op == AssignOp::Assign {
             rhs
         } else if let Some(op) = compound_op(assign.op) {
-            let current = target_to_read_expr(&target);
+            let current = target_to_read_expr(&target)?;
             if assign.op == AssignOp::AddAssign
                 && (self.infer_expr_type(&current)? == HirType::Str
                     || self.infer_expr_type(&rhs)? == HirType::Str)
@@ -23444,6 +23878,7 @@ impl<'a> FnLowerer<'a> {
                 };
                 self.coerce_to_declared(&element, value)?
             }
+            Target::Dictionary(_, _, element) => self.coerce_to_declared(element, value)?,
             Target::Prop(_, other, field) => {
                 return Err(format!(
                     "cannot assign to field `{field}` on value of type {other:?}"
@@ -23867,6 +24302,17 @@ impl<'a> FnLowerer<'a> {
                                     {
                                         Target::Prop(object, object_type, prop.sym.to_string())
                                     }
+                                    HirType::Dictionary(element)
+                                        if element.as_ref() == &HirType::F64 =>
+                                    {
+                                        Target::Dictionary(
+                                            object,
+                                            Box::new(HirExpr::Lit(HirLit::Str(
+                                                prop.sym.to_string(),
+                                            ))),
+                                            HirType::F64,
+                                        )
+                                    }
                                     _ => {
                                         return Err(format!(
                                             "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -23894,6 +24340,15 @@ impl<'a> FnLowerer<'a> {
                                 {
                                     Target::Prop(object, object_type, prop.sym.to_string())
                                 }
+                                HirType::Dictionary(element)
+                                    if element.as_ref() == &HirType::F64 =>
+                                {
+                                    Target::Dictionary(
+                                        object,
+                                        Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                        HirType::F64,
+                                    )
+                                }
                                 _ => {
                                     return Err(format!(
                                 "cannot apply ++/-- to non-number field `.{}` on {object_type:?}",
@@ -23919,7 +24374,7 @@ impl<'a> FnLowerer<'a> {
             UpdateOp::MinusMinus => BinOp::Sub,
         };
         let one = HirExpr::Lit(HirLit::F64(1.0));
-        let current = target_to_read_expr(&target);
+        let current = target_to_read_expr(&target)?;
         self.expect_type(&HirType::F64, &current, "update operand")?;
         if update.prefix {
             let value = HirExpr::BinOp(op, Box::new(current), Box::new(one));
@@ -23949,11 +24404,32 @@ impl<'a> FnLowerer<'a> {
                 bindings.push((object_name.clone(), object_type.clone(), object));
                 Target::Prop(HirExpr::Var(object_name), object_type, field)
             }
+            Target::Dictionary(object, key, element) => {
+                let object_name = format!("__thaw_update_dictionary_{}", self.next_binding);
+                self.next_binding += 1;
+                let object_type = HirType::Dictionary(Box::new(element.clone()));
+                self.scope.insert(object_name.clone(), object_type.clone());
+                bindings.push((object_name.clone(), object_type, object));
+
+                let key_name = format!("__thaw_update_key_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(key_name.clone(), HirType::Str);
+                bindings.push((key_name.clone(), HirType::Str, *key));
+                Target::Dictionary(
+                    HirExpr::Var(object_name),
+                    Box::new(HirExpr::Var(key_name)),
+                    element,
+                )
+            }
         };
         let old_name = format!("__thaw_update_old_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(old_name.clone(), HirType::F64);
-        bindings.push((old_name.clone(), HirType::F64, target_to_read_expr(&target)));
+        bindings.push((
+            old_name.clone(),
+            HirType::F64,
+            target_to_read_expr(&target)?,
+        ));
         let old = HirExpr::Var(old_name);
         let updated = HirExpr::BinOp(op, Box::new(old.clone()), Box::new(one));
         let result = HirExpr::Block(vec![
@@ -29509,5179 +29985,4 @@ impl<'a> FnLowerer<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::HirType;
-
-    fn lower(source: &str) -> HirProgram {
-        let module = thaw_parser::parse_typescript(source).expect("parse error");
-        lower_module(&module).expect("lowering error")
-    }
-
-    #[test]
-    fn lowers_typed_function_with_binary_op() {
-        let program = lower("function add(a: number, b: number): number { return a + b; }");
-        assert_eq!(program.functions.len(), 1);
-        let f = &program.functions[0];
-        assert_eq!(f.name, "add");
-        assert_eq!(
-            f.params,
-            vec![
-                HirParam {
-                    name: "a".into(),
-                    ty: HirType::F64
-                },
-                HirParam {
-                    name: "b".into(),
-                    ty: HirType::F64
-                },
-            ]
-        );
-        assert_eq!(f.ret, HirType::F64);
-        assert_eq!(
-            f.body,
-            vec![HirStmt::Return(Some(HirExpr::BinOp(
-                BinOp::Add,
-                Box::new(HirExpr::Var("a".into())),
-                Box::new(HirExpr::Var("b".into())),
-            )))]
-        );
-    }
-
-    #[test]
-    fn lowers_top_level_bindings_and_exposes_them_to_functions() {
-        let program = lower(
-            r#"
-                const base = 40;
-                let answer: number = base + 2;
-                function read(): number { return answer; }
-                function main(): void { console.log(read()); }
-            "#,
-        );
-        assert_eq!(program.globals.len(), 2);
-        assert_eq!(program.globals[0].name, "base");
-        assert_eq!(program.globals[0].ty, HirType::F64);
-        assert!(!program.globals[0].mutable);
-        assert_eq!(program.globals[1].name, "answer");
-        assert_eq!(program.globals[1].ty, HirType::F64);
-        assert!(program.globals[1].mutable);
-        let read = program
-            .functions
-            .iter()
-            .find(|function| function.name == "read")
-            .unwrap();
-        assert!(matches!(
-            &read.body[0],
-            HirStmt::Return(Some(HirExpr::Var(name))) if name == "answer"
-        ));
-    }
-
-    #[test]
-    fn infers_top_level_initializer_calls_to_forward_functions() {
-        let program = lower(
-            r#"
-                const answer = makeAnswer();
-                function makeAnswer(): number { return 42; }
-                function main(): void { console.log(answer); }
-            "#,
-        );
-        assert_eq!(program.globals[0].ty, HirType::F64);
-        assert!(matches!(program.globals[0].init, HirExpr::Call(_, _)));
-    }
-
-    #[test]
-    fn rejects_top_level_const_reassignment() {
-        let module = thaw_parser::parse_typescript(
-            "const answer = 42; function main(): void { answer = 43; }",
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert_eq!(error, "cannot assign to constant `answer`");
-    }
-
-    #[test]
-    fn validates_satisfies_without_widening_the_expression() {
-        let program = lower(
-            r#"
-                function main(): void {
-                    const value = { answer: 42 } satisfies { answer: number };
-                    console.log(value.answer);
-                }
-            "#,
-        );
-        assert!(matches!(
-            program.functions[0].body[0],
-            HirStmt::Let(_, HirType::Object(ref fields), _)
-                if fields == &vec![("answer".into(), HirType::F64)]
-        ));
-
-        let module = thaw_parser::parse_typescript(
-            r#"function main(): void {
-                const value = { answer: "wrong" } satisfies { answer: number };
-            }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("expected F64"), "{error}");
-    }
-
-    #[test]
-    fn rejects_direct_forward_references_between_top_level_bindings() {
-        let module = thaw_parser::parse_typescript(
-            "const answer: number = base + 2; const base = 40; function main(): void {}",
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("unknown variable `base`"), "{error}");
-    }
-
-    #[test]
-    fn preserves_top_level_executable_statements_in_initializer_order() {
-        let program = lower(
-            r#"
-                let answer = 40;
-                answer = answer + 1;
-                if (true) { answer++; }
-                function main(): void { console.log(answer); }
-            "#,
-        );
-        assert_eq!(program.initializers.len(), 3);
-        assert!(matches!(
-            program.initializers[0],
-            HirInitStep::StoreGlobal(ref name, _) if name == "answer"
-        ));
-        assert!(matches!(
-            program.initializers[1],
-            HirInitStep::Statement(HirStmt::Expr(HirExpr::Assign(ref name, _)))
-                if name == "answer"
-        ));
-        assert!(matches!(
-            program.initializers[2],
-            HirInitStep::Statement(HirStmt::If(_, _, _))
-        ));
-    }
-
-    #[test]
-    fn top_level_calls_constrain_unannotated_function_parameters() {
-        let program = lower(
-            r#"
-                function configure(value): void { console.log(value); }
-                configure(42);
-                function main(): void {}
-            "#,
-        );
-        let configure = program
-            .functions
-            .iter()
-            .find(|function| function.name == "configure")
-            .unwrap();
-        assert_eq!(configure.params[0].ty, HirType::F64);
-    }
-
-    #[test]
-    fn expands_nested_top_level_object_and_array_destructuring() {
-        let program = lower(
-            r#"
-                const { point: { x, y }, values: [first, second] } = {
-                    point: { x: 40, y: 2 },
-                    values: [20, 22]
-                };
-                function main(): void {
-                    console.log(x + y);
-                    console.log(first + second);
-                }
-            "#,
-        );
-        for name in ["x", "y", "first", "second"] {
-            let global = program
-                .globals
-                .iter()
-                .find(|global| global.name == name)
-                .unwrap_or_else(|| panic!("missing destructured global `{name}`"));
-            assert_eq!(global.ty, HirType::F64);
-            assert!(!global.mutable);
-        }
-    }
-
-    #[test]
-    fn expands_top_level_destructuring_defaults_and_array_rest() {
-        let program = lower(
-            r#"
-                interface Config { fallback: number | undefined; }
-                const { fallback = 42 }: Config = { fallback: undefined };
-                const [head, ...tail] = [20, 10, 12];
-                const { answer, ...metadata } = { answer: 42, label: "ready", code: 2 };
-                function main(): void {
-                    console.log(fallback);
-                    console.log(head + tail[0] + tail[1]);
-                    console.log(metadata.label);
-                }
-            "#,
-        );
-        assert_eq!(
-            program
-                .globals
-                .iter()
-                .find(|global| global.name == "fallback")
-                .unwrap()
-                .ty,
-            HirType::F64
-        );
-        assert_eq!(
-            program
-                .globals
-                .iter()
-                .find(|global| global.name == "tail")
-                .unwrap()
-                .ty,
-            HirType::Array(Box::new(HirType::F64))
-        );
-        assert_eq!(
-            program
-                .globals
-                .iter()
-                .find(|global| global.name == "metadata")
-                .unwrap()
-                .ty,
-            HirType::Object(vec![
-                ("label".into(), HirType::Str),
-                ("code".into(), HirType::F64),
-            ])
-        );
-    }
-
-    #[test]
-    fn keeps_top_level_default_temporaries_private_when_exporting() {
-        let module = thaw_parser::parse_typescript(
-            "export const { value = 42 }: { value: number | undefined } = { value: undefined };",
-        )
-        .unwrap();
-        let normalized = normalize_top_level_destructuring(&module).unwrap();
-        let mut exported = Vec::new();
-        let mut private_temporaries = Vec::new();
-        for item in normalized.body {
-            match item {
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
-                    if let Decl::Var(declaration) = export.decl {
-                        for declarator in declaration.decls {
-                            if let Pat::Ident(binding) = declarator.name {
-                                exported.push(binding.id.sym.to_string());
-                            }
-                        }
-                    }
-                }
-                ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => {
-                    for declarator in declaration.decls {
-                        if let Pat::Ident(binding) = declarator.name {
-                            if binding.id.sym.starts_with("__thaw_top_") {
-                                private_temporaries.push(binding.id.sym.to_string());
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(exported, ["value"]);
-        assert!(private_temporaries
-            .iter()
-            .any(|name| name.starts_with("__thaw_top_default_")));
-        assert!(private_temporaries
-            .iter()
-            .any(|name| name.starts_with("__thaw_top_destructure_")));
-    }
-
-    #[test]
-    fn lowers_console_log_of_a_string_literal() {
-        let program = lower(r#"function main(): void { console.log("Hello, Thaw!"); }"#);
-        let f = &program.functions[0];
-        assert_eq!(
-            f.body,
-            vec![HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::Lit(HirLit::Str("Hello, Thaw!".into()))],
-            ))]
-        );
-    }
-
-    #[test]
-    fn rejects_missing_parameter_type_annotation() {
-        let module = thaw_parser::parse_typescript("function f(a) { return a; }").unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("cannot infer parameter"));
-        assert!(error.contains("at bytes"));
-    }
-
-    #[test]
-    fn infers_unannotated_parameters_from_call_sites() {
-        let program = lower(
-            "function identity(value) { return value; } function main(): number { return identity(42); }",
-        );
-        let identity = &program.functions[0];
-        assert_eq!(identity.params[0].ty, HirType::F64);
-        assert_eq!(identity.ret, HirType::F64);
-    }
-
-    #[test]
-    fn propagates_parameter_constraints_through_forward_call_chains() {
-        let program = lower(
-            "function first(value) { return second(value); } function second(value) { return value; } function main(): string { return first(\"ok\"); }",
-        );
-        assert_eq!(program.functions[0].params[0].ty, HirType::Str);
-        assert_eq!(program.functions[0].ret, HirType::Str);
-        assert_eq!(program.functions[1].params[0].ty, HirType::Str);
-        assert_eq!(program.functions[1].ret, HirType::Str);
-    }
-
-    #[test]
-    fn rejects_conflicting_call_site_parameter_constraints() {
-        let module = thaw_parser::parse_typescript(
-            "function identity(value) { return value; } function main(): void { identity(1); identity(\"x\"); }",
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("conflicting inferred types"),
-            "unexpected error: {error}"
-        );
-        assert!(error.contains("at bytes"));
-    }
-
-    #[test]
-    fn structured_diagnostic_resolves_file_line_and_column() {
-        let source = "function identity(value) { return value; }\nfunction main(): void { identity(1); identity(\"x\"); }";
-        let (module, source_map) = thaw_parser::parse_typescript_with_source_map(source).unwrap();
-        let diagnostic =
-            lower_module_with_source_map(&module, &source_map, "example.ts").unwrap_err();
-        assert!(diagnostic.message.contains("conflicting inferred types"));
-        let range = diagnostic
-            .range
-            .as_ref()
-            .expect("diagnostic should carry a range");
-        assert_eq!(range.file, "example.ts");
-        assert_eq!(range.line, 2);
-        assert!(range.column > 1);
-        assert!(diagnostic.to_string().starts_with("example.ts:2:"));
-    }
-
-    #[test]
-    fn monomorphizes_a_generic_function_from_its_call_site() {
-        let program = lower(
-            "function identity<T>(value: T): T { return value; } function main(): string { return identity(\"ok\"); }",
-        );
-        let identity = program
-            .functions
-            .iter()
-            .find(|function| function.name == "identity__thaw_str")
-            .unwrap();
-        assert_eq!(identity.params[0].ty, HirType::Str);
-        assert_eq!(identity.ret, HirType::Str);
-    }
-
-    #[test]
-    fn creates_distinct_native_instantiations_for_polymorphic_uses() {
-        let program = lower(
-            "function identity<T>(value: T): T { return value; } function main(): void { identity(1); identity(2); identity(\"x\"); }",
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| function.name == "identity__thaw_f64")
-                .count(),
-            1
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| function.name == "identity__thaw_str")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn specializes_multiple_generic_arguments_as_one_call_tuple() {
-        let program = lower(
-            r#"
-            interface Pair<T, U> { first: T; second: U; }
-            function chooseFirst<T, U>(first: T, second: U): T { return first; }
-            function makePair<T, U>(first: T, second: U): Pair<T, U> {
-                return { first: first, second: second };
-            }
-            function main(): void {
-                console.log(chooseFirst(1, "ignored"));
-                const pair = makePair("left", 2);
-                console.log(pair.first);
-                console.log(pair.second);
-            }
-            "#,
-        );
-        let choose = program
-            .functions
-            .iter()
-            .find(|function| function.name == "chooseFirst__thaw_f64__str")
-            .expect("chooseFirst<number, string> specialization");
-        assert_eq!(choose.params[0].ty, HirType::F64);
-        assert_eq!(choose.params[1].ty, HirType::Str);
-        assert_eq!(choose.ret, HirType::F64);
-
-        let pair = program
-            .functions
-            .iter()
-            .find(|function| function.name == "makePair__thaw_str__f64")
-            .expect("makePair<string, number> specialization");
-        assert_eq!(
-            pair.ret,
-            HirType::Object(vec![
-                ("first".into(), HirType::Str),
-                ("second".into(), HirType::F64),
-            ])
-        );
-        assert!(
-            matches!(&pair.body[0], HirStmt::Return(Some(HirExpr::ObjectLit(fields))) if
-            fields[0].0 == "first" && fields[1].0 == "second")
-        );
-    }
-
-    #[test]
-    fn deduplicates_multi_argument_instantiations_and_supports_forward_references() {
-        let program = lower(
-            r#"
-            function main(): void {
-                chooseFirst(1, "a");
-                chooseFirst(2, "b");
-                chooseFirst("x", 3);
-            }
-            function chooseFirst<T, U>(first: T, second: U): T { return first; }
-            "#,
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| { function.name == "chooseFirst__thaw_f64__str" })
-                .count(),
-            1
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| { function.name == "chooseFirst__thaw_str__f64" })
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn enforces_repeated_generic_type_constraints_across_arguments() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            function same<T>(left: T, right: T): T { return left; }
-            function main(): void { same(1, "wrong"); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("conflicting call-site types"), "{error}");
-        assert!(error.contains("F64") && error.contains("Str"), "{error}");
-    }
-
-    #[test]
-    fn enforces_declared_generic_function_constraints() {
-        let primitive = thaw_parser::parse_typescript(
-            r#"
-            function numeric<T extends number>(value: T): T { return value; }
-            function main(): void { numeric("wrong"); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&primitive).unwrap_err();
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-
-        let dependent = thaw_parser::parse_typescript(
-            r#"
-            function choose<T, U extends T>(left: T, right: U): U { return right; }
-            function main(): void { choose(1, "wrong"); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&dependent).unwrap_err();
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-
-        let structural = thaw_parser::parse_typescript(
-            r#"
-            function named<T extends { name: string }>(value: T): T { return value; }
-            function main(): void { named({ value: 1 }); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&structural).unwrap_err();
-        assert!(
-            error.contains("does not satisfy constraint Object"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn validates_generic_function_defaults_against_constraints() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            function invalid<T extends number = string>(): T { return "wrong"; }
-            function main(): void { invalid(); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-    }
-
-    #[test]
-    fn rejects_required_type_parameters_after_defaults() {
-        for (source, kind) in [
-            (
-                "interface Invalid<T = string, U> { first: T; second: U } function main(): void {}",
-                "generic interface",
-            ),
-            (
-                "type Invalid<T = string, U> = { first: T; second: U }; function main(): void {}",
-                "generic type alias",
-            ),
-            (
-                "function invalid<T = string, U>(value: U): U { return value; } function main(): void { invalid(1); }",
-                "generic function",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(kind), "{error}");
-            assert!(error.contains("required type parameter `U`"), "{error}");
-        }
-    }
-
-    #[test]
-    fn validates_explicit_generic_function_type_arguments() {
-        for (source, expected) in [
-            (
-                "function id<T>(value: T): T { return value; } function main(): void { id<string>(1); }",
-                "explicit type is Str",
-            ),
-            (
-                "function pair<T, U>(left: T, right: U): T { return left; } function main(): void { pair<number>(1, 2); }",
-                "expects 2 explicit type argument",
-            ),
-            (
-                "function numeric<T extends number>(value: T): T { return value; } function main(): void { numeric<string>(\"x\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "function plain(value: number): number { return value; } function main(): void { plain<number>(1); }",
-                "non-generic function `plain`",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn validates_contextually_specialized_generic_callbacks() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            function numeric<T extends number>(value: T): T { return value; }
-            function main(): void { ["wrong"].map(numeric); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("cannot specialize generic callback `numeric`"),
-            "{error}"
-        );
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-    }
-
-    #[test]
-    fn validates_contextual_generic_arrow_constraints() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            function main(): void {
-                ["wrong"].map(<T extends number>(value: T): T => value);
-            }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-    }
-
-    #[test]
-    fn validates_generic_instantiation_expressions() {
-        for (source, expected) in [
-            (
-                "function numeric<T extends number>(value: T): T { return value; } function main(): void { const bad = numeric<string>; }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "function plain(value: number): number { return value; } function main(): void { const bad = plain<number>; }",
-                "non-generic function `plain`",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn validates_annotated_generic_arrow_constraints() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            function main(): void {
-                const invalid: (value: string) => string =
-                    <T extends number>(value: T): T => value;
-            }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-    }
-
-    #[test]
-    fn validates_local_generic_arrow_calls() {
-        for (source, expected) in [
-            (
-                "function main(): void { const numeric = <T extends number>(value: T): T => value; numeric(\"wrong\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "function main(): void { const pair = <T, U>(left: T, right: U): T => left; pair(1); }",
-                "expects 2 argument(s), got 1",
-            ),
-            (
-                "function main(): void { const identity = <T>(value: T): T => value; identity<string>(1); }",
-                "explicit type is Str",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn validates_user_function_generic_callback_constraints() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            function apply(callback: (value: string) => string, value: string): string {
-                return callback(value);
-            }
-            function numeric<T extends number>(value: T): T { return value; }
-            function main(): void { apply(numeric, "wrong"); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("cannot specialize generic callback `numeric`"),
-            "{error}"
-        );
-        assert!(error.contains("does not satisfy constraint F64"), "{error}");
-    }
-
-    #[test]
-    fn validates_generic_function_type_alias_assignments() {
-        for (source, expected) in [
-            (
-                "type Identity = <T>(value: T) => T; function main(): void { const bad: Identity = <U>(value: U): string => String(value); }",
-                "incompatible with function type alias `Identity`",
-            ),
-            (
-                "type Numeric = <T extends number>(value: T) => T; function main(): void { const bad: Numeric = <U extends string>(value: U): U => value; }",
-                "constraints do not match function type alias `Numeric`",
-            ),
-            (
-                "type Identity = <T>(value: T) => T; function bad<T>(value: T): string { return \"wrong\"; } function main(): void { const invalid: Identity = bad; }",
-                "incompatible with function type alias `Identity`",
-            ),
-            (
-                "type Identity = <T>(value: T) => T; type Stringify = <T>(value: T) => string; function main(): void { const identity: Identity = <T>(value: T): T => value; const invalid: Stringify = identity; }",
-                "incompatible with function type alias `Stringify`",
-            ),
-            (
-                "type Forward = Stringify; type Stringify = <T>(value: T) => string; function main(): void { const invalid: Forward = <T>(value: T): T => value; }",
-                "incompatible with function type alias `Forward`",
-            ),
-            (
-                "type Stringify = { <T>(value: T): string }; function main(): void { const invalid: Stringify = <T>(value: T): T => value; }",
-                "incompatible with function type alias `Stringify`",
-            ),
-            (
-                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = function<T>(value: T): string { return String(value); }; }",
-                "incompatible with function type alias `Identity`",
-            ),
-            (
-                "type Factory = <T = string>() => T; function main(): void { const invalid: Factory = <T = number>(): T => 1; }",
-                "defaults do not match function type alias `Factory`",
-            ),
-            (
-                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => String(value); }",
-                "incompatible with function type alias `Identity`",
-            ),
-            (
-                "type Stringify = <T>(value: T) => string; function main(): void { const invalid: Stringify = <T>(value: T) => 1; }",
-                "incompatible with function type alias `Stringify`",
-            ),
-            (
-                "type Nullify = <T>(value: T) => null; function main(): void { const invalid: Nullify = <T>(value: T) => undefined; }",
-                "incompatible with function type alias `Nullify`",
-            ),
-            (
-                "type Identity = <T>(value: T) => T; function main(): void { const invalid: Identity = <T>(value: T) => \"value=\" + String(value); }",
-                "incompatible with function type alias `Identity`",
-            ),
-            (
-                "type Predicate = <T>(value: T, flag: boolean) => boolean; function main(): void { const invalid: Predicate = <T>(value: T, flag: boolean) => flag && \"wrong\"; }",
-                "needs an explicit return type",
-            ),
-            (
-                "type OptionalIdentity = <T>(value?: T) => T; function main(): void { const invalid: OptionalIdentity = <T>(value: T): T => value; }",
-                "optional parameters do not match function type alias `OptionalIdentity`",
-            ),
-            (
-                "type Choose = <T, U>(left: T, right: U) => T; function main(): void { const invalid: Choose = function<T, U>(left: T, right: U) { if (true) return left; return right; }; }",
-                "needs an explicit return type",
-            ),
-            (
-                "type Identity = <T>(value: T) => T; async function asynchronous<T>(value: T): Promise<T> { return value; } function main(): void { const invalid: Identity = asynchronous; }",
-                "incompatible with function type alias `Identity`",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn validates_generic_callable_interface_assignments() {
-        for (source, name) in [
-            (
-                "interface Identity { <T>(value: T): T; } function main(): void { const invalid: Identity = <U>(value: U): string => \"wrong\"; }",
-                "Identity",
-            ),
-            (
-                "interface Derived extends Middle {} interface Middle extends Identity {} interface Identity { <T>(value: T): T; } function main(): void { const invalid: Derived = <U>(value: U): string => \"wrong\"; }",
-                "Derived",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(
-                error.contains(&format!(
-                    "incompatible with function type alias `{name}`"
-                )),
-                "{error}"
-            );
-        }
-    }
-
-    #[test]
-    fn enforces_repeated_generic_constraints_inside_arrays_and_interfaces() {
-        let array = thaw_parser::parse_typescript(
-            r#"
-            function sameArrays<T>(left: T[], right: T[]): T[] { return left; }
-            function main(): void { sameArrays([1], [2]); }
-            "#,
-        )
-        .unwrap();
-        assert!(lower_module(&array).is_ok());
-
-        let pair = thaw_parser::parse_typescript(
-            r#"
-            interface Pair<T, U> { first: T; second: U; }
-            function diagonal<T>(value: Pair<T, T>): T { return value.first; }
-            function main(): void { diagonal({ first: 1, second: "wrong" }); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&pair).unwrap_err();
-        assert!(error.contains("conflicting call-site types"), "{error}");
-    }
-
-    #[test]
-    fn diagnoses_uninferable_and_unsupported_generic_layouts() {
-        let uninferable = thaw_parser::parse_typescript(
-            r#"
-            function phantom<T, U>(value: T): T { return value; }
-            function main(): void { phantom(1); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&uninferable).unwrap_err();
-        assert!(
-            error.contains("cannot infer generic type parameter `U`"),
-            "{error}"
-        );
-
-        let unsupported = thaw_parser::parse_typescript(
-            r#"
-            function identity<T>(value: T): T { return value; }
-            function main(): void { identity(JSON.parse("null")); }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&unsupported).unwrap_err();
-        assert!(
-            error.contains("cannot specialize for native layout Json"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn propagates_specializations_through_generic_function_calls() {
-        let program = lower(
-            r#"
-            function forward<T, U>(first: T, second: U): T {
-                return chooseFirst(first, second);
-            }
-            function chooseFirst<T, U>(first: T, second: U): T {
-                return first;
-            }
-            function main(): void { console.log(forward(42, "unused")); }
-            "#,
-        );
-        let forward = program
-            .functions
-            .iter()
-            .find(|function| function.name == "forward__thaw_f64__str")
-            .expect("outer specialization");
-        assert!(format!("{:?}", forward.body).contains("chooseFirst__thaw_f64__str"));
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| function.name == "chooseFirst__thaw_f64__str")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn specializes_type_variables_nested_in_arrays_and_objects() {
-        let program = lower(
-            r#"
-            interface Box<T> { value: T; }
-            interface Wrapper<T> { boxed: Box<T>; }
-            function sameArray<T>(value: T[]): T[] { return value; }
-            function sameBox<T>(value: { value: T }): { value: T } { return value; }
-            function namedBox<T>(value: Box<T>): Box<T> { return value; }
-            function wrapped<T>(value: Wrapper<T>): Wrapper<T> { return value; }
-            function main(): void {
-                sameArray([1, 2]);
-                sameBox({ value: 3 });
-                namedBox({ value: 4 });
-                wrapped({ boxed: { value: 5 } });
-            }
-            "#,
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "sameArray__thaw_array_f64"));
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "sameBox__thaw_object_value_f64"));
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "namedBox__thaw_object_value_f64"));
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| { function.name == "wrapped__thaw_object_boxed_object_value_f64" }));
-    }
-
-    #[test]
-    fn specializes_named_structures_with_multiple_type_parameters() {
-        let program = lower(
-            r#"
-            interface Pair<T, U> { first: T; second: U; }
-            function samePair<T, U>(value: Pair<T, U>): Pair<T, U> { return value; }
-            function main(): void { samePair({ first: 1, second: "two" }); }
-            "#,
-        );
-        let pair = program
-            .functions
-            .iter()
-            .find(|function| function.name == "samePair__thaw_object_first_f64_second_str")
-            .expect("Pair<number, string> specialization");
-        assert_eq!(
-            pair.params[0].ty,
-            HirType::Object(vec![
-                ("first".into(), HirType::F64),
-                ("second".into(), HirType::Str),
-            ])
-        );
-        assert_eq!(pair.ret, pair.params[0].ty);
-    }
-
-    #[test]
-    fn specializes_generic_property_projections() {
-        let program = lower(
-            r#"
-            interface Pair<T, U> { first: T; second: U; }
-            interface Box<T> { value: T; }
-            interface Wrapper<T> { boxed: Box<T>; }
-            function first<T, U>(value: Pair<T, U>): T { return value.first; }
-            function unbox<T>(value: Wrapper<T>): T { return value.boxed.value; }
-            function main(): void {
-                const n = first({ first: 1, second: "two" });
-                const deep = unbox({ boxed: { value: 3 } });
-            }
-            "#,
-        );
-        let first = program
-            .functions
-            .iter()
-            .find(|function| function.name == "first__thaw_object_first_f64_second_str")
-            .unwrap();
-        assert_eq!(first.ret, HirType::F64);
-        let unbox = program
-            .functions
-            .iter()
-            .find(|function| function.name == "unbox__thaw_object_boxed_object_value_f64")
-            .unwrap();
-        assert_eq!(unbox.ret, HirType::F64);
-    }
-
-    #[test]
-    fn infers_unannotated_function_return_types_through_forward_calls() {
-        let program =
-            lower("function first() { return second(); } function second() { return 42; }");
-        assert_eq!(program.functions[0].ret, HirType::F64);
-        assert_eq!(program.functions[1].ret, HirType::F64);
-    }
-
-    #[test]
-    fn infers_void_for_an_unannotated_function_without_value_returns() {
-        let program = lower("function log() { console.log(1); }");
-        assert_eq!(program.functions[0].ret, HirType::Void);
-    }
-
-    #[test]
-    fn infers_void_for_expression_bodied_console_log_arrow() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                await new Promise<void>((resolve, reject) => resolve())
-                    .finally(() => console.log("cleanup"));
-            }"#,
-        );
-        let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
-            panic!("expected awaited finally chain");
-        };
-        let HirExpr::PromiseFinally(_, callback, HirType::Void, HirType::Void) = inner.as_ref()
-        else {
-            panic!("expected void finally callback");
-        };
-        assert!(matches!(
-            callback.as_ref(),
-            HirExpr::Lambda(_, _, HirType::Void, _)
-        ));
-    }
-
-    #[test]
-    fn rejects_incompatible_return_types() {
-        let module = thaw_parser::parse_typescript(
-            "function choose(flag: boolean) { if (flag) return 1; return \"no\"; }",
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("incompatible types"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn rejects_a_wrong_call_argument_type_and_arity() {
-        let wrong_type = thaw_parser::parse_typescript(
-            "function square(value: number): number { return value * value; } function main(): number { return square(\"x\"); }",
-        )
-        .unwrap();
-        let error = lower_module(&wrong_type).unwrap_err();
-        assert!(error.contains("argument 1"), "unexpected error: {error}");
-
-        let wrong_arity = thaw_parser::parse_typescript(
-            "function square(value: number): number { return value * value; } function main(): number { return square(); }",
-        )
-        .unwrap();
-        let error = lower_module(&wrong_arity).unwrap_err();
-        assert!(
-            error.contains("expects 1 argument"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn lowers_typed_unary_and_extended_comparison_operators() {
-        let program = lower(
-            r#"function main(): void {
-                console.log(-1);
-                console.log(+2);
-                console.log(!false);
-                console.log(1 <= 2);
-                console.log(2 >= 2);
-                console.log("a" !== "b");
-            }"#,
-        );
-        assert_eq!(program.functions[0].body.len(), 6);
-        for statement in &program.functions[0].body {
-            let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
-                panic!("expected console call");
-            };
-            assert_eq!(arguments.len(), 1);
-            assert!(matches!(
-                arguments[0],
-                HirExpr::Call(..) | HirExpr::BinOp(..) | HirExpr::Lit(..)
-            ));
-        }
-    }
-
-    #[test]
-    fn lowers_remainder_exponentiation_and_compound_assignments() {
-        let program = lower(
-            r#"function main(): void {
-                let value = 10;
-                console.log(value % 3);
-                console.log(2 ** 3);
-                value %= 4;
-                value **= 3;
-                console.log(value);
-            }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[1],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::BinOp(BinOp::Mod, _, _))
-        ));
-        assert!(matches!(
-            &program.functions[0].body[2],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::BinOp(BinOp::Exp, _, _))
-        ));
-        assert!(matches!(
-            &program.functions[0].body[3],
-            HirStmt::Expr(HirExpr::Assign(_, value))
-                if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Mod, _, _))
-        ));
-        assert!(matches!(
-            &program.functions[0].body[4],
-            HirStmt::Expr(HirExpr::Assign(_, value))
-                if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Exp, _, _))
-        ));
-    }
-
-    #[test]
-    fn lowers_bitwise_and_shift_operators() {
-        let program = lower(
-            r#"function main(): void {
-                let value = 5;
-                console.log(value | 2);
-                console.log(value ^ 1);
-                console.log(value & 3);
-                value <<= 2;
-                value >>= 1;
-                value >>>= 1;
-            }"#,
-        );
-        let expected = [BinOp::BitOr, BinOp::BitXor, BinOp::BitAnd];
-        for (statement, expected) in program.functions[0].body[1..4].iter().zip(expected) {
-            assert!(matches!(
-                statement,
-                HirStmt::Expr(HirExpr::Call(_, args))
-                    if matches!(&args[0], HirExpr::BinOp(op, _, _) if *op == expected)
-            ));
-        }
-        let expected = [BinOp::LShift, BinOp::RShift, BinOp::ZeroFillRShift];
-        for (statement, expected) in program.functions[0].body[4..7].iter().zip(expected) {
-            assert!(matches!(
-                statement,
-                HirStmt::Expr(HirExpr::Assign(_, value))
-                    if matches!(value.as_ref(), HirExpr::BinOp(op, _, _) if *op == expected)
-            ));
-        }
-    }
-
-    #[test]
-    fn lowers_bitwise_not() {
-        let program = lower(
-            r#"function main(): void {
-                console.log(~5);
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::BinOp(BinOp::BitXor, _, rhs)
-                    if matches!(rhs.as_ref(), HirExpr::Lit(HirLit::F64(value)) if *value == -1.0))
-        ));
-    }
-
-    #[test]
-    fn lowers_typeof_to_an_evaluating_typed_closure() {
-        let program = lower(
-            r#"function value(): number { return 1; }
-            function callback(value: number): number { return value; }
-            function main(): void {
-                console.log(typeof value());
-                console.log(typeof callback);
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::Call(lambda, values)
-                    if matches!(lambda.as_ref(), HirExpr::Lambda(_, params, HirType::Str, body)
-                        if params.len() == 1
-                            && matches!(body.as_ref(), HirExpr::Lit(HirLit::Str(value)) if value == "number"))
-                        && matches!(values.as_slice(), [HirExpr::Call(_, _)]))
-        ));
-        assert!(matches!(
-            &main.body[1],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::Lit(HirLit::Str(value)) if value == "function")
-        ));
-    }
-
-    #[test]
-    fn distinguishes_prefix_and_postfix_update_values() {
-        let program = lower(
-            r#"function main(): void {
-                let value = 1;
-                const old = value++;
-                const current = ++value;
-                let values = [4];
-                const element = values[0]--;
-            }"#,
-        );
-        let main = &program.functions[0];
-        assert!(matches!(
-            &main.body[1],
-            HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
-        ));
-        assert!(matches!(
-            &main.body[2],
-            HirStmt::Let(_, HirType::F64, HirExpr::Assign(_, value))
-                if matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
-        ));
-        assert!(matches!(
-            &main.body[4],
-            HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
-        ));
-    }
-
-    #[test]
-    fn lowers_number_field_update_expressions() {
-        let program = lower(
-            r#"function main(): void {
-                let point = { value: 2 };
-                const old = point.value++;
-                const current = --point.value;
-            }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[1],
-            HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
-        ));
-        assert!(matches!(
-            &program.functions[0].body[2],
-            HirStmt::Let(_, HirType::F64, HirExpr::PropAssign(_, _, field, _)) if field == "value"
-        ));
-    }
-
-    #[test]
-    fn binds_compound_assignment_references_once() {
-        let program = lower(
-            r#"function values(): number[] { return [1]; }
-            function index(): number { return 0; }
-            function point(): { value: number } { return { value: 1 }; }
-            function main(): void {
-                values()[index()] += 2;
-                point().value *= 3;
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(main
-            .body
-            .iter()
-            .all(|statement| matches!(statement, HirStmt::Expr(HirExpr::Call(_, _)))));
-    }
-
-    #[test]
-    fn lowers_static_computed_object_reads_and_targets() {
-        let program = lower(
-            r#"function main(): void {
-                let point = { value: 1 };
-                console.log(point["value"]);
-                point["value"] = 2;
-                point["value"] += 3;
-                point["value"]++;
-            }"#,
-        );
-        let body = &program.functions[0].body;
-        assert!(matches!(
-            &body[1],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::PropAccess(_, _, field) if field == "value")
-        ));
-        assert!(matches!(
-            &body[2],
-            HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "value"
-        ));
-        assert!(matches!(&body[3], HirStmt::Expr(HirExpr::Call(_, _))));
-        assert!(matches!(&body[4], HirStmt::Expr(HirExpr::Call(_, _))));
-    }
-
-    #[test]
-    fn dynamic_computed_object_reads_form_heterogeneous_unions() {
-        let program = lower(
-            r#"function read(key: string): number | string | null | undefined {
-                const mixed = { value: 1, label: "one", empty: null, absent: undefined };
-                return mixed[key];
-            }"#,
-        );
-        let HirStmt::Return(Some(HirExpr::DynamicPropAccess(_, _, fields, result))) =
-            &program.functions[0].body[1]
-        else {
-            panic!("expected a dynamic property union return");
-        };
-        assert_eq!(fields[0].1, HirType::F64);
-        assert_eq!(fields[1].1, HirType::Str);
-        assert_eq!(
-            result,
-            &HirType::Union(vec![
-                HirType::F64,
-                HirType::Str,
-                HirType::Null,
-                HirType::Undefined
-            ])
-        );
-    }
-
-    #[test]
-    fn dynamic_computed_object_reads_flatten_tagged_heterogeneous_fields() {
-        let program = lower(
-            r#"function read(
-                mixed: { value: number | undefined; label: string },
-                key: string
-            ): void { console.log(mixed[key]); }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(
-                    &args[0],
-                    HirExpr::DynamicPropAccess(
-                        _, _, _, HirType::Union(members)
-                    ) if members == &[HirType::F64, HirType::Undefined, HirType::Str]
-                )
-        ));
-    }
-
-    #[test]
-    fn dynamic_computed_object_reads_flatten_uniform_tagged_fields() {
-        let program = lower(
-            r#"function read(
-                optional: { a: number | undefined; b: number | undefined },
-                nullable: { a: number | null; b: number | null },
-                nullish: { a: number | null | undefined; b: number | null | undefined },
-                key: string
-            ): void {
-                console.log(optional[key]);
-                console.log(nullable[key]);
-                console.log(nullish[key]);
-            }"#,
-        );
-        let body = &program.functions[0].body;
-        assert!(matches!(
-            &body[0],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::DynamicPropAccess(_, _, _, HirType::Optional(inner)) if inner.as_ref() == &HirType::F64)
-        ));
-        assert!(matches!(
-            &body[1],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::DynamicPropAccess(_, _, _, HirType::Nullish(inner)) if inner.as_ref() == &HirType::F64)
-        ));
-        assert!(matches!(
-            &body[2],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::DynamicPropAccess(_, _, _, HirType::Nullish(inner)) if inner.as_ref() == &HirType::F64)
-        ));
-    }
-
-    #[test]
-    fn lowers_numeric_and_string_enum_members_declared_after_functions() {
-        let program = lower(
-            r#"function value(direction: Direction): number {
-                return direction + Direction.Next;
-            }
-            function main(): void {
-                console.log(value(Direction.None));
-                console.log(Direction["Mask"]);
-                console.log(Label.Alias);
-            }
-            enum Direction { None, Up = 4, Next = Up + 2, Mask = 1 << 3 }
-            enum Label { Ready = "ready", Alias = Ready }"#,
-        );
-        let value = program
-            .functions
-            .iter()
-            .find(|function| function.name == "value")
-            .unwrap();
-        assert_eq!(value.params[0].ty, HirType::F64);
-        assert!(matches!(
-            &value.body[0],
-            HirStmt::Return(Some(HirExpr::BinOp(BinOp::Add, _, right)))
-                if matches!(right.as_ref(), HirExpr::Lit(HirLit::F64(6.0)))
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_enum_native_layouts_and_members() {
-        for (source, expected) in [
-            (
-                r#"enum Mixed { Number = 1, Text = "text" }
-                   function main(): void {}"#,
-                "mixes numeric and string members",
-            ),
-            (
-                r#"enum Text { First = "first", Second }
-                   function main(): void {}"#,
-                "needs an initializer after a string member",
-            ),
-            (
-                r#"enum Value { Present = 1 }
-                   function main(): void { console.log(Value.Missing); }"#,
-                "has no member `Missing`",
-            ),
-            (
-                r#"enum Text { Present = "present" }
-                   function main(): void { console.log(Text[0]); }"#,
-                "does not support numeric reverse lookup",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn lowers_runtime_numeric_enum_reverse_lookup_as_optional_string() {
-        let program = lower(
-            r#"enum Status { Idle, Ready = 4, Alias = 4 }
-               function read(index: number): string | undefined {
-                   return Status[index];
-               }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Return(Some(HirExpr::EnumReverseLookup(index, entries)))
-                if matches!(index.as_ref(), HirExpr::Var(name) if name == "index")
-                    && entries == &vec![(0.0, "Idle".into()), (4.0, "Alias".into())]
-        ));
-    }
-
-    #[test]
-    fn merges_compatible_enum_declarations_in_source_order() {
-        let program = lower(
-            r#"enum Status {}
-               enum Status { First }
-               enum Status { Second }
-               enum Status { Third = 2 }
-               function read(index: number): string | undefined {
-                   return Status[index];
-               }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Return(Some(HirExpr::EnumReverseLookup(_, entries)))
-                if entries == &vec![(0.0, "Second".into()), (2.0, "Third".into())]
-        ));
-
-        for (source, expected) in [
-            (
-                r#"enum Value { First = 1 }
-                   enum Value { First = 2 }
-                   function main(): void {}"#,
-                "duplicate member `First`",
-            ),
-            (
-                r#"enum Value { First = 1 }
-                   enum Value { Text = "text" }
-                   function main(): void {}"#,
-                "mixes numeric and string members",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn normalizes_same_layout_literal_unions_and_intersections() {
-        let program = lower(
-            r#"function text(value: "start" | "stop"): string { return value; }
-               function numberValue(value: 1 | 2 | number): number { return value; }
-               function flag(value: true | false): boolean { return value; }
-               function intersection(value: string & "fixed"): string { return value; }
-               function objectValue(value: { kind: "ready" | "waiting" }): string {
-                   return value.kind;
-               }
-               function values(input: ("a" | "b")[]): string[] { return input; }"#,
-        );
-        assert_eq!(program.functions[0].params[0].ty, HirType::Str);
-        assert_eq!(program.functions[1].params[0].ty, HirType::F64);
-        assert_eq!(program.functions[2].params[0].ty, HirType::Bool);
-        assert_eq!(program.functions[3].params[0].ty, HirType::Str);
-        assert!(matches!(
-            &program.functions[4].params[0].ty,
-            HirType::Object(fields) if fields == &vec![("kind".into(), HirType::Str)]
-        ));
-        assert_eq!(
-            program.functions[5].params[0].ty,
-            HirType::Array(Box::new(HirType::Str))
-        );
-
-        let module =
-            thaw_parser::parse_typescript(r#"function mixed(value: string | number): void {}"#)
-                .unwrap();
-        let mixed = lower_module(&module).unwrap();
-        assert_eq!(
-            mixed.functions[0].params[0].ty,
-            HirType::Union(vec![HirType::Str, HirType::F64])
-        );
-    }
-
-    #[test]
-    fn lowers_heterogeneous_unions_to_tagged_injections() {
-        let program = lower(
-            r#"function identity(value: string | number): string | number { return value; }
-               function kind(value: string | number): string { return typeof value; }
-               function main(): void {
-                   const first: string | number = "text";
-                   const second: string | number = 2;
-                   kind(identity(first));
-                   kind(identity(second));
-               }"#,
-        );
-        let union = HirType::Union(vec![HirType::Str, HirType::F64]);
-        assert_eq!(program.functions[0].params[0].ty, union);
-        assert_eq!(program.functions[0].ret, union);
-        assert!(matches!(
-            &program.functions[2].body[0],
-            HirStmt::Let(_, ty, HirExpr::UnionInject(value, 0, members))
-                if ty == &union
-                    && members == &vec![HirType::Str, HirType::F64]
-                    && matches!(value.as_ref(), HirExpr::Lit(HirLit::Str(_)))
-        ));
-        assert!(matches!(
-            &program.functions[2].body[1],
-            HirStmt::Let(_, ty, HirExpr::UnionInject(value, 1, members))
-                if ty == &union
-                    && members == &vec![HirType::Str, HirType::F64]
-                    && matches!(value.as_ref(), HirExpr::Lit(HirLit::F64(2.0)))
-        ));
-    }
-
-    #[test]
-    fn lowers_common_object_union_properties_and_discriminant_type_narrowing() {
-        let program = lower(
-            r#"type Result =
-                   { kind: number; value: number; shared: string } |
-                   { kind: string; value: string; shared: string };
-               function describe(result: Result): string {
-                   console.log(result.shared);
-                   if (typeof result.kind === "number") {
-                       return String(result.value + 1);
-                   }
-                   return result.value + "!";
-               }"#,
-        );
-        let function = &program.functions[0];
-        assert!(matches!(
-            &function.body[0],
-            HirStmt::Expr(HirExpr::Call(callee, arguments))
-                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "console.log")
-                && matches!(arguments.as_slice(), [HirExpr::Call(lambda, _)]
-                    if matches!(lambda.as_ref(), HirExpr::Lambda(_, _, HirType::Str, _)))
-        ));
-        let HirStmt::If(_, then_body, _) = &function.body[1] else {
-            panic!("expected the discriminant guard")
-        };
-        assert!(matches!(
-            &then_body[0],
-            HirStmt::Return(Some(HirExpr::Call(_, arguments)))
-                if matches!(arguments.as_slice(), [HirExpr::BinOp(BinOp::Add, value, _) ]
-                    if matches!(value.as_ref(), HirExpr::PropAccess(object, _, field)
-                        if field == "value" && matches!(object.as_ref(), HirExpr::UnionValue(_, 0, _))))
-        ));
-        assert!(matches!(
-            &function.body[2],
-            HirStmt::Return(Some(HirExpr::Call(_, arguments)))
-                if matches!(arguments.as_slice(), [HirExpr::PropAccess(object, _, field), _]
-                    if field == "value" && matches!(object.as_ref(), HirExpr::UnionValue(_, 1, _)))
-        ));
-    }
-
-    #[test]
-    fn rejects_properties_missing_from_an_object_union_member() {
-        let module = thaw_parser::parse_typescript(
-            r#"function read(value: { common: number } | { other: number }): number {
-                   return value.common;
-               }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("a union member has no such field"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn flattens_tagged_fields_read_from_object_unions() {
-        let program = lower(
-            r#"type Mixed =
-                   { kind: number; value: number | undefined } |
-                   { kind: string; value: string | null } |
-                   { kind: boolean; value: boolean | null | undefined };
-               function show(value: Mixed): void { console.log(value.value); }"#,
-        );
-        let HirStmt::Expr(HirExpr::Call(_, arguments)) = &program.functions[0].body[0] else {
-            panic!("expected console.log call")
-        };
-        let [HirExpr::Call(adapter, _)] = arguments.as_slice() else {
-            panic!("expected union property adapter")
-        };
-        assert!(matches!(
-            adapter.as_ref(),
-            HirExpr::Lambda(
-                _,
-                _,
-                HirType::Union(members),
-                _
-            ) if members == &vec![
-                HirType::F64,
-                HirType::Undefined,
-                HirType::Str,
-                HirType::Null,
-                HirType::Bool,
-            ]
-        ));
-    }
-
-    #[test]
-    fn narrows_object_unions_by_literal_discriminants() {
-        let program = lower(
-            r#"type Result =
-                   { kind: "success"; value: number } |
-                   { kind: "failure"; value: string } |
-                   { kind: true; value: boolean };
-               function describe(result: Result): string {
-                   if (result.kind === "success") return String(result.value + 1);
-                   if ("failure" === result.kind) return result.value + "!";
-                   return result.value ? "true" : "false";
-               }"#,
-        );
-        let function = &program.functions[0];
-        for (statement, expected_index) in function.body[..2].iter().zip([0, 1]) {
-            let HirStmt::If(_, branch, _) = statement else {
-                panic!("expected discriminant branch")
-            };
-            assert!(format!("{branch:?}")
-                .contains(&format!("UnionValue(Var(\"result\"), {expected_index},")));
-        }
-        assert!(format!("{:?}", function.body[2]).contains("UnionValue(Var(\"result\"), 2,"));
-    }
-
-    #[test]
-    fn correlates_destructured_discriminants_with_sibling_unions() {
-        let program = lower(
-            r#"type Result =
-                   { kind: "success"; value: number; detail: number } |
-                   { kind: "failure"; value: string; detail: string };
-               function describe(result: Result): string {
-                   const { kind: tag, value, detail } = result;
-                   if (tag === "success" && value > 0) {
-                       return String(value + detail);
-                   }
-                   if ("failure" === tag) return value + detail;
-                   return "zero";
-               }"#,
-        );
-        let body = format!("{:?}", program.functions[0].body);
-        assert!(body.contains("UnionValue(Var(\"value\"), 0,"));
-        assert!(body.contains("UnionValue(Var(\"detail\"), 0,"));
-        assert!(body.contains("UnionValue(Var(\"value\"), 1,"));
-        assert!(body.contains("UnionValue(Var(\"detail\"), 1,"));
-    }
-
-    #[test]
-    fn resolves_forward_type_aliases_and_rejects_cycles() {
-        let program = lower(
-            r#"type Later = Base & { count: number };
-               type Base = { name: string };
-               type Choice = string | number;
-               function choose(value: Choice): Later {
-                   return { count: 2, name: "alias" };
-               }"#,
-        );
-        assert_eq!(
-            program.functions[0].params[0].ty,
-            HirType::Union(vec![HirType::Str, HirType::F64])
-        );
-        assert_eq!(
-            program.functions[0].ret,
-            HirType::Object(vec![
-                ("name".into(), HirType::Str),
-                ("count".into(), HirType::F64),
-            ])
-        );
-
-        let module = thaw_parser::parse_typescript("type A = B; type B = A;").unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("type declaration cycle"));
-
-        let mixed = lower(
-            r#"interface Item { label: Label; count: Count }
-               type Count = number;
-               type Label = string;
-               function item(value: Item): string { return value.label; }"#,
-        );
-        assert_eq!(
-            mixed.functions[0].params[0].ty,
-            HirType::Object(vec![
-                ("label".into(), HirType::Str),
-                ("count".into(), HirType::F64),
-            ])
-        );
-
-        let module =
-            thaw_parser::parse_typescript("type Link = Node; interface Node { next: Link; }")
-                .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("self-referential"));
-    }
-
-    #[test]
-    fn validates_generic_type_alias_instantiations() {
-        let module = thaw_parser::parse_typescript(
-            "type Boxed<T> = { value: T }; function bad(value: Boxed<number, string>): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("expects 1 type argument(s), got 2"));
-
-        let module = thaw_parser::parse_typescript(
-            "type Loop<T> = Loop<T>; function bad(value: Loop<number>): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("generic type alias `Loop` is (indirectly) self-referential"));
-
-        let module = thaw_parser::parse_typescript(
-            "type Numeric<T extends number> = { value: T }; function bad(value: Numeric<string>): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("does not satisfy constraint F64"));
-
-        let module = thaw_parser::parse_typescript(
-            "type Missing = NonNullable<null | undefined>; function bad(value: Missing): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("NonNullable<T> has no native value"));
-
-        let module = thaw_parser::parse_typescript(
-            "type Dynamic = Record<string, number>; function bad(value: Dynamic): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("keys must be a finite string or number literal union"));
-
-        let module = thaw_parser::parse_typescript(
-            "type Bad = Pick<{ value: number }, \"missing\">; function bad(value: Bad): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("key `missing` does not exist"));
-
-        let module = thaw_parser::parse_typescript(
-            "type Bad = { value: number }[\"missing\"]; function bad(value: Bad): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("indexed access key `missing` does not exist"));
-    }
-
-    #[test]
-    fn validates_generic_interface_defaults_and_constraints() {
-        let module = thaw_parser::parse_typescript(
-            "interface Numeric<T extends number> { value: T } function bad(value: Numeric<string>): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("does not satisfy constraint F64"));
-    }
-
-    #[test]
-    fn validates_generic_interface_inherited_field_collisions() {
-        let module = thaw_parser::parse_typescript(
-            "interface Base<T> { value: T } interface Child<T> extends Base<T> { value: T } function bad(value: Child<number>): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("collides with an inherited field"));
-    }
-
-    #[test]
-    fn validates_concrete_generic_base_constraints() {
-        let module = thaw_parser::parse_typescript(
-            "interface Bad extends Numeric<string> {} interface Numeric<T extends number> { value: T } function bad(value: Bad): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("does not satisfy constraint F64"));
-    }
-
-    #[test]
-    fn rejects_non_object_generic_alias_base() {
-        let module = thaw_parser::parse_typescript(
-            "type Value<T> = T; interface Bad extends Value<number> {} function bad(value: Bad): void {}",
-        )
-        .unwrap();
-        assert!(lower_module(&module)
-            .unwrap_err()
-            .contains("can only extend object-shaped"));
-    }
-
-    #[test]
-    fn lowers_nested_object_and_tuple_destructuring_once() {
-        let program = lower(
-            r#"function source(): { x: number; label: string; nested: { flag: boolean }; extra: number } {
-                return { x: 1, label: "ok", nested: { flag: true }, extra: 4 };
-            }
-            function main(): void {
-                const { x: renamed, nested: { flag }, ...rest } = source();
-                const [first, , pair, ...tail]: [number, string, { value: number }, number] =
-                    [1, "skip", { value: 3 }, 4];
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Let(name, HirType::Object(_), HirExpr::Call(_, _))
-                if name.starts_with("__thaw_destructure_")
-        ));
-        assert!(main.body.iter().any(|statement| matches!(
-            statement,
-            HirStmt::Let(name, HirType::Bool, _) if name == "flag"
-        )));
-        assert!(main.body.iter().any(|statement| matches!(
-            statement,
-            HirStmt::Let(name, HirType::Array(element), _) if name == "tail" && element.as_ref() == &HirType::F64
-        )));
-    }
-
-    #[test]
-    fn lowers_fixed_layout_destructuring_assignments() {
-        let program = lower(
-            r#"function source(): { x: number; label: string } {
-                return { x: 1, label: "ok" };
-            }
-            function main(): void {
-                let x = 0;
-                let label = "";
-                const returned = ({ x, label } = source());
-                let first = 0;
-                let tail = [0, 0];
-                [first, ...tail] = [2, 3, 4];
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[2],
-            HirStmt::Let(_, HirType::Object(_), HirExpr::Call(_, _))
-        ));
-        assert!(matches!(
-            main.body.last(),
-            Some(HirStmt::Expr(HirExpr::Call(_, _)))
-        ));
-    }
-
-    #[test]
-    fn lowers_for_of_destructuring_bindings_and_assignment_heads() {
-        let program = lower(
-            r#"function main(): void {
-                const rows = [{ x: 1, label: "a" }];
-                for (const { x, label } of rows) { console.log(x); }
-                let assigned = 0;
-                for ({ x: assigned } of rows) { console.log(assigned); }
-                const pairs: [number, string][] = [[2, "b"]];
-                for (const [value, text] of pairs) { console.log(text); }
-            }"#,
-        );
-        let loops = program.functions[0]
-            .body
-            .iter()
-            .filter_map(|statement| match statement {
-                HirStmt::While(_, body) => Some(body),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(loops.len(), 3);
-        assert!(loops.iter().all(|body| matches!(
-            body.first(),
-            Some(HirStmt::Let(name, _, _)) if name.starts_with("__thaw_for_of_item_")
-        )));
-    }
-
-    #[test]
-    fn lowers_function_and_arrow_parameter_destructuring() {
-        let program = lower(
-            r#"function read(
-                { x, nested: { flag }, ...rest }:
-                    { x: number; nested: { flag: boolean }; label: string },
-                [first, ...tail]: [number, number, number]
-            ): number { return x + first + tail[0]; }
-            function main(): void {
-                const pick = ({ value }: { value: number }): number => value;
-                console.log(read(
-                    { x: 1, nested: { flag: true }, label: "ok" }, [2, 3, 4]
-                ));
-                console.log(pick({ value: 5 }));
-            }"#,
-        );
-        let read = program
-            .functions
-            .iter()
-            .find(|function| function.name == "read")
-            .unwrap();
-        assert!(read
-            .params
-            .iter()
-            .all(|param| param.name.starts_with("__thaw_param_")));
-        assert!(read.body.iter().any(|statement| matches!(
-            statement,
-            HirStmt::Let(name, HirType::Bool, _) if name == "flag"
-        )));
-    }
-
-    #[test]
-    fn lowers_optional_chains_on_statically_non_null_values() {
-        let program = lower(
-            r#"function invoke(callback: (value: number) => number): number {
-                return callback?.(2);
-            }
-            function main(): void {
-                const box = { value: 1 };
-                console.log(box?.value);
-                console.log(box?.["value"]);
-            }"#,
-        );
-        let invoke = program
-            .functions
-            .iter()
-            .find(|function| function.name == "invoke")
-            .unwrap();
-        assert!(matches!(
-            &invoke.body[0],
-            HirStmt::Return(Some(HirExpr::Call(_, _)))
-        ));
-    }
-
-    #[test]
-    fn lowers_fixed_object_in_checks_with_operand_evaluation() {
-        let program = lower(
-            r#"function object(): { value: number } { return { value: 1 }; }
-            function main(): void {
-                console.log("value" in object());
-                console.log("missing" in object());
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(main.body.iter().all(|statement| matches!(
-            statement,
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::Call(_, _))
-        )));
-    }
-
-    #[test]
-    fn lowers_sequence_expressions_to_ordered_closures() {
-        let program = lower(
-            r#"function effect(value: number): number { return value; }
-            function main(): void {
-                const result = (effect(1), effect(2), 3);
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Let(_, HirType::F64, HirExpr::Call(lambda, args))
-                if args.is_empty()
-                    && matches!(lambda.as_ref(), HirExpr::Lambda(_, _, HirType::F64, body)
-                        if matches!(body.as_ref(), HirExpr::Block(statements) if statements.len() == 3))
-        ));
-    }
-
-    #[test]
-    fn lowers_void_to_an_evaluating_closure() {
-        let program = lower(
-            r#"function effect(): number { return 1; }
-            function main(): void { void effect(); }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Expr(HirExpr::Call(lambda, args))
-                if args.is_empty()
-                    && matches!(lambda.as_ref(), HirExpr::Lambda(_, params, HirType::Void, body)
-                        if params.is_empty() && matches!(body.as_ref(), HirExpr::Block(_)))
-        ));
-    }
-
-    #[test]
-    fn lowers_same_type_loose_equality() {
-        let program = lower(
-            r#"function main(): void {
-                console.log(1 == 1);
-                console.log("a" != "b");
-                console.log(true == false);
-            }"#,
-        );
-        assert_eq!(program.functions[0].body.len(), 3);
-        for statement in &program.functions[0].body {
-            assert!(matches!(
-                statement,
-                HirStmt::Expr(HirExpr::Call(_, args))
-                    if matches!(&args[0], HirExpr::BinOp(BinOp::EqEqEq, _, _))
-            ));
-        }
-    }
-
-    #[test]
-    fn lowers_static_and_tuple_call_argument_spreads() {
-        let program = lower(
-            r#"function emit(first: number, second: string, third: number): void {}
-            function makeArgs(): [string, number] { return ["two", 3]; }
-            function main(): void {
-                emit(...[1, "two", 3]);
-                emit(1, ...makeArgs());
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Expr(HirExpr::Call(lambda, _))
-                if matches!(lambda.as_ref(), HirExpr::Lambda(_, _, HirType::Void, _))
-        ));
-        let HirStmt::Expr(HirExpr::Call(_, first_arguments)) = &main.body[1] else {
-            panic!("expected bound leading argument");
-        };
-        assert!(matches!(
-            first_arguments.as_slice(),
-            [HirExpr::Lit(HirLit::F64(1.0))]
-        ));
-    }
-
-    #[test]
-    fn rejects_dynamic_length_call_spread() {
-        let module = thaw_parser::parse_typescript(
-            r#"function emit(first: number): void {}
-            function main(values: number[]): void { emit(...values); }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("statically known tuple length"), "{error}");
-    }
-
-    #[test]
-    fn lowers_cross_type_primitive_loose_equality() {
-        let program = lower(
-            r#"function main(): void {
-                console.log(1 == "1");
-                console.log(false != "1");
-            }"#,
-        );
-        assert_eq!(program.functions[0].body.len(), 2);
-    }
-
-    #[test]
-    fn lowers_boolean_logical_operators_to_short_circuit_closures() {
-        let program = lower(
-            r#"function main(): void {
-                const a = true;
-                const b = false;
-                console.log(a && b);
-                console.log(a || b);
-            }"#,
-        );
-        for statement in &program.functions[0].body[2..] {
-            let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
-                panic!("expected console call");
-            };
-            let HirExpr::Call(callee, call_arguments) = &arguments[0] else {
-                panic!("expected immediately invoked logical closure");
-            };
-            assert_eq!(call_arguments.len(), 1);
-            assert!(matches!(
-                callee.as_ref(),
-                HirExpr::Lambda(_, params, HirType::Bool, _) if params.len() == 1
-            ));
-        }
-    }
-
-    #[test]
-    fn rejects_wrong_assignment_and_declared_return_types() {
-        let assignment = thaw_parser::parse_typescript(
-            "function main(): void { let value = 1; value = \"x\"; }",
-        )
-        .unwrap();
-        assert!(lower_module(&assignment)
-            .unwrap_err()
-            .contains("expected F64"));
-
-        let returned =
-            thaw_parser::parse_typescript("function main(): number { return \"x\"; }").unwrap();
-        assert!(lower_module(&returned)
-            .unwrap_err()
-            .contains("expected F64"));
-    }
-
-    #[test]
-    fn desugars_classic_for_loop_into_let_and_while() {
-        let program = lower(
-            "function main(): void { for (let i = 0; i < 10; i = i + 1) { console.log(i); } }",
-        );
-        let f = &program.functions[0];
-        assert_eq!(f.body.len(), 2);
-        assert!(matches!(f.body[0], HirStmt::Let(ref n, HirType::F64, _) if n == "i"));
-        let HirStmt::While(ref cond, ref body) = f.body[1] else {
-            panic!("expected desugared while loop, got {:?}", f.body[1]);
-        };
-        assert_eq!(
-            *cond,
-            HirExpr::BinOp(
-                BinOp::Lt,
-                Box::new(HirExpr::Var("i".into())),
-                Box::new(HirExpr::Lit(HirLit::F64(10.0))),
-            )
-        );
-        // console.log(i) + the `i = i + 1` update appended to the body.
-        assert_eq!(body.len(), 2);
-        assert!(matches!(body[1], HirStmt::Expr(HirExpr::Assign(ref n, _)) if n == "i"));
-    }
-
-    #[test]
-    fn classic_for_continue_runs_the_update_but_nested_loop_continue_does_not() {
-        let program = lower(
-            r#"function main(): void {
-                for (let i = 0; i < 3; i++) {
-                    while (i < 1) { continue; }
-                    if (i === 1) { continue; }
-                    console.log(i);
-                }
-            }"#,
-        );
-        let HirStmt::While(_, body) = &program.functions[0].body[1] else {
-            panic!("expected desugared for loop");
-        };
-        let HirStmt::While(_, nested_body) = &body[0] else {
-            panic!("expected nested while loop");
-        };
-        assert_eq!(nested_body, &[HirStmt::Continue]);
-        let HirStmt::If(_, then_body, _) = &body[1] else {
-            panic!("expected conditional continue");
-        };
-        assert!(matches!(
-            then_body.as_slice(),
-            [HirStmt::Expr(HirExpr::Call(_, _)), HirStmt::Continue]
-        ));
-        assert!(matches!(
-            body.last(),
-            Some(HirStmt::Expr(HirExpr::Call(_, _)))
-        ));
-    }
-
-    #[test]
-    fn desugars_do_while_and_checks_condition_before_continue() {
-        let program = lower(
-            r#"function main(): void {
-                let i = 0;
-                do {
-                    i++;
-                    if (i < 2) continue;
-                    console.log(i);
-                } while (i < 3);
-            }"#,
-        );
-        let HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body) = &program.functions[0].body[1]
-        else {
-            panic!("expected unconditional desugared loop");
-        };
-        let guard_count = body
-            .iter()
-            .filter(|stmt| matches!(stmt, HirStmt::If(_, _, else_body) if else_body == &[HirStmt::Break]))
-            .count();
-        assert_eq!(guard_count, 1, "expected the ordinary tail guard");
-        let HirStmt::If(_, continue_body, _) = &body[1] else {
-            panic!("expected source if statement");
-        };
-        assert!(matches!(
-            continue_body.as_slice(),
-            [HirStmt::If(_, _, else_body), HirStmt::Continue]
-                if else_body == &[HirStmt::Break]
-        ));
-    }
-
-    #[test]
-    fn desugars_for_of_to_single_evaluation_index_loop() {
-        let program = lower(
-            r#"function values(): number[] { return [1, 2, 3]; }
-               function main(): void {
-                   for (const value of values()) { console.log(value); }
-               }"#,
-        );
-        let body = &program.functions[1].body;
-        assert_eq!(body.len(), 3);
-        assert!(matches!(
-            &body[0],
-            HirStmt::Let(_, HirType::Array(element), HirExpr::Call(_, _))
-                if element.as_ref() == &HirType::F64
-        ));
-        let HirStmt::While(_, loop_body) = &body[2] else {
-            panic!("expected indexed while loop");
-        };
-        assert!(matches!(
-            &loop_body[0],
-            HirStmt::Let(_, HirType::F64, HirExpr::TypedIndex(_, _, HirType::F64))
-        ));
-    }
-
-    #[test]
-    fn desugars_for_of_assignment_to_existing_variable() {
-        let program = lower(
-            r#"function main(): void {
-                let value = 0;
-                for (value of [1, 2]) { console.log(value); }
-                console.log(value);
-            }"#,
-        );
-        let HirStmt::While(_, loop_body) = &program.functions[0].body[3] else {
-            panic!("expected indexed while loop");
-        };
-        assert!(matches!(
-            &loop_body[0],
-            HirStmt::Expr(HirExpr::Assign(name, value))
-                if name == "value" && matches!(value.as_ref(), HirExpr::TypedIndex(_, _, HirType::F64))
-        ));
-    }
-
-    #[test]
-    fn desugars_for_await_of_promise_array_to_awaited_items() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                const values: Promise<number>[] = [
-                    new Promise<number>((resolve, reject) => resolve(1))
-                ];
-                for await (const value of values) { console.log(value); }
-            }"#,
-        );
-        let HirStmt::While(_, loop_body) = &program.functions[0].body[3] else {
-            panic!("expected indexed while loop");
-        };
-        assert!(matches!(
-            &loop_body[0],
-            HirStmt::Let(
-                _,
-                HirType::F64,
-                HirExpr::AwaitPromise(indexed, HirType::F64)
-            ) if matches!(indexed.as_ref(), HirExpr::TypedIndex(_, _, HirType::Promise(inner)) if inner.as_ref() == &HirType::F64)
-        ));
-    }
-
-    #[test]
-    fn lowers_switch_to_selected_case_state_without_switch_breaks() {
-        fn contains_break(stmts: &[HirStmt]) -> bool {
-            stmts.iter().any(|stmt| match stmt {
-                HirStmt::Break => true,
-                HirStmt::If(_, then_body, else_body) => {
-                    contains_break(then_body) || contains_break(else_body)
-                }
-                HirStmt::Try(body, _, catch_body) => {
-                    contains_break(body) || contains_break(catch_body)
-                }
-                HirStmt::While(_, _) => false,
-                _ => false,
-            })
-        }
-        let program = lower(
-            r#"function main(): void {
-                switch (2) {
-                    case 1: console.log("one"); break;
-                    default: console.log("default");
-                    case 2: console.log("two"); break;
-                }
-            }"#,
-        );
-        assert!(program.functions[0].body.len() > 4);
-        assert!(!contains_break(&program.functions[0].body));
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))
-                if name.starts_with("__thaw_switch_value_")
-        ));
-    }
-
-    #[test]
-    fn lowers_fixed_object_for_in_to_key_array_loop() {
-        let program = lower(
-            r#"function main(): void {
-                const object = { first: 1, second: 2 };
-                for (const key in object) { console.log(key); }
-            }"#,
-        );
-        let body = &program.functions[0].body;
-        assert_eq!(body.len(), 5);
-        assert!(matches!(
-            &body[2],
-            HirStmt::Let(_, HirType::Array(element), HirExpr::ArrayLit(keys))
-                if element.as_ref() == &HirType::Str
-                    && keys == &[
-                        HirExpr::Lit(HirLit::Str("first".into())),
-                        HirExpr::Lit(HirLit::Str("second".into()))
-                    ]
-        ));
-        assert!(matches!(&body[4], HirStmt::While(_, _)));
-    }
-
-    #[test]
-    fn lowers_array_literal_index_and_length() {
-        let program = lower(
-            "function main(): void { const xs: number[] = [1, 2, 3]; console.log(xs[1]); console.log(xs.length); }",
-        );
-        let f = &program.functions[0];
-        assert_eq!(
-            f.body[0],
-            HirStmt::Let(
-                "xs".into(),
-                HirType::Array(Box::new(HirType::F64)),
-                HirExpr::ArrayLit(vec![
-                    HirExpr::Lit(HirLit::F64(1.0)),
-                    HirExpr::Lit(HirLit::F64(2.0)),
-                    HirExpr::Lit(HirLit::F64(3.0)),
-                ]),
-            )
-        );
-        assert_eq!(
-            f.body[1],
-            HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::TypedIndex(
-                    Box::new(HirExpr::Var("xs".into())),
-                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                    HirType::F64,
-                )],
-            ))
-        );
-        assert_eq!(
-            f.body[2],
-            HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::ArrayLen(Box::new(HirExpr::Var("xs".into())))],
-            ))
-        );
-    }
-
-    #[test]
-    fn lowers_typed_array_spreads_in_source_order() {
-        let program = lower(
-            r#"function part(): number[] { return [2, 3]; }
-               function main(): void {
-                   const tail: number[] = [4, 5];
-                   const values: number[] = [1, ...part(), ...tail, 6];
-                   console.log(values.length);
-               }"#,
-        );
-        let HirStmt::Let(_, HirType::Array(element), HirExpr::ArrayConcat(parts, spread_element)) =
-            &program.functions[1].body[1]
-        else {
-            panic!("expected typed array concat");
-        };
-        assert_eq!(element.as_ref(), &HirType::F64);
-        assert_eq!(spread_element, &HirType::F64);
-        assert_eq!(parts.len(), 4);
-        assert!(matches!(&parts[0], HirExpr::ArrayLit(values) if values.len() == 1));
-        assert!(matches!(&parts[1], HirExpr::Call(_, _)));
-        assert!(matches!(&parts[2], HirExpr::Var(name) if name == "tail"));
-        assert!(matches!(&parts[3], HirExpr::ArrayLit(values) if values.len() == 1));
-    }
-
-    #[test]
-    fn lowers_process_env_access() {
-        let program = lower(r#"function main(): void { console.log(process.env.STAGE); }"#);
-        let f = &program.functions[0];
-        assert_eq!(
-            f.body,
-            vec![HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::EnvVar("STAGE".into())],
-            ))]
-        );
-    }
-
-    #[test]
-    fn lowers_try_catch() {
-        let program = lower(
-            r#"function main(): void {
-                try {
-                    throw "boom";
-                } catch (e) {
-                    console.log(e);
-                }
-            }"#,
-        );
-        let f = &program.functions[0];
-        assert_eq!(
-            f.body,
-            vec![HirStmt::Try(
-                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str("boom".into())))],
-                "e".into(),
-                vec![HirStmt::Expr(HirExpr::Call(
-                    Box::new(HirExpr::Var("console.log".into())),
-                    vec![HirExpr::Var("e".into())],
-                ))],
-            )]
-        );
-    }
-
-    #[test]
-    fn lowers_finally_onto_normal_return_and_rethrow_paths() {
-        let program = lower(
-            r#"function f(): string {
-                try {
-                    return "ok";
-                } catch (e) {
-                    throw e;
-                } finally {
-                    console.log("cleanup");
-                }
-            }
-            function main(): void { console.log(f()); }"#,
-        );
-        let HirStmt::Try(body, _, catch_body) = &program.functions[0].body[0] else {
-            panic!("expected lowered try");
-        };
-        assert!(matches!(body[0], HirStmt::Expr(_)));
-        assert!(matches!(body[1], HirStmt::Return(_)));
-        assert!(matches!(catch_body[0], HirStmt::Expr(_)));
-        assert!(matches!(catch_body[1], HirStmt::Throw(_)));
-        assert!(matches!(program.functions[0].body[1], HirStmt::Expr(_)));
-    }
-
-    #[test]
-    fn lowers_object_literal_field_access_and_mutation() {
-        let program = lower(
-            r#"function main(): void {
-                const p: { x: number; y: number } = { x: 1, y: 2 };
-                console.log(p.x);
-                p.y = p.y + 1;
-            }"#,
-        );
-        let f = &program.functions[0];
-        let obj_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
-
-        assert_eq!(
-            f.body[0],
-            HirStmt::Let(
-                "p".into(),
-                obj_ty.clone(),
-                HirExpr::ObjectLit(vec![
-                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
-                ]),
-            )
-        );
-        assert_eq!(
-            f.body[1],
-            HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::PropAccess(
-                    Box::new(HirExpr::Var("p".into())),
-                    obj_ty.clone(),
-                    "x".into(),
-                )],
-            ))
-        );
-        assert_eq!(
-            f.body[2],
-            HirStmt::Expr(HirExpr::PropAssign(
-                Box::new(HirExpr::Var("p".into())),
-                obj_ty.clone(),
-                "y".into(),
-                Box::new(HirExpr::BinOp(
-                    BinOp::Add,
-                    Box::new(HirExpr::PropAccess(
-                        Box::new(HirExpr::Var("p".into())),
-                        obj_ty,
-                        "y".into(),
-                    )),
-                    Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                )),
-            ))
-        );
-    }
-
-    #[test]
-    fn lowers_object_literal_shorthand_properties() {
-        let program = lower(
-            r#"function main(): void {
-                const x: number = 1;
-                const label: string = "point";
-                const point: { x: number; label: string } = { x, label };
-                console.log(point.x);
-            }"#,
-        );
-
-        assert_eq!(
-            program.functions[0].body[2],
-            HirStmt::Let(
-                "point".into(),
-                HirType::Object(vec![
-                    ("x".into(), HirType::F64),
-                    ("label".into(), HirType::Str),
-                ]),
-                HirExpr::ObjectLit(vec![
-                    ("x".into(), HirExpr::Var("x".into())),
-                    ("label".into(), HirExpr::Var("label".into())),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn lowers_static_computed_object_literal_properties() {
-        let program = lower(
-            r#"function main(): void {
-                const point: { x: number; label: string } = {
-                    ["x"]: 1,
-                    ["label"]: "point"
-                };
-                console.log(point.label);
-            }"#,
-        );
-
-        assert_eq!(
-            program.functions[0].body[0],
-            HirStmt::Let(
-                "point".into(),
-                HirType::Object(vec![
-                    ("x".into(), HirType::F64),
-                    ("label".into(), HirType::Str),
-                ]),
-                HirExpr::ObjectLit(vec![
-                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("label".into(), HirExpr::Lit(HirLit::Str("point".into()))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn lowers_local_object_spread_and_later_property_overrides() {
-        let program = lower(
-            r#"function main(): void {
-                const base: { x: number; label: string } = { x: 1, label: "base" };
-                const point: { x: number; label: string } = { ...base, label: "point" };
-                console.log(point.label);
-            }"#,
-        );
-        let base_type = HirType::Object(vec![
-            ("x".into(), HirType::F64),
-            ("label".into(), HirType::Str),
-        ]);
-
-        assert_eq!(
-            program.functions[0].body[1],
-            HirStmt::Let(
-                "point".into(),
-                base_type.clone(),
-                HirExpr::ObjectLit(vec![
-                    (
-                        "x".into(),
-                        HirExpr::PropAccess(
-                            Box::new(HirExpr::Var("base".into())),
-                            base_type,
-                            "x".into(),
-                        ),
-                    ),
-                    ("label".into(), HirExpr::Lit(HirLit::Str("point".into()))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn lowers_nested_object_literal_spread_without_reloading_fields() {
-        let program = lower(
-            r#"function main(): void {
-                const point: { x: number; label: string } = {
-                    ...{ x: 1, label: "base" },
-                    label: "point"
-                };
-                console.log(point.x);
-            }"#,
-        );
-
-        assert_eq!(
-            program.functions[0].body[0],
-            HirStmt::Let(
-                "point".into(),
-                HirType::Object(vec![
-                    ("x".into(), HirType::F64),
-                    ("label".into(), HirType::Str),
-                ]),
-                HirExpr::ObjectLit(vec![
-                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("label".into(), HirExpr::Lit(HirLit::Str("point".into()))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn evaluates_call_result_object_spread_once() {
-        let program = lower(
-            r#"function makeConfig(): { x: number; label: string } {
-                return { x: 1, label: "base" };
-            }
-            function main(): void {
-                const point: { x: number; label: string } = {
-                    ...makeConfig(),
-                    label: "point"
-                };
-                console.log(point.x);
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        let HirStmt::Let(_, _, HirExpr::Call(lambda, arguments)) = &main.body[0] else {
-            panic!("expected spread source to be bound through a lambda call");
-        };
-        assert!(matches!(
-            arguments.as_slice(),
-            [HirExpr::Call(callee, arguments)]
-                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "makeConfig")
-                    && arguments.is_empty()
-        ));
-        let HirExpr::Lambda(_, params, _, body) = lambda.as_ref() else {
-            panic!("expected spread binding lambda");
-        };
-        assert_eq!(params.len(), 1);
-        assert!(matches!(
-            body.as_ref(),
-            HirExpr::ObjectLit(fields)
-                if matches!(&fields[0].1, HirExpr::PropAccess(object, _, field)
-                    if matches!(object.as_ref(), HirExpr::Var(name) if name == &params[0].name)
-                        && field == "x")
-                    && fields[1] == ("label".into(), HirExpr::Lit(HirLit::Str("point".into())))
-        ));
-    }
-
-    #[test]
-    fn lowers_conditional_expressions_with_matching_native_types() {
-        let program = lower(
-            r#"function main(): void {
-                const chooseLeft: boolean = true;
-                const value: number = chooseLeft ? 1 : 2;
-                console.log(value);
-            }"#,
-        );
-        let HirStmt::Let(_, HirType::F64, HirExpr::Call(lambda, arguments)) =
-            &program.functions[0].body[1]
-        else {
-            panic!("expected conditional expression closure call");
-        };
-        assert!(arguments.is_empty());
-        assert!(matches!(
-            lambda.as_ref(),
-            HirExpr::Lambda(captures, params, HirType::F64, body)
-                if captures.len() == 1 && captures[0].name == "chooseLeft"
-                    && params.is_empty()
-                    && matches!(body.as_ref(), HirExpr::Block(stmts)
-                        if matches!(stmts.as_slice(), [HirStmt::If(_, _, _)]))
-        ));
-    }
-
-    #[test]
-    fn reorders_object_literal_fields_to_match_the_declared_type() {
-        // Written as {y, x} but the declared type says {x, y} -- lowering
-        // should reorder so codegen only ever sees the declared order.
-        let program = lower(
-            r#"function main(): void {
-                const p: { x: number; y: number } = { y: 2, x: 1 };
-                console.log(p.x);
-            }"#,
-        );
-        let f = &program.functions[0];
-        assert_eq!(
-            f.body[0],
-            HirStmt::Let(
-                "p".into(),
-                HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]),
-                HirExpr::ObjectLit(vec![
-                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn rejects_object_literal_with_wrong_field_type() {
-        let module = thaw_parser::parse_typescript(
-            r#"function main(): void {
-                const p: { x: number } = { x: "not a number" };
-            }"#,
-        )
-        .unwrap();
-        assert!(lower_module(&module).is_err());
-    }
-
-    #[test]
-    fn coerces_object_literal_argument_to_the_parameter_shape() {
-        let program = lower(
-            r#"function dist(p: { x: number; y: number }): number {
-                return p.x + p.y;
-            }
-            function main(): void {
-                console.log(dist({ y: 2, x: 1 }));
-            }"#,
-        );
-        let main = &program.functions[1];
-        let HirStmt::Expr(HirExpr::Call(_, args)) = &main.body[0] else {
-            panic!("expected a console.log call, got {:?}", main.body[0]);
-        };
-        let [console_arg] = args.as_slice() else {
-            panic!("expected one argument to console.log");
-        };
-        let HirExpr::Call(_, dist_args) = console_arg else {
-            panic!("expected a call to `dist`, got {console_arg:?}");
-        };
-        assert_eq!(
-            dist_args,
-            &vec![HirExpr::ObjectLit(vec![
-                ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
-            ])]
-        );
-    }
-
-    #[test]
-    fn lowers_async_function_unwrapping_promise_and_await() {
-        let program = lower(
-            r#"async function fetchStage(): Promise<string> {
-                const s: string = process.env.STAGE;
-                return s;
-            }
-            async function main(): Promise<void> {
-                const stage: string = await fetchStage();
-                console.log(stage);
-            }"#,
-        );
-
-        let fetch_stage = &program.functions[0];
-        assert!(fetch_stage.is_async);
-        // The function result stays unwrapped for native code generation;
-        // the await node records the value carried by its runtime promise.
-        assert_eq!(fetch_stage.ret, HirType::Str);
-
-        let main = &program.functions[1];
-        assert!(main.is_async);
-        assert_eq!(main.ret, HirType::Void);
-        assert_eq!(
-            main.body[0],
-            HirStmt::Let(
-                "stage".into(),
-                HirType::Str,
-                HirExpr::AwaitPromise(
-                    Box::new(HirExpr::Call(
-                        Box::new(HirExpr::Var("fetchStage".into())),
-                        vec![],
-                    )),
-                    HirType::Str,
-                ),
-            )
-        );
-    }
-
-    #[test]
-    fn infers_await_sleep_as_void() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                await sleep(1);
-            }"#,
-        );
-        let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
-            panic!("expected await expression");
-        };
-        assert_eq!(
-            FnLowerer::new(
-                &HashMap::new(),
-                &HashMap::new(),
-                &GenericInterfaces::new(),
-                &EnumValues::new(),
-                &EnumReverseValues::new(),
-                HirType::Void,
-                None,
-            )
-            .infer_expr_type(&HirExpr::Await(inner.clone()))
-            .unwrap(),
-            HirType::Void
-        );
-    }
-
-    #[test]
-    fn lowers_promise_constructor_then_and_catch_with_contextual_callbacks() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                const value: Promise<string> = new Promise<number>((resolve, reject) => {
-                    resolve(20);
-                }).then(number => "ready");
-                const recovered: Promise<number> = new Promise<number>((resolve, reject) => {
-                    reject("failure");
-                }).catch(error => 42);
-                console.log(await value);
-                console.log(await recovered);
-            }"#,
-        );
-        let HirStmt::Let(_, ty, HirExpr::PromiseThen(_, _, input, output, false, false)) =
-            &program.functions[0].body[0]
-        else {
-            panic!("expected a typed Promise.then expression");
-        };
-        assert_eq!(ty, &HirType::Promise(Box::new(HirType::Str)));
-        assert_eq!(input, &HirType::F64);
-        assert_eq!(output, &HirType::Str);
-        assert!(matches!(
-            &program.functions[0].body[1],
-            HirStmt::Let(
-                _,
-                HirType::Promise(_),
-                HirExpr::PromiseThen(_, _, HirType::F64, HirType::F64, true, false)
-            )
-        ));
-    }
-
-    #[test]
-    fn lowers_promise_void_constructor_with_zero_argument_resolve() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                await new Promise<void>((resolve, reject) => {
-                    resolve();
-                });
-            }"#,
-        );
-        let HirStmt::Expr(HirExpr::Await(inner)) = &program.functions[0].body[0] else {
-            panic!("expected awaited Promise<void>");
-        };
-        let HirExpr::PromiseNew(executor, HirType::Void, false) = inner.as_ref() else {
-            panic!("expected Promise<void> constructor");
-        };
-        let HirExpr::Lambda(_, params, HirType::Void, _) = executor.as_ref() else {
-            panic!("expected Promise executor lambda");
-        };
-        assert!(matches!(
-            &params[0].ty,
-            HirType::Function(resolve_params, ret)
-                if resolve_params.is_empty() && ret.as_ref() == &HirType::Void
-        ));
-    }
-
-    #[test]
-    fn lowers_void_promise_continuations() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                await new Promise<void>((resolve, reject) => resolve()).then(() => {});
-                await new Promise<void>((resolve, reject) => reject("failure")).catch(error => {
-                    console.log(error);
-                });
-            }"#,
-        );
-        assert_eq!(program.functions[0].body.len(), 2);
-        for stmt in &program.functions[0].body {
-            let HirStmt::Expr(HirExpr::Await(inner)) = stmt else {
-                panic!("expected awaited continuation");
-            };
-            assert!(matches!(
-                inner.as_ref(),
-                HirExpr::PromiseThen(_, _, HirType::Void, HirType::Void, _, false)
-            ));
-        }
-    }
-
-    #[test]
-    fn infers_promise_constructor_type_and_reports_conflicting_resolves() {
-        let program = lower(
-            r#"async function main(): Promise<void> {
-                const value: number = await new Promise((resolve, reject) => {
-                    resolve(42);
-                });
-                console.log(value);
-            }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Let(_, HirType::F64, HirExpr::AwaitPromise(_, HirType::F64))
-        ));
-
-        let local_program = lower(
-            r#"async function main(): Promise<void> {
-                const value: number = await new Promise((resolve, reject) => {
-                    const base = 20;
-                    const answer = base + 22;
-                    resolve(answer);
-                });
-                console.log(value);
-            }"#,
-        );
-        assert!(matches!(
-            &local_program.functions[0].body[0],
-            HirStmt::Let(_, HirType::F64, HirExpr::AwaitPromise(_, HirType::F64))
-        ));
-
-        let module = thaw_parser::parse_typescript(
-            r#"function main(): void {
-                const value = new Promise((resolve, reject) => {
-                    resolve(1);
-                    resolve("wrong");
-                });
-            }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("conflicting Promise resolve types"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn promise_all_requires_homogeneous_promises() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            async function value(): Promise<number> {
-                await sleep(1);
-                return 1;
-            }
-            async function main(): Promise<void> {
-                const values: number[] = await Promise.all([value(), sleep(1)]);
-                console.log(values.length);
-            }
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("Promise.all element 1 resolves to void"));
-    }
-
-    #[test]
-    fn promise_combinators_accept_homogeneous_array_spreads() {
-        let program = lower(
-            r#"async function value(input: number): Promise<number> { return input; }
-            function pending(): Promise<number>[] { return [value(2), value(3)]; }
-            async function main(): Promise<void> {
-                await Promise.all([value(1), ...pending()]);
-                await Promise.allSettled([...pending(), value(4)]);
-                await Promise.race([value(1), ...pending()]);
-                await Promise.any([...pending(), value(4)]);
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
-                if matches!(inner.as_ref(), HirExpr::PromiseAllArray(array, _)
-                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
-        ));
-        assert!(matches!(
-            &main.body[1],
-            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
-                if matches!(inner.as_ref(), HirExpr::PromiseAllSettledArray(array, _)
-                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
-        ));
-        assert!(matches!(
-            &main.body[2],
-            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
-                if matches!(inner.as_ref(), HirExpr::PromiseRaceArray(array, _)
-                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
-        ));
-        assert!(matches!(
-            &main.body[3],
-            HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
-                if matches!(inner.as_ref(), HirExpr::PromiseAnyArray(array, _)
-                    if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
-        ));
-    }
-
-    #[test]
-    fn promise_race_rejects_empty_mixed_and_non_promise_inputs() {
-        let empty = thaw_parser::parse_typescript(
-            "async function main(): Promise<void> { await Promise.race([]); }",
-        )
-        .unwrap();
-        assert!(lower_module(&empty)
-            .unwrap_err()
-            .contains("requires at least one promise"));
-
-        let mixed = thaw_parser::parse_typescript(
-            r#"
-            async function numberValue(): Promise<number> { return 1; }
-            async function stringValue(): Promise<string> { return "x"; }
-            async function main(): Promise<void> {
-                await Promise.race([numberValue(), stringValue()]);
-            }
-            "#,
-        )
-        .unwrap();
-        assert!(lower_module(&mixed)
-            .unwrap_err()
-            .contains("Promise.race element 1 resolves to Str, expected F64"));
-
-        let plain = thaw_parser::parse_typescript(
-            "async function main(): Promise<void> { await Promise.race([1]); }",
-        )
-        .unwrap();
-        assert!(lower_module(&plain)
-            .unwrap_err()
-            .contains("Promise.race element 0 must be a Promise"));
-    }
-
-    #[test]
-    fn promise_any_rejects_empty_mixed_and_non_promise_inputs() {
-        let empty = thaw_parser::parse_typescript(
-            "async function main(): Promise<void> { await Promise.any([]); }",
-        )
-        .unwrap();
-        assert!(lower_module(&empty)
-            .unwrap_err()
-            .contains("requires at least one promise"));
-
-        let mixed = thaw_parser::parse_typescript(
-            r#"
-            async function numberValue(): Promise<number> { return 1; }
-            async function stringValue(): Promise<string> { return "x"; }
-            async function main(): Promise<void> {
-                await Promise.any([numberValue(), stringValue()]);
-            }
-            "#,
-        )
-        .unwrap();
-        assert!(lower_module(&mixed)
-            .unwrap_err()
-            .contains("Promise.any element 1 resolves to Str, expected F64"));
-
-        let plain = thaw_parser::parse_typescript(
-            "async function main(): Promise<void> { await Promise.any([1]); }",
-        )
-        .unwrap();
-        assert!(lower_module(&plain)
-            .unwrap_err()
-            .contains("Promise.any element 0 must be a Promise"));
-    }
-
-    #[test]
-    fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
-        let mixed = thaw_parser::parse_typescript(
-            r#"
-            async function numberValue(): Promise<number> { return 1; }
-            async function stringValue(): Promise<string> { return "x"; }
-            async function main(): Promise<void> {
-                await Promise.allSettled([numberValue(), stringValue()]);
-            }
-            "#,
-        )
-        .unwrap();
-        assert!(lower_module(&mixed)
-            .unwrap_err()
-            .contains("Promise.allSettled element 1 resolves to Str, expected F64"));
-
-        let plain = thaw_parser::parse_typescript(
-            "async function main(): Promise<void> { await Promise.allSettled([1]); }",
-        )
-        .unwrap();
-        assert!(lower_module(&plain)
-            .unwrap_err()
-            .contains("Promise.allSettled element 0 must be a Promise"));
-    }
-
-    #[test]
-    fn rejects_async_function_not_declared_as_returning_promise() {
-        let module =
-            thaw_parser::parse_typescript("async function f(): number { return 1; }").unwrap();
-        let err = lower_module(&module).unwrap_err();
-        assert!(err.contains("Promise"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn lowers_fetch_and_json_parse_field_access() {
-        let program = lower(
-            r#"function main(): void {
-                const text: string = fetch("https://example.com/api");
-                const data = JSON.parse(text);
-                const name: string = String(data.name);
-                const count: number = Number(data.items[0]);
-                console.log(name);
-                console.log(count);
-            }"#,
-        );
-        let f = &program.functions[0];
-
-        assert_eq!(
-            f.body[0],
-            HirStmt::Let(
-                "text".into(),
-                HirType::Str,
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("fetch".into())),
-                    vec![HirExpr::Lit(HirLit::Str("https://example.com/api".into()))],
-                ),
-            )
-        );
-        assert_eq!(
-            f.body[1],
-            HirStmt::Let(
-                "data".into(),
-                HirType::Json,
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("JSON.parse".into())),
-                    vec![HirExpr::Var("text".into())],
-                ),
-            )
-        );
-        assert_eq!(
-            f.body[2],
-            HirStmt::Let(
-                "name".into(),
-                HirType::Str,
-                HirExpr::JsonAsString(Box::new(HirExpr::JsonGet(
-                    Box::new(HirExpr::Var("data".into())),
-                    "name".into(),
-                ))),
-            )
-        );
-        assert_eq!(
-            f.body[3],
-            HirStmt::Let(
-                "count".into(),
-                HirType::F64,
-                HirExpr::JsonAsNumber(Box::new(HirExpr::JsonIndex(
-                    Box::new(HirExpr::JsonGet(
-                        Box::new(HirExpr::Var("data".into())),
-                        "items".into(),
-                    )),
-                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                ))),
-            )
-        );
-    }
-
-    #[test]
-    fn lowers_load_script_and_call_dynamic() {
-        let program = lower(
-            r#"function main(): void {
-                const ok: boolean = loadScript("function add(a,b){return a+b;}");
-                const args = JSON.parse("[1,2]");
-                const result = callDynamic("add", args);
-                console.log(Number(result));
-            }"#,
-        );
-        let f = &program.functions[0];
-        assert_eq!(
-            f.body[0],
-            HirStmt::Let(
-                "ok".into(),
-                HirType::Bool,
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("loadScript".into())),
-                    vec![HirExpr::Lit(HirLit::Str(
-                        "function add(a,b){return a+b;}".into()
-                    ))],
-                ),
-            )
-        );
-        assert_eq!(
-            f.body[2],
-            HirStmt::Let(
-                "result".into(),
-                HirType::Json,
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("callDynamic".into())),
-                    vec![
-                        HirExpr::Lit(HirLit::Str("add".into())),
-                        HirExpr::Var("args".into()),
-                    ],
-                ),
-            )
-        );
-    }
-
-    #[test]
-    fn lowers_json_type_annotation() {
-        let program = lower(
-            r#"function wrap(args: Json): Json {
-                return args;
-            }
-            function main(): void {}"#,
-        );
-        let f = &program.functions[0];
-        assert_eq!(
-            f.params,
-            vec![HirParam {
-                name: "args".into(),
-                ty: HirType::Json
-            }]
-        );
-        assert_eq!(f.ret, HirType::Json);
-    }
-
-    #[test]
-    fn lowers_number_conversion_through_native_object_stringification() {
-        let program = lower("function main(): void { const x: number = Number({ value: 1 }); }");
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Let(_, HirType::F64, HirExpr::Call(callee, _))
-                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_string_to_number")
-        ));
-    }
-
-    #[test]
-    fn rejects_indexed_assignment_into_a_non_array() {
-        let module = thaw_parser::parse_typescript(
-            r#"function main(): void {
-                const data = JSON.parse("[]");
-                data[0] = 1;
-            }"#,
-        )
-        .unwrap();
-        assert!(lower_module(&module).is_err());
-    }
-
-    #[test]
-    fn lowers_ambient_declaration_call_to_ffi_call() {
-        let program = lower(
-            r#"declare function native_add(a: number, b: number): number;
-
-            function main(): void {
-                console.log(native_add(2, 3));
-            }"#,
-        );
-
-        assert_eq!(
-            program.functions.len(),
-            1,
-            "the ambient decl has no body to lower"
-        );
-        assert_eq!(
-            program.extern_functions,
-            vec![crate::FfiSignature {
-                symbol: "native_add".into(),
-                params: vec![HirType::F64, HirType::F64],
-                variadic: None,
-                variadic_abi: crate::FfiVariadicAbi::Native,
-                ret: HirType::F64,
-                error_abi: crate::FfiErrorAbi::Direct,
-                return_ownership: crate::FfiOwnership::Borrowed,
-                error_ownership: crate::FfiOwnership::Borrowed,
-                param_string_abis: vec![crate::FfiStringAbi::NullTerminated; 2],
-                return_string_abi: crate::FfiStringAbi::NullTerminated,
-                calling_convention: crate::FfiCallingConvention::C,
-                aggregate_return_abi: crate::FfiAggregateAbi::Internal,
-                aggregate_return_layout: None,
-            }]
-        );
-
-        let main = &program.functions[0];
-        assert_eq!(
-            main.body[0],
-            HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::FfiCall(
-                    Box::new(crate::FfiSignature {
-                        symbol: "native_add".into(),
-                        params: vec![HirType::F64, HirType::F64],
-                        variadic: None,
-                        variadic_abi: crate::FfiVariadicAbi::Native,
-                        ret: HirType::F64,
-                        error_abi: crate::FfiErrorAbi::Direct,
-                        return_ownership: crate::FfiOwnership::Borrowed,
-                        error_ownership: crate::FfiOwnership::Borrowed,
-                        param_string_abis: vec![crate::FfiStringAbi::NullTerminated; 2],
-                        return_string_abi: crate::FfiStringAbi::NullTerminated,
-                        calling_convention: crate::FfiCallingConvention::C,
-                        aggregate_return_abi: crate::FfiAggregateAbi::Internal,
-                        aggregate_return_layout: None,
-                    }),
-                    vec![
-                        HirExpr::Lit(HirLit::F64(2.0)),
-                        HirExpr::Lit(HirLit::F64(3.0)),
-                    ],
-                )],
-            ))
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_ambient_variadic_element_types() {
-        let module = thaw_parser::parse_typescript(
-            r#"declare function native_merge(...values: (boolean | undefined)[][]): number;
-               function main(): void { console.log(native_merge([true])); }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("unsupported rest element layout"), "{error}");
-    }
-
-    #[test]
-    fn variadic_ambient_calls_still_require_every_fixed_argument() {
-        let module = thaw_parser::parse_typescript(
-            r#"declare function native_sum(count: number, ...values: number[]): number;
-               function main(): void { console.log(native_sum()); }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("expects at least 1 argument(s), got 0"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn lowers_interface_as_a_named_object_type() {
-        let program = lower(
-            r#"interface Point {
-                x: number;
-                y: number;
-            }
-
-            function dist(p: Point): number {
-                return p.x + p.y;
-            }
-
-            function main(): void {
-                const p: Point = { y: 2, x: 1 };
-                console.log(dist(p));
-            }"#,
-        );
-
-        let point_ty =
-            HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
-
-        let dist = &program.functions[0];
-        assert_eq!(
-            dist.params,
-            vec![HirParam {
-                name: "p".into(),
-                ty: point_ty.clone()
-            }]
-        );
-
-        let main = &program.functions[1];
-        // Declared via the interface name, but the literal is still
-        // reordered to the interface's field order (same machinery as
-        // inline object type literals).
-        assert_eq!(
-            main.body[0],
-            HirStmt::Let(
-                "p".into(),
-                point_ty,
-                HirExpr::ObjectLit(vec![
-                    ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn interfaces_can_reference_each_other_regardless_of_declaration_order() {
-        // `Line` is declared before `Point`, and refers to it -- the
-        // resolver must not depend on source order.
-        let program = lower(
-            r#"interface Line {
-                start: Point;
-                length: number;
-            }
-
-            interface Point {
-                x: number;
-                y: number;
-            }
-
-            function main(): void {
-                const l: Line = { start: { x: 1, y: 2 }, length: 5 };
-                console.log(l.length);
-            }"#,
-        );
-
-        let point_ty =
-            HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
-        let line_ty = HirType::Object(vec![
-            ("start".into(), point_ty),
-            ("length".into(), HirType::F64),
-        ]);
-
-        assert_eq!(
-            program.functions[0].body[0],
-            HirStmt::Let(
-                "l".into(),
-                line_ty,
-                HirExpr::ObjectLit(vec![
-                    (
-                        "start".into(),
-                        HirExpr::ObjectLit(vec![
-                            ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                            ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
-                        ]),
-                    ),
-                    ("length".into(), HirExpr::Lit(HirLit::F64(5.0))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn rejects_self_referential_interface() {
-        let module = thaw_parser::parse_typescript(
-            r#"interface Node {
-                value: number;
-                next: Node;
-            }
-            function main(): void {}"#,
-        )
-        .unwrap();
-        let err = lower_module(&module).unwrap_err();
-        assert!(err.contains("self-referential"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn lowers_generic_interface_instantiated_with_a_concrete_type() {
-        let program = lower(
-            r#"interface Box<T> {
-                value: T;
-            }
-            function unwrap(b: Box<number>): number {
-                return b.value;
-            }
-            function main(): void {
-                const b: Box<number> = { value: 5 };
-                console.log(unwrap(b));
-            }"#,
-        );
-
-        let box_number_ty = HirType::Object(vec![("value".into(), HirType::F64)]);
-        assert_eq!(
-            program.functions[0].params,
-            vec![HirParam {
-                name: "b".into(),
-                ty: box_number_ty.clone()
-            }]
-        );
-        assert_eq!(
-            program.functions[1].body[0],
-            HirStmt::Let(
-                "b".into(),
-                box_number_ty,
-                HirExpr::ObjectLit(vec![("value".into(), HirExpr::Lit(HirLit::F64(5.0)))]),
-            )
-        );
-    }
-
-    #[test]
-    fn generic_interface_instantiations_with_different_arguments_are_distinct_shapes() {
-        let program = lower(
-            r#"interface Box<T> { value: T; }
-            function f(a: Box<number>, b: Box<string>): void {}
-            function main(): void {}"#,
-        );
-        assert_eq!(
-            program.functions[0].params[0].ty,
-            HirType::Object(vec![("value".into(), HirType::F64)])
-        );
-        assert_eq!(
-            program.functions[0].params[1].ty,
-            HirType::Object(vec![("value".into(), HirType::Str)])
-        );
-    }
-
-    #[test]
-    fn generic_interface_field_can_be_an_array_or_object_literal_of_the_type_parameter() {
-        let program = lower(
-            r#"interface Box<T> {
-                items: T[];
-            }
-            function main(): void {
-                const b: Box<number> = { items: [1, 2, 3] };
-                console.log(b.items.length);
-            }"#,
-        );
-        let box_ty = HirType::Object(vec![(
-            "items".into(),
-            HirType::Array(Box::new(HirType::F64)),
-        )]);
-        assert!(matches!(&program.functions[0].body[0], HirStmt::Let(_, ty, _) if *ty == box_ty));
-    }
-
-    #[test]
-    fn rejects_wrong_number_of_generic_type_arguments() {
-        let module = thaw_parser::parse_typescript(
-            r#"interface Pair<A, B> { first: A; second: B; }
-            function main(): void {
-                const p: Pair<number> = { first: 1, second: 2 };
-            }"#,
-        )
-        .unwrap();
-        let err = lower_module(&module).unwrap_err();
-        assert!(err.contains("type argument"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn rejects_self_referential_generic_interface() {
-        // Triggered via a parameter type (not a `let`) so the error comes
-        // from resolving `Node<number>` itself, not from lowering some
-        // initializer expression first.
-        let module = thaw_parser::parse_typescript(
-            r#"interface Node<T> {
-                value: T;
-                next: Node<T>;
-            }
-            function f(n: Node<number>): void {}
-            function main(): void {}"#,
-        )
-        .unwrap();
-        let err = lower_module(&module).unwrap_err();
-        assert!(err.contains("self-referential"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn interface_extends_prepends_base_fields() {
-        let program = lower(
-            r#"interface Shape {
-                color: number;
-            }
-            interface Circle extends Shape {
-                radius: number;
-            }
-            function main(): void {
-                const c: Circle = { color: 1, radius: 2 };
-                console.log(c.radius);
-            }"#,
-        );
-
-        let circle_ty = HirType::Object(vec![
-            ("color".into(), HirType::F64),
-            ("radius".into(), HirType::F64),
-        ]);
-        assert_eq!(
-            program.functions[0].body[0],
-            HirStmt::Let(
-                "c".into(),
-                circle_ty,
-                HirExpr::ObjectLit(vec![
-                    ("color".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("radius".into(), HirExpr::Lit(HirLit::F64(2.0))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn interface_can_extend_multiple_bases_in_order() {
-        let program = lower(
-            r#"interface A { a: number; }
-            interface B { b: number; }
-            interface C extends A, B {
-                c: number;
-            }
-            function main(): void {
-                const v: C = { a: 1, b: 2, c: 3 };
-                console.log(v.a);
-            }"#,
-        );
-        let c_ty = HirType::Object(vec![
-            ("a".into(), HirType::F64),
-            ("b".into(), HirType::F64),
-            ("c".into(), HirType::F64),
-        ]);
-        assert_eq!(
-            program.functions[0].body[0],
-            HirStmt::Let(
-                "v".into(),
-                c_ty,
-                HirExpr::ObjectLit(vec![
-                    ("a".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                    ("b".into(), HirExpr::Lit(HirLit::F64(2.0))),
-                    ("c".into(), HirExpr::Lit(HirLit::F64(3.0))),
-                ]),
-            )
-        );
-    }
-
-    #[test]
-    fn rejects_extends_field_name_collision() {
-        let module = thaw_parser::parse_typescript(
-            r#"interface A { x: number; }
-            interface B extends A { x: number; }
-            function main(): void {}"#,
-        )
-        .unwrap();
-        let err = lower_module(&module).unwrap_err();
-        assert!(err.contains("collides"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn extends_chains_work_transitively() {
-        let program = lower(
-            r#"interface A { a: number; }
-            interface B extends A { b: number; }
-            interface C extends B { c: number; }
-            function main(): void {
-                const v: C = { a: 1, b: 2, c: 3 };
-                console.log(v.a);
-            }"#,
-        );
-        let c_ty = HirType::Object(vec![
-            ("a".into(), HirType::F64),
-            ("b".into(), HirType::F64),
-            ("c".into(), HirType::F64),
-        ]);
-        assert!(matches!(&program.functions[0].body[0], HirStmt::Let(_, ty, _) if *ty == c_ty));
-    }
-
-    #[test]
-    fn renames_shadowed_block_locals_and_restores_outer_binding() {
-        let program = lower(
-            r#"function main(): void {
-                let value = 1;
-                if (value < 2) {
-                    let value = 2;
-                    value = value + 1;
-                    console.log(value);
-                }
-                console.log(value);
-            }"#,
-        );
-        let body = &program.functions[0].body;
-        assert!(matches!(&body[0], HirStmt::Let(name, _, _) if name == "value"));
-        let HirStmt::If(_, then_body, _) = &body[1] else {
-            panic!("expected lowered if");
-        };
-        assert!(matches!(&then_body[0], HirStmt::Let(name, _, _) if name == "value__thaw_0"));
-        assert!(
-            matches!(&then_body[1], HirStmt::Expr(HirExpr::Assign(name, _)) if name == "value__thaw_0")
-        );
-        assert!(format!("{:?}", then_body[2]).contains("value__thaw_0"));
-        assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
-    }
-
-    #[test]
-    fn renames_catch_binding_that_shadows_an_outer_local() {
-        let program = lower(
-            r#"function main(): void {
-                const error = "outer";
-                try {
-                    throw "inner";
-                } catch (error) {
-                    console.log(error);
-                }
-                console.log(error);
-            }"#,
-        );
-        let body = &program.functions[0].body;
-        let HirStmt::Try(_, catch_name, catch_body) = &body[1] else {
-            panic!("expected lowered try");
-        };
-        assert_eq!(catch_name, "error__thaw_0");
-        assert!(format!("{:?}", catch_body).contains("error__thaw_0"));
-        assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
-    }
-
-    #[test]
-    fn lowers_typed_arrow_functions_and_restores_the_outer_scope() {
-        let program = lower(
-            r#"function main(): void {
-                const value: number = 10;
-                const callback = (value: number): number => value + 1;
-                console.log(value);
-            }"#,
-        );
-        let body = &program.functions[0].body;
-        let HirStmt::Let(
-            _,
-            HirType::Function(param_types, return_type),
-            HirExpr::Lambda(captures, params, lambda_return, lambda_body),
-        ) = &body[1]
-        else {
-            panic!("expected a lowered arrow function");
-        };
-        assert!(captures.is_empty());
-        assert_eq!(param_types, &[HirType::F64]);
-        assert_eq!(return_type.as_ref(), &HirType::F64);
-        assert_eq!(lambda_return, &HirType::F64);
-        assert_eq!(
-            params,
-            &[HirParam {
-                name: "value__thaw_0".into(),
-                ty: HirType::F64
-            }]
-        );
-        assert!(matches!(
-            lambda_body.as_ref(),
-            HirExpr::BinOp(_, left, _) if matches!(left.as_ref(), HirExpr::Var(name) if name == "value__thaw_0")
-        ));
-        assert!(format!("{:?}", body[2]).contains("Var(\"value\")"));
-    }
-
-    #[test]
-    fn lowers_a_typed_arrow_block_body() {
-        let program = lower(
-            r#"function main(): void {
-                const callback = (path: string): string => { return path; };
-            }"#,
-        );
-        let HirStmt::Let(_, _, HirExpr::Lambda(captures, params, return_type, lambda_body)) =
-            &program.functions[0].body[0]
-        else {
-            panic!("expected a lowered arrow function");
-        };
-        assert!(captures.is_empty());
-        assert_eq!(params[0].ty, HirType::Str);
-        assert_eq!(return_type, &HirType::Str);
-        assert!(matches!(
-            lambda_body.as_ref(),
-            HirExpr::Block(stmts)
-                if matches!(&stmts[0], HirStmt::Return(Some(HirExpr::Var(name))) if name == "path")
-        ));
-    }
-
-    #[test]
-    fn lowers_function_type_annotations_and_calls_through_function_values() {
-        let program = lower(
-            r#"function main(): void {
-                const increment: (value: number) => number =
-                    (value: number): number => value + 1;
-                console.log(increment(41));
-            }"#,
-        );
-        let function_type = HirType::Function(vec![HirType::F64], Box::new(HirType::F64));
-        assert!(matches!(
-            &program.functions[0].body[0],
-            HirStmt::Let(name, ty, HirExpr::Lambda(_, _, _, _))
-                if name == "increment" && ty == &function_type
-        ));
-        assert!(format!("{:?}", program.functions[0].body[1])
-            .contains("Call(Var(\"increment\"), [Lit(F64(41.0))])"));
-    }
-
-    #[test]
-    fn records_arrow_capture_names_and_types() {
-        let program = lower(
-            r#"function main(): void {
-                const base: number = 40;
-                const add = (value: number): number => base + value;
-                console.log(add(2));
-            }"#,
-        );
-        let HirStmt::Let(_, _, HirExpr::Lambda(captures, _, _, _)) = &program.functions[0].body[1]
-        else {
-            panic!("expected captured lambda");
-        };
-        assert_eq!(
-            captures,
-            &[HirParam {
-                name: "base".into(),
-                ty: HirType::F64,
-            }]
-        );
-    }
-
-    #[test]
-    fn lowers_calls_through_function_typed_object_properties() {
-        let program = lower(
-            r#"interface Operations { apply: (value: number) => number; }
-            function main(): void {
-                const operations: Operations = {
-                    apply: (value: number): number => value + 1
-                };
-                console.log(operations.apply(41));
-            }"#,
-        );
-        assert!(matches!(
-            &program.functions[0].body[1],
-            HirStmt::Expr(HirExpr::Call(_, args))
-                if matches!(&args[0], HirExpr::Call(callee, _)
-                    if matches!(callee.as_ref(), HirExpr::PropAccess(_, _, field) if field == "apply"))
-        ));
-    }
-
-    #[test]
-    fn specializes_forward_referenced_generic_classes_once_per_type_tuple() {
-        let program = lower(
-            r#"
-            function read(value: Box<number>): number { return value.get(); }
-            function main(): number {
-                const first = new Box<number>(40);
-                const duplicate = new Box<number>(2);
-                const inferredDuplicate = new Box(1);
-                const text = new Box<string>("ready");
-                const pair = new Pair<string, number>(text.get(), first.get() + duplicate.get());
-                return read(new Box<number>(pair.second + inferredDuplicate.get()));
-            }
-            class Pair<T, U> {
-                constructor(public first: T, public second: U) {}
-            }
-            class Box<T> {
-                constructor(public value: T) {}
-                get(): T { return this.value; }
-            }
-            "#,
-        );
-        let number_box = specialized_generic_name("Box", &[HirType::F64]);
-        let string_box = specialized_generic_name("Box", &[HirType::Str]);
-        let pair = specialized_generic_name("Pair", &[HirType::Str, HirType::F64]);
-        for class_name in [&number_box, &string_box, &pair] {
-            assert_eq!(
-                program
-                    .functions
-                    .iter()
-                    .filter(|function| {
-                        function.name == class_constructor_symbol(class_name.as_ref())
-                    })
-                    .count(),
-                1,
-                "specialization {class_name} must be emitted exactly once"
-            );
-        }
-        let number_getter = program
-            .functions
-            .iter()
-            .find(|function| function.name == class_method_symbol(&number_box, "get"))
-            .expect("number Box method specialization");
-        assert_eq!(number_getter.ret, HirType::F64);
-        let string_getter = program
-            .functions
-            .iter()
-            .find(|function| function.name == class_method_symbol(&string_box, "get"))
-            .expect("string Box method specialization");
-        assert_eq!(string_getter.ret, HirType::Str);
-    }
-
-    #[test]
-    fn validates_native_generic_class_defaults_and_constraints() {
-        for (source, expected) in [
-            (
-                "class Numeric<T extends number> { constructor(public value: T) {} } function main(): void { new Numeric<string>(\"wrong\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "class Numeric<T extends number> { constructor(public value: T) {} } function main(): void { new Numeric(\"wrong\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "class Numeric<T extends number> { static count: number = 0; } function main(): void { console.log(Numeric<string>.count); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "class Invalid<T extends number = string> { constructor(public value: T) {} } function main(): void { new Invalid(\"wrong\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "class Phantom<T> { constructor() {} } function main(): void { new Phantom(); }",
-                "cannot infer generic class `Phantom` type parameter `T`",
-            ),
-            (
-                "class Invalid<T = string, U> {} function main(): void {}",
-                "required type parameter `U`",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn deduplicates_explicit_and_inferred_nested_generic_classes() {
-        let program = lower(
-            r#"
-            class Box<T> { constructor(public value: T) {} }
-            class Holder<T> { constructor(public value: T) {} }
-            function main(): void {
-                const boxed = new Box(42);
-                const explicit = new Holder<Box<number>>(boxed);
-                const inferred = new Holder(boxed);
-                console.log(explicit.value.value + inferred.value.value);
-            }
-            "#,
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| {
-                    function.name.starts_with("__thaw_class_Holder__thaw_")
-                        && function.name.ends_with("_constructor")
-                })
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn diagnoses_recursive_native_generic_class_layouts() {
-        let module = thaw_parser::parse_typescript(
-            r#"
-            class Loop<T> { constructor(public next: Loop<T>) {} }
-            function consume(value: Loop<number>): void {}
-            "#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("fixed-size native layout"), "{error}");
-    }
-
-    #[test]
-    fn lowers_one_shared_static_owner_for_generic_class_specializations() {
-        let program = lower(
-            r#"
-            class Box<T> {
-                static count: number = 0;
-                constructor(public value: T) { Box.count += 1; }
-            }
-            function main(): void {
-                new Box(1);
-                new Box("two");
-                console.log(Box.count);
-            }
-            "#,
-        );
-        let owner = generic_class_static_owner("Box");
-        assert_eq!(
-            program
-                .globals
-                .iter()
-                .filter(|global| global.name == class_static_field_symbol(&owner, "count"))
-                .count(),
-            1
-        );
-        assert!(!program.globals.iter().any(|global| {
-            global.name.contains("Box__thaw_f64_static_field_count")
-                || global.name.contains("Box__thaw_str_static_field_count")
-        }));
-    }
-
-    #[test]
-    fn rejects_generic_class_type_parameters_in_static_members() {
-        let module = thaw_parser::parse_typescript(
-            "class Invalid<T> { static value: T; } function main(): void {}",
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("static members cannot reference class type parameter `T`"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn specializes_explicit_generic_class_methods_once_per_type_tuple() {
-        let program = lower(
-            r#"
-            class Box {
-                convert<T>(value: T): T { return value; }
-            }
-            function main(): void {
-                const box = new Box();
-                console.log(box.convert<string>("first"));
-                console.log(box.convert<string>("second"));
-                console.log(box.convert("inferred"));
-                console.log(box.convert<number>(42));
-            }
-            "#,
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| {
-                    function.name == class_method_symbol("Box", "convert__thaw_str")
-                })
-                .count(),
-            1
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| { function.name == class_method_symbol("Box", "convert__thaw_f64") }));
-    }
-
-    #[test]
-    fn infers_generic_class_methods_from_instance_member_types() {
-        let program = lower(
-            r#"
-            class SourceBase {
-                value: string = "field";
-                get current(): string { return this.value; }
-                read(): string { return this.current; }
-                convert<T>(value: T): T { return value; }
-                fromThisField(): string { return this.convert(this.value); }
-                fromThisGetter(): string { return this.convert(this.current); }
-                fromThisMethod(): string { return this.convert(this.read()); }
-            }
-            class SourceDerived extends SourceBase {}
-            function main(): void {
-                const source = new SourceDerived();
-                console.log(source.convert(source.value));
-                console.log(source.convert(source.current));
-                console.log(source.convert(source.read()));
-                console.log(source.fromThisField());
-                console.log(source.fromThisGetter());
-                console.log(source.fromThisMethod());
-            }
-            "#,
-        );
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| {
-                    function.name == class_method_symbol("SourceBase", "convert__thaw_str")
-                })
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn validates_explicit_generic_class_method_arguments() {
-        for (source, expected) in [
-            (
-                "class Box { numeric<T extends number>(value: T): T { return value; } } function main(): void { const box = new Box(); box.numeric<string>(\"bad\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "class Box { pair<T, U>(left: T, right: U): T { return left; } } function main(): void { const box = new Box(); box.pair<number>(1, 2); }",
-                "expects 2 type argument(s), got 1",
-            ),
-            (
-                "class Box { numeric<T extends number>(value: T): T { return value; } } function main(): void { const box = new Box(); box.numeric(\"bad\"); }",
-                "does not satisfy constraint F64",
-            ),
-            (
-                "class Box { collect<T>(first: T, ...rest: T[]): T { return first; } } function main(): void { const box = new Box(); box.collect(1, \"bad\"); }",
-                "conflicting call-site types",
-            ),
-            (
-                "class Box { convert<T>(value: T): T { return value; } } function main(): void { const box = new Box(); const values: string[] = [\"bad\"]; box.convert(...values); }",
-                "requires a statically sized tuple spread",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn validates_abstract_generic_class_method_implementations() {
-        let valid = thaw_parser::parse_typescript(
-            "abstract class Base { abstract convert<T>(value: T): T; } class Derived extends Base { convert<U>(value: U): U { return value; } } function main(): void { new Derived().convert(42); }",
-        )
-        .unwrap();
-        lower_module(&valid).unwrap();
-
-        for (source, expected) in [
-            (
-                "abstract class Base { abstract convert<T>(value: T): T; } class Derived extends Base {} function main(): void {}",
-                "must implement abstract generic member `convert`",
-            ),
-            (
-                "abstract class Base { abstract convert<T>(value: T): T; } class Derived extends Base { convert<T>(value: T): string { return \"bad\"; } } function main(): void {}",
-                "abstract generic member `convert` from `Base` with an incompatible signature",
-            ),
-            (
-                "abstract class Base { abstract convert<T extends number>(value: T): T; } class Derived extends Base { convert<T extends string>(value: T): T { return value; } } function main(): void {}",
-                "abstract generic member `convert` from `Base` with an incompatible signature",
-            ),
-            (
-                "abstract class Base { abstract collect<T>(...value: T[]): T; } class Derived extends Base { collect<T>(value: T[]): T { return value[0]; } } function main(): void {}",
-                "abstract generic member `collect` from `Base` with an incompatible signature",
-            ),
-        ] {
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-
-    #[test]
-    fn lowers_native_class_construction_and_this_field_initialization() {
-        let program = lower(
-            r#"class Counter {
-                value: number = 1;
-                label: string;
-                constructor(value: number, label: string) {
-                    this.value = value;
-                    this.label = label;
-                }
-            }
-            function main(): number {
-                const counter = new Counter(42, "ready");
-                return counter.value;
-            }"#,
-        );
-        let constructor = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Counter_constructor")
-            .expect("native class constructor");
-        assert_eq!(constructor.params.len(), 2);
-        assert!(matches!(
-            &constructor.body[0],
-            HirStmt::Let(name, HirType::Object(fields), HirExpr::ObjectAlloc(_))
-                if name == "__thaw_this"
-                    && fields.iter().any(|(name, ty)| name == "value" && ty == &HirType::F64)
-                    && fields.iter().any(|(name, ty)| name == "label" && ty == &HirType::Str)
-        ));
-        let initializer = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Counter_initialize")
-            .expect("native class initializer");
-        assert_eq!(initializer.params[0].name, "__thaw_this");
-        assert!(matches!(
-            constructor.body.last(),
-            Some(HirStmt::Return(Some(HirExpr::Call(callee, args))))
-                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Counter_initialize")
-                    && matches!(args.first(), Some(HirExpr::Var(name)) if name == "__thaw_this")
-        ));
-        assert_eq!(
-            initializer
-                .body
-                .iter()
-                .filter(|statement| matches!(statement, HirStmt::Expr(HirExpr::PropAssign(..))))
-                .count(),
-            3
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(matches!(
-            &main.body[0],
-            HirStmt::Let(_, HirType::Object(_), HirExpr::Call(callee, _))
-                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Counter_constructor")
-        ));
-    }
-
-    #[test]
-    fn lowers_native_class_instance_methods_with_explicit_receiver() {
-        let program = lower(
-            r#"class Counter {
-                value: number;
-                constructor(value: number) { this.value = value; }
-                add(delta: number): number {
-                    this.value += delta;
-                    return this.value;
-                }
-            }
-            function main(): number {
-                const counter = new Counter(40);
-                return counter.add(2);
-            }"#,
-        );
-        let method = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Counter_method_add")
-            .expect("native class method");
-        assert_eq!(method.params[0].name, "__thaw_this");
-        assert!(matches!(method.params[0].ty, HirType::Object(_)));
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(format!("{:?}", main.body).contains(
-            "Call(Var(\"__thaw_class_Counter_method_add\"), [Var(\"counter\"), Lit(F64(2.0))])"
-        ));
-    }
-
-    #[test]
-    fn lowers_native_class_static_methods_without_a_receiver() {
-        let program = lower(
-            r#"class MathBox {
-                static add(left: number, right: number): number { return left + right; }
-            }
-            function main(): number { return MathBox.add(40, 2); }"#,
-        );
-        let method = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_MathBox_static_add")
-            .expect("native static method");
-        assert_eq!(method.params.len(), 2);
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(format!("{:?}", main.body).contains(
-            "Call(Var(\"__thaw_class_MathBox_static_add\"), [Lit(F64(40.0)), Lit(F64(2.0))])"
-        ));
-    }
-
-    #[test]
-    fn lowers_native_class_instance_and_static_getters() {
-        let program = lower(
-            r#"class Box {
-                value: number;
-                constructor(value: number) { this.value = value; }
-                get doubled(): number { return this.value * 2; }
-                static get version(): string { return "v1"; }
-            }
-            function main(): number {
-                const box = new Box(21);
-                console.log(Box.version);
-                return box.doubled;
-            }"#,
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "__thaw_class_Box_instance_getter_doubled"));
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "__thaw_class_Box_static_getter_version"));
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        let body = format!("{:?}", main.body);
-        assert!(body.contains("__thaw_class_Box_static_getter_version"));
-        assert!(body.contains("__thaw_class_Box_instance_getter_doubled"));
-    }
-
-    #[test]
-    fn lowers_native_class_setters_and_preserves_assignment_values() {
-        let program = lower(
-            r#"let version: number = 0;
-            class Box {
-                stored: number;
-                constructor(value: number) { this.stored = value; }
-                set value(next: number) { this.stored = next; }
-                static set current(next: number) { version = next; }
-            }
-            function main(): number {
-                const box = new Box(1);
-                const assigned = (box.value = 40);
-                const selected = (Box.current = 2);
-                return assigned + selected + version;
-            }"#,
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "__thaw_class_Box_instance_setter_value"));
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "__thaw_class_Box_static_setter_current"));
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        let body = format!("{:?}", main.body);
-        assert!(body.contains("__thaw_class_Box_instance_setter_value"));
-        assert!(body.contains("__thaw_class_Box_static_setter_current"));
-        let setter = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Box_instance_setter_value")
-            .unwrap();
-        assert_eq!(setter.ret, HirType::F64);
-        assert!(matches!(
-            setter.body.last(),
-            Some(HirStmt::Return(Some(HirExpr::Var(name)))) if name == "next"
-        ));
-    }
-
-    #[test]
-    fn lowers_constructor_parameter_properties_as_instance_fields() {
-        let program = lower(
-            r#"class Point {
-                constructor(public x: number, readonly label: string) {}
-                sum(y: number): number { return this.x + y; }
-            }
-            function main(): number {
-                const point = new Point(40, "ready");
-                console.log(point.label);
-                return point.sum(2);
-            }"#,
-        );
-        let constructor = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Point_constructor")
-            .unwrap();
-        let HirType::Object(fields) = &constructor.ret else {
-            panic!("class layout")
-        };
-        assert!(fields
-            .iter()
-            .any(|(name, ty)| name == "x" && ty == &HirType::F64));
-        assert!(fields
-            .iter()
-            .any(|(name, ty)| name == "label" && ty == &HirType::Str));
-        let initializer = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Point_initialize")
-            .unwrap();
-        assert_eq!(
-            initializer
-                .body
-                .iter()
-                .filter(|statement| matches!(statement, HirStmt::Expr(HirExpr::PropAssign(..))))
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn builds_forward_class_inheritance_layouts_in_base_to_derived_order() {
-        let program = lower(
-            r#"class Derived extends Base {
-                label: string;
-                read(): number { return this.value; }
-            }
-            class Base { value: number; }
-            function main(): number {
-                const value = new Derived();
-                return value.read();
-            }"#,
-        );
-        let constructor = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Derived_constructor")
-            .unwrap();
-        let HirType::Object(fields) = &constructor.ret else {
-            panic!("derived layout")
-        };
-        assert_eq!(
-            fields,
-            &vec![
-                ("__thaw_class_identity_Derived$Base".into(), HirType::Bool),
-                ("value".into(), HirType::F64),
-                ("label".into(), HirType::Str),
-            ]
-        );
-    }
-
-    #[test]
-    fn rejects_class_inheritance_cycles_and_field_collisions() {
-        let cycle = thaw_parser::parse_typescript(
-            "class First extends Second {} class Second extends First {}",
-        )
-        .unwrap();
-        assert!(lower_module(&cycle)
-            .unwrap_err()
-            .contains("class inheritance cycle"));
-
-        let collision = thaw_parser::parse_typescript(
-            "class Base { value: number; } class Derived extends Base { value: number; }",
-        )
-        .unwrap();
-        assert!(lower_module(&collision)
-            .unwrap_err()
-            .contains("collides with an inherited or local field"));
-    }
-
-    #[test]
-    fn lowers_super_to_the_base_initializer_on_the_same_instance() {
-        let program = lower(
-            r#"class Derived extends Base {
-                label: string = "ready";
-                constructor(value: number) { super(value); }
-                answer(): number { return this.value; }
-            }
-            class Base { constructor(public value: number) {} }
-            function main(): number { return new Derived(42).answer(); }"#,
-        );
-        let initializer = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Derived_initialize")
-            .unwrap();
-        assert!(matches!(
-            &initializer.body[0],
-            HirStmt::Expr(HirExpr::Call(callee, args))
-                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Base_initialize")
-                    && matches!(args.first(), Some(HirExpr::Var(name)) if name == "__thaw_this")
-        ));
-        assert!(matches!(
-            &initializer.body[1],
-            HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "label"
-        ));
-    }
-
-    #[test]
-    fn generates_typed_inherited_member_wrappers_and_prefers_overrides() {
-        let program = lower(
-            r#"class Base {
-                constructor(public value: number) {}
-                answer(): number { return this.value; }
-                get doubled(): number { return this.value * 2; }
-                set current(next: number) { this.value = next; }
-            }
-            class Derived extends Base {
-                constructor(value: number) { super(value); }
-                answer(): number { return this.value + 1; }
-            }
-            function main(): number {
-                const value = new Derived(20);
-                value.current = 21;
-                console.log(value.doubled);
-                return value.answer();
-            }"#,
-        );
-        for symbol in [
-            "__thaw_class_Derived_instance_getter_doubled",
-            "__thaw_class_Derived_instance_setter_current",
-        ] {
-            assert!(program
-                .functions
-                .iter()
-                .any(|function| function.name == symbol));
-        }
-        let answer = program
-            .functions
-            .iter()
-            .filter(|function| function.name == "__thaw_class_Derived_method_answer")
-            .collect::<Vec<_>>();
-        assert_eq!(answer.len(), 1, "override must suppress inherited wrapper");
-    }
-
-    #[test]
-    fn lowers_super_method_calls_to_the_direct_base_implementation() {
-        let program = lower(
-            r#"class Base {
-                constructor(public value: number) {}
-                answer(delta: number): number { return this.value + delta; }
-            }
-            class Derived extends Base {
-                constructor(value: number) { super(value); }
-                answer(delta: number): number { return super.answer(delta) + 1; }
-            }
-            function main(): number { return new Derived(40).answer(1); }"#,
-        );
-        let method = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Derived_method_answer")
-            .unwrap();
-        assert!(format!("{:?}", method.body).contains(
-            "Call(Var(\"__thaw_class_Base_method_answer\"), [Var(\"__thaw_this\"), Var(\"delta\")])"
-        ));
-    }
-
-    #[test]
-    fn lowers_super_getter_and_setter_access_to_base_accessors() {
-        let program = lower(
-            r#"class Base {
-                stored: number;
-                constructor(value: number) { this.stored = value; }
-                get value(): number { return this.stored; }
-                set value(next: number) { this.stored = next; }
-            }
-            class Derived extends Base {
-                constructor(value: number) { super(value); }
-                get value(): number { return super.value + 1; }
-                set value(next: number) { super.value = next + 1; }
-            }
-            function main(): number {
-                const value = new Derived(1);
-                value.value = 20;
-                return value.value;
-            }"#,
-        );
-        let getter = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Derived_instance_getter_value")
-            .unwrap();
-        assert!(format!("{:?}", getter.body).contains("__thaw_class_Base_instance_getter_value"));
-        let setter = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Derived_instance_setter_value")
-            .unwrap();
-        assert!(format!("{:?}", setter.body).contains("__thaw_class_Base_instance_setter_value"));
-    }
-
-    #[test]
-    fn inherits_static_members_and_prefers_static_overrides() {
-        let program = lower(
-            r#"let stored: number = 0;
-            class Base {
-                static add(left: number, right: number): number { return left + right; }
-                static get current(): number { return stored; }
-                static set current(next: number) { stored = next; }
-            }
-            class Derived extends Base {
-                static add(left: number, right: number): number { return left + right + 1; }
-            }
-            function main(): number {
-                Derived.current = 40;
-                return Derived.current + Derived.add(1, 1);
-            }"#,
-        );
-        for symbol in [
-            "__thaw_class_Derived_static_getter_current",
-            "__thaw_class_Derived_static_setter_current",
-        ] {
-            assert!(program
-                .functions
-                .iter()
-                .any(|function| function.name == symbol));
-        }
-        assert_eq!(
-            program
-                .functions
-                .iter()
-                .filter(|function| function.name == "__thaw_class_Derived_static_add")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn lowers_static_super_methods_getters_and_setters() {
-        let program = lower(
-            r#"let stored: number = 0;
-            class Base {
-                static add(value: number): number { return value + 1; }
-                static get current(): number { return stored; }
-                static set current(next: number) { stored = next; }
-            }
-            class Derived extends Base {
-                static add(value: number): number { return super.add(value) + 1; }
-                static get current(): number { return super.current + 1; }
-                static set current(next: number) { super.current = next + 1; }
-            }
-            function main(): number {
-                Derived.current = 40;
-                return Derived.current + Derived.add(0);
-            }"#,
-        );
-        for symbol in [
-            "__thaw_class_Derived_static_add",
-            "__thaw_class_Derived_static_getter_current",
-            "__thaw_class_Derived_static_setter_current",
-        ] {
-            let function = program
-                .functions
-                .iter()
-                .find(|function| function.name == symbol)
-                .unwrap();
-            assert!(format!("{:?}", function.body).contains("__thaw_class_Base_static"));
-        }
-    }
-
-    #[test]
-    fn forwards_implicit_derived_constructor_arguments_through_multiple_levels() {
-        let program = lower(
-            r#"class Leaf extends Middle {}
-            class Middle extends Base {}
-            class Base {
-                constructor(public value: number, public label: string) {}
-                answer(): number { return this.value; }
-            }
-            function main(): number {
-                const value = new Leaf(42, "ready");
-                console.log(value.label);
-                return value.answer();
-            }"#,
-        );
-        for class_name in ["Middle", "Leaf"] {
-            let constructor = program
-                .functions
-                .iter()
-                .find(|function| function.name == format!("__thaw_class_{class_name}_constructor"))
-                .unwrap();
-            assert_eq!(constructor.params.len(), 2);
-        }
-        let leaf_initializer = program
-            .functions
-            .iter()
-            .find(|function| function.name == "__thaw_class_Leaf_initialize")
-            .unwrap();
-        assert!(format!("{:?}", leaf_initializer.body).contains("__thaw_class_Middle_initialize"));
-    }
-
-    #[test]
-    fn validates_native_class_implements_against_inherited_layout() {
-        let program = lower(
-            r#"interface NamedValue<N, V> { name: N; value: V; }
-            class Named {
-                constructor(public name: string) {}
-            }
-            class Value extends Named implements NamedValue<string, number> {
-                constructor(name: string, public value: number) { super(name); }
-            }
-            function main(): number { return new Value("answer", 42).value; }"#,
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == "__thaw_class_Value_constructor"));
-    }
-
-    #[test]
-    fn rejects_native_class_missing_an_implemented_field() {
-        let module = thaw_parser::parse_typescript(
-            r#"interface Required { value: number; label: string; }
-            class Incomplete implements Required {
-                constructor(public value: number) {}
-            }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("missing field `label` required by `Required`"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn rejects_native_class_implemented_field_type_mismatch() {
-        let module = thaw_parser::parse_typescript(
-            r#"type Required = { value: number };
-            class Mismatch implements Required {
-                constructor(public value: string) {}
-            }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("field `value` has type Str, but `Required` requires F64"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn lowers_initialized_native_static_fields_as_globals() {
-        let program = lower(
-            r#"class Counter {
-                static base: number = 40;
-                static value: number = Counter.base + 2;
-                static readonly label: string = "ready";
-                static next(): number { Counter.value += 1; return Counter.value; }
-            }
-            function main(): number { console.log(Counter.label); return Counter.next(); }"#,
-        );
-        for field in ["base", "value", "label"] {
-            assert!(program
-                .globals
-                .iter()
-                .any(|global| { global.name == class_static_field_symbol("Counter", field) }));
-        }
-        assert!(program.initializers.iter().any(|step| matches!(
-            step,
-            HirInitStep::StoreGlobal(name, _)
-                if name == &class_static_field_symbol("Counter", "value")
-        )));
-    }
-
-    #[test]
-    fn lowers_generic_static_this_initializers_on_the_shared_owner() {
-        let program = lower(
-            r#"class Box<T> {
-                static label: string = "ready";
-                static identity<U>(value: U): U { return value; }
-                static initialized: string = this.identity<string>(this.label);
-                constructor(public value: T) {}
-            }
-            function main(): void { new Box(1); console.log(Box.initialized); }"#,
-        );
-        let owner = generic_class_static_owner("Box");
-        for field in ["label", "initialized"] {
-            let symbol = class_static_field_symbol(&owner, field);
-            assert!(
-                program.globals.iter().any(|global| global.name == symbol),
-                "missing shared static global {symbol}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_assignment_to_readonly_native_static_field() {
-        let module = thaw_parser::parse_typescript(
-            r#"class Constants { static readonly answer: number = 42; }
-            function main(): void { Constants.answer = 0; }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("cannot assign to constant"), "{error}");
-
-        let through_this = thaw_parser::parse_typescript(
-            r#"class Constants {
-                static readonly answer: number = 42;
-                static invalid(): number { return this.answer++; }
-            }"#,
-        )
-        .unwrap();
-        let error = lower_module(&through_this).unwrap_err();
-        assert!(error.contains("cannot update constant"), "{error}");
-    }
-
-    #[test]
-    fn inherits_native_static_fields_without_copying_storage() {
-        let program = lower(
-            r#"class Base {
-                static value: number = 40;
-                static readonly label: string = "shared";
-            }
-            class Middle extends Base {}
-            class Leaf extends Middle {}
-            function main(): number { Leaf.value = 42; return Base.value; }"#,
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == class_getter_symbol("Leaf", "value", true)));
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == class_setter_symbol("Leaf", "value", true)));
-        assert!(!program
-            .globals
-            .iter()
-            .any(|global| { global.name == class_static_field_symbol("Leaf", "value") }));
-        assert!(!program
-            .functions
-            .iter()
-            .any(|function| function.name == class_setter_symbol("Leaf", "label", true)));
-    }
-
-    #[test]
-    fn rejects_assignment_to_inherited_readonly_native_static_field() {
-        let module = thaw_parser::parse_typescript(
-            r#"class Base { static readonly label: string = "fixed"; }
-            class Derived extends Base {}
-            function main(): void { Derived.label = "changed"; }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("cannot assign to readonly static member `Derived.label`"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn lowers_native_static_blocks_in_class_body_order() {
-        let program = lower(
-            r#"let trace: string = "";
-            class Counter {
-                static value: number = 1;
-                static { Counter.value += 40; trace += "A"; }
-                static result: number = Counter.value + 1;
-                static { trace += "B"; }
-            }
-            function main(): number { console.log(trace); return Counter.result; }"#,
-        );
-        let value = class_static_field_symbol("Counter", "value");
-        let result = class_static_field_symbol("Counter", "result");
-        let value_index = program
-            .initializers
-            .iter()
-            .position(|step| matches!(step, HirInitStep::StoreGlobal(name, _) if name == &value))
-            .unwrap();
-        let result_index = program
-            .initializers
-            .iter()
-            .position(|step| matches!(step, HirInitStep::StoreGlobal(name, _) if name == &result))
-            .unwrap();
-        assert!(result_index > value_index + 1);
-    }
-
-    #[test]
-    fn lowers_string_literal_computed_native_class_members() {
-        let program = lower(
-            r#"class Box {
-                ["value"]: number;
-                static ["count"]: number = 40;
-                constructor(value: number) { this["value"] = value; }
-                ["add"](delta: number): number { return this["value"] + delta; }
-                get ["current"](): number { return this["value"]; }
-                set ["current"](value: number) { this["value"] = value; }
-                static ["next"](): number { return ++Box["count"]; }
-            }
-            function main(): number {
-                const value = new Box(40);
-                value["current"] = value["add"](2);
-                return value["current"] + Box["next"]();
-            }"#,
-        );
-        for symbol in [
-            class_method_symbol("Box", "add"),
-            class_getter_symbol("Box", "current", false),
-            class_setter_symbol("Box", "current", false),
-            class_static_method_symbol("Box", "next"),
-        ] {
-            assert!(program
-                .functions
-                .iter()
-                .any(|function| function.name == symbol));
-        }
-    }
-
-    #[test]
-    fn folds_static_computed_native_class_member_names() {
-        let program = lower(
-            r#"const prefix = "val";
-            const field = `${prefix}ue` as const;
-            const method = ("re" + "ad") as string;
-            class Box {
-                [field]: number = 42;
-                [method](): number { return this[field]; }
-            }
-            function main(): number { return new Box()[method](); }"#,
-        );
-        assert!(program
-            .functions
-            .iter()
-            .any(|function| function.name == class_method_symbol("Box", "read")));
-
-        let module = thaw_parser::parse_typescript(
-            r#"let key: string = "value";
-            class Box { [key]: number = 42; }
-            function main(): void {}"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("computed members require a string-literal name"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn lowers_tuple_spreads_for_native_class_constructors_and_methods() {
-        let program = lower(
-            r#"class Calculator {
-                constructor(public offset: number) {}
-                sum(left: number, right: number): number {
-                    return this.offset + left + right;
-                }
-                static sum(left: number, right: number): number { return left + right; }
-            }
-            function main(): number {
-                const constructorArgs: [number] = [1];
-                const args: [number, number] = [20, 21];
-                const calculator = new Calculator(...constructorArgs);
-                return calculator.sum(...args) + Calculator.sum(...args);
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        let body = format!("{:?}", main.body);
-        assert!(body.contains("__thaw_class_Calculator_constructor"));
-        assert!(body.contains("__thaw_class_Calculator_method_sum"));
-        assert!(body.contains("__thaw_class_Calculator_static_sum"));
-    }
-
-    #[test]
-    fn lowers_typed_tuple_spreads_for_native_method_bind() {
-        let program = lower(
-            r#"class Binder {
-                join(left: string, right: string): string { return left + right; }
-                static join(left: string, right: string): string { return left + right; }
-            }
-            function main(): void {
-                const binder = new Binder();
-                const first: [string] = ["left"];
-                const both: [string, string] = ["left", "right"];
-                const instanceBound = binder.join.bind(binder, ...first);
-                const staticBound = Binder.join.bind(binder, ...both);
-                console.log(instanceBound("right"));
-                console.log(staticBound());
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        let body = format!("{:?}", main.body);
-        assert!(body.contains("__thaw_class_Binder_method_join"));
-        assert!(body.contains("__thaw_class_Binder_static_join"));
-        assert_eq!(body.matches("__thaw_native_spread_").count(), 6);
-
-        let module = thaw_parser::parse_typescript(
-            r#"class Binder { join(value: string): string { return value; } }
-            function main(): void {
-                const binder = new Binder();
-                const values: string[] = ["value"];
-                binder.join.bind(binder, ...values);
-            }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("spread source must have statically known tuple length"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn extracts_this_independent_native_methods_as_function_values() {
-        let program = lower(
-            r#"class Operations {
-                pass(value: string): string { return value; }
-                static double(value: number): number { return value * 2; }
-            }
-            function main(): void {
-                const operations = new Operations();
-                const pass = operations.pass;
-                const double = Operations.double;
-                console.log(pass("extracted"));
-                console.log(double(21));
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        let body = format!("{:?}", main.body);
-        assert!(body.contains("__thaw_class_Operations_method_pass"));
-        assert!(body.contains("__thaw_class_Operations_static_double"));
-        assert!(body.contains("Lambda"));
-        assert!(body.contains("FunctionRef"));
-    }
-
-    #[test]
-    fn invokes_saved_this_dependent_methods_with_call_and_apply() {
-        let program = lower(
-            r#"class Box {
-                constructor(public value: string) {}
-                read(suffix: string): string { return this.value + suffix; }
-                maybe(useThis: boolean): string {
-                    if (useThis) return this.value;
-                    return this === undefined ? "undefined-this" : "wrong-this";
-                }
-            }
-            class StaticBox {
-                static value: string = "static";
-                static read(suffix: string): string { return this.value + suffix; }
-            }
-            function main(): void {
-                const first = new Box("first");
-                const second = new Box("second");
-                const read = first.read;
-                const alias = read;
-                const args: [string] = ["?"];
-                const boundArgs: [string] = ["!"];
-                const bound = alias.bind(second, ...boundArgs);
-                const staticRead = StaticBox.read;
-                const staticBound = staticRead.bind(first, ...boundArgs);
-                const maybe = first.maybe;
-                console.log(read.call(second, "!"));
-                console.log(alias.apply(first, args));
-                console.log(bound());
-                console.log(staticRead.call(first, "!"));
-                console.log(staticRead.apply(first, args));
-                console.log(staticBound());
-                console.log(maybe(false));
-            }"#,
-        );
-        let main = program
-            .functions
-            .iter()
-            .find(|function| function.name == "main")
-            .unwrap();
-        assert!(format!("{:?}", main.body).contains("__thaw_class_Box_method_read"));
-        assert!(program.functions.iter().any(|function| {
-            function.name == unbound_class_method_symbol(&class_method_symbol("Box", "maybe"))
-        }));
-    }
-
-    #[test]
-    fn lowers_tuple_spreads_for_super_constructors_and_methods() {
-        let program = lower(
-            r#"class Base {
-                constructor(public left: number, public right: number) {}
-                sum(left: number, right: number): number { return left + right; }
-                static sum(left: number, right: number): number { return left + right; }
-            }
-            class Derived extends Base {
-                constructor(args: [number, number]) { super(...args); }
-                sumPair(args: [number, number]): number { return super.sum(...args); }
-                static sumPair(args: [number, number]): number { return super.sum(...args); }
-            }
-            function main(): number {
-                const args: [number, number] = [20, 22];
-                return new Derived(args).sumPair(args) + Derived.sumPair(args);
-            }"#,
-        );
-        for symbol in [
-            class_initializer_symbol("Derived"),
-            class_method_symbol("Derived", "sumPair"),
-            class_static_method_symbol("Derived", "sumPair"),
-        ] {
-            let function = program
-                .functions
-                .iter()
-                .find(|function| function.name == symbol)
-                .unwrap();
-            assert!(format!("{:?}", function.body).contains("__thaw_native_spread_"));
-        }
-    }
-
-    #[test]
-    fn lowers_static_block_super_fields_methods_and_accessors() {
-        let program = lower(
-            r#"class Base {
-                static value: number = 40;
-                static bump(value: number): number { return value + 1; }
-                static get current(): number { return Base.value; }
-                static set current(value: number) { Base.value = value; }
-            }
-            class Derived extends Base {
-                static before: number = super.current;
-                static viaMethod: number = super.bump(super.value);
-                static { super.current = super.value + 2; }
-                static after: number = super.current;
-            }
-            function main(): number { return Derived.after; }"#,
-        );
-        let block = program
-            .initializers
-            .iter()
-            .find(|step| matches!(step, HirInitStep::Statement(_)))
-            .unwrap();
-        let debug = format!("{block:?}");
-        assert!(debug.contains("__thaw_class_Base_static_setter_current"));
-        assert!(debug.contains("__thaw_class_Base_static_field_value"));
-    }
-
-    #[test]
-    fn lowers_native_instanceof_across_the_inheritance_chain() {
-        let program = lower(
-            r#"class Base {}
-            class Middle extends Base {}
-            class Leaf extends Middle {}
-            class Other {}
-            function main(): boolean {
-                const value = new Leaf();
-                return value instanceof Leaf && value instanceof Middle
-                    && value instanceof Base && !(value instanceof Other);
-            }"#,
-        );
-        let HirType::Object(fields) = &program
-            .functions
-            .iter()
-            .find(|function| function.name == class_constructor_symbol("Leaf"))
-            .unwrap()
-            .ret
-        else {
-            panic!("leaf constructor must return an object")
-        };
-        assert_eq!(fields[0].0, "__thaw_class_identity_Leaf$Middle$Base");
-    }
-
-    #[test]
-    fn lowers_native_class_default_parameter_wrappers() {
-        let program = lower(
-            r#"class Box {
-                constructor(public value: number = 40, public label: string = String(value)) {}
-                add(delta: number = this.value): number { return this.value + delta; }
-                static sum(left: number = 20, right: number = left + 22): number {
-                    return left + right;
-                }
-            }
-            function main(): number {
-                const value = new Box();
-                console.log(value.label);
-                return value.add() + Box.sum();
-            }"#,
-        );
-        for symbol in [
-            default_arity_symbol(&class_constructor_symbol("Box"), 0),
-            default_arity_symbol(&class_method_symbol("Box", "add"), 1),
-            default_arity_symbol(&class_static_method_symbol("Box", "sum"), 0),
-        ] {
-            assert!(program
-                .functions
-                .iter()
-                .any(|function| function.name == symbol));
-        }
-    }
-
-    #[test]
-    fn rejects_constructing_an_abstract_native_class() {
-        let module = thaw_parser::parse_typescript(
-            r#"abstract class Shape { abstract area(): number; }
-            function main(): void { const value = new Shape(); }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("cannot construct abstract class `Shape`"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn rejects_missing_or_incompatible_abstract_implementations() {
-        let missing = thaw_parser::parse_typescript(
-            r#"abstract class Shape { abstract area(value: number): number; }
-            class Missing extends Shape {}"#,
-        )
-        .unwrap();
-        let error = lower_module(&missing).unwrap_err();
-        assert!(
-            error.contains("must implement abstract member `area`"),
-            "{error}"
-        );
-
-        let incompatible = thaw_parser::parse_typescript(
-            r#"abstract class Shape { abstract area(value: number): number; }
-            class Wrong extends Shape { area(value: string): number { return 0; } }"#,
-        )
-        .unwrap();
-        let error = lower_module(&incompatible).unwrap_err();
-        assert!(error.contains("incompatible signature"), "{error}");
-
-        let missing_field = thaw_parser::parse_typescript(
-            r#"abstract class Named { abstract name: string; }
-            class MissingField extends Named {}"#,
-        )
-        .unwrap();
-        let error = lower_module(&missing_field).unwrap_err();
-        assert!(
-            error.contains("must implement abstract field `name`"),
-            "{error}"
-        );
-
-        let wrong_field = thaw_parser::parse_typescript(
-            r#"abstract class Named { abstract name: string; }
-            class WrongField extends Named { name: number = 1; }"#,
-        )
-        .unwrap();
-        let error = lower_module(&wrong_field).unwrap_err();
-        assert!(
-            error.contains("implements abstract field `name`"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn rejects_uninitialized_non_optional_native_static_fields() {
-        let module =
-            thaw_parser::parse_typescript("class Invalid { static value: number; }").unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(
-            error.contains("needs an optional or undefined-capable type"),
-            "{error}"
-        );
-    }
-}
+mod tests;

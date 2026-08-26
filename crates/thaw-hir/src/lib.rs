@@ -139,6 +139,8 @@ pub enum HirType {
     Void,
     Str,
     Json,
+    /// A runtime-keyed JSON object whose values share one native type.
+    Dictionary(Box<HirType>),
     /// Opaque callable/object value retained by the embedded JavaScript realm.
     JsValue,
     Promise(Box<HirType>),
@@ -446,6 +448,8 @@ pub enum HirExpr {
     /// codegen never has to reconcile two different field orderings.
     /// Phase 2 codegen only supports `f64`-valued fields.
     ObjectLit(Vec<(Symbol, HirExpr)>),
+    /// A runtime-keyed homogeneous object backed by thaw-std's JSON value.
+    JsonObjectLit(Vec<(Symbol, HirExpr)>, HirType),
     /// Allocates a fixed-shape object and initializes every field to its
     /// native zero value before the reference escapes. Constructors use this
     /// to establish instance identity before executing `this.field = ...`.
@@ -470,6 +474,10 @@ pub enum HirExpr {
     /// resolved at runtime by thaw-std's `thaw_json_get`, returning
     /// another `Json` value (never a concrete type).
     JsonGet(Box<HirExpr>, Symbol),
+    /// A JSON object lookup with a runtime string key.
+    JsonKey(Box<HirExpr>, Box<HirExpr>),
+    /// Mutates a homogeneous runtime-keyed object and evaluates to the assigned value.
+    JsonSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>, HirType),
     /// `json[index]` where `json: HirType::Json`. Same story as
     /// `JsonGet`, via `thaw_json_index`.
     JsonIndex(Box<HirExpr>, Box<HirExpr>),
@@ -588,9 +596,15 @@ pub fn set_ffi_error_abi(
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
-            | HirExpr::DynamicPropAccess(left, right, _, _) => {
+            | HirExpr::DynamicPropAccess(left, right, _, _)
+            | HirExpr::JsonKey(left, right) => {
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
+            }
+            HirExpr::JsonSet(object, key, value, _) => {
+                visit_expr(object, symbol, abi, found);
+                visit_expr(key, symbol, abi, found);
+                visit_expr(value, symbol, abi, found);
             }
             HirExpr::Call(callee, args) => {
                 visit_expr(callee, symbol, abi, found);
@@ -678,6 +692,11 @@ pub fn set_ffi_error_abi(
                 visit_expr(value, symbol, abi, found);
             }
             HirExpr::ObjectLit(fields) => {
+                for (_, value) in fields {
+                    visit_expr(value, symbol, abi, found);
+                }
+            }
+            HirExpr::JsonObjectLit(fields, _) => {
                 for (_, value) in fields {
                     visit_expr(value, symbol, abi, found);
                 }
@@ -807,9 +826,15 @@ pub fn set_ffi_ownership(
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
-            | HirExpr::DynamicPropAccess(left, right, _, _) => {
+            | HirExpr::DynamicPropAccess(left, right, _, _)
+            | HirExpr::JsonKey(left, right) => {
                 update_expr(left, symbol, returns, errors, found);
                 update_expr(right, symbol, returns, errors, found);
+            }
+            HirExpr::JsonSet(object, key, value, _) => {
+                update_expr(object, symbol, returns, errors, found);
+                update_expr(key, symbol, returns, errors, found);
+                update_expr(value, symbol, returns, errors, found);
             }
             HirExpr::Await(inner)
             | HirExpr::AwaitPromise(inner, _)
@@ -869,6 +894,11 @@ pub fn set_ffi_ownership(
                 update_expr(c, symbol, returns, errors, found);
             }
             HirExpr::ObjectLit(fields) => {
+                for (_, value) in fields {
+                    update_expr(value, symbol, returns, errors, found);
+                }
+            }
+            HirExpr::JsonObjectLit(fields, _) => {
                 for (_, value) in fields {
                     update_expr(value, symbol, returns, errors, found);
                 }
@@ -1102,7 +1132,8 @@ pub fn set_ffi_string_abi(
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
-            | HirExpr::DynamicPropAccess(left, right, _, _) => {
+            | HirExpr::DynamicPropAccess(left, right, _, _)
+            | HirExpr::JsonKey(left, right) => {
                 update_expr(
                     left,
                     symbol,
@@ -1114,6 +1145,35 @@ pub fn set_ffi_string_abi(
                 );
                 update_expr(
                     right,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+            }
+            HirExpr::JsonSet(object, key, value, _) => {
+                update_expr(
+                    object,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    key,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    value,
                     symbol,
                     params,
                     returns,
@@ -1292,6 +1352,19 @@ pub fn set_ffi_string_abi(
                 );
             }
             HirExpr::ObjectLit(fields) => {
+                for (_, value) in fields {
+                    update_expr(
+                        value,
+                        symbol,
+                        params,
+                        returns,
+                        calling_convention,
+                        aggregate_return_abi,
+                        found,
+                    );
+                }
+            }
+            HirExpr::JsonObjectLit(fields, _) => {
                 for (_, value) in fields {
                     update_expr(
                         value,
