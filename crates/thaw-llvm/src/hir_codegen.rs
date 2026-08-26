@@ -16328,6 +16328,43 @@ mod tests {
     }
 
     #[test]
+    fn destructures_object_unions_with_nested_fields_defaults_and_rest() {
+        let source = r#"
+            type Event =
+                { kind: "number"; value: number; nested: { detail: number }; optional: number | undefined } |
+                { kind: "text"; value: string; nested: { detail: string }; optional: string | undefined };
+            function source(event: Event): Event {
+                console.log("source");
+                return event;
+            }
+            async function delayed(): Promise<Event> {
+                await sleep(1);
+                return { kind: "text", value: "async", nested: { detail: "nested" }, optional: undefined };
+            }
+            function show(event: Event): void {
+                const { kind: category, optional = "default", ...rest } = source(event);
+                console.log(category);
+                console.log(optional);
+                console.log(rest.value);
+                console.log(rest.nested.detail);
+            }
+            async function main(): Promise<void> {
+                show({ kind: "number", value: 7, nested: { detail: 8 }, optional: 9 });
+                show({ kind: "text", value: "value", nested: { detail: "detail" }, optional: undefined });
+                const { kind, value, nested: { detail }, ...rest } = await delayed();
+                console.log(kind);
+                console.log(value);
+                console.log(detail);
+                console.log(rest.optional);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "object_union_destructuring"),
+            "source\nnumber\n9\n7\n8\nsource\ntext\ndefault\nvalue\ndetail\ntext\nasync\nnested\nundefined\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{
