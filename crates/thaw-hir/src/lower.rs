@@ -21782,6 +21782,24 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        let assigned_function_property = if assign.op == AssignOp::Assign {
+            match &assign.left {
+                AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
+                    match (member.obj.as_ref(), member_property_name(&member.prop)) {
+                        (Expr::Ident(object), Some(property)) => Some((
+                            self.resolve_binding(object.sym.as_ref()),
+                            property,
+                            self.expression_function_property_result_discriminants(&assign.right),
+                            self.expression_object_function_property_discriminants(&assign.right),
+                        )),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         if self.unbound_this_context {
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
                 if matches!(member.obj.as_ref(), Expr::This(_)) {
@@ -22253,6 +22271,25 @@ impl<'a> FnLowerer<'a> {
         };
 
         let result = build_assign(target, value);
+        if let Some((object, property, value, nested)) = assigned_function_property {
+            let metadata = self
+                .object_function_property_discriminants
+                .entry(object.clone())
+                .or_default();
+            metadata.retain(|path, _| path.first() != Some(&property));
+            if let Some(value) = value {
+                metadata.insert(vec![property.clone()], value);
+            }
+            if let Some(nested) = nested {
+                metadata.extend(nested.into_iter().map(|(mut path, discriminants)| {
+                    path.insert(0, property.clone());
+                    (path, discriminants)
+                }));
+            }
+            if metadata.is_empty() {
+                self.object_function_property_discriminants.remove(&object);
+            }
+        }
         if assign.op == AssignOp::Assign {
             if let Some(name) = assigned_variable.as_ref() {
                 if let Some(method) = assigned_method_value {
