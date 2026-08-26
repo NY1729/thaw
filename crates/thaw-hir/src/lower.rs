@@ -875,12 +875,40 @@ fn member_references_class_type_parameter(
     detector.found
 }
 
-struct GenericClassStaticReferenceRewriter<'a> {
+struct GenericClassStaticReferenceRewriter<'a, 'ast> {
     owners: &'a HashMap<Symbol, Symbol>,
+    templates: &'a HashMap<Symbol, GenericClassTemplate>,
+    interfaces: &'a HashMap<Symbol, HirType>,
+    generic_interfaces: &'a GenericInterfaces<'ast>,
+    error: Option<String>,
 }
 
-impl VisitMut for GenericClassStaticReferenceRewriter<'_> {
+impl VisitMut for GenericClassStaticReferenceRewriter<'_, '_> {
     fn visit_mut_member_expr(&mut self, member: &mut MemberExpr) {
+        if let Expr::TsInstantiation(instantiation) = member.obj.as_ref() {
+            if let Expr::Ident(owner) = instantiation.expr.as_ref() {
+                if let Some(shared) = self.owners.get(owner.sym.as_ref()) {
+                    let arguments = unbox_types(&instantiation.type_args.params);
+                    if let Err(error) = resolve_generic_class_type_tuple(
+                        owner.sym.as_ref(),
+                        &self.templates[owner.sym.as_ref()],
+                        &arguments,
+                        None,
+                        self.interfaces,
+                        self.generic_interfaces,
+                    ) {
+                        self.error = Some(error);
+                        return;
+                    }
+                    *member.obj = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                        shared.clone().into(),
+                        owner.span,
+                    ));
+                    member.prop.visit_mut_with(self);
+                    return;
+                }
+            }
+        }
         member.visit_mut_children_with(self);
         let Expr::Ident(owner) = member.obj.as_mut() else {
             return;
@@ -2441,9 +2469,17 @@ fn specialize_generic_classes(
         }
         return Err(error);
     }
-    specialized.visit_mut_with(&mut GenericClassStaticReferenceRewriter {
+    let mut static_rewriter = GenericClassStaticReferenceRewriter {
         owners: &static_owners,
-    });
+        templates: &templates,
+        interfaces: &specialization_interfaces,
+        generic_interfaces,
+        error: None,
+    };
+    specialized.visit_mut_with(&mut static_rewriter);
+    if let Some(error) = static_rewriter.error {
+        return Err(error);
+    }
     if specialized.body.iter().any(|item| {
         matches!(
             item,
@@ -23243,6 +23279,10 @@ mod tests {
             ),
             (
                 "class Numeric<T extends number> { constructor(public value: T) {} } function main(): void { new Numeric(\"wrong\"); }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "class Numeric<T extends number> { static count: number = 0; } function main(): void { console.log(Numeric<string>.count); }",
                 "does not satisfy constraint F64",
             ),
             (

@@ -19423,7 +19423,9 @@ mod tests {
                 console.log(number.value);
                 console.log(text.value);
                 console.log(Box.count);
+                console.log(Box<number>.count);
                 console.log(Box.current());
+                console.log(Box<string>.current());
                 console.log(Box.describe());
                 console.log(Box.reveal());
                 const derivedNumber = new DerivedCounter(1);
@@ -19438,7 +19440,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_static_state"),
-            "40\nready\n3\n3\nbox\n40\n2\n2\n2\n1\ntwo\n42\n"
+            "40\nready\n3\n3\n3\n3\nbox\n40\n2\n2\n2\n1\ntwo\n42\n"
         );
     }
 
