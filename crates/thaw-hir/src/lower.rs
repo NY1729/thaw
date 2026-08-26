@@ -154,6 +154,8 @@ enum GenericTypePattern {
     Promise(Box<GenericTypePattern>),
     Awaited(Box<GenericTypePattern>),
     NonNullable(Box<GenericTypePattern>),
+    Partial(Box<GenericTypePattern>),
+    Required(Box<GenericTypePattern>),
     Object(Vec<(Symbol, GenericTypePattern)>),
 }
 
@@ -6279,6 +6281,37 @@ fn non_nullable_hir_type(ty: HirType) -> Result<HirType, String> {
     }
 }
 
+fn partial_hir_type(ty: HirType) -> Result<HirType, String> {
+    let HirType::Object(fields) = ty else {
+        return Err("Partial<T> requires an object type".into());
+    };
+    Ok(HirType::Object(
+        fields
+            .into_iter()
+            .map(|(name, ty)| (name, optional_parameter_type(ty)))
+            .collect(),
+    ))
+}
+
+fn required_hir_type(ty: HirType) -> Result<HirType, String> {
+    let HirType::Object(fields) = ty else {
+        return Err("Required<T> requires an object type".into());
+    };
+    Ok(HirType::Object(
+        fields
+            .into_iter()
+            .map(|(name, ty)| {
+                let ty = match ty {
+                    HirType::Optional(value) => *value,
+                    HirType::Nullish(value) => HirType::Nullable(value),
+                    other => other,
+                };
+                (name, ty)
+            })
+            .collect(),
+    ))
+}
+
 fn specialized_generic_name(name: &str, types: &[HirType]) -> Symbol {
     fn fingerprint(ty: &HirType) -> String {
         match ty {
@@ -6319,9 +6352,9 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         GenericTypePattern::Array(inner)
         | GenericTypePattern::Promise(inner)
         | GenericTypePattern::Awaited(inner)
-        | GenericTypePattern::NonNullable(inner) => {
-            generic_pattern_contains_variable(inner, variable)
-        }
+        | GenericTypePattern::NonNullable(inner)
+        | GenericTypePattern::Partial(inner)
+        | GenericTypePattern::Required(inner) => generic_pattern_contains_variable(inner, variable),
         GenericTypePattern::Object(fields) => fields
             .iter()
             .any(|(_, field)| generic_pattern_contains_variable(field, variable)),
@@ -6351,6 +6384,12 @@ fn instantiate_generic_pattern(
         )?)),
         GenericTypePattern::NonNullable(inner) => {
             non_nullable_hir_type(instantiate_generic_pattern(inner, substitution)?)
+        }
+        GenericTypePattern::Partial(inner) => {
+            partial_hir_type(instantiate_generic_pattern(inner, substitution)?)
+        }
+        GenericTypePattern::Required(inner) => {
+            required_hir_type(instantiate_generic_pattern(inner, substitution)?)
         }
         GenericTypePattern::Object(fields) => Ok(HirType::Object(
             fields
@@ -6615,6 +6654,8 @@ fn generic_type_pattern(
                     "Readonly" => return Ok(*inner),
                     "Awaited" => return Ok(GenericTypePattern::Awaited(inner)),
                     "NonNullable" => return Ok(GenericTypePattern::NonNullable(inner)),
+                    "Partial" => return Ok(GenericTypePattern::Partial(inner)),
+                    "Required" => return Ok(GenericTypePattern::Required(inner)),
                     _ => {}
                 }
             }
@@ -6717,6 +6758,10 @@ fn match_generic_pattern(
             match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::NonNullable(expected), actual) => {
+            match_generic_pattern(expected, actual, inferred)
+        }
+        (GenericTypePattern::Partial(expected), actual)
+        | (GenericTypePattern::Required(expected), actual) => {
             match_generic_pattern(expected, actual, inferred)
         }
         (GenericTypePattern::Object(expected), HirType::Object(value))
@@ -10329,6 +10374,16 @@ fn lower_ts_type(
                     interfaces,
                     generic_interfaces,
                 )?),
+                (Some("Partial"), Some(inner)) => partial_hir_type(lower_ts_type(
+                    inner,
+                    interfaces,
+                    generic_interfaces,
+                )?),
+                (Some("Required"), Some(inner)) => required_hir_type(lower_ts_type(
+                    inner,
+                    interfaces,
+                    generic_interfaces,
+                )?),
                 _ => Err("unsupported type reference (generics are not supported yet)".into()),
             }
         }
@@ -10735,6 +10790,8 @@ fn resolve_ts_type_with_substitution(
                         "Readonly" => return Ok(resolved_elem),
                         "Awaited" => return Ok(awaited_hir_type(resolved_elem)),
                         "NonNullable" => return non_nullable_hir_type(resolved_elem),
+                        "Partial" => return partial_hir_type(resolved_elem),
+                        "Required" => return required_hir_type(resolved_elem),
                         _ => {}
                     }
                 }
@@ -17697,7 +17754,11 @@ impl<'a> FnLowerer<'a> {
             return Ok(value);
         };
 
-        if declared_fields.len() != lit_fields.len() {
+        if lit_fields.len() > declared_fields.len()
+            || lit_fields
+                .iter()
+                .any(|(name, _)| !declared_fields.iter().any(|(declared, _)| declared == name))
+        {
             return Err(format!(
                 "object literal has {} field(s), expected {} for this type",
                 lit_fields.len(),
@@ -17708,10 +17769,9 @@ impl<'a> FnLowerer<'a> {
         let reordered = declared_fields
             .iter()
             .map(|(name, expected_ty)| {
-                let (_, field_value) = lit_fields
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .ok_or_else(|| format!("object literal is missing field `{name}`"))?;
+                let Some((_, field_value)) = lit_fields.iter().find(|(n, _)| n == name) else {
+                    return Ok((name.clone(), omitted_parameter_value(expected_ty)?));
+                };
                 let field_value = self
                     .coerce_to_declared(expected_ty, field_value.clone())
                     .map_err(|error| format!("field `{name}`: {error}"))?;
