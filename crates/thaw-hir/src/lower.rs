@@ -1325,13 +1325,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         .iter()
         .map(|declaration| (declaration.ident.sym.to_string(), *declaration))
         .collect::<HashMap<_, _>>();
-    let member_key = |member: &swc_ecma_ast::ClassMethod| -> Result<(u8, Symbol), String> {
+    let member_key = |member: &swc_ecma_ast::ClassMethod| -> Result<(u8, bool, Symbol), String> {
         Ok((
             match member.kind {
                 MethodKind::Method => 0,
                 MethodKind::Getter => 1,
                 MethodKind::Setter => 2,
             },
+            member.is_static,
             class_property_name(&member.key)?,
         ))
     };
@@ -1344,7 +1345,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             .body
             .iter()
             .filter_map(|member| match member {
-                ClassMember::Method(method) if !method.is_static => member_key(method).ok(),
+                ClassMember::Method(method) => member_key(method).ok(),
                 _ => None,
             })
             .collect::<HashSet<_>>();
@@ -1363,38 +1364,23 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 let ClassMember::Method(method) = member else {
                     continue;
                 };
-                if method.is_static {
-                    continue;
-                }
                 let key = member_key(method)?;
                 if !seen.insert(key) {
                     continue;
                 }
                 let base_symbol = class_member_symbol(&current_name, method)?;
-                let derived_symbol = match method.kind {
-                    MethodKind::Method => {
-                        class_method_symbol(&derived_name, &class_property_name(&method.key)?)
-                    }
-                    MethodKind::Getter => class_getter_symbol(
-                        &derived_name,
-                        &class_property_name(&method.key)?,
-                        false,
-                    ),
-                    MethodKind::Setter => class_setter_symbol(
-                        &derived_name,
-                        &class_property_name(&method.key)?,
-                        false,
-                    ),
-                };
+                let derived_symbol = class_member_symbol(&derived_name, method)?;
                 let mut signature = signatures[&base_symbol].clone();
-                signature.params[0] = derived_type.clone();
+                if !method.is_static {
+                    signature.params[0] = derived_type.clone();
+                }
                 signatures.insert(derived_symbol.clone(), signature.clone());
                 let params = signature
                     .params
                     .iter()
                     .enumerate()
                     .map(|(index, ty)| HirParam {
-                        name: if index == 0 {
+                        name: if !method.is_static && index == 0 {
                             "__thaw_this".into()
                         } else {
                             format!("__thaw_inherited_arg_{index}")
@@ -19858,5 +19844,41 @@ mod tests {
             .find(|function| function.name == "__thaw_class_Derived_instance_setter_value")
             .unwrap();
         assert!(format!("{:?}", setter.body).contains("__thaw_class_Base_instance_setter_value"));
+    }
+
+    #[test]
+    fn inherits_static_members_and_prefers_static_overrides() {
+        let program = lower(
+            r#"let stored: number = 0;
+            class Base {
+                static add(left: number, right: number): number { return left + right; }
+                static get current(): number { return stored; }
+                static set current(next: number) { stored = next; }
+            }
+            class Derived extends Base {
+                static add(left: number, right: number): number { return left + right + 1; }
+            }
+            function main(): number {
+                Derived.current = 40;
+                return Derived.current + Derived.add(1, 1);
+            }"#,
+        );
+        for symbol in [
+            "__thaw_class_Derived_static_getter_current",
+            "__thaw_class_Derived_static_setter_current",
+        ] {
+            assert!(program
+                .functions
+                .iter()
+                .any(|function| function.name == symbol));
+        }
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| function.name == "__thaw_class_Derived_static_add")
+                .count(),
+            1
+        );
     }
 }
