@@ -16255,6 +16255,15 @@ mod tests {
                 if (result.kind === "success") return String(result.value + 3);
                 return "wrong";
             }
+            function compound(result: Result): string {
+                if (result.kind === "success" && result.value > 0) {
+                    return String(result.value + 1);
+                }
+                if (result.kind !== "failure" || result.value === "expected") {
+                    return "accepted";
+                }
+                return result.value + "!";
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 41 };
@@ -16271,6 +16280,9 @@ mod tests {
                 console.log(inferred(true));
                 console.log(inferred(false));
                 console.log(asserted());
+                console.log(compound({ kind: "success", value: 4 }));
+                console.log(compound({ kind: "failure", value: "expected" }));
+                console.log(compound({ kind: "failure", value: "rejected" }));
                 console.log(describe(await delayed(true)));
                 console.log(describe(await delayed(false)));
                 const awaited = await delayed(false);
@@ -16279,7 +16291,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "literal_object_union_discriminants"),
-            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n22\nreturned!\n33\n42\nasync!\nasync inferred\n"
+            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n22\nreturned!\n33\n5\naccepted\nrejected!\n42\nasync!\nasync inferred\n"
         );
     }
 
