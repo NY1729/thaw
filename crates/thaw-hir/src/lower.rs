@@ -12738,16 +12738,11 @@ impl<'a> FnLowerer<'a> {
                 };
                 let callee = ordinary_optional_expression(callee);
                 if let Expr::Member(member) = &callee {
-                    if let Some(discriminants) = self
-                        .expression_called_function_property_discriminants(&callee)
-                        .and_then(|metadata| metadata.array)
-                    {
-                        return Some(discriminants);
-                    }
                     let property = member_property_name(&member.prop)?;
                     if matches!(
                         property.as_str(),
                         "concat"
+                            | "copyWithin"
                             | "filter"
                             | "reverse"
                             | "slice"
@@ -12755,9 +12750,15 @@ impl<'a> FnLowerer<'a> {
                             | "toSpliced"
                             | "with"
                     ) {
-                        return self.expression_array_element_discriminants(&member.obj);
+                        if let Some(discriminants) =
+                            self.expression_array_element_discriminants(&member.obj)
+                        {
+                            return Some(discriminants);
+                        }
                     }
-                    return None;
+                    return self
+                        .expression_called_function_property_discriminants(&callee)
+                        .and_then(|metadata| metadata.array);
                 }
                 let Expr::Ident(callee) = &callee else {
                     return None;
