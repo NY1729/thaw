@@ -3784,6 +3784,7 @@ fn lower_class_methods(
             None,
         );
         seed_global_scope(&mut lowerer, global_types, immutable_globals);
+        lowerer.class_static_context = method.is_static;
         if let Some(base) = &declaration.class.super_class {
             let Expr::Ident(base) = base.as_ref() else {
                 unreachable!("class layout validation accepts identifier bases only")
@@ -5377,6 +5378,7 @@ struct FnLowerer<'a> {
     loop_depth: usize,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
+    class_static_context: bool,
 }
 
 type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
@@ -5423,6 +5425,7 @@ impl<'a> FnLowerer<'a> {
             loop_depth: 0,
             labels: Vec::new(),
             super_initializer: None,
+            class_static_context: false,
         }
     }
 
@@ -8920,7 +8923,11 @@ impl<'a> FnLowerer<'a> {
                     .clone()
                     .ok_or("`super` property access is only valid in a derived class")?;
                 let property = super_property_name(&member.prop)?;
-                let symbol = class_getter_symbol(&base_name, &property, false);
+                let symbol = class_getter_symbol(
+                    &base_name,
+                    &property,
+                    self.class_static_context,
+                );
                 if !self.signatures.contains_key(&symbol) {
                     return Err(format!(
                         "base class `{base_name}` has no getter `{property}`"
@@ -8928,7 +8935,11 @@ impl<'a> FnLowerer<'a> {
                 }
                 Ok(HirExpr::Call(
                     Box::new(HirExpr::Var(symbol)),
-                    vec![HirExpr::Var(self.resolve_binding("this"))],
+                    if self.class_static_context {
+                        Vec::new()
+                    } else {
+                        vec![HirExpr::Var(self.resolve_binding("this"))]
+                    },
                 ))
             }
 
@@ -10255,16 +10266,20 @@ impl<'a> FnLowerer<'a> {
                     .clone()
                     .ok_or("`super` property assignment is only valid in a derived class")?;
                 let property = super_property_name(&member.prop)?;
-                let symbol = class_setter_symbol(&base_name, &property, false);
+                let symbol = class_setter_symbol(&base_name, &property, self.class_static_context);
                 let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
                     format!("base class `{base_name}` has no setter `{property}`")
                 })?;
                 let rhs = self.lower_expr(&assign.right)?;
-                let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
-                return Ok(HirExpr::Call(
-                    Box::new(HirExpr::Var(symbol)),
-                    vec![HirExpr::Var(self.resolve_binding("this")), rhs],
-                ));
+                let value_index = usize::from(!self.class_static_context);
+                let rhs = self.coerce_to_declared(&signature.params[value_index], rhs)?;
+                let mut args = if self.class_static_context {
+                    Vec::new()
+                } else {
+                    vec![HirExpr::Var(self.resolve_binding("this"))]
+                };
+                args.push(rhs);
+                return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
             }
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
                 if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
@@ -12578,7 +12593,11 @@ impl<'a> FnLowerer<'a> {
                         }
                     },
                 };
-                let symbol = class_method_symbol(&base_name, &method_name);
+                let symbol = if self.class_static_context {
+                    class_static_method_symbol(&base_name, &method_name)
+                } else {
+                    class_method_symbol(&base_name, &method_name)
+                };
                 let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
                     format!("base class `{base_name}` has no method `{method_name}`")
                 })?;
@@ -12589,17 +12608,24 @@ impl<'a> FnLowerer<'a> {
                         "native super methods do not support type or spread arguments yet".into(),
                     );
                 }
-                if call.args.len() + 1 != signature.params.len() {
+                let receiver_count = usize::from(!self.class_static_context);
+                if call.args.len() + receiver_count != signature.params.len() {
                     return Err(format!(
                         "super method `{base_name}.{method_name}` expects {} argument(s), got {}",
-                        signature.params.len() - 1,
+                        signature.params.len() - receiver_count,
                         call.args.len()
                     ));
                 }
-                let mut args = vec![HirExpr::Var(self.resolve_binding("this"))];
+                let mut args = if self.class_static_context {
+                    Vec::new()
+                } else {
+                    vec![HirExpr::Var(self.resolve_binding("this"))]
+                };
                 for (index, argument) in call.args.iter().enumerate() {
                     let value = self.lower_expr(&argument.expr)?;
-                    args.push(self.coerce_to_declared(&signature.params[index + 1], value)?);
+                    args.push(
+                        self.coerce_to_declared(&signature.params[index + receiver_count], value)?,
+                    );
                 }
                 return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), args));
             }
@@ -19880,5 +19906,38 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn lowers_static_super_methods_getters_and_setters() {
+        let program = lower(
+            r#"let stored: number = 0;
+            class Base {
+                static add(value: number): number { return value + 1; }
+                static get current(): number { return stored; }
+                static set current(next: number) { stored = next; }
+            }
+            class Derived extends Base {
+                static add(value: number): number { return super.add(value) + 1; }
+                static get current(): number { return super.current + 1; }
+                static set current(next: number) { super.current = next + 1; }
+            }
+            function main(): number {
+                Derived.current = 40;
+                return Derived.current + Derived.add(0);
+            }"#,
+        );
+        for symbol in [
+            "__thaw_class_Derived_static_add",
+            "__thaw_class_Derived_static_getter_current",
+            "__thaw_class_Derived_static_setter_current",
+        ] {
+            let function = program
+                .functions
+                .iter()
+                .find(|function| function.name == symbol)
+                .unwrap();
+            assert!(format!("{:?}", function.body).contains("__thaw_class_Base_static"));
+        }
     }
 }
