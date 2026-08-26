@@ -16223,6 +16223,8 @@ mod tests {
             type Numeric =
                 { code: 200; value: number } |
                 { code: 500; value: string };
+            type Factory = (ok: boolean) => Result;
+            type AsyncFactory = (ok: boolean) => Promise<Result>;
             function describe(result: Result): string {
                 if (result.kind === "success") return String(result.value + 1);
                 if ("failure" === result.kind) return result.value + "!";
@@ -16264,6 +16266,32 @@ mod tests {
                 }
                 return result.value + "!";
             }
+            function consume(factory: Factory, ok: boolean): string {
+                const result = factory(ok);
+                if (result.kind === "success") return String(result.value + 4);
+                if (result.kind === "failure") return result.value + " callback";
+                return "boolean";
+            }
+            function throughFunctionValue(ok: boolean): string {
+                const factory: Factory = (value: boolean): Result => {
+                    if (value) return { kind: "success", value: 40 };
+                    return { kind: "failure", value: "factory" };
+                };
+                const alias = factory;
+                return consume(alias, ok);
+            }
+            async function asyncFactory(value: boolean): Promise<Result> {
+                await sleep(1);
+                if (value) return { kind: "success", value: 50 };
+                return { kind: "failure", value: "async-factory" };
+            }
+            async function throughAsyncFunctionValue(ok: boolean): Promise<string> {
+                const factory: AsyncFactory = asyncFactory;
+                const result = await factory(ok);
+                if (result.kind === "success") return String(result.value + 5);
+                if (result.kind === "failure") return result.value + " callback";
+                return "boolean";
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 41 };
@@ -16283,6 +16311,10 @@ mod tests {
                 console.log(compound({ kind: "success", value: 4 }));
                 console.log(compound({ kind: "failure", value: "expected" }));
                 console.log(compound({ kind: "failure", value: "rejected" }));
+                console.log(throughFunctionValue(true));
+                console.log(throughFunctionValue(false));
+                console.log(await throughAsyncFunctionValue(true));
+                console.log(await throughAsyncFunctionValue(false));
                 console.log(describe(await delayed(true)));
                 console.log(describe(await delayed(false)));
                 const awaited = await delayed(false);
@@ -16291,7 +16323,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "literal_object_union_discriminants"),
-            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n22\nreturned!\n33\n5\naccepted\nrejected!\n42\nasync!\nasync inferred\n"
+            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n22\nreturned!\n33\n5\naccepted\nrejected!\n44\nfactory callback\n55\nasync-factory callback\n42\nasync!\nasync inferred\n"
         );
     }
 
