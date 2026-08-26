@@ -19789,14 +19789,18 @@ mod tests {
             type Loaded = Awaited<Promise<number>>;
             type DeepLoaded = Awaited<Promise<Promise<number>>>;
             type LoadedValue<T> = Awaited<Promise<T>>;
+            type Present = NonNullable<number | null | undefined>;
+            type PresentValue<T> = NonNullable<T>;
             function main(): void {
                 const frozen: Frozen = { value: 40, label: "ready" };
                 const box: FrozenBox<string> = { value: frozen.label };
                 const loaded: Loaded = frozen.value + 2;
                 const generic: LoadedValue<number> = loaded;
                 const deep: DeepLoaded = generic;
+                const present: Present = deep;
+                const genericPresent: PresentValue<number | null> = present;
                 console.log(box.value);
-                console.log(deep);
+                console.log(genericPresent);
             }
         "#;
         assert_eq!(
