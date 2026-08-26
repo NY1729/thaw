@@ -16441,6 +16441,14 @@ mod tests {
                 if (kind === "number") return String(value + 2);
                 return value + "!";
             }
+            function aliased(result: Result): string {
+                const { kind, value } = result;
+                const tagAlias = (kind);
+                const payloadAlias = (value as string | number | boolean);
+                if (tagAlias === "success") return String(payloadAlias + 4);
+                if (tagAlias === "failure") return payloadAlias + " alias";
+                return payloadAlias ? "pending" : "waiting";
+            }
             async function delayed(ok: boolean): Promise<Result> {
                 await sleep(1);
                 if (ok) return { kind: "success", value: 20, detail: 2 };
@@ -16467,6 +16475,8 @@ mod tests {
                 console.log(tupleNested({ kind: "text", pair: ["tuple", "!", "?"] }));
                 console.log(tupleDefault({ kind: "number", pair: [8] }));
                 console.log(tupleDefault({ kind: "text", pair: [undefined] }));
+                console.log(aliased({ kind: "success", value: 6, detail: 0 }));
+                console.log(aliased({ kind: "failure", value: "bad", detail: "" }));
                 const { kind, value, detail } = await delayed(true);
                 if (kind === "success") console.log(value + detail);
                 const { kind: asyncKind, value: asyncValue, detail: asyncDetail } = await delayed(false);
@@ -16477,7 +16487,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "correlated_object_union_destructuring"),
-            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n22\nasync!\n"
+            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n10\nbad alias\n22\nasync!\n"
         );
     }
 
