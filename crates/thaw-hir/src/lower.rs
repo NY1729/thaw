@@ -723,6 +723,13 @@ fn class_static_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_static_{method}")
 }
 
+fn class_getter_symbol(class: &str, property: &str, is_static: bool) -> Symbol {
+    format!(
+        "__thaw_class_{class}_{}_getter_{property}",
+        if is_static { "static" } else { "instance" }
+    )
+}
+
 fn class_name_from_type(ty: &HirType) -> Option<&str> {
     let HirType::Object(fields) = ty else {
         return None;
@@ -1025,7 +1032,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     let ClassMember::Method(method) = member else {
                         continue;
                     };
-                    if method.kind != MethodKind::Method {
+                    if !matches!(method.kind, MethodKind::Method | MethodKind::Getter) {
                         continue;
                     }
                     if method.function.type_params.is_some() || method.function.is_generator {
@@ -1035,6 +1042,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         ));
                     }
                     let method_name = class_property_name(&method.key)?;
+                    if method.kind == MethodKind::Getter && !method.function.params.is_empty() {
+                        return Err(format!(
+                            "class `{name}` getter `{method_name}` cannot accept parameters"
+                        ));
+                    }
                     let mut params = if method.is_static {
                         Vec::new()
                     } else {
@@ -1065,7 +1077,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         &generic_interfaces,
                         &HashMap::new(),
                     )?;
-                    let symbol = if method.is_static {
+                    let symbol = if method.kind == MethodKind::Getter {
+                        class_getter_symbol(&name, &method_name, method.is_static)
+                    } else if method.is_static {
                         class_static_method_symbol(&name, &method_name)
                     } else {
                         class_method_symbol(&name, &method_name)
@@ -3353,11 +3367,13 @@ fn lower_class_methods(
         let ClassMember::Method(method) = member else {
             continue;
         };
-        if method.kind != MethodKind::Method {
+        if !matches!(method.kind, MethodKind::Method | MethodKind::Getter) {
             continue;
         }
         let method_name = class_property_name(&method.key)?;
-        let symbol = if method.is_static {
+        let symbol = if method.kind == MethodKind::Getter {
+            class_getter_symbol(&class_name, &method_name, method.is_static)
+        } else if method.is_static {
             class_static_method_symbol(&class_name, &method_name)
         } else {
             class_method_symbol(&class_name, &method_name)
@@ -9449,6 +9465,30 @@ impl<'a> FnLowerer<'a> {
                         "string enum `{}` does not support numeric reverse lookup",
                         enum_name.sym
                     ));
+                }
+            }
+        }
+        if let MemberProp::Ident(property) = &member.prop {
+            if let Expr::Ident(receiver) = member.obj.as_ref() {
+                let static_symbol =
+                    class_getter_symbol(receiver.sym.as_ref(), property.sym.as_ref(), true);
+                if self.signatures.contains_key(&static_symbol) {
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(static_symbol)),
+                        Vec::new(),
+                    ));
+                }
+                let binding = self.resolve_binding(receiver.sym.as_ref());
+                if let Some(receiver_type) = self.scope.get(&binding).cloned() {
+                    if let Some(class_name) = class_name_from_type(&receiver_type) {
+                        let symbol = class_getter_symbol(class_name, property.sym.as_ref(), false);
+                        if self.signatures.contains_key(&symbol) {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var(symbol)),
+                                vec![HirExpr::Var(binding)],
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -18962,5 +19002,38 @@ mod tests {
         assert!(format!("{:?}", main.body).contains(
             "Call(Var(\"__thaw_class_MathBox_static_add\"), [Lit(F64(40.0)), Lit(F64(2.0))])"
         ));
+    }
+
+    #[test]
+    fn lowers_native_class_instance_and_static_getters() {
+        let program = lower(
+            r#"class Box {
+                value: number;
+                constructor(value: number) { this.value = value; }
+                get doubled(): number { return this.value * 2; }
+                static get version(): string { return "v1"; }
+            }
+            function main(): number {
+                const box = new Box(21);
+                console.log(Box.version);
+                return box.doubled;
+            }"#,
+        );
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "__thaw_class_Box_instance_getter_doubled"));
+        assert!(program
+            .functions
+            .iter()
+            .any(|function| function.name == "__thaw_class_Box_static_getter_version"));
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("__thaw_class_Box_static_getter_version"));
+        assert!(body.contains("__thaw_class_Box_instance_getter_doubled"));
     }
 }
