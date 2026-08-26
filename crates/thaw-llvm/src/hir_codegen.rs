@@ -19441,6 +19441,38 @@ mod tests {
     }
 
     #[test]
+    fn preserves_nested_union_metadata_through_function_properties() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            interface Service {
+                load: () => Result[][];
+                loadAsync: () => Promise<Result[][]>;
+            }
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            async function loadAsync(): Promise<Result[][]> {
+                return [[{ kind: "text", value: "async" } as Result]];
+            }
+            async function main(): Promise<void> {
+                const service: Service = {
+                    load: (): Result[][] => [[{ kind: "number", value: 1 } as Result]],
+                    loadAsync,
+                };
+                print(service.load().flat()[0]);
+                print((await service.loadAsync()).flat()[0]);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "function_property_nested_union_array"),
+            "11\nasync!\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_of() {
         let source = r#"
             interface Item { value: number; }
