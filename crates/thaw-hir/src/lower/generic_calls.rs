@@ -741,30 +741,25 @@ impl<'a> FnLowerer<'a> {
         if call.type_args.is_some() {
             return Err("optional native calls do not accept type arguments".into());
         }
-        if call.args.iter().any(|argument| argument.spread.is_some()) {
-            return Err("optional native call spread arguments are not supported".into());
-        }
-        if call.args.len() > params.len() && rest.is_none() {
+        let (mut arguments, spread_bindings) =
+            self.lower_native_spread_values(&call.args, "optional native call")?;
+        if arguments.len() > params.len() && rest.is_none() {
             return Err(format!(
                 "optional function accepts {} argument(s), got {}",
                 params.len(),
-                call.args.len()
+                arguments.len()
             ));
         }
-        if call.args.len() < params.len()
-            && (call.args.len()..params.len()).any(|index| !is_optional_parameter(&optional, index))
+        if arguments.len() < params.len()
+            && (arguments.len()..params.len())
+                .any(|index| !is_optional_parameter(&optional, index))
         {
             return Err(format!(
                 "optional function requires at least {} argument(s), got {}",
                 optional.first_at_or_after(0).unwrap_or(params.len()),
-                call.args.len()
+                arguments.len()
             ));
         }
-        let mut arguments = call
-            .args
-            .iter()
-            .map(|argument| self.lower_expr(&argument.expr))
-            .collect::<Result<Vec<_>, String>>()?;
         let rest_values = rest.as_ref().map(|element| {
             let values = if arguments.len() > params.len() {
                 arguments.split_off(params.len())
@@ -800,6 +795,7 @@ impl<'a> FnLowerer<'a> {
             _ => unreachable!(),
         };
         let invoked = HirExpr::Call(Box::new(function), arguments);
+        let invoked = self.wrap_call_argument_bindings(invoked, &spread_bindings)?;
         let is_none = |bound: HirExpr| match absence_kind {
             0 => HirExpr::OptionalIsNone(Box::new(bound), payload.as_ref().clone()),
             1 => HirExpr::NullableIsNone(Box::new(bound), payload.as_ref().clone()),

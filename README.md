@@ -1044,6 +1044,8 @@ The workspace crates have narrow responsibilities:
   optional chaining. Omitted slots use tagged `undefined` values; named default
   functions dispatch those tags to their existing source-level omission
   wrappers, including async Promise results
+- Optional function calls accept fixed-length tuple spreads while preserving
+  left-to-right evaluation and skipping every argument when the callee is nullish
 - Named async generic functions specialize for inferred or explicit types and
   retain exactly one Promise layer when used directly, as instantiated function
   values, or as assimilated Promise callbacks
