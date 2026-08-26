@@ -19731,6 +19731,35 @@ mod tests {
     }
 
     #[test]
+    fn calls_saved_this_dependent_methods_with_explicit_receivers() {
+        let source = r#"
+            class Box {
+                constructor(public value: string) {}
+                read(suffix: string): string { return this.value + suffix; }
+                async readAsync(suffix: string): Promise<string> { return this.value + suffix; }
+            }
+            function make(): Box {
+                console.log("extract-receiver");
+                return new Box("discarded");
+            }
+            async function main(): Promise<void> {
+                const extracted = make();
+                const read = extracted.read;
+                const readAsync = extracted.readAsync;
+                const alias = read;
+                const args: [string] = ["?"];
+                console.log(read.call(new Box("call"), "!"));
+                console.log(alias.apply(new Box("apply"), args));
+                console.log(await readAsync.call(new Box("async"), "!"));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "saved_unbound_native_method_call_apply"),
+            "extract-receiver\ncall!\napply?\nasync!\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
