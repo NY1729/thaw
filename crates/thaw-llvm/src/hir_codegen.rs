@@ -19810,6 +19810,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_partial_and_required_utility_types() {
+        let source = r#"
+            type Model = { value: number; label: string };
+            type Patch = Partial<Model>;
+            type CompletePatch = Required<Patch>;
+            type GenericPatch<T> = Partial<{ value: T; label: string }>;
+            function main(): void {
+                const empty: Patch = {};
+                const patch: GenericPatch<number> = { value: 42 };
+                const complete: CompletePatch = { value: 42, label: "ready" };
+                console.log(patch.value ?? 0);
+                console.log(complete.label);
+                console.log(empty.label ?? "empty");
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "partial_and_required_utility_types"),
+            "42\nready\nempty\n"
+        );
+    }
+
+    #[test]
     fn updates_union_metadata_when_reassigning_function_values() {
         let source = r#"
             type First =
