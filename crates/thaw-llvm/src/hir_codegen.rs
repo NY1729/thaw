@@ -16067,6 +16067,21 @@ mod tests {
                 if (typeof value === "string") return value + "!";
                 return String(value + 1);
             }
+            function literalNarrowing(value: number | string | boolean): string {
+                if (value === 0) return String(value + 1);
+                if ("exact" === value) return value + "!";
+                if (value === true) return value ? "true" : "false";
+                if (typeof value === "number") return String(value * 2);
+                if (typeof value === "string") return value + "?";
+                return value ? "yes" : "no";
+            }
+            function notEqualNarrowing(value: number | string): string {
+                if (value !== 1) {
+                    if (typeof value === "number") return String(value + 1);
+                    return value + "!";
+                }
+                return String(value + 10);
+            }
             async function delayed(kind: number): Promise<number | string | null> {
                 await sleep(1);
                 return choose(kind);
@@ -16113,11 +16128,20 @@ mod tests {
                 console.log(equalAcrossOrders(NaN, NaN));
                 console.log(await equalAcrossOrdersAsync("async", "async"));
                 console.log(await equalAcrossOrdersAsync(null, null));
+                console.log(literalNarrowing(0));
+                console.log(literalNarrowing(3));
+                console.log(literalNarrowing("exact"));
+                console.log(literalNarrowing("other"));
+                console.log(literalNarrowing(true));
+                console.log(literalNarrowing(false));
+                console.log(notEqualNarrowing(1));
+                console.log(notEqualNarrowing(2));
+                console.log(notEqualNarrowing("text"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "general_union_null_members"),
-            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n13\nguard!\nnull\nundefined\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\n"
+            "8\nvalue!\ntrue\nnull\nnull\ntrue\nnull\n10\nordered!\ntrue\nnull\n11\nasync!\ntrue\nnull\n13\nguard!\nnull\nundefined\ntrue\ntrue\ntrue\nfalse\nfalse\ntrue\ntrue\n1\n6\nexact!\nother?\ntrue\nno\n11\n3\ntext!\n"
         );
     }
 

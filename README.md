@@ -189,7 +189,10 @@ The workspace crates have narrow responsibilities:
   order-insensitive: assignments, arguments and returns with the same member
   set retag values into the destination order exactly once. Strict equality
   or inequality with the singleton `null`/`undefined` members narrows both
-  branches and carries the residual member set past terminating guards
+  branches and carries the residual member set past terminating guards.
+  Number, string and boolean literal comparisons narrow the matching branch;
+  their non-matching branch conservatively retains that primitive member
+  because another value of the same native type may still be present
 - Local-variable inference from supported expressions
 - `let`/`const`, assignment, arithmetic (including remainder, exponentiation,
   bitwise/shift operations, and their compound assignments), typed unary
