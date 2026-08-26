@@ -7163,6 +7163,17 @@ fn object_array_property_discriminants(
                     visiting.remove(&name);
                     return;
                 };
+                for base in &interface.extends {
+                    let Expr::Ident(base_name) = base.expr.as_ref() else {
+                        continue;
+                    };
+                    let base = TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                        span: base.span,
+                        type_name: swc_ecma_ast::TsEntityName::Ident(base_name.clone()),
+                        type_params: base.type_args.clone(),
+                    });
+                    collect(&base, generic, prefix, visiting, result);
+                }
                 (interface.body.body.as_slice(), Some(name))
             }
             _ => return,
@@ -7350,6 +7361,17 @@ fn object_function_property_discriminants(
                     visiting.remove(&name);
                     return;
                 };
+                for base in &interface.extends {
+                    let Expr::Ident(base_name) = base.expr.as_ref() else {
+                        continue;
+                    };
+                    let base = TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                        span: base.span,
+                        type_name: swc_ecma_ast::TsEntityName::Ident(base_name.clone()),
+                        type_params: base.type_args.clone(),
+                    });
+                    collect(&base, generic, prefix, visiting, result);
+                }
                 (interface.body.body.as_slice(), Some(name))
             }
             _ => return,
