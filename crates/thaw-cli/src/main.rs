@@ -3576,6 +3576,31 @@ mod tests {
     }
 
     #[test]
+    fn top_level_exception_skips_main_and_fails_the_process() {
+        let dir = std::env::temp_dir().join(format!(
+            "thaw-cli-top-level-exception-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.ts");
+        std::fs::write(
+            &entry,
+            r#"
+                console.log("before failure");
+                throw "module initialization failed";
+                function main(): void { console.log("main must not run"); }
+            "#,
+        )
+        .unwrap();
+        let output = dir.join("app");
+        build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+        let result = Command::new(&output).output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "before failure\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn resolves_and_reports_star_export_ambiguity() {
         let dir = std::env::temp_dir().join(format!(
             "thaw-cli-star-export-ambiguity-{}",
