@@ -18491,6 +18491,42 @@ mod tests {
     }
 
     #[test]
+    fn preserves_union_discriminants_for_element_returning_array_methods() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            function main(): void {
+                const results: Result[] = [
+                    { kind: "number", value: 1 },
+                    { kind: "text", value: "found" }
+                ];
+                const at = results.at(0);
+                if (at !== undefined) print(at);
+                const found = results.find(item => item.kind === "text");
+                if (found !== undefined) print(found);
+                const last = results.findLast(() => true);
+                if (last !== undefined) print(last);
+                const reduced = results.reduce((previous, current) =>
+                    current.kind === "text" ? current : previous
+                );
+                print(reduced);
+                const initial: Result = { kind: "number", value: 2 };
+                const reducedRight = results.reduceRight(previous => previous, initial);
+                print(reducedRight);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "union_array_element_metadata"),
+            "11\nfound!\nfound!\nfound!\n12\n"
+        );
+    }
+
+    #[test]
     fn compiles_native_array_at() {
         let source = r#"
             interface Item { value: number; }
