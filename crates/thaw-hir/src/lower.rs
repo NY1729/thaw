@@ -2079,6 +2079,22 @@ fn lower_top_level_initializers(
             }
             ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => {
                 let class_name = declaration.ident.sym.as_ref();
+                let saved_super = lowerer.super_initializer.clone();
+                let saved_static_context = lowerer.class_static_context;
+                lowerer.class_static_context = true;
+                lowerer.super_initializer =
+                    declaration
+                        .class
+                        .super_class
+                        .as_ref()
+                        .and_then(|base| match base.as_ref() {
+                            Expr::Ident(base) => Some((
+                                class_initializer_symbol(base.sym.as_ref()),
+                                interfaces[base.sym.as_ref()].clone(),
+                                base.sym.to_string(),
+                            )),
+                            _ => None,
+                        });
                 for member in &declaration.class.body {
                     if let ClassMember::StaticBlock(block) = member {
                         steps.extend(
@@ -2107,6 +2123,8 @@ fn lower_top_level_initializers(
                     let init = lowerer.coerce_to_declared(&expected, init)?;
                     steps.push(HirInitStep::StoreGlobal(symbol, init));
                 }
+                lowerer.super_initializer = saved_super;
+                lowerer.class_static_context = saved_static_context;
             }
             ModuleItem::Stmt(Stmt::Decl(
                 Decl::Fn(_) | Decl::TsInterface(_) | Decl::TsEnum(_) | Decl::TsTypeAlias(_),
@@ -2227,6 +2245,22 @@ fn lower_static_class_globals(
     let mut globals = Vec::new();
     for declaration in declarations {
         let class_name = declaration.ident.sym.as_ref();
+        let saved_super = lowerer.super_initializer.clone();
+        let saved_static_context = lowerer.class_static_context;
+        lowerer.class_static_context = true;
+        lowerer.super_initializer =
+            declaration
+                .class
+                .super_class
+                .as_ref()
+                .and_then(|base| match base.as_ref() {
+                    Expr::Ident(base) => Some((
+                        class_initializer_symbol(base.sym.as_ref()),
+                        interfaces[base.sym.as_ref()].clone(),
+                        base.sym.to_string(),
+                    )),
+                    _ => None,
+                });
         for member in &declaration.class.body {
             let ClassMember::ClassProp(property) = member else {
                 continue;
@@ -2251,6 +2285,8 @@ fn lower_static_class_globals(
                 mutable: !immutable_globals.contains(&symbol),
             });
         }
+        lowerer.super_initializer = saved_super;
+        lowerer.class_static_context = saved_static_context;
     }
     Ok(globals)
 }
@@ -9341,6 +9377,12 @@ impl<'a> FnLowerer<'a> {
                     .clone()
                     .ok_or("`super` property access is only valid in a derived class")?;
                 let property = super_property_name(&member.prop)?;
+                if self.class_static_context {
+                    let storage = class_static_field_symbol(&base_name, &property);
+                    if self.scope.contains_key(&storage) {
+                        return Ok(HirExpr::Var(storage));
+                    }
+                }
                 let symbol = class_getter_symbol(
                     &base_name,
                     &property,
@@ -10698,6 +10740,50 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        if self.class_static_context {
+            if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = &assign.left {
+                let (_, _, base_name) = self
+                    .super_initializer
+                    .clone()
+                    .ok_or("`super` property assignment is only valid in a derived class")?;
+                let property = super_property_name(&member.prop)?;
+                let storage = class_static_field_symbol(&base_name, &property);
+                if let Some(expected) = self.scope.get(&storage).cloned() {
+                    if self.immutable_bindings.contains(&storage) {
+                        return Err(format!(
+                            "cannot assign to readonly static member `super.{property}`"
+                        ));
+                    }
+                    let rhs = self.lower_expr(&assign.right)?;
+                    let value = if assign.op == AssignOp::Assign {
+                        rhs
+                    } else if let Some(operator) = compound_op(assign.op) {
+                        let current = HirExpr::Var(storage.clone());
+                        if assign.op == AssignOp::AddAssign
+                            && (expected == HirType::Str
+                                || self.infer_expr_type(&rhs)? == HirType::Str)
+                        {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                vec![
+                                    self.coerce_primitive_to_string(current)?,
+                                    self.coerce_primitive_to_string(rhs)?,
+                                ],
+                            )
+                        } else {
+                            HirExpr::BinOp(operator, Box::new(current), Box::new(rhs))
+                        }
+                    } else {
+                        return Err(format!(
+                            "unsupported super static-field assignment operator {:?}",
+                            assign.op
+                        ));
+                    };
+                    let value = self.coerce_to_declared(&expected, value)?;
+                    return Ok(HirExpr::Assign(storage, Box::new(value)));
+                }
+            }
+        }
         if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
             if let (Expr::Ident(receiver), Some(property)) =
                 (member.obj.as_ref(), member_property_name(&member.prop))
@@ -20832,5 +20918,32 @@ mod tests {
                 .unwrap();
             assert!(format!("{:?}", function.body).contains("__thaw_native_spread_"));
         }
+    }
+
+    #[test]
+    fn lowers_static_block_super_fields_methods_and_accessors() {
+        let program = lower(
+            r#"class Base {
+                static value: number = 40;
+                static bump(value: number): number { return value + 1; }
+                static get current(): number { return Base.value; }
+                static set current(value: number) { Base.value = value; }
+            }
+            class Derived extends Base {
+                static before: number = super.current;
+                static viaMethod: number = super.bump(super.value);
+                static { super.current = super.value + 2; }
+                static after: number = super.current;
+            }
+            function main(): number { return Derived.after; }"#,
+        );
+        let block = program
+            .initializers
+            .iter()
+            .find(|step| matches!(step, HirInitStep::Statement(_)))
+            .unwrap();
+        let debug = format!("{block:?}");
+        assert!(debug.contains("__thaw_class_Base_static_setter_current"));
+        assert!(debug.contains("__thaw_class_Base_static_field_value"));
     }
 }
