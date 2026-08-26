@@ -18842,23 +18842,36 @@ mod tests {
                 static sum(left: number = 20, right: number = left + 22): number {
                     return left + right;
                 }
+                static mixed(left: number = 20, right: number): number {
+                    return left + right;
+                }
             }
             function main(): void {
+                const missing = undefined;
                 const first = new Box();
                 const second = new Box(41);
                 const third = new Box(42, "explicit");
+                const fourth = new Box(undefined, "explicit-default");
                 console.log(first.value);
                 console.log(first.label);
                 console.log(second.label);
                 console.log(third.label);
+                console.log(fourth.value);
+                console.log(fourth.label);
                 console.log(first.add());
+                console.log(first.add(undefined));
                 console.log(Box.sum());
                 console.log(Box.sum(21));
+                console.log(Box.sum(undefined, 1));
+                console.log(Box.sum(1, undefined));
+                console.log(Box.sum(missing, 1));
+                console.log(Box.sum(...[undefined, 1]));
+                console.log(Box.mixed(undefined, 2));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_class_default_parameters"),
-            "40\n40\n41\nexplicit\n80\n62\n64\n"
+            "40\n40\n41\nexplicit\n40\nexplicit-default\n80\n80\n62\n64\n21\n24\n21\n21\n22\n"
         );
     }
 
@@ -18874,9 +18887,9 @@ mod tests {
             }
             class Implicit extends Base {}
             class Explicit extends Base {
-                constructor() { super(); }
-                addAgain(): number { return super.add(); }
-                static sumAgain(): number { return super.sum(); }
+                constructor() { super(...[undefined]); }
+                addAgain(): number { return super.add(...[undefined]); }
+                static sumAgain(): number { return super.sum(...[undefined, 1]); }
             }
             function main(): void {
                 const implicit = new Implicit();
@@ -18889,7 +18902,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "native_inherited_default_parameters"),
-            "40\n40\n80\n62\n"
+            "40\n40\n80\n21\n"
         );
     }
 
