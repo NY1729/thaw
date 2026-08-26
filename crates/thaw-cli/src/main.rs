@@ -3500,10 +3500,10 @@ mod tests {
         std::fs::write(
             dir.join("base.ts"),
             r#"
-                export class Base {
+                export const Base = class Base {
                     constructor(public value: number) {}
                     answer(): number { return this.value; }
-                }
+                };
             "#,
         )
         .unwrap();

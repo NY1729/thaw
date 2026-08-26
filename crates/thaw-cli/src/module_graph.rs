@@ -505,6 +505,17 @@ impl VisitMut for RenameReferences<'_> {
         }
     }
 
+    fn visit_mut_class_expr(&mut self, expression: &mut thaw_parser::ast::ClassExpr) {
+        expression.class.visit_mut_with(self);
+        if self.function_depth == 0 {
+            if let Some(ident) = &mut expression.ident {
+                if let Some(replacement) = self.names.get(ident.sym.as_ref()) {
+                    ident.sym = replacement.clone().into();
+                }
+            }
+        }
+    }
+
     fn visit_mut_var_declarator(&mut self, declaration: &mut thaw_parser::ast::VarDeclarator) {
         declaration.visit_mut_children_with(self);
         if self.function_depth == 0 {

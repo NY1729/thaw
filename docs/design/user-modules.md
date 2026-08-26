@@ -77,7 +77,8 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Generic/abstract classes, private or dynamically computed members, class expressions, top-level
+Generic/abstract classes, private or dynamically computed members, non-top-level or differently
+internally named class expressions, top-level
 declarations/statements outside the general HIR-supported subset, package multi-capture
 package export keys, and full ESM live bindings are outside the current typed AOT subset.
 Typed fixed-layout class declarations, including inheritance and named or anonymous default
@@ -99,6 +100,10 @@ Trailing rest parameters use an internal typed-array ABI. Calls pack zero or mor
 arguments into that array for constructors, instance/static methods, async methods, explicit
 base calls and inherited implicit constructors; defaults before the rest slot still use the
 same omission masks.
+Top-level `const Name = class {}` and `const Name = class Name {}` forms normalize into this
+same fixed-layout model before HIR collection. Module bundling renames the outer and self-name
+together, so exported class expressions retain forward references and cross-file inheritance.
+Inherited method forwarders also copy default/optional/rest adapters and preserve async awaiting.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
