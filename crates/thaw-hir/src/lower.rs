@@ -780,27 +780,51 @@ fn collect_native_classes<'a>(
     interfaces: &mut HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Result<Vec<&'a ClassDecl>, String> {
-    let mut classes = Vec::new();
-    for item in &module.body {
-        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
-            continue;
-        };
-        let name = declaration.ident.sym.to_string();
-        if declaration.declare {
-            return Err(format!(
-                "ambient class `{name}` cannot use the native class path"
-            ));
+    fn resolve_layout(
+        name: &str,
+        declarations: &HashMap<Symbol, &ClassDecl>,
+        interfaces: &mut HashMap<Symbol, HirType>,
+        generic_interfaces: &GenericInterfaces,
+        resolved: &mut HashSet<Symbol>,
+        active: &mut Vec<Symbol>,
+    ) -> Result<(), String> {
+        if resolved.contains(name) {
+            return Ok(());
         }
-        if declaration.class.is_abstract
-            || declaration.class.type_params.is_some()
-            || declaration.class.super_class.is_some()
-            || !declaration.class.implements.is_empty()
-        {
-            return Err(format!(
-                "class `{name}` currently requires a concrete, non-generic class without extends/implements"
-            ));
+        if active.iter().any(|current| current == name) {
+            active.push(name.to_string());
+            return Err(format!("class inheritance cycle `{}`", active.join(" -> ")));
         }
+        let declaration = declarations
+            .get(name)
+            .ok_or_else(|| format!("unknown native class `{name}`"))?;
+        active.push(name.to_string());
         let mut fields = vec![(format!("__thaw_class_identity_{name}"), HirType::Bool)];
+        if let Some(base) = &declaration.class.super_class {
+            let Expr::Ident(base) = base.as_ref() else {
+                return Err(format!(
+                    "class `{name}` requires an identifier in its extends clause"
+                ));
+            };
+            let base_name = base.sym.as_ref();
+            if !declarations.contains_key(base_name) {
+                return Err(format!(
+                    "class `{name}` extends unknown native class `{base_name}`"
+                ));
+            }
+            resolve_layout(
+                base_name,
+                declarations,
+                interfaces,
+                generic_interfaces,
+                resolved,
+                active,
+            )?;
+            let HirType::Object(base_fields) = &interfaces[base_name] else {
+                unreachable!("native class layouts are objects")
+            };
+            fields.extend(base_fields.iter().skip(1).cloned());
+        }
         for member in &declaration.class.body {
             let ClassMember::ClassProp(property) = member else {
                 continue;
@@ -816,7 +840,9 @@ fn collect_native_classes<'a>(
             }
             let field_name = class_property_name(&property.key)?;
             if fields.iter().any(|(existing, _)| existing == &field_name) {
-                return Err(format!("class `{name}` has duplicate field `{field_name}`"));
+                return Err(format!(
+                    "class `{name}` field `{field_name}` collides with an inherited or local field"
+                ));
             }
             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                 format!("class `{name}` field `{field_name}` needs a type annotation")
@@ -844,7 +870,7 @@ fn collect_native_classes<'a>(
             let field_name = binding.id.sym.to_string();
             if fields.iter().any(|(existing, _)| existing == &field_name) {
                 return Err(format!(
-                    "class `{name}` parameter property duplicates field `{field_name}`"
+                    "class `{name}` parameter property duplicates an inherited or local field `{field_name}`"
                 ));
             }
             let annotation = binding.type_ann.as_ref().ok_or_else(|| {
@@ -855,15 +881,51 @@ fn collect_native_classes<'a>(
                 lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?,
             ));
         }
-        if interfaces
-            .insert(name.clone(), HirType::Object(fields))
-            .is_some()
+        interfaces.insert(name.to_string(), HirType::Object(fields));
+        active.pop();
+        resolved.insert(name.to_string());
+        Ok(())
+    }
+
+    let mut classes = Vec::new();
+    let mut declarations = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+            continue;
+        };
+        let name = declaration.ident.sym.to_string();
+        if declaration.declare {
+            return Err(format!(
+                "ambient class `{name}` cannot use the native class path"
+            ));
+        }
+        if declaration.class.is_abstract
+            || declaration.class.type_params.is_some()
+            || !declaration.class.implements.is_empty()
+        {
+            return Err(format!(
+                "class `{name}` currently requires a concrete, non-generic class without implements"
+            ));
+        }
+        if interfaces.contains_key(&name)
+            || declarations.insert(name.clone(), declaration).is_some()
         {
             return Err(format!(
                 "class `{name}` conflicts with an interface or type declaration"
             ));
         }
         classes.push(declaration);
+    }
+    let mut resolved = HashSet::new();
+    for declaration in &classes {
+        resolve_layout(
+            declaration.ident.sym.as_ref(),
+            &declarations,
+            interfaces,
+            generic_interfaces,
+            &mut resolved,
+            &mut Vec::new(),
+        )?;
     }
     Ok(classes)
 }
@@ -19314,5 +19376,55 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn builds_forward_class_inheritance_layouts_in_base_to_derived_order() {
+        let program = lower(
+            r#"class Derived extends Base {
+                label: string;
+                read(): number { return this.value; }
+            }
+            class Base { value: number; }
+            function main(): number {
+                const value = new Derived();
+                return value.read();
+            }"#,
+        );
+        let constructor = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Derived_constructor")
+            .unwrap();
+        let HirType::Object(fields) = &constructor.ret else {
+            panic!("derived layout")
+        };
+        assert_eq!(
+            fields,
+            &vec![
+                ("__thaw_class_identity_Derived".into(), HirType::Bool),
+                ("value".into(), HirType::F64),
+                ("label".into(), HirType::Str),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_class_inheritance_cycles_and_field_collisions() {
+        let cycle = thaw_parser::parse_typescript(
+            "class First extends Second {} class Second extends First {}",
+        )
+        .unwrap();
+        assert!(lower_module(&cycle)
+            .unwrap_err()
+            .contains("class inheritance cycle"));
+
+        let collision = thaw_parser::parse_typescript(
+            "class Base { value: number; } class Derived extends Base { value: number; }",
+        )
+        .unwrap();
+        assert!(lower_module(&collision)
+            .unwrap_err()
+            .contains("collides with an inherited or local field"));
     }
 }
