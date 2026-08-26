@@ -1426,6 +1426,8 @@ The workspace crates have narrow responsibilities:
   `.apply()` forms; their ignored `thisArg` is still evaluated before ordinary arguments.
   `.bind()` produces synchronous or async typed closures, captures partially applied
   leading arguments, and evaluates but does not retain its ignored static `thisArg`.
+  Instance calls through `this` are specialized directly, including calls nested inside
+  an enclosing generic method after its outer type tuple has become concrete.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
