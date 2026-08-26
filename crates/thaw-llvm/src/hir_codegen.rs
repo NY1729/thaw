@@ -16854,15 +16854,19 @@ mod tests {
                 return "empty";
             }
             function producedService(): ResultService {
-                const load: ResultFactory = producedResults;
-                const holder: HolderFactory = producedHolder;
-                return { load, holder, nested: { load } };
+                return {
+                    load: producedResults,
+                    holder: producedHolder,
+                    nested: { load: producedResults }
+                };
             }
             async function delayedService(): Promise<ResultService> {
                 await sleep(1);
-                const load: ResultFactory = producedResults;
-                const holder: HolderFactory = producedHolder;
-                return { load, holder, nested: { load } };
+                return {
+                    load: producedResults,
+                    holder: producedHolder,
+                    nested: { load: producedResults }
+                };
             }
             function consumeServiceFactory(factory: ServiceFactory): string {
                 for (const item of factory().load()) {
@@ -16973,12 +16977,10 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 1);
                     else console.log(item.value + " nested rest");
                 }
-                const serviceLoader: ResultFactory = producedResults;
-                const serviceHolder: HolderFactory = producedHolder;
                 const service: ResultService = {
-                    load: serviceLoader,
-                    holder: serviceHolder,
-                    nested: { load: serviceLoader }
+                    load: producedResults,
+                    holder: producedHolder,
+                    nested: { load: producedResults }
                 };
                 const serviceAlias = service;
                 for (const item of serviceAlias.load()) {
@@ -16995,8 +16997,8 @@ mod tests {
                 }
                 console.log(consumeService(serviceAlias));
                 const inferredService = {
-                    load: serviceLoader,
-                    nested: { holder: serviceHolder }
+                    load: producedResults,
+                    nested: { holder: producedHolder }
                 };
                 const spreadService = { ...inferredService };
                 for (const item of spreadService.load()) {

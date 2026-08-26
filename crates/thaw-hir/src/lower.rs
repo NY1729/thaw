@@ -13011,6 +13011,11 @@ impl<'a> FnLowerer<'a> {
             Expr::Ident(identifier) => self
                 .function_value_discriminants
                 .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .or_else(|| {
+                    self.generic_interfaces
+                        .function_discriminants
+                        .get(identifier.sym.as_ref())
+                })
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_discriminants(&parenthesized.expr)
@@ -13056,6 +13061,11 @@ impl<'a> FnLowerer<'a> {
             Expr::Ident(identifier) => self
                 .function_value_array_discriminants
                 .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .or_else(|| {
+                    self.generic_interfaces
+                        .function_array_discriminants
+                        .get(identifier.sym.as_ref())
+                })
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_array_discriminants(&parenthesized.expr)
@@ -13109,6 +13119,11 @@ impl<'a> FnLowerer<'a> {
             Expr::Ident(identifier) => self
                 .function_value_object_array_property_discriminants
                 .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .or_else(|| {
+                    self.generic_interfaces
+                        .function_object_array_property_discriminants
+                        .get(identifier.sym.as_ref())
+                })
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_object_array_property_discriminants(&parenthesized.expr)
@@ -13164,6 +13179,11 @@ impl<'a> FnLowerer<'a> {
             Expr::Ident(identifier) => self
                 .function_value_object_function_property_discriminants
                 .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .or_else(|| {
+                    self.generic_interfaces
+                        .function_object_function_property_discriminants
+                        .get(identifier.sym.as_ref())
+                })
                 .cloned(),
             Expr::Paren(parenthesized) => {
                 self.expression_function_object_function_property_discriminants(&parenthesized.expr)
@@ -18425,6 +18445,25 @@ impl<'a> FnLowerer<'a> {
             Expr::Lit(Lit::Null(_)) => Ok(HirExpr::Lit(HirLit::Null)),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
+                if !self.scope.contains_key(&name) {
+                    if let Some(signature) = self.signatures.get(&name) {
+                        if signature.is_extern || !signature.generic_type_params.is_empty() {
+                            return Err(format!(
+                                "function value `{name}` needs a monomorphic native implementation"
+                            ));
+                        }
+                        let ret = if signature.is_async {
+                            HirType::Promise(Box::new(signature.ret.clone()))
+                        } else {
+                            signature.ret.clone()
+                        };
+                        return Ok(HirExpr::FunctionRef(
+                            name,
+                            signature.params.clone(),
+                            ret,
+                        ));
+                    }
+                }
                 if !self.scope.contains_key(&name) && !self.signatures.contains_key(&name) {
                     match ident.sym.as_ref() {
                         "NaN" => return Ok(HirExpr::Lit(HirLit::F64(f64::NAN))),
@@ -18959,7 +18998,7 @@ impl<'a> FnLowerer<'a> {
                                 "`typeof` requires one statically known runtime category, got {operand_type:?}"
                             ));
                         };
-                        if matches!(&value, HirExpr::Var(_))
+                        if matches!(&value, HirExpr::Var(_) | HirExpr::FunctionRef(..))
                             && matches!(operand_type, HirType::Function(_, _))
                         {
                             HirExpr::Lit(HirLit::Str(type_name.into()))
