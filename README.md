@@ -1422,6 +1422,8 @@ The workspace crates have narrow responsibilities:
   default/rest/spread adapters while evaluating the method target before `thisArg`.
   Immediately invoked bound methods are fused into that same path, so bound leading
   arguments combine with invocation arguments before default selection and rest packing.
+  Static generic instantiation expressions support the same `.call()` and typed-tuple
+  `.apply()` forms; their ignored `thisArg` is still evaluated before ordinary arguments.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model

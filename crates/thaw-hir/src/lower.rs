@@ -9785,6 +9785,82 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    fn lower_native_static_call_or_apply(
+        &mut self,
+        call: &CallExpr,
+    ) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(operation) = callee.as_ref() else {
+            return Ok(None);
+        };
+        let Some(operation_name) = member_property_name(&operation.prop) else {
+            return Ok(None);
+        };
+        if operation_name != "call" && operation_name != "apply" {
+            return Ok(None);
+        }
+        let Expr::Member(method) = operation.obj.as_ref() else {
+            return Ok(None);
+        };
+        let Expr::Ident(class) = method.obj.as_ref() else {
+            return Ok(None);
+        };
+        let Some(method_name) = member_property_name(&method.prop) else {
+            return Ok(None);
+        };
+        let symbol = class_static_method_symbol(class.sym.as_ref(), &method_name);
+        if !self.signatures.contains_key(&symbol) {
+            return Ok(None);
+        }
+        let Some((this_argument, supplied)) = call.args.split_first() else {
+            return Err(format!(
+                "native static method `{}.{method_name}.{operation_name}` expects a `thisArg`",
+                class.sym
+            ));
+        };
+        if this_argument.spread.is_some() {
+            return Err(format!(
+                "native static method `.{operation_name}()` cannot spread its `thisArg`"
+            ));
+        }
+        let forwarded = if operation_name == "apply" {
+            let [arguments] = supplied else {
+                return Err(format!(
+                    "native static method `{}.{method_name}.apply` expects exactly a `thisArg` and an argument tuple",
+                    class.sym
+                ));
+            };
+            if arguments.spread.is_some() {
+                return Err(
+                    "native static method `.apply()` argument tuple cannot be spread".into(),
+                );
+            }
+            vec![swc_ecma_ast::ExprOrSpread {
+                spread: Some(call.span),
+                expr: arguments.expr.clone(),
+            }]
+        } else {
+            supplied.to_vec()
+        };
+        let this_value = self.lower_expr(&this_argument.expr)?;
+        let this_type = self.infer_expr_type(&this_value)?;
+        let forwarded_call = CallExpr {
+            span: call.span,
+            ctxt: call.ctxt,
+            callee: Callee::Expr(Box::new(Expr::Member(method.clone()))),
+            args: forwarded,
+            type_args: None,
+        };
+        let result = self.lower_call(&forwarded_call)?;
+        let this_name = format!("__thaw_static_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(this_name.clone(), this_type.clone());
+        self.wrap_call_argument_bindings(result, &[(this_name, this_type, this_value)])
+            .map(Some)
+    }
+
     fn lower_immediately_invoked_class_bind(
         &mut self,
         call: &CallExpr,
@@ -17480,6 +17556,9 @@ impl<'a> FnLowerer<'a> {
             return Ok(bound);
         }
         if let Some(invoked) = self.lower_native_class_call_or_apply(call)? {
+            return Ok(invoked);
+        }
+        if let Some(invoked) = self.lower_native_static_call_or_apply(call)? {
             return Ok(invoked);
         }
 
