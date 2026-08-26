@@ -2585,7 +2585,11 @@ struct GenericClassMethodUseCollector<'a, 'ast> {
     call_results: &'a HashMap<Symbol, HirType>,
     parents: &'a HashMap<Symbol, Symbol>,
     static_member_types: &'a HashMap<(Symbol, Symbol), HirType>,
+    instance_member_types: &'a HashMap<(Symbol, Symbol), HirType>,
+    instance_method_results: &'a HashMap<(Symbol, Symbol), HirType>,
+    classes: &'a HashSet<Symbol>,
     current_classes: Vec<Symbol>,
+    current_static_contexts: Vec<bool>,
     error: Option<String>,
 }
 
@@ -2604,23 +2608,50 @@ impl GenericClassMethodUseCollector<'_, '_> {
         None
     }
 
+    fn instance_member_type(
+        &self,
+        class: &str,
+        member: &str,
+        method_result: bool,
+    ) -> Option<HirType> {
+        let types = if method_result {
+            self.instance_method_results
+        } else {
+            self.instance_member_types
+        };
+        let mut current = Some(class);
+        while let Some(class) = current {
+            if let Some(ty) = types.get(&(class.to_string(), member.to_string())) {
+                return Some(ty.clone());
+            }
+            current = self.parents.get(class).map(String::as_str);
+        }
+        None
+    }
+
+    fn is_static_receiver(&self, expression: &Expr) -> bool {
+        match expression {
+            Expr::Ident(identifier) => self.classes.contains(identifier.sym.as_ref()),
+            Expr::This(_) => self.current_static_contexts.last().copied().unwrap_or(true),
+            Expr::Paren(parenthesized) => self.is_static_receiver(&parenthesized.expr),
+            Expr::TsAs(assertion) => self.is_static_receiver(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => self.is_static_receiver(&assertion.expr),
+            _ => false,
+        }
+    }
+
     fn infer_actual_type(&self, expression: &Expr) -> Result<HirType, String> {
         if let Expr::Member(member) = expression {
             if let Some(property) = member_property_name(&member.prop) {
-                let class = match member.obj.as_ref() {
-                    Expr::This(_) => self.current_classes.last().map(String::as_str),
-                    Expr::Ident(class)
-                        if self
-                            .static_member_types
-                            .keys()
-                            .any(|(candidate, _)| candidate == class.sym.as_ref()) =>
-                    {
-                        Some(class.sym.as_ref())
+                let class = self.receiver_class(&member.obj);
+                let ty = class.as_deref().and_then(|class| {
+                    if self.is_static_receiver(&member.obj) {
+                        self.static_member_type(class, &property)
+                    } else {
+                        self.instance_member_type(class, &property, false)
                     }
-                    _ => None,
-                };
-                if let Some(ty) = class.and_then(|class| self.static_member_type(class, &property))
-                {
+                });
+                if let Some(ty) = ty {
                     return Ok(ty);
                 }
             }
@@ -2629,14 +2660,15 @@ impl GenericClassMethodUseCollector<'_, '_> {
             if let Callee::Expr(callee) = &call.callee {
                 if let Expr::Member(member) = callee.as_ref() {
                     if let Some(method) = member_property_name(&member.prop) {
-                        let class = match member.obj.as_ref() {
-                            Expr::This(_) => self.current_classes.last().map(String::as_str),
-                            Expr::Ident(class) => Some(class.sym.as_ref()),
-                            _ => None,
-                        };
-                        if let Some(ty) =
-                            class.and_then(|class| self.static_member_type(class, &method))
-                        {
+                        let class = self.receiver_class(&member.obj);
+                        let ty = class.as_deref().and_then(|class| {
+                            if self.is_static_receiver(&member.obj) {
+                                self.static_member_type(class, &method)
+                            } else {
+                                self.instance_member_type(class, &method, true)
+                            }
+                        });
+                        if let Some(ty) = ty {
                             return Ok(ty);
                         }
                     }
@@ -2756,7 +2788,9 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
         if method.function.type_params.is_some() {
             return;
         }
+        self.current_static_contexts.push(method.is_static);
         method.visit_children_with(self);
+        self.current_static_contexts.pop();
     }
 
     fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
@@ -3355,7 +3389,19 @@ fn specialize_generic_class_methods(
             Some((declaration.ident.sym.to_string(), parent.sym.to_string()))
         })
         .collect::<HashMap<_, _>>();
+    let classes = module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
+                return None;
+            };
+            Some(declaration.ident.sym.to_string())
+        })
+        .collect::<HashSet<_>>();
     let mut static_member_types = HashMap::new();
+    let mut instance_member_types = HashMap::new();
+    let mut instance_method_results = HashMap::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
             continue;
@@ -3393,6 +3439,58 @@ fn specialize_generic_class_methods(
             };
             static_member_types.insert((class.clone(), name), ty);
         }
+        for member in &declaration.class.body {
+            let (name, mut ty, method_result) = match member {
+                ClassMember::ClassProp(property) if !property.is_static => {
+                    let Some(annotation) = property.type_ann.as_ref() else {
+                        continue;
+                    };
+                    let Ok(mut ty) =
+                        lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                    else {
+                        continue;
+                    };
+                    if property.is_optional {
+                        ty = optional_parameter_type(ty);
+                    }
+                    (class_property_name(&property.key)?, ty, false)
+                }
+                ClassMember::Method(method)
+                    if !method.is_static
+                        && method.function.type_params.is_none()
+                        && method.kind != MethodKind::Setter =>
+                {
+                    let Some(annotation) = method.function.return_type.as_ref() else {
+                        continue;
+                    };
+                    let Ok(ty) =
+                        lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
+                    else {
+                        continue;
+                    };
+                    (
+                        class_property_name(&method.key)?,
+                        ty,
+                        method.kind == MethodKind::Method,
+                    )
+                }
+                _ => continue,
+            };
+            if method_result && matches!(ty, HirType::Void) {
+                continue;
+            }
+            if let ClassMember::Method(method) = member {
+                if method.function.is_async && !matches!(ty, HirType::Promise(_)) {
+                    ty = HirType::Promise(Box::new(ty));
+                }
+            }
+            let types = if method_result {
+                &mut instance_method_results
+            } else {
+                &mut instance_member_types
+            };
+            types.insert((class.clone(), name), ty);
+        }
     }
     let mut collector = GenericClassMethodUseCollector {
         templates: &templates,
@@ -3403,7 +3501,11 @@ fn specialize_generic_class_methods(
         call_results: &call_results,
         parents: &parents,
         static_member_types: &static_member_types,
+        instance_member_types: &instance_member_types,
+        instance_method_results: &instance_method_results,
+        classes: &classes,
         current_classes: Vec::new(),
+        current_static_contexts: Vec::new(),
         error: None,
     };
     module.visit_with(&mut collector);
@@ -24947,6 +25049,43 @@ mod tests {
             .functions
             .iter()
             .any(|function| { function.name == class_method_symbol("Box", "convert__thaw_f64") }));
+    }
+
+    #[test]
+    fn infers_generic_class_methods_from_instance_member_types() {
+        let program = lower(
+            r#"
+            class SourceBase {
+                value: string = "field";
+                get current(): string { return this.value; }
+                read(): string { return this.current; }
+                convert<T>(value: T): T { return value; }
+                fromThisField(): string { return this.convert(this.value); }
+                fromThisGetter(): string { return this.convert(this.current); }
+                fromThisMethod(): string { return this.convert(this.read()); }
+            }
+            class SourceDerived extends SourceBase {}
+            function main(): void {
+                const source = new SourceDerived();
+                console.log(source.convert(source.value));
+                console.log(source.convert(source.current));
+                console.log(source.convert(source.read()));
+                console.log(source.fromThisField());
+                console.log(source.fromThisGetter());
+                console.log(source.fromThisMethod());
+            }
+            "#,
+        );
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| {
+                    function.name == class_method_symbol("SourceBase", "convert__thaw_str")
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -1436,6 +1436,8 @@ The workspace crates have narrow responsibilities:
   `this.field` reads and explicitly instantiated generic static method calls.
   Generic static method inference follows declared static field, getter and non-generic
   method result types through both `this` and class-qualified access, including inheritance.
+  Instance generic method inference likewise follows declared field, getter and non-generic
+  method result types through direct receivers and instance `this`, including inherited members.
   Inherited static methods are re-lowered for each derived class, so `this` selects the
   final derived static-field storage and static method override across multiple levels.
   Runtime class values, dynamically computed members, `new.target`,
