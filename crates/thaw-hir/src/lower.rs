@@ -825,6 +825,8 @@ fn normalize_private_class_members(module: &Module) -> Module {
 struct GenericClassTemplate {
     declaration: ClassDecl,
     parameters: Vec<Symbol>,
+    constraints: Vec<Option<Box<TsType>>>,
+    defaults: Vec<Option<Box<TsType>>>,
 }
 
 struct GenericClassUseCollector<'a> {
@@ -838,18 +840,15 @@ fn unbox_types(types: &[Box<TsType>]) -> Vec<TsType> {
 
 impl Visit for GenericClassUseCollector<'_> {
     fn visit_class(&mut self, class: &swc_ecma_ast::Class) {
-        if let (Some(Expr::Ident(super_class)), Some(arguments)) = (
-            class.super_class.as_deref(),
-            class.super_type_params.as_ref(),
-        ) {
+        if let Some(Expr::Ident(super_class)) = class.super_class.as_deref() {
             if self.names.contains(super_class.sym.as_ref()) {
                 self.uses.push((
                     super_class.sym.to_string(),
-                    arguments
-                        .params
-                        .iter()
-                        .map(|argument| argument.as_ref().clone())
-                        .collect(),
+                    class
+                        .super_type_params
+                        .as_ref()
+                        .map(|arguments| unbox_types(&arguments.params))
+                        .unwrap_or_default(),
                 ));
             }
         }
@@ -857,36 +856,48 @@ impl Visit for GenericClassUseCollector<'_> {
     }
 
     fn visit_new_expr(&mut self, expression: &swc_ecma_ast::NewExpr) {
-        if let (Expr::Ident(class), Some(arguments)) =
-            (expression.callee.as_ref(), expression.type_args.as_ref())
-        {
+        if let Expr::Ident(class) = expression.callee.as_ref() {
             if self.names.contains(class.sym.as_ref()) {
-                self.uses
-                    .push((class.sym.to_string(), unbox_types(&arguments.params)));
+                self.uses.push((
+                    class.sym.to_string(),
+                    expression
+                        .type_args
+                        .as_ref()
+                        .map(|arguments| unbox_types(&arguments.params))
+                        .unwrap_or_default(),
+                ));
             }
         }
         expression.visit_children_with(self);
     }
 
     fn visit_ts_type_ref(&mut self, reference: &swc_ecma_ast::TsTypeRef) {
-        if let (swc_ecma_ast::TsEntityName::Ident(class), Some(arguments)) =
-            (&reference.type_name, reference.type_params.as_ref())
-        {
+        if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
             if self.names.contains(class.sym.as_ref()) {
-                self.uses
-                    .push((class.sym.to_string(), unbox_types(&arguments.params)));
+                self.uses.push((
+                    class.sym.to_string(),
+                    reference
+                        .type_params
+                        .as_ref()
+                        .map(|arguments| unbox_types(&arguments.params))
+                        .unwrap_or_default(),
+                ));
             }
         }
         reference.visit_children_with(self);
     }
 
     fn visit_ts_expr_with_type_args(&mut self, expression: &swc_ecma_ast::TsExprWithTypeArgs) {
-        if let (Expr::Ident(class), Some(arguments)) =
-            (expression.expr.as_ref(), expression.type_args.as_ref())
-        {
+        if let Expr::Ident(class) = expression.expr.as_ref() {
             if self.names.contains(class.sym.as_ref()) {
-                self.uses
-                    .push((class.sym.to_string(), unbox_types(&arguments.params)));
+                self.uses.push((
+                    class.sym.to_string(),
+                    expression
+                        .type_args
+                        .as_ref()
+                        .map(|arguments| unbox_types(&arguments.params))
+                        .unwrap_or_default(),
+                ));
             }
         }
         expression.visit_children_with(self);
@@ -913,23 +924,99 @@ impl VisitMut for GenericClassTypeSubstituter<'_> {
     }
 }
 
+fn resolve_generic_class_type_tuple(
+    name: &str,
+    template: &GenericClassTemplate,
+    arguments: &[TsType],
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<(Vec<HirType>, Vec<TsType>), String> {
+    let required = template
+        .defaults
+        .iter()
+        .filter(|default| default.is_none())
+        .count();
+    if arguments.len() < required || arguments.len() > template.parameters.len() {
+        let expected = if required == template.parameters.len() {
+            required.to_string()
+        } else {
+            format!("{required}..={}", template.parameters.len())
+        };
+        return Err(format!(
+            "generic class `{name}` expects {expected} type argument(s), got {}",
+            arguments.len()
+        ));
+    }
+
+    let mut types = Vec::with_capacity(template.parameters.len());
+    let mut concrete_arguments = Vec::with_capacity(template.parameters.len());
+    let mut hir_substitution = HashMap::new();
+    let mut ast_substitution = HashMap::new();
+    for (index, parameter) in template.parameters.iter().enumerate() {
+        let mut argument = if let Some(argument) = arguments.get(index) {
+            argument.clone()
+        } else {
+            *template.defaults[index]
+                .clone()
+                .expect("validated generic class arity requires a default")
+        };
+        argument.visit_mut_with(&mut GenericClassTypeSubstituter {
+            substitutions: &ast_substitution,
+        });
+        let concrete = lower_ts_type(&argument, interfaces, generic_interfaces)?;
+        ast_substitution.insert(parameter.clone(), Box::new(argument.clone()));
+        hir_substitution.insert(parameter.clone(), concrete.clone());
+        concrete_arguments.push(argument);
+        types.push(concrete);
+    }
+
+    for ((parameter, actual), constraint) in template
+        .parameters
+        .iter()
+        .zip(&types)
+        .zip(&template.constraints)
+    {
+        let Some(constraint) = constraint else {
+            continue;
+        };
+        let constraint = resolve_ts_type_with_substitution(
+            constraint,
+            &hir_substitution,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
+        )?;
+        if !type_satisfies_constraint(actual, &constraint) {
+            return Err(format!(
+                "generic class `{name}` type {actual:?} does not satisfy constraint {constraint:?} for `{parameter}`"
+            ));
+        }
+    }
+    Ok((types, concrete_arguments))
+}
+
 struct GenericClassReferenceRewriter<'a, 'ast> {
     specializations: &'a [(Symbol, Vec<HirType>, Symbol)],
+    templates: &'a HashMap<Symbol, GenericClassTemplate>,
     interfaces: &'a HashMap<Symbol, HirType>,
     generic_interfaces: &'a GenericInterfaces<'ast>,
     error: Option<String>,
 }
 
 impl GenericClassReferenceRewriter<'_, '_> {
-    fn resolve(&mut self, name: &str, arguments: &[Box<TsType>]) -> Option<Symbol> {
-        let types = arguments
-            .iter()
-            .map(|argument| lower_ts_type(argument, self.interfaces, self.generic_interfaces))
-            .collect::<Result<Vec<_>, _>>();
-        let types = match types {
-            Ok(types) => types,
+    fn resolve(&mut self, name: &str, arguments: Option<&[Box<TsType>]>) -> Option<Symbol> {
+        let template = self.templates.get(name)?;
+        let arguments = arguments.map(unbox_types).unwrap_or_default();
+        let types = match resolve_generic_class_type_tuple(
+            name,
+            template,
+            &arguments,
+            self.interfaces,
+            self.generic_interfaces,
+        ) {
+            Ok((types, _)) => types,
             Err(error) => {
-                self.error = Some(format!("cannot specialize generic class `{name}`: {error}"));
+                self.error = Some(error);
                 return None;
             }
         };
@@ -944,18 +1031,15 @@ impl GenericClassReferenceRewriter<'_, '_> {
 impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
     fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
         class.visit_mut_children_with(self);
-        let Some(arguments) = class
+        let arguments = class
             .super_type_params
             .as_ref()
-            .map(|arguments| arguments.params.clone())
-        else {
-            return;
-        };
+            .map(|arguments| arguments.params.clone());
         let Some(Expr::Ident(super_class)) = class.super_class.as_deref_mut() else {
             return;
         };
         let name = super_class.sym.to_string();
-        if let Some(symbol) = self.resolve(&name, &arguments) {
+        if let Some(symbol) = self.resolve(&name, arguments.as_deref()) {
             super_class.sym = symbol.into();
             class.super_type_params = None;
         }
@@ -963,12 +1047,16 @@ impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
 
     fn visit_mut_new_expr(&mut self, expression: &mut swc_ecma_ast::NewExpr) {
         expression.visit_mut_children_with(self);
-        let (Expr::Ident(class), Some(arguments)) =
-            (expression.callee.as_mut(), expression.type_args.as_ref())
-        else {
+        let Expr::Ident(class) = expression.callee.as_mut() else {
             return;
         };
-        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+        if let Some(symbol) = self.resolve(
+            class.sym.as_ref(),
+            expression
+                .type_args
+                .as_ref()
+                .map(|arguments| arguments.params.as_slice()),
+        ) {
             class.sym = symbol.into();
             expression.type_args = None;
         }
@@ -976,12 +1064,16 @@ impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
 
     fn visit_mut_ts_type_ref(&mut self, reference: &mut swc_ecma_ast::TsTypeRef) {
         reference.visit_mut_children_with(self);
-        let (swc_ecma_ast::TsEntityName::Ident(class), Some(arguments)) =
-            (&mut reference.type_name, reference.type_params.as_ref())
-        else {
+        let swc_ecma_ast::TsEntityName::Ident(class) = &mut reference.type_name else {
             return;
         };
-        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+        if let Some(symbol) = self.resolve(
+            class.sym.as_ref(),
+            reference
+                .type_params
+                .as_ref()
+                .map(|arguments| arguments.params.as_slice()),
+        ) {
             class.sym = symbol.into();
             reference.type_params = None;
         }
@@ -992,12 +1084,16 @@ impl VisitMut for GenericClassReferenceRewriter<'_, '_> {
         expression: &mut swc_ecma_ast::TsExprWithTypeArgs,
     ) {
         expression.visit_mut_children_with(self);
-        let (Expr::Ident(class), Some(arguments)) =
-            (expression.expr.as_mut(), expression.type_args.as_ref())
-        else {
+        let Expr::Ident(class) = expression.expr.as_mut() else {
             return;
         };
-        if let Some(symbol) = self.resolve(class.sym.as_ref(), &arguments.params) {
+        if let Some(symbol) = self.resolve(
+            class.sym.as_ref(),
+            expression
+                .type_args
+                .as_ref()
+                .map(|arguments| arguments.params.as_slice()),
+        ) {
             class.sym = symbol.into();
             expression.type_args = None;
         }
@@ -1022,16 +1118,6 @@ fn specialize_generic_classes(
             declaration.ident.sym.as_ref(),
             parameters,
         )?;
-        if parameters
-            .params
-            .iter()
-            .any(|parameter| parameter.constraint.is_some() || parameter.default.is_some())
-        {
-            return Err(format!(
-                "generic class `{}` constraints and defaults are not specialized yet",
-                declaration.ident.sym
-            ));
-        }
         templates.insert(
             declaration.ident.sym.to_string(),
             GenericClassTemplate {
@@ -1040,6 +1126,16 @@ fn specialize_generic_classes(
                     .params
                     .iter()
                     .map(|parameter| parameter.name.sym.to_string())
+                    .collect(),
+                constraints: parameters
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.constraint.clone())
+                    .collect(),
+                defaults: parameters
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.default.clone())
                     .collect(),
             },
         );
@@ -1064,17 +1160,13 @@ fn specialize_generic_classes(
         let mut added = false;
         for (name, arguments) in collector.uses {
             let template = &templates[&name];
-            if arguments.len() != template.parameters.len() {
-                return Err(format!(
-                    "generic class `{name}` expects {} type argument(s), got {}",
-                    template.parameters.len(),
-                    arguments.len()
-                ));
-            }
-            let types = arguments
-                .iter()
-                .map(|argument| lower_ts_type(argument, interfaces, generic_interfaces))
-                .collect::<Result<Vec<_>, _>>()?;
+            let (types, arguments) = resolve_generic_class_type_tuple(
+                &name,
+                template,
+                &arguments,
+                interfaces,
+                generic_interfaces,
+            )?;
             if let Some(unsupported) = types.iter().find(|ty| !supports_generic_native_layout(ty)) {
                 return Err(format!(
                     "generic class `{name}` cannot specialize for native layout {unsupported:?}"
@@ -1113,6 +1205,7 @@ fn specialize_generic_classes(
 
     let mut rewriter = GenericClassReferenceRewriter {
         specializations: &instances,
+        templates: &templates,
         interfaces,
         generic_interfaces,
         error: None,
@@ -21827,6 +21920,32 @@ mod tests {
             .find(|function| function.name == class_method_symbol(&string_box, "get"))
             .expect("string Box method specialization");
         assert_eq!(string_getter.ret, HirType::Str);
+    }
+
+    #[test]
+    fn validates_native_generic_class_defaults_and_constraints() {
+        for (source, expected) in [
+            (
+                "class Numeric<T extends number> { constructor(public value: T) {} } function main(): void { new Numeric<string>(\"wrong\"); }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "class Invalid<T extends number = string> { constructor(public value: T) {} } function main(): void { new Invalid(\"wrong\"); }",
+                "does not satisfy constraint F64",
+            ),
+            (
+                "class Pair<T, U = T> { constructor(public first: T, public second: U) {} } function main(): void { new Pair(1, 2); }",
+                "expects 1..=2 type argument(s), got 0",
+            ),
+            (
+                "class Invalid<T = string, U> {} function main(): void {}",
+                "required type parameter `U`",
+            ),
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
