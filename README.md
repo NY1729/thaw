@@ -1345,13 +1345,21 @@ The workspace crates have narrow responsibilities:
 
 ### Not yet compatible
 
-- Contextual/generic TypeScript inference, overload resolution, classes,
-  tuples, incompatible/non-object intersections, multi-capture export keys and the
+- Contextual/generic TypeScript inference, overload resolution, generic/abstract
+  classes, private fields, decorators, class expressions, static initialization
+  blocks, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant
   subset. Compatible declarations merge in source order, with duplicate
   member names and mixed native layouts rejected
+- The typed AOT class subset supports constructors, parameter properties,
+  instance fields and methods, accessors, static members, inheritance, `super`
+  calls and implicit derived-constructor forwarding. Named and anonymous default
+  classes can be imported, namespace-imported and re-exported across user modules
+  into one executable. Runtime class values, computed members, `new.target`,
+  constructor object returns and full JavaScript prototype mutation remain outside
+  that native fixed-layout model
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel
   collisions. Nullish coalescing and `??=` unwrap or update the payload with
