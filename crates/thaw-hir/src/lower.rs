@@ -12677,6 +12677,21 @@ impl<'a> FnLowerer<'a> {
                     return None;
                 };
                 let callee = ordinary_optional_expression(callee);
+                if let Expr::Member(member) = &callee {
+                    let property = member_property_name(&member.prop)?;
+                    if matches!(property.as_str(), "at" | "find" | "findLast") {
+                        return self.expression_array_element_discriminants(&member.obj);
+                    }
+                    if matches!(property.as_str(), "reduce" | "reduceRight") {
+                        return call
+                            .args
+                            .get(1)
+                            .and_then(|argument| {
+                                self.expression_union_discriminants(&argument.expr)
+                            })
+                            .or_else(|| self.expression_array_element_discriminants(&member.obj));
+                    }
+                }
                 let Expr::Ident(callee) = &callee else {
                     return None;
                 };
