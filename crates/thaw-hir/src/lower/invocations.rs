@@ -1379,9 +1379,6 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"toSpliced" {
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array toSpliced spread arguments are not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1390,23 +1387,29 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
-                    let mut arguments = Vec::with_capacity(call.args.len());
-                    for (index, argument) in call.args.iter().enumerate() {
-                        let value = self.lower_expr(&argument.expr)?;
+                    let source_name = format!("__thaw_to_spliced_source_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(source_name.clone(), array_type.clone());
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Array.toSpliced")?;
+                    for (index, value) in arguments.iter().enumerate() {
                         let expected = if index < 2 {
                             &HirType::F64
                         } else {
                             &element_type
                         };
-                        self.expect_type(expected, &value, "array toSpliced argument")?;
-                        arguments.push(value);
+                        self.expect_type(expected, value, "array toSpliced argument")?;
                     }
-                    return self.lower_array_to_spliced(
-                        receiver,
-                        array_type,
+                    let result = self.lower_array_to_spliced(
+                        HirExpr::Var(source_name.clone()),
+                        array_type.clone(),
                         element_type,
                         arguments,
-                    );
+                    )?;
+                    let mut bindings = vec![(source_name, array_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"at" {
                     let receiver = self.lower_expr(&member.obj)?;
