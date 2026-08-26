@@ -12579,10 +12579,27 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
-                if matches!(callee.as_ref(), Expr::Member(_)) {
-                    return self
+                if let Expr::Member(member) = callee.as_ref() {
+                    if let Some(discriminants) = self
                         .expression_called_function_property_discriminants(callee)
-                        .and_then(|metadata| metadata.array);
+                        .and_then(|metadata| metadata.array)
+                    {
+                        return Some(discriminants);
+                    }
+                    let property = member_property_name(&member.prop)?;
+                    if matches!(
+                        property.as_str(),
+                        "concat"
+                            | "filter"
+                            | "reverse"
+                            | "slice"
+                            | "toReversed"
+                            | "toSpliced"
+                            | "with"
+                    ) {
+                        return self.expression_array_element_discriminants(&member.obj);
+                    }
+                    return None;
                 }
                 let Expr::Ident(callee) = callee.as_ref() else {
                     return None;

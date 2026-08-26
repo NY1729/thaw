@@ -752,7 +752,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module
                 .add_function(name, array_join_type, Some(Linkage::External));
         }
-        let array_reverse_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        let array_reverse_type = i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false);
         self.module.add_function(
             "thaw_array_reverse",
             array_reverse_type,
@@ -761,6 +761,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let array_copy_within_type = i8_ptr.fn_type(
             &[
                 i8_ptr.into(),
+                i64_type.into(),
                 f64_type.into(),
                 f64_type.into(),
                 f64_type.into(),
@@ -783,8 +784,15 @@ impl<'ctx> HirCompiler<'ctx> {
             );
             self.module.add_function(name, ty, Some(Linkage::External));
         }
-        let array_slice_type =
-            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false);
+        let array_slice_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
         self.module.add_function(
             "thaw_array_slice",
             array_slice_type,
@@ -795,6 +803,7 @@ impl<'ctx> HirCompiler<'ctx> {
             array_reverse_type,
             Some(Linkage::External),
         );
+        let array_sort_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
         for name in [
             "thaw_number_array_sort",
             "thaw_string_array_sort",
@@ -806,7 +815,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_object_array_to_sorted",
         ] {
             self.module
-                .add_function(name, array_reverse_type, Some(Linkage::External));
+                .add_function(name, array_sort_type, Some(Linkage::External));
         }
         for (name, needle_type, return_type) in [
             (
@@ -9367,6 +9376,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map(|(_, ty)| ty.clone()),
             HirExpr::DynamicPropAccess(_, _, _, result) => Some(result.clone()),
             HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
+            HirExpr::ArrayLit(elements) => Some(HirType::Array(Box::new(
+                elements
+                    .first()
+                    .and_then(|element| self.expr_hir_type(element))
+                    .unwrap_or(HirType::F64),
+            ))),
+            HirExpr::ArrayConcat(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArrayAlloc(_, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::ArraySetLen(_, _, element) => Some(HirType::Array(Box::new(element.clone()))),
             HirExpr::Lambda(_, params, ret, _) => Some(HirType::Function(
@@ -9381,8 +9397,25 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::MethodRef(_, _, params, ret, _) => {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
-            HirExpr::Call(callee, _) => {
+            HirExpr::Call(callee, arguments) => {
                 if let HirExpr::Var(name) = callee.as_ref() {
+                    if name == "__thaw_string_to_array" {
+                        return Some(HirType::Array(Box::new(HirType::Str)));
+                    }
+                    if matches!(
+                        name.as_str(),
+                        "__thaw_array_reverse"
+                            | "__thaw_array_copy_within"
+                            | "__thaw_number_array_fill"
+                            | "__thaw_pointer_array_fill"
+                            | "__thaw_bool_array_fill"
+                            | "__thaw_array_slice"
+                            | "__thaw_array_to_reversed"
+                    ) {
+                        return arguments
+                            .first()
+                            .and_then(|argument| self.expr_hir_type(argument));
+                    }
                     if let Some(ret) = self.frame_async_functions.get(name) {
                         return Some(HirType::Promise(Box::new(ret.clone())));
                     }
@@ -9726,14 +9759,45 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("array join returned no value".to_string());
             }
             "__thaw_array_reverse" => {
-                return self.compile_single_arg_call("thaw_array_reverse", args, "array reverse")
+                let [array] = args else {
+                    return Err("array reverse expects one operand".to_string());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                    return Err("array reverse requires a homogeneous array".to_string());
+                };
+                let array = self.compile_expr(array)?;
+                let width = self
+                    .context
+                    .i64_type()
+                    .const_int(array_element_storage_bytes(&element), false);
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_reverse").unwrap(),
+                        &[array.into(), width.into()],
+                        "array_reverse",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array reverse returned no value".to_string());
             }
             "__thaw_array_copy_within" => {
                 if args.len() != 4 {
                     return Err("array copyWithin expects four operands".to_string());
                 }
-                let mut arguments = Vec::with_capacity(4);
-                for argument in args {
+                let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
+                    return Err("array copyWithin requires a homogeneous array".to_string());
+                };
+                let mut arguments = Vec::with_capacity(5);
+                arguments.push(self.compile_expr(&args[0])?.into());
+                arguments.push(
+                    self.context
+                        .i64_type()
+                        .const_int(array_element_storage_bytes(&element), false)
+                        .into(),
+                );
+                for argument in &args[1..] {
                     arguments.push(self.compile_expr(argument)?.into());
                 }
                 return self
@@ -9787,8 +9851,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
                 }
-                let mut arguments = Vec::with_capacity(3);
-                for argument in args {
+                let Some(HirType::Array(element)) = self.expr_hir_type(&args[0]) else {
+                    return Err("array slice requires a homogeneous array".to_string());
+                };
+                let mut arguments = Vec::with_capacity(4);
+                arguments.push(self.compile_expr(&args[0])?.into());
+                arguments.push(
+                    self.context
+                        .i64_type()
+                        .const_int(array_element_storage_bytes(&element), false)
+                        .into(),
+                );
+                for argument in &args[1..] {
                     arguments.push(self.compile_expr(argument)?.into());
                 }
                 return self
@@ -9804,11 +9878,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or("array slice returned no value".to_string());
             }
             "__thaw_array_to_reversed" => {
-                return self.compile_single_arg_call(
-                    "thaw_array_to_reversed",
-                    args,
-                    "array toReversed",
-                )
+                let [array] = args else {
+                    return Err("array toReversed expects one operand".to_string());
+                };
+                let Some(HirType::Array(element)) = self.expr_hir_type(array) else {
+                    return Err("array toReversed requires a homogeneous array".to_string());
+                };
+                let array = self.compile_expr(array)?;
+                let width = self
+                    .context
+                    .i64_type()
+                    .const_int(array_element_storage_bytes(&element), false);
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_array_to_reversed").unwrap(),
+                        &[array.into(), width.into()],
+                        "array_to_reversed",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("array toReversed returned no value".to_string());
             }
             "__thaw_number_array_sort"
             | "__thaw_string_array_sort"
@@ -16914,6 +17005,21 @@ mod tests {
                     { kind: "number", value: 6 },
                     { kind: "text", value: "sync" }
                 ];
+                const reversedResults = results
+                    .slice(0, 2)
+                    .concat(results.slice(0, 0))
+                    .filter(() => true)
+                    .toReversed()
+                    .reverse();
+                for (const item of reversedResults) {
+                    if (item.kind === "number") console.log(item.value + 150);
+                    else console.log(item.value + " array method");
+                }
+                const copiedResults = results.copyWithin(0, 0) as Result[];
+                for (const item of copiedResults) {
+                    if (item.kind === "number") console.log(item.value + 151);
+                    else console.log(item.value + " copied");
+                }
                 for (const { kind, value } of results) {
                     if (kind === "number") console.log(value + 1);
                     else console.log(value + "!");
@@ -17140,7 +17246,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 

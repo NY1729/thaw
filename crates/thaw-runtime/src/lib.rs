@@ -501,20 +501,27 @@ pub extern "C" fn thaw_number_object_is(left: f64, right: f64) -> u8 {
 }
 
 #[no_mangle]
-/// Reverses an eight-byte-slot native array in place and returns the receiver.
+/// Reverses a fixed-width native array in place and returns the receiver.
 ///
 /// # Safety
 ///
 /// `array` must point to a writable Thaw array whose elements occupy
-/// eight-byte slots.
-pub unsafe extern "C" fn thaw_array_reverse(array: *mut u8) -> *mut u8 {
+/// `element_width` bytes, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_reverse(array: *mut u8, element_width: usize) -> *mut u8 {
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return std::ptr::null_mut();
     };
+    if element_width == 0 {
+        return std::ptr::null_mut();
+    }
     for left in 0..length / 2 {
         let right = length - left - 1;
         unsafe {
-            std::ptr::swap_nonoverlapping(array.add(8 + left * 8), array.add(8 + right * 8), 8);
+            std::ptr::swap_nonoverlapping(
+                array.add(8 + left * element_width),
+                array.add(8 + right * element_width),
+                element_width,
+            );
         }
     }
     array
@@ -536,14 +543,15 @@ fn relative_array_index(index: f64, length: usize) -> usize {
 }
 
 #[no_mangle]
-/// Implements in-place `Array.prototype.copyWithin` for eight-byte slots.
+/// Implements in-place `Array.prototype.copyWithin` for fixed-width slots.
 ///
 /// # Safety
 ///
 /// `array` must point to a writable Thaw array whose elements occupy
-/// eight-byte slots.
+/// `element_width` bytes, and `element_width` must be nonzero.
 pub unsafe extern "C" fn thaw_array_copy_within(
     array: *mut u8,
+    element_width: usize,
     target: f64,
     start: f64,
     end: f64,
@@ -551,6 +559,9 @@ pub unsafe extern "C" fn thaw_array_copy_within(
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return std::ptr::null_mut();
     };
+    if element_width == 0 {
+        return std::ptr::null_mut();
+    }
     let target = relative_array_index(target, length);
     let start = relative_array_index(start, length);
     let end = relative_array_index(end, length);
@@ -558,9 +569,9 @@ pub unsafe extern "C" fn thaw_array_copy_within(
     if count != 0 {
         unsafe {
             std::ptr::copy(
-                array.add(8 + start * 8),
-                array.add(8 + target * 8),
-                count * 8,
+                array.add(8 + start * element_width),
+                array.add(8 + target * element_width),
+                count * element_width,
             );
         }
     }
@@ -621,22 +632,34 @@ pub unsafe extern "C" fn thaw_bool_array_fill(
 /// # Safety
 ///
 /// `array` must point to a readable Thaw array whose elements occupy
-/// eight-byte slots.
-pub unsafe extern "C" fn thaw_array_slice(array: *const u8, start: f64, end: f64) -> *mut u8 {
+/// `element_width` bytes, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_slice(
+    array: *const u8,
+    element_width: usize,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return std::ptr::null_mut();
     };
+    if element_width == 0 {
+        return std::ptr::null_mut();
+    }
     let start = relative_array_index(start, length);
     let end = relative_array_index(end, length);
     let count = end.saturating_sub(start);
-    let output = thaw_arena::thaw_arena_alloc((count + 1) * 8, 8);
+    let output = thaw_arena::thaw_arena_alloc(8 + count * element_width, element_width.min(8));
     if output.is_null() {
         return std::ptr::null_mut();
     }
     unsafe {
         output.cast::<u64>().write(count as u64);
         if count != 0 {
-            std::ptr::copy_nonoverlapping(array.add(8 + start * 8), output.add(8), count * 8);
+            std::ptr::copy_nonoverlapping(
+                array.add(8 + start * element_width),
+                output.add(8),
+                count * element_width,
+            );
         }
     }
     output
@@ -648,13 +671,13 @@ pub unsafe extern "C" fn thaw_array_slice(array: *const u8, start: f64, end: f64
 /// # Safety
 ///
 /// `array` must point to a readable Thaw array whose elements occupy
-/// eight-byte slots.
-pub unsafe extern "C" fn thaw_array_to_reversed(array: *const u8) -> *mut u8 {
-    let output = unsafe { thaw_array_slice(array, 0.0, f64::INFINITY) };
+/// `element_width` bytes, and `element_width` must be nonzero.
+pub unsafe extern "C" fn thaw_array_to_reversed(array: *const u8, element_width: usize) -> *mut u8 {
+    let output = unsafe { thaw_array_slice(array, element_width, 0.0, f64::INFINITY) };
     if output.is_null() {
         return output;
     }
-    unsafe { thaw_array_reverse(output) }
+    unsafe { thaw_array_reverse(output, element_width) }
 }
 
 unsafe fn native_array_slots(array: *mut u8) -> Option<&'static mut [u64]> {
@@ -730,7 +753,7 @@ macro_rules! array_to_sorted {
         /// # Safety
         /// `array` must point to a readable Thaw array of the matching type.
         pub unsafe extern "C" fn $name(array: *const u8) -> *mut u8 {
-            let output = unsafe { thaw_array_slice(array, 0.0, f64::INFINITY) };
+            let output = unsafe { thaw_array_slice(array, 8, 0.0, f64::INFINITY) };
             if output.is_null() {
                 return output;
             }

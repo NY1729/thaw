@@ -1603,6 +1603,9 @@ The workspace crates have narrow responsibilities:
   Forward, transitive and multiple plain-interface inheritance carries tracked
   union-array and typed function properties in the same base-to-derived order
   as the fixed native object layout.
+  Native Array methods which preserve their element type retain tracked union
+  discriminants through their returned arrays, including chained mutable and
+  copy-producing operations.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
