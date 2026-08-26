@@ -600,8 +600,9 @@ The workspace crates have narrow responsibilities:
   independent ArrayBuffer copies, and streaming compilation validates a
   successful Response plus its `application/wasm` MIME type. JavaScript
   function imports are linked by module/name and support scalar parameters,
-  i64 BigInts, void and multi-value results; thrown JavaScript errors trap as
-  `WebAssembly.RuntimeError`. Imported Memory and mutable Global objects are
+  i64 BigInts, identity-preserving `externref` values, void and multi-value
+  results; thrown JavaScript errors trap as `WebAssembly.RuntimeError`.
+  Imported Memory and mutable Global objects are
   synchronized before and after calls, including growth and sharing the same
   JavaScript object across multiple instances. `externref` values preserve
   JavaScript identity through exported functions and mutable globals. Imported
