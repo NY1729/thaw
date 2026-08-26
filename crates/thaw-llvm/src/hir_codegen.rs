@@ -19447,9 +19447,9 @@ mod tests {
                 { kind: "number"; value: number } |
                 { kind: "text"; value: string };
             interface Service {
-                get: () => Result;
-                load: () => Result[][];
-                loadAsync: () => Promise<Result[][]>;
+                get(): Result;
+                load(): Result[][];
+                loadAsync(): Promise<Result[][]>;
             }
             function print(item: Result): void {
                 if (item.kind === "number") console.log(item.value + 10);
