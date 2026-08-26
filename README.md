@@ -601,7 +601,9 @@ The workspace crates have narrow responsibilities:
   successful Response plus its `application/wasm` MIME type. JavaScript
   function imports are linked by module/name and support scalar parameters,
   i64 BigInts, void and multi-value results; thrown JavaScript errors trap as
-  `WebAssembly.RuntimeError`. Imported Memory, Global and Table values remain
+  `WebAssembly.RuntimeError`. Imported Memory and mutable Global objects are
+  synchronized before and after calls, including growth and sharing the same
+  JavaScript object across multiple instances. Imported Table values remain
   the next interoperability layer
 - `node:wasi` links the full `wasi_snapshot_preview1` syscall surface into
   wasmi instances. `WASI` validates Preview1 args, environment and preopened
