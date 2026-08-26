@@ -1212,6 +1212,8 @@ The workspace crates have narrow responsibilities:
   JavaScript's default comma or a coerced custom separator. Number, string,
   boolean, fixed-object and nested aggregate elements, empty arrays, receiver
   ordering and awaited receivers are supported
+- Native array/tuple `join` and homogeneous-array `at`, `with`, and literal-depth
+  `flat` accept statically sized tuple spreads while evaluating receivers first
 - Homogeneous number, string, boolean and fixed-object arrays implement
   `.indexOf()`, `.lastIndexOf()` and `.includes()` with positive/negative and
   infinite starting positions.
