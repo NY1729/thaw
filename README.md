@@ -1387,8 +1387,7 @@ The workspace crates have narrow responsibilities:
 ### Not yet compatible
 
 - Contextual TypeScript inference, overload resolution, decorators,
-  non-top-level class expressions, constructor-valued
-  `this` in static initialization, incompatible/non-object intersections, multi-capture export keys and the
+  non-top-level class expressions, incompatible/non-object intersections, multi-capture export keys and the
   complete JavaScript expression/statement set. Anonymous default functions
   are assigned stable bundle-local symbols. General runtime enum-object
   reflection and heterogeneous enums remain outside the native constant
@@ -1500,7 +1499,8 @@ The workspace crates have narrow responsibilities:
   Static methods and blocks also route `this` field/accessor assignment, compound updates
   and prefix/postfix updates through shared static storage with readonly checks.
   Static field initializers use the same declaring-class resolution for source-ordered
-  `this.field` reads and explicitly instantiated generic static method calls.
+  `this.field` reads and explicitly instantiated generic static method calls. Bare `this`
+  is also a constructor function value there and can initialize a compatible typed static field.
   Generic static method inference follows declared static field, getter and non-generic
   method result types through both `this` and class-qualified access, including inheritance.
   Instance generic method inference likewise follows declared field, getter and non-generic
