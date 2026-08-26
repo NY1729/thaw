@@ -19846,7 +19846,10 @@ mod tests {
                 }
                 static staticMaybe(useThis: boolean): string {
                     if (useThis) return this.staticValue;
-                    return "undefined-static-this";
+                    return this === undefined ? "undefined-static-this" : "wrong-static-this";
+                }
+                static inspectThis(): string {
+                    return typeof this + ":" + (this === undefined ? "undefined" : "bound");
                 }
             }
             class Holder { constructor(public box: Box) {} }
@@ -19876,6 +19879,7 @@ mod tests {
                 const staticRead = Box.staticRead;
                 const staticReadAsync = Box.staticReadAsync;
                 const staticMaybe = Box.staticMaybe;
+                const inspectThis = Box.inspectThis;
                 const staticBound = staticRead.bind(
                     (console.log("static-bind-this"), extracted),
                     ...boundArgs
@@ -19901,6 +19905,8 @@ mod tests {
                 console.log(maybe(false));
                 console.log(await maybeAsync(false));
                 console.log(staticMaybe(false));
+                console.log(Box.inspectThis());
+                console.log(inspectThis());
                 try { maybe(true); } catch (error) { console.log(error); }
                 try { await maybeAsync(true); } catch (error) { console.log(error); }
                 try { await readAsync("!"); } catch (error) { console.log(error); }
@@ -19918,7 +19924,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nCannot read properties of undefined (reading 'value')\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nfunction:bound\nundefined:undefined\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nCannot read properties of undefined (reading 'value')\n"
         );
     }
 
