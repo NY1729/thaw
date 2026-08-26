@@ -2603,15 +2603,13 @@ impl<'a> FnLowerer<'a> {
         }
 
         if matches!(callee_name.as_str(), "isNaN" | "isFinite") {
-            let [argument] = call.args.as_slice() else {
+            let (arguments, bindings) =
+                self.lower_native_spread_values(&call.args, &callee_name)?;
+            let [value] = arguments.as_slice() else {
                 return Err(format!("`{callee_name}` expects exactly one argument"));
             };
-            if argument.spread.is_some() {
-                return Err("number predicate spread is not supported".into());
-            }
-            let value = self.lower_expr(&argument.expr)?;
-            let value = self.coerce_primitive_to_number(value)?;
-            return Ok(HirExpr::Call(
+            let value = self.coerce_primitive_to_number(value.clone())?;
+            let result = HirExpr::Call(
                 Box::new(HirExpr::Var(
                     if callee_name == "isNaN" {
                         "__thaw_number_is_nan"
@@ -2621,7 +2619,8 @@ impl<'a> FnLowerer<'a> {
                     .to_string(),
                 )),
                 vec![value],
-            ));
+            );
+            return self.wrap_call_argument_bindings(result, &bindings);
         }
 
         if callee_name == "Promise.all" {

@@ -1206,6 +1206,8 @@ The workspace crates have narrow responsibilities:
   longest valid numeric prefix. They support whitespace/sign handling,
   incomplete exponents, infinity, radix inference and validation, signed zero,
   trailing text, single evaluation, awaited arguments and fixed-length tuple spreads
+- Coercing global `isNaN` and `isFinite` also accept one argument through a
+  statically sized tuple spread
 - `Number.parseFloat` and `Number.parseInt` are aliases of the same native
   parsing paths, including radix inference, coercion and suspension behavior
 - Native homogeneous arrays and heterogeneous tuples implement `.join()` with
