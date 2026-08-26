@@ -263,6 +263,9 @@ pub enum HirExpr {
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
     Block(Vec<HirStmt>),
+    /// Raises `error` from an expression position. `fallback` supplies the
+    /// unreachable native value required by the surrounding typed expression.
+    ThrowValue(Box<HirExpr>, Box<HirExpr>),
     FfiCall(Box<FfiSignature>, Vec<HirExpr>),
     DynamicCall(DynamicSignature, Vec<HirExpr>),
     /// `name = value` (and desugared compound assignments / `++`/`--`).
@@ -494,6 +497,10 @@ pub fn set_ffi_error_abi(
                 visit_expr(source, symbol, abi, found);
                 visit_expr(callback, symbol, abi, found);
             }
+            HirExpr::ThrowValue(error, fallback) => {
+                visit_expr(error, symbol, abi, found);
+                visit_expr(fallback, symbol, abi, found);
+            }
             HirExpr::Block(stmts) => visit_stmts(stmts, symbol, abi, found),
             HirExpr::ArrayLit(values)
             | HirExpr::ArrayConcat(values, _)
@@ -670,6 +677,10 @@ pub fn set_ffi_ownership(
             HirExpr::PromiseFinally(source, callback, _, _) => {
                 update_expr(source, symbol, returns, errors, found);
                 update_expr(callback, symbol, returns, errors, found);
+            }
+            HirExpr::ThrowValue(error, fallback) => {
+                update_expr(error, symbol, returns, errors, found);
+                update_expr(fallback, symbol, returns, errors, found);
             }
             HirExpr::Block(stmts) => update_stmts(stmts, symbol, returns, errors, found),
             HirExpr::IndexAssign(a, b, c) => {
@@ -953,6 +964,26 @@ pub fn set_ffi_string_abi(
                 );
                 update_expr(
                     callback,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+            }
+            HirExpr::ThrowValue(error, fallback) => {
+                update_expr(
+                    error,
+                    symbol,
+                    params,
+                    returns,
+                    calling_convention,
+                    aggregate_return_abi,
+                    found,
+                );
+                update_expr(
+                    fallback,
                     symbol,
                     params,
                     returns,

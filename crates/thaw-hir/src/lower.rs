@@ -3994,6 +3994,10 @@ fn class_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_method_{method}")
 }
 
+fn unbound_class_method_symbol(method: &str) -> Symbol {
+    format!("{method}__thaw_unbound")
+}
+
 fn class_static_method_symbol(class: &str, method: &str) -> Symbol {
     format!("__thaw_class_{class}_static_{method}")
 }
@@ -4831,6 +4835,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .get_mut(&symbol)
                         .expect("class method signature")
                         .native_rest = native_rest;
+                    if method.kind == MethodKind::Method && signatures[&symbol].uses_this {
+                        let mut unbound = signatures[&symbol].clone();
+                        if !method.is_static {
+                            unbound.params.remove(0);
+                        }
+                        unbound.uses_this = false;
+                        signatures.insert(unbound_class_method_symbol(&symbol), unbound);
+                    }
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
                         let receiver_count = usize::from(!method.is_static);
                         for arity in default_start..patterns.len() {
@@ -8374,6 +8386,51 @@ fn lower_class_methods(
             is_async: signature.is_async,
             body: lowered_body,
         });
+        if method.kind == MethodKind::Method && signature.uses_this {
+            let unbound_symbol = unbound_class_method_symbol(&symbol);
+            let unbound_signature = signatures.get(&unbound_symbol).unwrap_or(signature);
+            let unbound_params = params[receiver_offset..].to_vec();
+            let mut unbound = FnLowerer::new(
+                signatures,
+                interfaces,
+                generic_interfaces,
+                enum_values,
+                enum_reverse_values,
+                unbound_signature.ret.clone(),
+                None,
+            );
+            seed_global_scope(&mut unbound, global_types, immutable_globals);
+            unbound.class_static_context = method.is_static;
+            unbound.class_context = Some(class_name.clone());
+            unbound.unbound_this_context = true;
+            if let Some(base) = &declaration.class.super_class {
+                let Expr::Ident(base) = base.as_ref() else {
+                    unreachable!("class layout validation accepts identifier bases only")
+                };
+                unbound.super_initializer = Some((
+                    class_initializer_symbol(base.sym.as_ref()),
+                    interfaces[base.sym.as_ref()].clone(),
+                    base.sym.to_string(),
+                ));
+            }
+            for parameter in &unbound_params {
+                unbound
+                    .scope
+                    .insert(parameter.name.clone(), parameter.ty.clone());
+                unbound
+                    .bindings
+                    .entry(parameter.name.clone())
+                    .or_default()
+                    .push(parameter.name.clone());
+            }
+            functions.push(HirFunction {
+                name: unbound_symbol,
+                params: unbound_params,
+                ret: unbound_signature.ret.clone(),
+                is_async: unbound_signature.is_async,
+                body: unbound.lower_stmts(&body.stmts)?,
+            });
+        }
         let patterns = method
             .function
             .params
@@ -9562,6 +9619,10 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(source, names);
             collect_referenced_bindings(callback, names);
         }
+        HirExpr::ThrowValue(error, fallback) => {
+            collect_referenced_bindings(error, names);
+            collect_referenced_bindings(fallback, names);
+        }
         HirExpr::Block(stmts) => collect_stmt_bindings(stmts, names),
         HirExpr::FfiCall(_, args)
         | HirExpr::DynamicCall(_, args)
@@ -9662,6 +9723,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         }
         HirExpr::PropAssign(object, _, _, value) => contains_await(object) || contains_await(value),
         HirExpr::ObjectLit(fields) => fields.iter().any(|(_, value)| contains_await(value)),
+        HirExpr::ThrowValue(error, fallback) => contains_await(error) || contains_await(fallback),
         HirExpr::Block(stmts) => stmts.iter().any(stmt_contains_await),
         // A closure body runs only when the closure is invoked, not when the
         // function value is evaluated at this expression boundary.
@@ -9998,6 +10060,7 @@ struct FnLowerer<'a> {
     super_initializer: Option<(Symbol, HirType, Symbol)>,
     class_static_context: bool,
     class_context: Option<Symbol>,
+    unbound_this_context: bool,
 }
 
 type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
@@ -10316,31 +10379,16 @@ impl<'a> FnLowerer<'a> {
             let symbol = class_static_method_symbol(class.sym.as_ref(), method_name);
             if let Some(signature) = self.signatures.get(&symbol) {
                 if signature.uses_this {
-                    let parameters = signature
-                        .params
-                        .iter()
-                        .enumerate()
-                        .map(|(index, ty)| HirParam {
-                            name: format!("__thaw_unbound_static_argument_{index}"),
-                            ty: ty.clone(),
-                        })
-                        .collect();
                     let result =
                         if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
                             HirType::Promise(Box::new(signature.ret.clone()))
                         } else {
                             signature.ret.clone()
                         };
-                    return Ok(Some(HirExpr::Lambda(
-                        Vec::new(),
-                        parameters,
+                    return Ok(Some(HirExpr::FunctionRef(
+                        unbound_class_method_symbol(&symbol),
+                        signature.params.clone(),
                         result,
-                        Box::new(HirExpr::Block(vec![HirStmt::Throw(HirExpr::Lit(
-                            HirLit::Str(format!(
-                                "Cannot call unbound native static method `{}.{method_name}` without an explicit thisArg",
-                                class.sym
-                            )),
-                        ))])),
                     )));
                 }
                 let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
@@ -10387,18 +10435,21 @@ impl<'a> FnLowerer<'a> {
             } else {
                 signature.ret.clone()
             };
-            let trap = HirExpr::Lambda(
+            let arguments = parameters
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone()))
+                .collect();
+            let unbound = HirExpr::Lambda(
                 Vec::new(),
                 parameters,
                 result,
-                Box::new(HirExpr::Block(vec![HirStmt::Throw(HirExpr::Lit(
-                    HirLit::Str(format!(
-                        "Cannot call unbound native method `{class_name}.{method_name}` without an explicit thisArg"
-                    )),
-                ))])),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var(unbound_class_method_symbol(&symbol))),
+                    arguments,
+                )),
             );
             return self
-                .wrap_call_argument_bindings(trap, &[(receiver_name, receiver_type, receiver)])
+                .wrap_call_argument_bindings(unbound, &[(receiver_name, receiver_type, receiver)])
                 .map(Some);
         }
         let receiver = self.lower_expr(&member.obj)?;
@@ -10596,14 +10647,7 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee) = &call.callee else {
             return Ok(None);
         };
-        if let Expr::Ident(identifier) = callee.as_ref() {
-            let binding = self.resolve_binding(identifier.sym.as_ref());
-            if self.native_method_values.contains_key(&binding) {
-                return Err(format!(
-                    "unbound native method `{}` requires `.call(thisArg, ...)`, `.apply(thisArg, tuple)`, or `.bind(thisArg, ...)` before ordinary invocation",
-                    identifier.sym
-                ));
-            }
+        if matches!(callee.as_ref(), Expr::Ident(_)) {
             return Ok(None);
         }
         let Expr::Member(operation) = callee.as_ref() else {
@@ -10951,6 +10995,7 @@ impl<'a> FnLowerer<'a> {
             super_initializer: None,
             class_static_context: false,
             class_context: None,
+            unbound_this_context: false,
         }
     }
 
@@ -13315,6 +13360,7 @@ impl<'a> FnLowerer<'a> {
                 params.iter().map(|param| param.ty.clone()).collect(),
                 Box::new(ret.clone()),
             )),
+            HirExpr::ThrowValue(_, fallback) => self.infer_expr_type(fallback),
             HirExpr::Block(stmts) => self.infer_return_type(stmts),
         }
     }
@@ -13815,6 +13861,9 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::This(_) => {
+                if self.unbound_this_context {
+                    return Ok(HirExpr::Lit(HirLit::Undefined));
+                }
                 let name = self.resolve_binding("this");
                 if self.scope.contains_key(&name) {
                     Ok(HirExpr::Var(name))
@@ -15423,7 +15472,111 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(HirExpr::ObjectLit(fields), &bindings)
     }
 
+    fn unreachable_value(ty: &HirType) -> Result<HirExpr, String> {
+        match ty {
+            HirType::F64 => Ok(HirExpr::Lit(HirLit::F64(0.0))),
+            HirType::Bool => Ok(HirExpr::Lit(HirLit::Bool(false))),
+            HirType::Str => Ok(HirExpr::Lit(HirLit::Str(String::new()))),
+            HirType::Undefined | HirType::Void => Ok(HirExpr::Lit(HirLit::Undefined)),
+            HirType::Null => Ok(HirExpr::Lit(HirLit::Null)),
+            HirType::Object(_) => Ok(HirExpr::ObjectAlloc(ty.clone())),
+            HirType::Array(element) => Ok(HirExpr::ArrayAlloc(
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                element.as_ref().clone(),
+            )),
+            HirType::Optional(payload) => Ok(HirExpr::OptionalNone(payload.as_ref().clone())),
+            HirType::Nullable(payload) => Ok(HirExpr::NullableNone(payload.as_ref().clone())),
+            HirType::Nullish(payload) => Ok(HirExpr::NullishUndefined(payload.as_ref().clone())),
+            HirType::Function(params, result) => Ok(HirExpr::Lambda(
+                Vec::new(),
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| HirParam {
+                        name: format!("__thaw_unreachable_parameter_{index}"),
+                        ty: ty.clone(),
+                    })
+                    .collect(),
+                result.as_ref().clone(),
+                Box::new(Self::unreachable_value(result)?),
+            )),
+            other => Err(format!(
+                "unbound `this` cannot synthesize unreachable value of type {other:?}"
+            )),
+        }
+    }
+
+    fn unbound_this_member_type(&self, property: &str) -> Option<HirType> {
+        let class = self.class_context.as_deref()?;
+        if self.class_static_context {
+            let field = class_static_field_symbol(class, property);
+            if let Some(ty) = self.scope.get(&field) {
+                return Some(ty.clone());
+            }
+            let getter = class_getter_symbol(class, property, true);
+            if let Some(signature) = self.signatures.get(&getter) {
+                return Some(signature.ret.clone());
+            }
+            let method = class_static_method_symbol(class, property);
+            let signature = self.signatures.get(&method)?;
+            let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+                HirType::Promise(Box::new(signature.ret.clone()))
+            } else {
+                signature.ret.clone()
+            };
+            return Some(HirType::Function(
+                signature.params.clone(),
+                Box::new(result),
+            ));
+        }
+        let instance = self.interfaces.get(class)?;
+        if let HirType::Object(fields) = instance {
+            if let Some((_, ty)) = fields.iter().find(|(name, _)| name == property) {
+                return Some(ty.clone());
+            }
+        }
+        let getter = class_getter_symbol(class, property, false);
+        if let Some(signature) = self.signatures.get(&getter) {
+            return Some(signature.ret.clone());
+        }
+        let method = class_method_symbol(class, property);
+        let signature = self.signatures.get(&method)?;
+        let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+            HirType::Promise(Box::new(signature.ret.clone()))
+        } else {
+            signature.ret.clone()
+        };
+        Some(HirType::Function(
+            signature.params[1..].to_vec(),
+            Box::new(result),
+        ))
+    }
+
+    fn lower_unbound_this_error(&self, property: &str, ty: &HirType) -> Result<HirExpr, String> {
+        Ok(HirExpr::ThrowValue(
+            Box::new(HirExpr::Lit(HirLit::Str(format!(
+                "Cannot read properties of undefined (reading '{property}')"
+            )))),
+            Box::new(Self::unreachable_value(ty)?),
+        ))
+    }
+
+    fn lower_unbound_this_member(&self, property: &str) -> Result<HirExpr, String> {
+        let ty = self.unbound_this_member_type(property).ok_or_else(|| {
+            format!(
+                "class `{}` has no native member `{property}`",
+                self.class_context.as_deref().unwrap_or("<unknown>")
+            )
+        })?;
+        self.lower_unbound_this_error(property, &ty)
+    }
+
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
+        if self.unbound_this_context && matches!(member.obj.as_ref(), Expr::This(_)) {
+            let property = member_property_name(&member.prop)
+                .ok_or("unbound `this` member access requires a statically known property")?;
+            return self.lower_unbound_this_member(&property);
+        }
         if let Expr::Ident(enum_name) = member.obj.as_ref() {
             let member_name = match &member.prop {
                 MemberProp::Ident(member) => Some(member.sym.to_string()),
@@ -15906,6 +16059,30 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
+        if self.unbound_this_context {
+            if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
+                if matches!(member.obj.as_ref(), Expr::This(_)) {
+                    let property = member_property_name(&member.prop)
+                        .ok_or("unbound `this` assignment requires a statically known property")?;
+                    if assign.op != AssignOp::Assign {
+                        return self.lower_unbound_this_member(&property);
+                    }
+                    let value = self.lower_expr(&assign.right)?;
+                    let value_type = self.infer_expr_type(&value)?;
+                    let value_name = format!("__thaw_unbound_assignment_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(value_name.clone(), value_type.clone());
+                    let result = HirExpr::ThrowValue(
+                        Box::new(HirExpr::Lit(HirLit::Str(format!(
+                            "Cannot set properties of undefined (setting '{property}')"
+                        )))),
+                        Box::new(HirExpr::Var(value_name.clone())),
+                    );
+                    return self
+                        .wrap_call_argument_bindings(result, &[(value_name, value_type, value)]);
+                }
+            }
+        }
         if self.class_static_context {
             if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = &assign.left {
                 let (_, _, base_name) = self
@@ -16557,6 +16734,15 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_update(&mut self, update: &swc_ecma_ast::UpdateExpr) -> Result<HirExpr, String> {
+        if self.unbound_this_context {
+            if let Expr::Member(member) = update.arg.as_ref() {
+                if matches!(member.obj.as_ref(), Expr::This(_)) {
+                    let property = member_property_name(&member.prop)
+                        .ok_or("unbound `this` update requires a statically known property")?;
+                    return self.lower_unbound_this_member(&property);
+                }
+            }
+        }
         if let Expr::Member(member) = update.arg.as_ref() {
             let static_class = match member.obj.as_ref() {
                 Expr::Ident(receiver) => Some(receiver.sym.to_string()),
@@ -18659,6 +18845,21 @@ impl<'a> FnLowerer<'a> {
 
         if let Some(invoked) = self.lower_saved_native_method_call_or_apply(call)? {
             return Ok(invoked);
+        }
+        if self.unbound_this_context {
+            if let Expr::Member(member) = callee_expr.as_ref() {
+                if matches!(member.obj.as_ref(), Expr::This(_)) {
+                    let property = member_property_name(&member.prop)
+                        .ok_or("unbound `this` method call requires a statically known property")?;
+                    let HirType::Function(_, result) = self
+                        .unbound_this_member_type(&property)
+                        .ok_or_else(|| format!("class has no native method `{property}`"))?
+                    else {
+                        return Err(format!("native member `{property}` is not callable"));
+                    };
+                    return self.lower_unbound_this_error(&property, &result);
+                }
+            }
         }
 
         if let Some(invoked) = self.lower_immediately_invoked_class_bind(call)? {
@@ -26758,6 +26959,10 @@ mod tests {
             r#"class Box {
                 constructor(public value: string) {}
                 read(suffix: string): string { return this.value + suffix; }
+                maybe(useThis: boolean): string {
+                    if (useThis) return this.value;
+                    return this === undefined ? "undefined-this" : "wrong-this";
+                }
             }
             class StaticBox {
                 static value: string = "static";
@@ -26773,12 +26978,14 @@ mod tests {
                 const bound = alias.bind(second, ...boundArgs);
                 const staticRead = StaticBox.read;
                 const staticBound = staticRead.bind(first, ...boundArgs);
+                const maybe = first.maybe;
                 console.log(read.call(second, "!"));
                 console.log(alias.apply(first, args));
                 console.log(bound());
                 console.log(staticRead.call(first, "!"));
                 console.log(staticRead.apply(first, args));
                 console.log(staticBound());
+                console.log(maybe(false));
             }"#,
         );
         let main = program
@@ -26787,14 +26994,9 @@ mod tests {
             .find(|function| function.name == "main")
             .unwrap();
         assert!(format!("{:?}", main.body).contains("__thaw_class_Box_method_read"));
-
-        let module = thaw_parser::parse_typescript(
-            r#"class Box { value: string = "value"; read(): string { return this.value; } }
-            function main(): void { const box = new Box(); const read = box.read; read(); }"#,
-        )
-        .unwrap();
-        let error = lower_module(&module).unwrap_err();
-        assert!(error.contains("requires `.call(thisArg"), "{error}");
+        assert!(program.functions.iter().any(|function| {
+            function.name == unbound_class_method_symbol(&class_method_symbol("Box", "maybe"))
+        }));
     }
 
     #[test]
