@@ -18602,6 +18602,28 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_native_class_implements() {
+        let source = r#"
+            interface NamedValue<N, V> { name: N; value: V; }
+            class Named {
+                constructor(public name: string) {}
+            }
+            class Value extends Named implements NamedValue<string, number> {
+                constructor(name: string, public value: number) { super(name); }
+            }
+            function main(): void {
+                const value = new Value("answer", 42);
+                console.log(value.name);
+                console.log(value.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_class_implements"),
+            "answer\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
