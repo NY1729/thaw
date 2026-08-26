@@ -2840,6 +2840,27 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
         }
         call.visit_children_with(self);
     }
+
+    fn visit_ts_instantiation(&mut self, instantiation: &swc_ecma_ast::TsInstantiation) {
+        if let Expr::Member(member) = instantiation.expr.as_ref() {
+            if let (Some(class), Some(method)) = (
+                self.receiver_class(&member.obj),
+                member_property_name(&member.prop),
+            ) {
+                if let Some(owner) = self.template_owner(&class, &method) {
+                    self.uses.push(GenericClassMethodUse {
+                        span: instantiation.span,
+                        class: owner,
+                        method,
+                        arguments: Some(unbox_types(&instantiation.type_args.params)),
+                        actual_params: None,
+                    });
+                    return;
+                }
+            }
+        }
+        instantiation.visit_children_with(self);
+    }
 }
 
 fn resolve_explicit_generic_class_method_types(
@@ -2952,6 +2973,21 @@ struct GenericClassMethodCallRewriter<'a> {
 }
 
 impl VisitMut for GenericClassMethodCallRewriter<'_> {
+    fn visit_mut_expr(&mut self, expression: &mut Expr) {
+        expression.visit_mut_children_with(self);
+        let Expr::TsInstantiation(instantiation) = expression else {
+            return;
+        };
+        let Some(method) = self.calls.get(&instantiation.span) else {
+            return;
+        };
+        let Expr::Member(mut member) = instantiation.expr.as_ref().clone() else {
+            return;
+        };
+        member.prop = MemberProp::Ident(IdentName::new(method.clone().into(), instantiation.span));
+        *expression = Expr::Member(member);
+    }
+
     fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
         call.visit_mut_children_with(self);
         let Some(method) = self.calls.get(&call.span) else {
@@ -9515,6 +9551,109 @@ struct FnLowerer<'a> {
 type UnionTypeofNarrowing = (Symbol, Vec<usize>, Vec<usize>, Vec<HirType>, bool);
 
 impl<'a> FnLowerer<'a> {
+    fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .scope
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::This(_) => self.scope.get(&self.resolve_binding("this")).cloned(),
+            Expr::New(construction) => construction
+                .callee
+                .as_ident()
+                .and_then(|class| self.interfaces.get(class.sym.as_ref()).cloned()),
+            _ => infer_generic_constructor_expr_type(
+                expression,
+                self.interfaces,
+                self.generic_interfaces,
+                std::slice::from_ref(&self.scope),
+                &self.generic_call_returns,
+            )
+            .ok(),
+        }
+    }
+
+    fn lower_native_class_bind(&mut self, call: &CallExpr) -> Result<Option<HirExpr>, String> {
+        let Callee::Expr(callee) = &call.callee else {
+            return Ok(None);
+        };
+        let Expr::Member(bind) = callee.as_ref() else {
+            return Ok(None);
+        };
+        if member_property_name(&bind.prop).as_deref() != Some("bind") {
+            return Ok(None);
+        }
+        let Expr::Member(method) = bind.obj.as_ref() else {
+            return Ok(None);
+        };
+        let Some(method_name) = member_property_name(&method.prop) else {
+            return Ok(None);
+        };
+        let Some(target_type) = self.native_class_expression_type(&method.obj) else {
+            return Ok(None);
+        };
+        let Some(class_name) = class_name_from_type(&target_type) else {
+            return Ok(None);
+        };
+        let symbol = class_method_symbol(class_name, &method_name);
+        let Some(signature) = self.signatures.get(&symbol).cloned() else {
+            return Ok(None);
+        };
+        if call.type_args.is_some() {
+            return Err("native class method `.bind()` does not accept type arguments".into());
+        }
+        let [this_argument] = call.args.as_slice() else {
+            return Err(format!(
+                "native class method `{class_name}.{method_name}.bind` expects exactly one `thisArg`"
+            ));
+        };
+        if this_argument.spread.is_some() {
+            return Err("native class method `.bind()` does not support spread arguments".into());
+        }
+        let target = self.lower_expr(&method.obj)?;
+        self.expect_type(&target_type, &target, "method bind target")?;
+        let bound = self.lower_expr(&this_argument.expr)?;
+        self.expect_type(&target_type, &bound, "method bind `thisArg`")?;
+
+        let target_name = format!("__thaw_bind_target_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(target_name.clone(), target_type.clone());
+        let bound_name = format!("__thaw_bound_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(bound_name.clone(), target_type.clone());
+        let parameters = signature.params[1..]
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_bound_argument_{index}"),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut arguments = vec![HirExpr::Var(bound_name.clone())];
+        arguments.extend(
+            parameters
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone())),
+        );
+        let closure = HirExpr::Lambda(
+            vec![HirParam {
+                name: bound_name.clone(),
+                ty: target_type.clone(),
+            }],
+            parameters,
+            signature.ret,
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
+        );
+        self.wrap_call_argument_bindings(
+            closure,
+            &[
+                (target_name, target_type.clone(), target),
+                (bound_name, target_type, bound),
+            ],
+        )
+        .map(Some)
+    }
+
     fn stmt_is_iteration(stmt: &Stmt) -> bool {
         match stmt {
             Stmt::While(_) | Stmt::DoWhile(_) | Stmt::For(_) | Stmt::ForIn(_) | Stmt::ForOf(_) => {
@@ -17158,6 +17297,10 @@ impl<'a> FnLowerer<'a> {
         let Callee::Expr(callee_expr) = &call.callee else {
             return Err("unsupported callee (super/import calls not supported)".into());
         };
+
+        if let Some(bound) = self.lower_native_class_bind(call)? {
+            return Ok(bound);
+        }
 
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let Some(property) = member_property_name(&member.prop) {
