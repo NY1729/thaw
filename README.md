@@ -1391,7 +1391,7 @@ The workspace crates have narrow responsibilities:
   and every native value shape are supported
 - All four Promise combinators accept their single array argument through a
   statically sized outer tuple spread, including heterogeneous `Promise.all`
-- Promise `.then()` and `.catch()` accept a typed callback through a statically
+- Promise `.then()`, `.catch()` and `.finally()` accept a typed callback through a statically
   sized tuple spread while preserving receiver-before-argument evaluation
 - `new Promise(...[executor])` accepts a typed executor through a statically
   sized tuple spread and can infer its resolved value type
