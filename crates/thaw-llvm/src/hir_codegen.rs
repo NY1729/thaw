@@ -134,6 +134,9 @@ const ASYNC_WAITING_OFFSET: u64 = 16;
 const ASYNC_RESULT_OFFSET: u64 = ASYNC_FRAME_BYTES;
 const CLOSURE_THIS_ENTRY_OFFSET: u64 = 8;
 const CLOSURE_CAPTURE_BASE: u64 = 16;
+const BOUND_CLOSURE_SOURCE_OFFSET: u64 = CLOSURE_CAPTURE_BASE;
+const BOUND_CLOSURE_THIS_OFFSET: u64 = CLOSURE_CAPTURE_BASE + 8;
+const BOUND_CLOSURE_ARGUMENT_BASE: u64 = CLOSURE_CAPTURE_BASE + 16;
 
 struct AsyncSegment {
     stmts: Vec<HirStmt>,
@@ -5045,6 +5048,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::FunctionCallWithThis(callee, this_arg, args, params, ret) => {
                 self.compile_function_call_with_this(callee, this_arg, args, params, ret)
             }
+            HirExpr::FunctionBindThis(callee, this_arg, args, params, ret) => {
+                self.compile_function_bind_this(callee, this_arg, args, params, ret)
+            }
             HirExpr::PromiseAll(args, element) => self.compile_promise_all(args, element),
             HirExpr::PromiseAllArray(array, element) => {
                 self.compile_promise_all_array(array, element)
@@ -9231,6 +9237,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
             HirExpr::FunctionCallWithThis(_, _, _, _, ret) => Some(ret.clone()),
+            HirExpr::FunctionBindThis(_, _, bound, params, ret) => Some(HirType::Function(
+                params[bound.len()..].to_vec(),
+                Box::new(ret.clone()),
+            )),
             HirExpr::AwaitPromise(_, resolved) => Some(resolved.clone()),
             HirExpr::ThrowValue(_, fallback) => self.expr_hir_type(fallback),
             _ => None,
@@ -10137,6 +10147,197 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.branch_on_pending_exception()?;
         Ok(value)
+    }
+
+    fn compile_function_bind_this(
+        &mut self,
+        callee: &HirExpr,
+        this_arg: &HirExpr,
+        bound: &[HirExpr],
+        params: &[HirType],
+        ret: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if bound.len() > params.len() {
+            return Err("bound function has more leading arguments than parameters".into());
+        }
+        let remaining = &params[bound.len()..];
+        let name = format!("__thaw_bound_function_{}", self.next_lambda);
+        self.next_lambda += 1;
+        let code = self.module.add_function(
+            &name,
+            self.function_type(remaining, ret)?,
+            Some(Linkage::Internal),
+        );
+        let parent = self.builder.get_insert_block().unwrap();
+        let entry = self.context.append_basic_block(code, "entry");
+        self.builder.position_at_end(entry);
+        let environment = code.get_nth_param(0).unwrap().into_pointer_value();
+        let i64_type = self.context.i64_type();
+        let load_slot = |compiler: &mut Self, offset: u64, label: &str| unsafe {
+            compiler
+                .builder
+                .build_in_bounds_gep(
+                    compiler.context.i8_type(),
+                    environment,
+                    &[i64_type.const_int(offset, false)],
+                    label,
+                )
+                .map_err(|error| error.to_string())
+        };
+        let source_slot = load_slot(self, BOUND_CLOSURE_SOURCE_OFFSET, "bound_source_slot")?;
+        let source = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                source_slot,
+                "bound_source",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let source_this_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    source,
+                    &[i64_type.const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
+                    "bound_source_this_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let source_this_entry = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                source_this_slot,
+                "bound_source_this_entry",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let this_slot = load_slot(self, BOUND_CLOSURE_THIS_OFFSET, "bound_this_slot")?;
+        let this_word = self
+            .builder
+            .build_load(i64_type, this_slot, "bound_this")
+            .map_err(|error| error.to_string())?;
+        let mut arguments = vec![
+            BasicMetadataValueEnum::from(source),
+            BasicMetadataValueEnum::from(this_word),
+        ];
+        let mut offset = BOUND_CLOSURE_ARGUMENT_BASE;
+        for (index, ty) in params[..bound.len()].iter().enumerate() {
+            let slot = load_slot(self, offset, &format!("bound_argument_{index}_slot"))?;
+            let value = self
+                .builder
+                .build_load(
+                    self.basic_type(ty)?,
+                    slot,
+                    &format!("bound_argument_{index}"),
+                )
+                .map_err(|error| error.to_string())?;
+            arguments.push(value.into());
+            offset += object_field_storage_bytes(ty);
+        }
+        arguments.extend(
+            code.get_param_iter()
+                .skip(1)
+                .map(BasicMetadataValueEnum::from),
+        );
+        let mut source_params = Vec::with_capacity(params.len() + 1);
+        source_params.push(HirType::I64);
+        source_params.extend_from_slice(params);
+        let call = self
+            .builder
+            .build_indirect_call(
+                self.function_type(&source_params, ret)?,
+                source_this_entry,
+                &arguments,
+                "invoke_bound_function",
+            )
+            .map_err(|error| error.to_string())?;
+        if *ret == HirType::Void {
+            self.builder
+                .build_return(None)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let value = call
+                .try_as_basic_value()
+                .basic()
+                .ok_or("bound function returned no value")?;
+            self.builder
+                .build_return(Some(&value))
+                .map_err(|error| error.to_string())?;
+        }
+        let ignored_this = self.compile_ignored_this_adapter(
+            code,
+            remaining,
+            ret,
+            &format!("{name}__thaw_this_adapter"),
+        )?;
+        self.builder.position_at_end(parent);
+        let source = self.compile_expr(callee)?.into_pointer_value();
+        let this_word = self.compile_this_argument_word(this_arg)?;
+        let bound_values = bound
+            .iter()
+            .map(|value| self.compile_expr(value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let payload_bytes = params[..bound.len()]
+            .iter()
+            .map(object_field_storage_bytes)
+            .sum::<u64>();
+        let closure = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    i64_type
+                        .const_int(BOUND_CLOSURE_ARGUMENT_BASE + payload_bytes, false)
+                        .into(),
+                    i64_type.const_int(8, false).into(),
+                ],
+                "bound_function_closure",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("bound closure allocation returned no value")?
+            .into_pointer_value();
+        self.builder
+            .build_store(closure, code.as_global_value().as_pointer_value())
+            .map_err(|error| error.to_string())?;
+        let slot = |compiler: &mut Self, offset: u64, label: &str| unsafe {
+            compiler
+                .builder
+                .build_in_bounds_gep(
+                    compiler.context.i8_type(),
+                    closure,
+                    &[i64_type.const_int(offset, false)],
+                    label,
+                )
+                .map_err(|error| error.to_string())
+        };
+        let this_entry_slot = slot(self, CLOSURE_THIS_ENTRY_OFFSET, "bound_this_entry_slot")?;
+        self.builder
+            .build_store(
+                this_entry_slot,
+                ignored_this.as_global_value().as_pointer_value(),
+            )
+            .map_err(|error| error.to_string())?;
+        let source_slot = slot(self, BOUND_CLOSURE_SOURCE_OFFSET, "bound_source_store")?;
+        self.builder
+            .build_store(source_slot, source)
+            .map_err(|error| error.to_string())?;
+        let bound_this_slot = slot(self, BOUND_CLOSURE_THIS_OFFSET, "bound_this_store")?;
+        self.builder
+            .build_store(bound_this_slot, this_word)
+            .map_err(|error| error.to_string())?;
+        let mut offset = BOUND_CLOSURE_ARGUMENT_BASE;
+        for (index, (value, ty)) in bound_values.into_iter().zip(params).enumerate() {
+            let argument_slot = slot(self, offset, &format!("bound_argument_{index}_store"))?;
+            self.builder
+                .build_store(argument_slot, value)
+                .map_err(|error| error.to_string())?;
+            offset += object_field_storage_bytes(ty);
+        }
+        Ok(closure.into())
     }
 
     fn compile_closure_call(
@@ -13617,17 +13818,25 @@ mod tests {
                 console.log("target");
                 return (value: number): number => value + 1;
             }
+            function passBinary(callback: (left: number, right: number) => number): (left: number, right: number) => number {
+                return callback;
+            }
             function main(): void {
                 const callback = pass((value: number): number => value + 1);
                 const args: [number] = [41];
+                const leading: [number] = [40];
+                const bound = passBinary((left: number, right: number): number => left + right)
+                    .bind((console.log("bind-this"), { marker: "bound" }), ...leading);
                 console.log(callback.call(7, 41));
                 console.log(callback.apply({ marker: "this" }, args));
                 console.log(make().call((console.log("this"), 0), (console.log("argument"), 41)));
+                console.log(bound(2));
+                console.log(bound.call((console.log("rebound-this"), 0), 2));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "function_call_apply_with_this"),
-            "42\n42\ntarget\nthis\nargument\n42\n"
+            "bind-this\n42\n42\ntarget\nthis\nargument\n42\n42\nrebound-this\n42\n"
         );
     }
 
@@ -20283,6 +20492,11 @@ mod tests {
                     (console.log("static-bind-this"), extracted),
                     ...boundArgs
                 );
+                const boundaryBound = passedRead.bind(new Box("boundary-bound"), ...boundArgs);
+                const boundaryAsyncBound = passedReadAsync.bind(new Box("boundary-async-bound"), ...boundArgs);
+                const boundaryStaticBound = passedStaticRead.bind(
+                    (console.log("boundary-static-bind-this"), extracted), ...boundArgs
+                );
                 console.log(read.call(new Box("call"), "!"));
                 console.log(alias.apply(new Box("apply"), args));
                 console.log(await readAsync.call(new Box("async"), "!"));
@@ -20322,12 +20536,16 @@ mod tests {
                 console.log(passedRead.apply(new Box("boundary-apply"), args));
                 console.log(passedStaticRead.call((console.log("boundary-static-this"), extracted), "!"));
                 console.log(await passedReadAsync.call(new Box("boundary-async"), "!"));
+                console.log(boundaryBound());
+                console.log(boundaryBound.call(new Box("ignored-rebind")));
+                console.log(await boundaryAsyncBound());
+                console.log(boundaryStaticBound());
                 try { defaultFromThis(); } catch (error) { console.log(error); }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nfunction:bound\nundefined:undefined\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nboundary-call!\nboundary-apply?\nboundary-static-this\nstatic!\nboundary-async!\nCannot read properties of undefined (reading 'value')\n"
+            "extract-receiver\nstatic-bind-this\nboundary-static-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nfunction:bound\nundefined:undefined\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nboundary-call!\nboundary-apply?\nboundary-static-this\nstatic!\nboundary-async!\nboundary-bound!\nboundary-bound!\nboundary-async-bound!\nstatic!\nCannot read properties of undefined (reading 'value')\n"
         );
     }
 
