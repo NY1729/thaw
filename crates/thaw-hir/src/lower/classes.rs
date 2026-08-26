@@ -17,18 +17,20 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
             let Pat::Ident(binding) = &declarator.name else {
                 return Err("top-level class expressions require an identifier binding".into());
             };
+            let mut class = expression.class.as_ref().clone();
             if let Some(internal) = &expression.ident {
                 if internal.sym != binding.id.sym {
-                    return Err(format!(
-                        "class expression `{}` assigned to `{}` needs a matching internal name or no internal name",
-                        internal.sym, binding.id.sym
-                    ));
+                    class.visit_mut_with(&mut ClassSelfReferenceRenamer {
+                        from: internal.sym.as_ref(),
+                        to: binding.id.sym.as_ref(),
+                        shadowed: Vec::new(),
+                    });
                 }
             }
             body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(ClassDecl {
                 ident: binding.id.clone(),
                 declare: false,
-                class: expression.class.clone(),
+                class: Box::new(class),
             }))));
         }
     }
@@ -36,6 +38,97 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
         body,
         ..module.clone()
     })
+}
+
+struct ClassSelfReferenceRenamer<'a> {
+    from: &'a str,
+    to: &'a str,
+    shadowed: Vec<bool>,
+}
+
+impl ClassSelfReferenceRenamer<'_> {
+    fn is_shadowed(&self) -> bool {
+        self.shadowed.iter().rev().any(|shadowed| *shadowed)
+    }
+
+    fn rename(&self, identifier: &mut swc_ecma_ast::Ident) {
+        if !self.is_shadowed() && identifier.sym == *self.from {
+            identifier.sym = self.to.into();
+        }
+    }
+}
+
+#[derive(Default)]
+struct ClassSelfBindingCollector {
+    names: HashSet<Symbol>,
+}
+
+impl Visit for ClassSelfBindingCollector {
+    fn visit_binding_ident(&mut self, binding: &swc_ecma_ast::BindingIdent) {
+        self.names.insert(binding.id.sym.to_string());
+    }
+
+    fn visit_function(&mut self, _function: &swc_ecma_ast::Function) {}
+
+    fn visit_arrow_expr(&mut self, _arrow: &swc_ecma_ast::ArrowExpr) {}
+}
+
+impl VisitMut for ClassSelfReferenceRenamer<'_> {
+    fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
+        let mut bindings = ClassSelfBindingCollector::default();
+        for parameter in &function.params {
+            parameter.pat.visit_with(&mut bindings);
+        }
+        if let Some(body) = &function.body {
+            body.visit_with(&mut bindings);
+        }
+        self.shadowed.push(bindings.names.contains(self.from));
+        function.visit_mut_children_with(self);
+        self.shadowed.pop();
+    }
+
+    fn visit_mut_arrow_expr(&mut self, arrow: &mut swc_ecma_ast::ArrowExpr) {
+        let mut bindings = ClassSelfBindingCollector::default();
+        for parameter in &arrow.params {
+            parameter.visit_with(&mut bindings);
+        }
+        arrow.body.visit_with(&mut bindings);
+        self.shadowed.push(bindings.names.contains(self.from));
+        arrow.visit_mut_children_with(self);
+        self.shadowed.pop();
+    }
+
+    fn visit_mut_class_decl(&mut self, declaration: &mut ClassDecl) {
+        self.shadowed
+            .push(declaration.ident.sym == *self.from);
+        declaration.visit_mut_children_with(self);
+        self.shadowed.pop();
+    }
+
+    fn visit_mut_class_expr(&mut self, expression: &mut swc_ecma_ast::ClassExpr) {
+        self.shadowed.push(
+            expression
+                .ident
+                .as_ref()
+                .is_some_and(|identifier| identifier.sym == *self.from),
+        );
+        expression.visit_mut_children_with(self);
+        self.shadowed.pop();
+    }
+
+    fn visit_mut_expr(&mut self, expression: &mut Expr) {
+        expression.visit_mut_children_with(self);
+        if let Expr::Ident(identifier) = expression {
+            self.rename(identifier);
+        }
+    }
+
+    fn visit_mut_ts_type_ref(&mut self, reference: &mut swc_ecma_ast::TsTypeRef) {
+        reference.visit_mut_children_with(self);
+        if let swc_ecma_ast::TsEntityName::Ident(identifier) = &mut reference.type_name {
+            self.rename(identifier);
+        }
+    }
 }
 
 fn static_class_member_name(
@@ -3118,4 +3211,3 @@ fn specialize_generic_class_methods(
     specialized.visit_mut_with(&mut GenericClassMethodCallRewriter { calls: &calls });
     Ok(Some(specialized))
 }
-
