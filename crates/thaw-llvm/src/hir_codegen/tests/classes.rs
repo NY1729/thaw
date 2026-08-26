@@ -375,6 +375,7 @@ fn compiles_and_runs_native_static_class_fields() {
             static base: number = 40;
             static value: number = Counter.base + 2;
             static readonly label: string = "ready";
+            static self: () => Counter = this;
             static next(): number {
                 Counter.value += 1;
                 return Counter.value;
@@ -386,11 +387,12 @@ fn compiles_and_runs_native_static_class_fields() {
             console.log(Counter.value);
             console.log(Counter.next());
             console.log(Counter.label);
+            console.log(typeof Counter.self);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "native_static_class_fields"),
-        "42\n42\n43\nready\n"
+        "42\n42\n43\nready\nfunction\n"
     );
 }
 
