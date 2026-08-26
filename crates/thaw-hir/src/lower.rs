@@ -13222,6 +13222,7 @@ impl<'a> FnLowerer<'a> {
             Stmt::ForOf(for_of) => {
                 let saved = self.bindings.clone();
                 let saved_scope = self.scope.clone();
+                let saved_correlations = self.destructured_union_correlations.clone();
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
                     let item_discriminants =
                         self.expression_array_element_discriminants(&for_of.right);
@@ -13371,6 +13372,10 @@ impl<'a> FnLowerer<'a> {
                                     format!("__thaw_for_of_item_{}", self.next_binding);
                                 self.next_binding += 1;
                                 self.scope.insert(temporary.clone(), item_type.clone());
+                                if let Some(discriminants) = item_discriminants.clone() {
+                                    self.union_discriminants
+                                        .insert(temporary.clone(), discriminants);
+                                }
                                 let mut statements = vec![HirStmt::Let(
                                     temporary.clone(),
                                     item_type.clone(),
@@ -13426,6 +13431,7 @@ impl<'a> FnLowerer<'a> {
                 })();
                 self.bindings = saved;
                 self.scope = saved_scope;
+                self.destructured_union_correlations = saved_correlations;
                 lowered
             }
 
@@ -14541,6 +14547,131 @@ impl<'a> FnLowerer<'a> {
                 self.lower_union_tuple_index_read(value.clone(), elements, index)?;
             let element_type = self.infer_expr_type(&element_value)?;
             self.lower_binding_pattern(element_pattern, element_value, &element_type, statements)?;
+        }
+        Ok(())
+    }
+
+    fn lower_union_object_assignment_pattern(
+        &mut self,
+        pattern: &swc_ecma_ast::ObjectPat,
+        value: HirExpr,
+        elements: &[HirType],
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        let discriminants = match &value {
+            HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
+            _ => None,
+        };
+        let mut discriminant_bindings = Vec::new();
+        let mut used = BTreeSet::new();
+        for property in &pattern.props {
+            match property {
+                ObjectPatProp::Assign(property) => {
+                    let key = property.key.id.sym.to_string();
+                    let mut field_value =
+                        self.lower_union_property_read(value.clone(), elements, &key)?;
+                    let mut field_type = self.infer_expr_type(&field_value)?;
+                    used.insert(key.clone());
+                    if let Some(default) = &property.value {
+                        let default = self.lower_expr(default)?;
+                        field_value = self.lower_undefined_default(field_value, default)?;
+                        field_type = self.infer_expr_type(&field_value)?;
+                    }
+                    self.lower_assignment_pattern(
+                        &Pat::Ident(property.key.clone()),
+                        field_value,
+                        &field_type,
+                        statements,
+                    )?;
+                    if property.value.is_none() {
+                        discriminant_bindings
+                            .push((key, self.resolve_binding(property.key.id.sym.as_ref())));
+                    }
+                }
+                ObjectPatProp::KeyValue(property) => {
+                    let key = match &property.key {
+                        PropName::Ident(key) => key.sym.to_string(),
+                        PropName::Str(key) => key.value.to_string_lossy().into_owned(),
+                        PropName::Computed(computed) => match computed.expr.as_ref() {
+                            Expr::Lit(Lit::Str(key)) => key.value.to_string_lossy().into_owned(),
+                            _ => {
+                                return Err(
+                                    "computed destructuring keys must be string literals".into()
+                                )
+                            }
+                        },
+                        _ => return Err("unsupported object destructuring key".into()),
+                    };
+                    let field_value =
+                        self.lower_union_property_read(value.clone(), elements, &key)?;
+                    let field_type = self.infer_expr_type(&field_value)?;
+                    used.insert(key.clone());
+                    self.lower_assignment_pattern(
+                        &property.value,
+                        field_value,
+                        &field_type,
+                        statements,
+                    )?;
+                    if let Pat::Ident(binding) = property.value.as_ref() {
+                        discriminant_bindings
+                            .push((key, self.resolve_binding(binding.id.sym.as_ref())));
+                    }
+                }
+                ObjectPatProp::Rest(rest) => {
+                    let (rest_value, rest_type) =
+                        self.lower_union_object_rest(value.clone(), elements, &used)?;
+                    self.lower_assignment_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                }
+            }
+        }
+        if let Some(discriminants) = discriminants {
+            let source_types = elements
+                .iter()
+                .cloned()
+                .map(|element| vec![element])
+                .collect::<Vec<_>>();
+            let mut extracted = Vec::new();
+            self.collect_correlated_destructured_bindings(
+                &Pat::Object(pattern.clone()),
+                &source_types,
+                &mut extracted,
+            )?;
+            self.register_destructured_union_correlations(
+                elements,
+                &discriminants,
+                &discriminant_bindings,
+                &extracted,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn lower_union_tuple_assignment_pattern(
+        &mut self,
+        pattern: &swc_ecma_ast::ArrayPat,
+        value: HirExpr,
+        elements: &[HirType],
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        for (index, element_pattern) in pattern.elems.iter().enumerate() {
+            let Some(element_pattern) = element_pattern else {
+                continue;
+            };
+            if let Pat::Rest(rest) = element_pattern {
+                let (rest_value, rest_type) =
+                    self.lower_union_tuple_rest(value.clone(), elements, index)?;
+                self.lower_assignment_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                break;
+            }
+            let element_value =
+                self.lower_union_tuple_index_read(value.clone(), elements, index)?;
+            let element_type = self.infer_expr_type(&element_value)?;
+            self.lower_assignment_pattern(
+                element_pattern,
+                element_value,
+                &element_type,
+                statements,
+            )?;
         }
         Ok(())
     }
@@ -20386,10 +20517,16 @@ impl<'a> FnLowerer<'a> {
                     .cloned()
                     .ok_or_else(|| format!("assignment to unknown binding `{name}`"))?;
                 let value = self.coerce_to_declared(&expected, value)?;
+                self.invalidate_destructured_union_correlation(&name);
                 statements.push(HirStmt::Expr(HirExpr::Assign(name, Box::new(value))));
                 Ok(())
             }
             Pat::Object(pattern) => {
+                if let HirType::Union(elements) = ty {
+                    return self.lower_union_object_assignment_pattern(
+                        pattern, value, elements, statements,
+                    );
+                }
                 let HirType::Object(fields) = ty else {
                     return Err(format!("object pattern cannot destructure {ty:?}"));
                 };
@@ -20481,6 +20618,16 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Array(pattern) => {
+                if let HirType::Union(elements) = ty {
+                    if elements
+                        .iter()
+                        .all(|element| matches!(element, HirType::Tuple(_)))
+                    {
+                        return self.lower_union_tuple_assignment_pattern(
+                            pattern, value, elements, statements,
+                        );
+                    }
+                }
                 let HirType::Tuple(elements) = ty else {
                     return Err(format!(
                         "array pattern requires a fixed-length tuple, got {ty:?}"
@@ -20541,9 +20688,15 @@ impl<'a> FnLowerer<'a> {
             }
             Pat::Assign(assign) => {
                 let default = self.lower_expr(&assign.right)?;
+                let default_type = self.infer_expr_type(&default)?;
                 let value = self.lower_undefined_default(value, default)?;
                 let value_type = self.infer_expr_type(&value)?;
-                self.lower_assignment_pattern(&assign.left, value, &value_type, statements)
+                self.lower_assignment_pattern(&assign.left, value, &value_type, statements)?;
+                if let Pat::Ident(binding) = assign.left.as_ref() {
+                    self.destructuring_default_types
+                        .insert(self.resolve_binding(binding.id.sym.as_ref()), default_type);
+                }
+                Ok(())
             }
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
             _ => Err("unsupported destructuring assignment target".into()),

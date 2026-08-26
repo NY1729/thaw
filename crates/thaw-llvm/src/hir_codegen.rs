@@ -16792,6 +16792,12 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 2);
                     else console.log(item.value + " item");
                 }
+                let assignedKind: string = "text";
+                let assignedValue: number | string = "initial";
+                for ({ kind: assignedKind, value: assignedValue } of results) {
+                    if (assignedKind === "number") console.log(assignedValue + 10);
+                    else console.log(assignedValue + " assigned");
+                }
                 console.log(consumeResults([{ kind: "text", value: "loop" }]));
                 for (const item of producedResults()) {
                     if (item.kind === "number") console.log(item.value + 1);
@@ -16826,11 +16832,16 @@ mod tests {
                     if (kind === "number") console.log(value + 3);
                     else console.log(value + "!");
                 }
+                const assignedPending: Promise<Result>[] = [result(false)];
+                for await ({ kind: assignedKind, value: assignedValue } of assignedPending) {
+                    if (assignedKind === "number") console.log(assignedValue + 3);
+                    else console.log(assignedValue + " assigned async");
+                }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n16\nsync assigned\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
