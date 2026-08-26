@@ -19030,6 +19030,63 @@ mod tests {
     }
 
     #[test]
+    fn compiles_native_private_fields_methods_and_accessors() {
+        let source = r#"
+            class Vault {
+                #value: number = 40;
+                static #count: number = 0;
+                constructor(delta: number = 2) {
+                    this.#value += delta;
+                    Vault.#count++;
+                }
+                #double(extra: number = 0): number { return this.#value * 2 + extra; }
+                get #doubled(): number { return this.#double(); }
+                set #doubled(value: number) { this.#value = value / 2; }
+                read(other: Vault): number { return other.#value; }
+                has(other: Vault): boolean { return #value in other; }
+                reveal(): number { return this.#doubled; }
+                update(value: number): number { this.#doubled = value; return this.#value; }
+                static #format(value: number): string { return String(value); }
+                static total(): string { return Vault.#format(Vault.#count); }
+                static get #current(): number { return Vault.#count; }
+                static set #current(value: number) { Vault.#count = value; }
+                static reset(value: number): number {
+                    Vault.#current = value;
+                    return Vault.#current;
+                }
+            }
+            class Derived extends Vault {
+                #value: string = "derived";
+                own(): string { return this.#value; }
+            }
+            const Expression = class Expression {
+                #text: string = "private expression";
+                read(): string { return this.#text; }
+            };
+            function main(): void {
+                const first = new Vault();
+                const second = new Vault(3);
+                const derived = new Derived();
+                const expression = new Expression();
+                console.log(first.read(second));
+                console.log(first.has(second));
+                console.log(first.reveal());
+                console.log(first.update(100));
+                console.log(first.reveal());
+                console.log(derived.reveal());
+                console.log(derived.own());
+                console.log(Vault.total());
+                console.log(Vault.reset(7));
+                console.log(expression.read());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_private_members"),
+            "43\ntrue\n84\n50\n100\n84\nderived\n3\n7\nprivate expression\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
