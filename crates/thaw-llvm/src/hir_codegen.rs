@@ -19570,11 +19570,17 @@ mod tests {
                     (console.log("static-arg"), "static-call")
                 ));
                 console.log(Box.identity<string>.apply(box, staticTuple));
+                const staticBound = Box.identity<string>.bind(box);
+                console.log(staticBound("static-bound"));
+                const staticComplete = Box.identity<number>.bind(box, 60);
+                console.log(staticComplete());
+                const staticAsyncBound = Box.identityAsync<string>.bind(box);
+                console.log(await staticAsyncBound("static-async-bound"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\nmember-receiver\ntuple-spread\n52\ngeneric-override\ninferred-super\nexplicit-super\n54\npartial-bind\nbound-async\n55\n50\n57\n50\n59\nstatic-this\nstatic-arg\nstatic-call\nstatic-apply\nstatic-bound\n60\nstatic-async-bound\n"
         );
     }
 

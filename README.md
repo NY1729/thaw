@@ -1424,6 +1424,8 @@ The workspace crates have narrow responsibilities:
   arguments combine with invocation arguments before default selection and rest packing.
   Static generic instantiation expressions support the same `.call()` and typed-tuple
   `.apply()` forms; their ignored `thisArg` is still evaluated before ordinary arguments.
+  `.bind()` produces synchronous or async typed closures, captures partially applied
+  leading arguments, and evaluates but does not retain its ignored static `thisArg`.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
