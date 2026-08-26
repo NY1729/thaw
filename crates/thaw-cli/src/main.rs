@@ -3603,6 +3603,9 @@ mod tests {
                 export class Pair<T, U> {
                     constructor(public first: T, public second: U) {}
                 }
+                export class Holder<T> {
+                    constructor(public value: T) {}
+                }
                 export class NumberBox extends Box<number> {
                     double(): number { return this.value * 2; }
                 }
@@ -3613,16 +3616,22 @@ mod tests {
         std::fs::write(
             &entry,
             r#"
-                import { Box, Pair, NumberBox } from "./models";
+                import { Box, Pair, Holder, NumberBox } from "./models";
                 function read(value: Box<number>): number { return value.get(); }
                 function main(): void {
                     const first = new Box<number>(40);
                     const duplicate = new Box<number>(2);
                     const text = new Box<string>("module");
                     const pair = new Pair<string, number>(text.get(), read(first) + duplicate.get());
+                    const nested = new Holder<Box<number>>(first);
+                    const inferredNested = new Holder(first);
+                    const nestedBox = nested.value;
+                    const inferredNestedBox = inferredNested.value;
                     const derived = new NumberBox(21);
                     console.log(pair.first);
                     console.log(pair.second);
+                    console.log(nestedBox.get());
+                    console.log(inferredNestedBox.get());
                     console.log(derived.double());
                     console.log(derived.get());
                 }
@@ -3639,7 +3648,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            "module\n42\n42\n21\n"
+            "module\n42\n40\n40\n42\n21\n"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
