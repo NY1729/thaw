@@ -1377,7 +1377,9 @@ The workspace crates have narrow responsibilities:
   concrete implementations for inherited abstract methods/accessors across multiple
   levels. Inherited concrete instance methods are specialized for each derived receiver,
   preserving virtual method/accessor overrides, lexical `super`, async execution and
-  abstract-member dispatch. Abstract fields remain outside the fixed-layout subset.
+  abstract-member dispatch. Abstract fields reserve one inherited layout slot; concrete
+  descendants must provide a same-typed field implementation, including through abstract
+  intermediate classes.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model

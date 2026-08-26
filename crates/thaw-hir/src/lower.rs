@@ -1133,25 +1133,64 @@ fn collect_native_classes<'a>(
             if property.is_static {
                 continue;
             }
-            if property.is_abstract || property.declare {
+            if property.declare {
                 return Err(format!(
-                    "class `{name}` field `{}` cannot be abstract or ambient",
+                    "class `{name}` field `{}` cannot be ambient",
                     class_property_name(&property.key)?
                 ));
             }
             let field_name = class_property_name(&property.key)?;
-            if fields.iter().any(|(existing, _)| existing == &field_name) {
-                return Err(format!(
-                    "class `{name}` field `{field_name}` collides with an inherited or local field"
-                ));
-            }
             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                 format!("class `{name}` field `{field_name}` needs a type annotation")
             })?;
-            fields.push((
-                field_name,
-                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?,
-            ));
+            let field_type = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            if let Some((_, inherited_type)) =
+                fields.iter().find(|(existing, _)| existing == &field_name)
+            {
+                let mut base_name =
+                    declaration
+                        .class
+                        .super_class
+                        .as_deref()
+                        .and_then(|base| match base {
+                            Expr::Ident(base) => Some(base.sym.to_string()),
+                            _ => None,
+                        });
+                let mut overrides_abstract = false;
+                while let Some(current) = base_name {
+                    let base = declarations[&current];
+                    if base.class.body.iter().any(|member| {
+                        matches!(member, ClassMember::ClassProp(candidate)
+                            if !candidate.is_static
+                                && candidate.is_abstract
+                                && class_property_name(&candidate.key).ok().as_deref()
+                                    == Some(field_name.as_str()))
+                    }) {
+                        overrides_abstract = true;
+                        break;
+                    }
+                    base_name = base
+                        .class
+                        .super_class
+                        .as_deref()
+                        .and_then(|parent| match parent {
+                            Expr::Ident(parent) => Some(parent.sym.to_string()),
+                            _ => None,
+                        });
+                }
+                if !overrides_abstract {
+                    return Err(format!(
+                        "class `{name}` field `{field_name}` collides with an inherited or local field"
+                    ));
+                }
+                if inherited_type != &field_type {
+                    return Err(format!(
+                        "class `{name}` implements abstract field `{field_name}` with type {field_type:?}, expected {inherited_type:?}"
+                    ));
+                }
+            } else {
+                fields.push((field_name, field_type));
+            }
         }
         for property in declaration
             .class
@@ -1284,6 +1323,42 @@ fn collect_native_classes<'a>(
             &mut resolved,
             &mut Vec::new(),
         )?;
+    }
+    for declaration in &classes {
+        if declaration.class.is_abstract {
+            continue;
+        }
+        let name = declaration.ident.sym.as_ref();
+        let mut seen = HashSet::new();
+        let mut current = Some(name.to_string());
+        while let Some(current_name) = current {
+            let class = declarations[&current_name];
+            for member in &class.class.body {
+                let ClassMember::ClassProp(property) = member else {
+                    continue;
+                };
+                if property.is_static {
+                    continue;
+                }
+                let field = class_property_name(&property.key)?;
+                if !seen.insert(field.clone()) {
+                    continue;
+                }
+                if property.is_abstract {
+                    return Err(format!(
+                        "concrete class `{name}` must implement abstract field `{field}` from `{current_name}`"
+                    ));
+                }
+            }
+            current = class
+                .class
+                .super_class
+                .as_deref()
+                .and_then(|parent| match parent {
+                    Expr::Ident(parent) => Some(parent.sym.to_string()),
+                    _ => None,
+                });
+        }
     }
     Ok(classes)
 }
@@ -22249,5 +22324,27 @@ mod tests {
         .unwrap();
         let error = lower_module(&incompatible).unwrap_err();
         assert!(error.contains("incompatible signature"), "{error}");
+
+        let missing_field = thaw_parser::parse_typescript(
+            r#"abstract class Named { abstract name: string; }
+            class MissingField extends Named {}"#,
+        )
+        .unwrap();
+        let error = lower_module(&missing_field).unwrap_err();
+        assert!(
+            error.contains("must implement abstract field `name`"),
+            "{error}"
+        );
+
+        let wrong_field = thaw_parser::parse_typescript(
+            r#"abstract class Named { abstract name: string; }
+            class WrongField extends Named { name: number = 1; }"#,
+        )
+        .unwrap();
+        let error = lower_module(&wrong_field).unwrap_err();
+        assert!(
+            error.contains("implements abstract field `name`"),
+            "{error}"
+        );
     }
 }
