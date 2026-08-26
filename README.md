@@ -1372,7 +1372,8 @@ The workspace crates have narrow responsibilities:
   to identifiers use the same path, including across exports. Computed fields, methods, accessors and
   static members use the same fixed-layout dispatch when their names fold from string literals,
   top-level string constants, concatenation, templates, parentheses or type/const assertions;
-  literal bracket access and ordinary dot access select the resulting member.
+  the same shadowing-aware constant expressions work in bracket reads, writes and calls, while
+  ordinary dot access selects the resulting member directly.
   Owner-mangled private instance/static fields, methods and accessors support reads,
   writes, calls, private brand checks and same-spelling members in base/derived classes.
   Abstract classes provide non-constructible base layouts and require compatible
