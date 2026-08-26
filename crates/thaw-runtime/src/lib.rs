@@ -3117,9 +3117,10 @@ struct PromiseAllState {
     remaining: usize,
     rejected: bool,
     first_error: *const u8,
-    result: *mut u64,
+    result: *mut u8,
     result_slot: *mut *const u8,
     element_sizes: Vec<usize>,
+    element_offsets: Vec<usize>,
 }
 
 struct PromiseAllChild {
@@ -3140,9 +3141,9 @@ extern "C" fn resume_promise_all_child(frame: *mut u8, result: *const u8) {
         }
     } else if !state.rejected {
         for index in &child.indices {
-            let destination = unsafe { state.result.add(index + 1).cast::<u8>() };
+            let destination = unsafe { state.result.add(state.element_offsets[*index]) };
             unsafe {
-                destination.write_bytes(0, size_of::<u64>());
+                destination.write_bytes(0, state.element_sizes[*index].max(size_of::<u64>()));
                 std::ptr::copy_nonoverlapping(result, destination, state.element_sizes[*index]);
             }
         }
@@ -3178,7 +3179,8 @@ pub unsafe extern "C" fn thaw_promise_all_slots(
 }
 
 /// Joins Promise handles using one result-copy size per input position.
-/// Sizes must be between one byte and one eight-byte array slot.
+/// Each value occupies at least one eight-byte array slot; wider values use
+/// their complete byte width.
 ///
 /// # Safety
 ///
@@ -3200,23 +3202,33 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
     } else {
         unsafe { std::slice::from_raw_parts(element_sizes, len) }.to_vec()
     };
-    if element_sizes
-        .iter()
-        .any(|size| *size == 0 || *size > size_of::<u64>())
-    {
+    if element_sizes.contains(&0) {
         thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
-    let allocation =
-        thaw_arena::thaw_arena_alloc((len + 2) * size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    let mut element_offsets = Vec::with_capacity(len);
+    let mut result_bytes = size_of::<u64>();
+    for size in &element_sizes {
+        element_offsets.push(result_bytes);
+        let Some(next) = result_bytes.checked_add((*size).max(size_of::<u64>())) else {
+            thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+            return output;
+        };
+        result_bytes = next;
+    }
+    let Some(allocation_bytes) = result_bytes.checked_add(size_of::<*const u8>()) else {
+        thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        return output;
+    };
+    let allocation = thaw_arena::thaw_arena_alloc(allocation_bytes, align_of::<u64>());
     if allocation.is_null() {
         thaw_promise_reject(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
     let result_slot = allocation.cast::<*const u8>();
-    let result = unsafe { allocation.add(1) };
+    let result = unsafe { allocation.add(size_of::<*const u8>()) };
     unsafe { result_slot.write(result.cast()) };
-    unsafe { result.write(len as u64) };
+    unsafe { result.cast::<u64>().write(len as u64) };
     if len == 0 {
         thaw_promise_resolve(output, result_slot.cast());
         return output;
@@ -3254,6 +3266,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
         result,
         result_slot,
         element_sizes,
+        element_offsets,
     }));
     if !grouped.is_empty() {
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
@@ -4269,6 +4282,35 @@ mod tests {
         assert_eq!(unsafe { result.add(1).read() }, 1);
         assert_eq!(unsafe { result.add(2).read() }, pointer_value);
         assert_eq!(unsafe { result.add(3).read() }, 1);
+        unsafe { thaw_promise_destroy(joined) };
+    }
+
+    #[test]
+    fn promise_all_typed_preserves_wide_values() {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let sizes = [16usize, 16];
+        let joined =
+            unsafe { thaw_promise_all_typed(children.as_ptr(), sizes.as_ptr(), children.len()) };
+        let first_value = [1u64, 11];
+        let second_value = [2u64, 22];
+        assert_eq!(thaw_promise_resolve(first, first_value.as_ptr().cast()), 1);
+        assert_eq!(
+            thaw_promise_resolve(second, second_value.as_ptr().cast()),
+            1
+        );
+        thaw_runtime_run_until_idle();
+        let result = unsafe { *thaw_runtime_run_until_resolved(joined).cast::<*const u8>() };
+        assert_eq!(unsafe { result.cast::<u64>().read() }, 2);
+        assert_eq!(
+            unsafe { result.add(8).cast::<[u64; 2]>().read() },
+            first_value
+        );
+        assert_eq!(
+            unsafe { result.add(24).cast::<[u64; 2]>().read() },
+            second_value
+        );
         unsafe { thaw_promise_destroy(joined) };
     }
 

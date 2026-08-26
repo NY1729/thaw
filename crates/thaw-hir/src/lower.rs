@@ -12747,6 +12747,24 @@ impl<'a> FnLowerer<'a> {
                     .get(&vec![property])
                     .cloned()
             }
+            Expr::Array(array) => {
+                let mut merged = None;
+                for element in array.elems.iter().flatten() {
+                    let metadata = if element.spread.is_some() {
+                        self.expression_array_element_discriminants(&element.expr)
+                    } else {
+                        self.expression_union_discriminants(&element.expr)
+                    }?;
+                    if let Some(previous) = &merged {
+                        if previous != &metadata {
+                            return None;
+                        }
+                    } else {
+                        merged = Some(metadata);
+                    }
+                }
+                merged
+            }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
@@ -12754,6 +12772,13 @@ impl<'a> FnLowerer<'a> {
                 let callee = ordinary_optional_expression(callee);
                 if let Expr::Member(member) = &callee {
                     let property = member_property_name(&member.prop)?;
+                    if property == "all"
+                        && matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Promise")
+                    {
+                        return call.args.first().and_then(|argument| {
+                            self.expression_array_element_discriminants(&argument.expr)
+                        });
+                    }
                     if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Array")
                     {
                         if property == "of" {
