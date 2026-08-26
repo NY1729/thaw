@@ -1010,6 +1010,13 @@ The workspace crates have narrow responsibilities:
   later invoked through `.call()`. Immediate `.bind(thisArg, ...leadingArgs)(...remainingArgs)` uses the same path,
   including async results and tuple-spread evaluation order. The target, `thisArg` and ordinary or tuple-expanded
   arguments are evaluated once in JavaScript order; ordinary functions ignore the explicit receiver
+- Function types with a trailing rest parameter preserve that logical variadic
+  shape across parameters, returns and fixed-layout object fields. Direct calls,
+  `.call()`, typed-tuple `.apply()` and partially applied `.bind()` pack excess
+  arguments into the native rest array exactly once; pre-bound rest values are
+  prepended to invocation-time values. The same closure ABI carries synchronous
+  and async results, and `.d.ts` fast-path callback classification recognizes a
+  trailing typed rest parameter
 - Named async generic functions specialize for inferred or explicit types and
   retain exactly one Promise layer when used directly, as instantiated function
   values, or as assimilated Promise callbacks

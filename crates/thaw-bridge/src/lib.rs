@@ -846,17 +846,48 @@ fn classify_ts_type(
                 return DtsType::Unsupported("generic callback types are not supported".into());
             }
             let mut params = Vec::with_capacity(function.params.len());
-            for param in &function.params {
-                let TsFnParam::Ident(param) = param else {
-                    return DtsType::Unsupported(
-                        "callback parameters must be plain identifiers".into(),
-                    );
-                };
-                let Some(annotation) = &param.type_ann else {
-                    return DtsType::Unsupported(format!(
-                        "callback parameter `{}` has no type annotation",
-                        param.id.sym
-                    ));
+            let mut rest = None;
+            for (index, parameter) in function.params.iter().enumerate() {
+                let annotation = match parameter {
+                    TsFnParam::Ident(parameter) => {
+                        let Some(annotation) = &parameter.type_ann else {
+                            return DtsType::Unsupported(format!(
+                                "callback parameter `{}` has no type annotation",
+                                parameter.id.sym
+                            ));
+                        };
+                        annotation
+                    }
+                    TsFnParam::Rest(parameter) if index + 1 == function.params.len() => {
+                        let Some(annotation) = &parameter.type_ann else {
+                            return DtsType::Unsupported(
+                                "callback rest parameter has no type annotation".into(),
+                            );
+                        };
+                        let TsType::TsArrayType(array) = annotation.type_ann.as_ref() else {
+                            return DtsType::Unsupported(
+                                "callback rest parameter must use an array type".into(),
+                            );
+                        };
+                        match classify_ts_type(&array.elem_type, interfaces, generic_interfaces) {
+                            DtsType::Native(ty) => rest = Some(ty),
+                            DtsType::Unsupported(reason) => {
+                                return DtsType::Unsupported(format!(
+                                    "callback rest element type: {reason}"
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+                    TsFnParam::Rest(_) => {
+                        return DtsType::Unsupported("callback rest parameter must be last".into());
+                    }
+                    _ => {
+                        return DtsType::Unsupported(
+                            "callback parameters must be identifiers or a trailing rest parameter"
+                                .into(),
+                        );
+                    }
                 };
                 match classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces) {
                     DtsType::Native(ty) => params.push(ty),
@@ -869,7 +900,11 @@ fn classify_ts_type(
                 }
             }
             match classify_ts_type(&function.type_ann.type_ann, interfaces, generic_interfaces) {
-                DtsType::Native(ret) => DtsType::Native(HirType::Function(params, Box::new(ret))),
+                DtsType::Native(ret) => DtsType::Native(if let Some(rest) = rest {
+                    HirType::RestFunction(params, Box::new(rest), Box::new(ret))
+                } else {
+                    HirType::Function(params, Box::new(ret))
+                }),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("callback return type: {reason}"))
                 }
@@ -1435,6 +1470,15 @@ fn render_ts_type(ty: &HirType) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("({params}) => {}", render_ts_type(ret))
+        }
+        HirType::RestFunction(params, rest, ret) => {
+            let mut params = params
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| format!("arg{index}: {}", render_ts_type(ty)))
+                .collect::<Vec<_>>();
+            params.push(format!("...rest: {}[]", render_ts_type(rest)));
+            format!("({}) => {}", params.join(", "), render_ts_type(ret))
         }
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
@@ -2220,6 +2264,25 @@ mod tests {
             vec![HirType::Function(
                 vec![HirType::Str],
                 Box::new(HirType::Void)
+            )]
+        );
+    }
+
+    #[test]
+    fn classifies_typed_rest_callback_parameter_as_fast_path() {
+        let funcs = parse_dts(
+            "export declare function f(cb: (prefix: string, ...values: number[]) => string): void;",
+        )
+        .unwrap();
+        let Classification::FastPath(signature) = classify(&funcs[0]) else {
+            panic!("expected rest callback fast path");
+        };
+        assert_eq!(
+            signature.params,
+            vec![HirType::RestFunction(
+                vec![HirType::Str],
+                Box::new(HirType::F64),
+                Box::new(HirType::Str),
             )]
         );
     }
