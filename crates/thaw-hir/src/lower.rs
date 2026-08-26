@@ -6979,6 +6979,108 @@ impl GenericInterfaces<'_> {
     }
 }
 
+struct GenericMetadataTypeMaterializer<'a, 'ast> {
+    generic: &'a GenericInterfaces<'ast>,
+    substitutions: HashMap<Symbol, Box<TsType>>,
+    visiting: HashSet<Symbol>,
+}
+
+impl VisitMut for GenericMetadataTypeMaterializer<'_, '_> {
+    fn visit_mut_ts_type(&mut self, ty: &mut TsType) {
+        let TsType::TsTypeRef(reference) = ty else {
+            ty.visit_mut_children_with(self);
+            return;
+        };
+        let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else {
+            ty.visit_mut_children_with(self);
+            return;
+        };
+        if reference.type_params.is_none() {
+            let substitution_name = name.sym.to_string();
+            if let Some(replacement) = self.substitutions.remove(&substitution_name) {
+                let original = replacement.clone();
+                *ty = *replacement;
+                ty.visit_mut_with(self);
+                self.substitutions.insert(substitution_name, original);
+                return;
+            }
+        }
+        let Some(interface) = self.generic.interfaces.get(name.sym.as_ref()) else {
+            ty.visit_mut_children_with(self);
+            return;
+        };
+        if !self.visiting.insert(name.sym.to_string()) {
+            return;
+        }
+        let parameters = &interface
+            .type_params
+            .as_ref()
+            .expect("generic metadata interface parameters")
+            .params;
+        let arguments = reference
+            .type_params
+            .as_ref()
+            .map(|arguments| arguments.params.as_slice())
+            .unwrap_or_default();
+        if arguments.len() > parameters.len()
+            || parameters
+                .iter()
+                .skip(arguments.len())
+                .any(|parameter| parameter.default.is_none())
+        {
+            self.visiting.remove(name.sym.as_ref());
+            return;
+        }
+        let outer = self.substitutions.clone();
+        let mut nested = outer.clone();
+        for (index, parameter) in parameters.iter().enumerate() {
+            let mut argument = arguments
+                .get(index)
+                .cloned()
+                .or_else(|| parameter.default.clone())
+                .expect("validated generic metadata argument");
+            self.substitutions = nested.clone();
+            argument.visit_mut_with(self);
+            nested.insert(parameter.name.sym.to_string(), argument);
+        }
+        self.substitutions = nested;
+        let mut members = Vec::new();
+        for base in &interface.extends {
+            let Expr::Ident(base_name) = base.expr.as_ref() else {
+                continue;
+            };
+            let mut base = TsType::TsTypeRef(swc_ecma_ast::TsTypeRef {
+                span: base.span,
+                type_name: swc_ecma_ast::TsEntityName::Ident(base_name.clone()),
+                type_params: base.type_args.clone(),
+            });
+            base.visit_mut_with(self);
+            if let TsType::TsTypeLit(base) = base {
+                members.extend(base.members);
+            }
+        }
+        let mut own = interface.body.body.clone();
+        own.visit_mut_with(self);
+        members.extend(own);
+        self.substitutions = outer;
+        self.visiting.remove(name.sym.as_ref());
+        *ty = TsType::TsTypeLit(swc_ecma_ast::TsTypeLit {
+            span: interface.span,
+            members,
+        });
+    }
+}
+
+fn materialize_generic_metadata_type(ty: &TsType, generic: &GenericInterfaces<'_>) -> TsType {
+    let mut ty = ty.clone();
+    ty.visit_mut_with(&mut GenericMetadataTypeMaterializer {
+        generic,
+        substitutions: HashMap::new(),
+        visiting: HashSet::new(),
+    });
+    ty
+}
+
 fn strip_parenthesized_ts_type(mut ty: &TsType) -> &TsType {
     while let TsType::TsParenthesizedType(parenthesized) = ty {
         ty = &parenthesized.type_ann;
@@ -7204,9 +7306,10 @@ fn object_array_property_discriminants(
         }
     }
 
+    let ty = materialize_generic_metadata_type(ty, generic);
     let mut result = HashMap::new();
     collect(
-        ty,
+        &ty,
         generic,
         &mut Vec::new(),
         &mut HashSet::new(),
@@ -7410,9 +7513,10 @@ fn object_function_property_discriminants(
         }
     }
 
+    let ty = materialize_generic_metadata_type(ty, generic);
     let mut result = HashMap::new();
     collect(
-        ty,
+        &ty,
         generic,
         &mut Vec::new(),
         &mut HashSet::new(),
