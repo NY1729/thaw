@@ -19737,6 +19737,11 @@ mod tests {
                 constructor(public value: string) {}
                 read(suffix: string): string { return this.value + suffix; }
                 async readAsync(suffix: string): Promise<string> { return this.value + suffix; }
+                static staticValue: string = "static";
+                static staticRead(suffix: string): string { return this.staticValue + suffix; }
+                static async staticReadAsync(suffix: string): Promise<string> {
+                    return this.staticValue + suffix;
+                }
             }
             function make(): Box {
                 console.log("extract-receiver");
@@ -19751,16 +19756,28 @@ mod tests {
                 const boundArgs: [string] = ["!"];
                 const bound = alias.bind(new Box("bound"), ...boundArgs);
                 const asyncBound = readAsync.bind(new Box("async-bound"));
+                const staticRead = Box.staticRead;
+                const staticReadAsync = Box.staticReadAsync;
+                const staticBound = staticRead.bind(
+                    (console.log("static-bind-this"), extracted),
+                    ...boundArgs
+                );
                 console.log(read.call(new Box("call"), "!"));
                 console.log(alias.apply(new Box("apply"), args));
                 console.log(await readAsync.call(new Box("async"), "!"));
                 console.log(bound());
                 console.log(await asyncBound("!"));
+                console.log(staticRead.call(
+                    (console.log("static-call-this"), extracted),
+                    "!"
+                ));
+                console.log(await staticReadAsync.apply(extracted, args));
+                console.log(staticBound());
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\ncall!\napply?\nasync!\nbound!\nasync-bound!\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\n"
         );
     }
 

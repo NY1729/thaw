@@ -98,7 +98,7 @@ struct FnSignature {
 #[derive(Clone)]
 struct NativeMethodValue {
     symbol: Symbol,
-    receiver: HirType,
+    receiver: Option<HirType>,
 }
 
 #[derive(Default)]
@@ -10267,10 +10267,32 @@ impl<'a> FnLowerer<'a> {
             let symbol = class_static_method_symbol(class.sym.as_ref(), method_name);
             if let Some(signature) = self.signatures.get(&symbol) {
                 if signature.uses_this {
-                    return Err(format!(
-                        "cannot extract native static method `{}.{method_name}` because it uses `this`; bind it explicitly",
-                        class.sym
-                    ));
+                    let parameters = signature
+                        .params
+                        .iter()
+                        .enumerate()
+                        .map(|(index, ty)| HirParam {
+                            name: format!("__thaw_unbound_static_argument_{index}"),
+                            ty: ty.clone(),
+                        })
+                        .collect();
+                    let result =
+                        if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+                            HirType::Promise(Box::new(signature.ret.clone()))
+                        } else {
+                            signature.ret.clone()
+                        };
+                    return Ok(Some(HirExpr::Lambda(
+                        Vec::new(),
+                        parameters,
+                        result,
+                        Box::new(HirExpr::Block(vec![HirStmt::Throw(HirExpr::Lit(
+                            HirLit::Str(format!(
+                                "Cannot call unbound native static method `{}.{method_name}` without an explicit thisArg",
+                                class.sym
+                            )),
+                        ))])),
+                    )));
                 }
                 let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
                 {
@@ -10373,13 +10395,29 @@ impl<'a> FnLowerer<'a> {
             return None;
         };
         let method = member_property_name(&member.prop)?;
+        if let Expr::Ident(class) = member.obj.as_ref() {
+            let symbol = class_static_method_symbol(class.sym.as_ref(), &method);
+            if self
+                .signatures
+                .get(&symbol)
+                .is_some_and(|signature| signature.uses_this)
+            {
+                return Some(NativeMethodValue {
+                    symbol,
+                    receiver: None,
+                });
+            }
+        }
         let receiver = self.native_class_expression_type(&member.obj)?;
         let class = class_name_from_type(&receiver)?;
         let symbol = class_method_symbol(class, &method);
         self.signatures
             .get(&symbol)
             .is_some_and(|signature| signature.uses_this)
-            .then_some(NativeMethodValue { symbol, receiver })
+            .then_some(NativeMethodValue {
+                symbol,
+                receiver: Some(receiver),
+            })
     }
 
     fn lower_saved_native_method_bind(
@@ -10402,27 +10440,32 @@ impl<'a> FnLowerer<'a> {
             return Err("unbound native method `.bind()` cannot spread its `thisArg`".into());
         }
         let bound = self.lower_expr(&this_argument.expr)?;
-        self.expect_type(&method.receiver, &bound, "unbound method bind `thisArg`")?;
+        let bound_type = if let Some(receiver) = &method.receiver {
+            self.expect_type(receiver, &bound, "unbound method bind `thisArg`")?;
+            receiver.clone()
+        } else {
+            self.infer_expr_type(&bound)?
+        };
+        let receiver_count = usize::from(method.receiver.is_some());
         let label = format!("unbound native method `{target}.bind`");
         let (leading_values, leading_bindings) =
             self.lower_native_spread_values(leading_arguments, &label)?;
-        if leading_values.len() > signature.params.len().saturating_sub(1) {
+        if leading_values.len() > signature.params.len().saturating_sub(receiver_count) {
             return Err(format!(
                 "unbound native method `{target}.bind` binds {} leading argument(s), but the method accepts {}",
                 leading_values.len(),
-                signature.params.len().saturating_sub(1)
+                signature.params.len().saturating_sub(receiver_count)
             ));
         }
         let bound_name = format!("__thaw_saved_bound_this_{}", self.next_binding);
         self.next_binding += 1;
-        self.scope
-            .insert(bound_name.clone(), method.receiver.clone());
-        let mut bindings = vec![(bound_name.clone(), method.receiver.clone(), bound)];
+        self.scope.insert(bound_name.clone(), bound_type.clone());
+        let mut bindings = vec![(bound_name.clone(), bound_type, bound)];
         bindings.extend(leading_bindings);
         let mut bound_argument_names = Vec::new();
         for (index, (value, expected)) in leading_values
             .iter()
-            .zip(signature.params[1..].iter())
+            .zip(signature.params[receiver_count..].iter())
             .enumerate()
         {
             let value = self
@@ -10439,7 +10482,7 @@ impl<'a> FnLowerer<'a> {
             bound_argument_names.push(name.clone());
             bindings.push((name, expected.clone(), value));
         }
-        let parameters = signature.params[1 + leading_values.len()..]
+        let parameters = signature.params[receiver_count + leading_values.len()..]
             .iter()
             .enumerate()
             .map(|(index, ty)| HirParam {
@@ -10447,22 +10490,32 @@ impl<'a> FnLowerer<'a> {
                 ty: ty.clone(),
             })
             .collect::<Vec<_>>();
-        let mut arguments = vec![HirExpr::Var(bound_name.clone())];
+        let mut arguments = method
+            .receiver
+            .as_ref()
+            .map(|_| vec![HirExpr::Var(bound_name.clone())])
+            .unwrap_or_default();
         arguments.extend(bound_argument_names.iter().cloned().map(HirExpr::Var));
         arguments.extend(
             parameters
                 .iter()
                 .map(|parameter| HirExpr::Var(parameter.name.clone())),
         );
-        let mut captures = vec![HirParam {
-            name: bound_name,
-            ty: method.receiver.clone(),
-        }];
+        let mut captures = method
+            .receiver
+            .as_ref()
+            .map(|receiver| {
+                vec![HirParam {
+                    name: bound_name,
+                    ty: receiver.clone(),
+                }]
+            })
+            .unwrap_or_default();
         captures.extend(
             bound_argument_names
                 .into_iter()
                 .zip(
-                    signature.params[1..1 + leading_values.len()]
+                    signature.params[receiver_count..receiver_count + leading_values.len()]
                         .iter()
                         .cloned(),
                 )
@@ -10553,6 +10606,35 @@ impl<'a> FnLowerer<'a> {
         } else {
             supplied.to_vec()
         };
+        if method.receiver.is_none() {
+            let this_value = self.lower_expr(&this_argument.expr)?;
+            let this_type = self.infer_expr_type(&this_value)?;
+            let this_name = format!("__thaw_saved_static_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(this_name.clone(), this_type.clone());
+            let label = format!("saved static method `{}.{operation_name}`", target.sym);
+            let (arguments, mut bindings) = self.lower_native_spread_values(&forwarded, &label)?;
+            let mut symbol = method.symbol.clone();
+            let mut signature = self
+                .signatures
+                .get(&symbol)
+                .cloned()
+                .expect("saved static method retains its signature");
+            let arguments = self.select_omitted_class_arguments(
+                &mut symbol,
+                &mut signature,
+                arguments,
+                0,
+                &label,
+            )?;
+            bindings.insert(0, (this_name, this_type, this_value));
+            return self
+                .wrap_call_argument_bindings(
+                    HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments),
+                    &bindings,
+                )
+                .map(Some);
+        }
         let mut arguments = Vec::with_capacity(forwarded.len() + 1);
         arguments.push(this_argument.clone());
         arguments.extend(forwarded);
@@ -26597,17 +26679,6 @@ mod tests {
         assert!(body.contains("__thaw_class_Operations_static_double"));
         assert!(body.contains("Lambda"));
         assert!(body.contains("FunctionRef"));
-
-        {
-            let source = r#"class Box { static value: string = "value"; static read(): string { return this.value; } }
-            function main(): void { const read = Box.read; }"#;
-            let module = thaw_parser::parse_typescript(source).unwrap();
-            let error = lower_module(&module).unwrap_err();
-            assert!(
-                error.contains("because it uses `this`; bind it explicitly"),
-                "{error}"
-            );
-        }
     }
 
     #[test]
@@ -26617,6 +26688,10 @@ mod tests {
                 constructor(public value: string) {}
                 read(suffix: string): string { return this.value + suffix; }
             }
+            class StaticBox {
+                static value: string = "static";
+                static read(suffix: string): string { return this.value + suffix; }
+            }
             function main(): void {
                 const first = new Box("first");
                 const second = new Box("second");
@@ -26625,9 +26700,14 @@ mod tests {
                 const args: [string] = ["?"];
                 const boundArgs: [string] = ["!"];
                 const bound = alias.bind(second, ...boundArgs);
+                const staticRead = StaticBox.read;
+                const staticBound = staticRead.bind(first, ...boundArgs);
                 console.log(read.call(second, "!"));
                 console.log(alias.apply(first, args));
                 console.log(bound());
+                console.log(staticRead.call(first, "!"));
+                console.log(staticRead.apply(first, args));
+                console.log(staticBound());
             }"#,
         );
         let main = program
