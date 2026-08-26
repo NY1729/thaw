@@ -19743,14 +19743,16 @@ mod tests {
                     return this.staticValue + suffix;
                 }
             }
+            class Holder { constructor(public box: Box) {} }
             function make(): Box {
                 console.log("extract-receiver");
                 return new Box("discarded");
             }
             async function main(): Promise<void> {
-                const extracted = make();
-                const read = extracted.read;
+                const read = make().read;
+                const extracted = new Box("ignored");
                 const readAsync = extracted.readAsync;
+                const holderRead = new Holder(new Box("holder")).box.read;
                 const alias = read;
                 const args: [string] = ["?"];
                 const boundArgs: [string] = ["!"];
@@ -19773,11 +19775,12 @@ mod tests {
                 ));
                 console.log(await staticReadAsync.apply(extracted, args));
                 console.log(staticBound());
+                console.log(holderRead.call(new Box("chain"), "!"));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\n"
         );
     }
 

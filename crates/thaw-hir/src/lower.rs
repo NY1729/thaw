@@ -10014,6 +10014,55 @@ impl<'a> FnLowerer<'a> {
                 .callee
                 .as_ident()
                 .and_then(|class| self.interfaces.get(class.sym.as_ref()).cloned()),
+            Expr::Paren(parenthesized) => self.native_class_expression_type(&parenthesized.expr),
+            Expr::TsAs(assertion) => self.native_class_expression_type(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => self.native_class_expression_type(&assertion.expr),
+            Expr::TsConstAssertion(assertion) => self.native_class_expression_type(&assertion.expr),
+            Expr::Seq(sequence) => sequence
+                .exprs
+                .last()
+                .and_then(|expression| self.native_class_expression_type(expression)),
+            Expr::Cond(conditional) => {
+                let consequent = self.native_class_expression_type(&conditional.cons)?;
+                let alternate = self.native_class_expression_type(&conditional.alt)?;
+                (consequent == alternate).then_some(consequent)
+            }
+            Expr::Member(member) => {
+                let property = member_property_name(&member.prop)?;
+                let HirType::Object(fields) = self.native_class_expression_type(&member.obj)?
+                else {
+                    return None;
+                };
+                fields
+                    .into_iter()
+                    .find_map(|(name, ty)| (name == property).then_some(ty))
+            }
+            Expr::Call(call) => {
+                let Callee::Expr(callee) = &call.callee else {
+                    return None;
+                };
+                match callee.as_ref() {
+                    Expr::Ident(function) => self
+                        .signatures
+                        .get(function.sym.as_ref())
+                        .map(|signature| signature.ret.clone()),
+                    Expr::Member(member) => {
+                        let method = member_property_name(&member.prop)?;
+                        if let Expr::Ident(class) = member.obj.as_ref() {
+                            let symbol = class_static_method_symbol(class.sym.as_ref(), &method);
+                            if let Some(signature) = self.signatures.get(&symbol) {
+                                return Some(signature.ret.clone());
+                            }
+                        }
+                        let receiver = self.native_class_expression_type(&member.obj)?;
+                        let class = class_name_from_type(&receiver)?;
+                        self.signatures
+                            .get(&class_method_symbol(class, &method))
+                            .map(|signature| signature.ret.clone())
+                    }
+                    _ => None,
+                }
+            }
             _ => infer_generic_constructor_expr_type(
                 expression,
                 self.interfaces,
