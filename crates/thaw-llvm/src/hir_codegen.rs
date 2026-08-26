@@ -77,6 +77,8 @@ const USER_MAIN_SYMBOL: &str = "thaw_user_main";
 /// entry points (`main` and `handler`).
 const MODULE_INIT_SYMBOL: &str = "__thaw_module_init";
 const NATIVE_MODULE_INIT_SYMBOL: &str = "__thaw_native_module_init";
+const TOP_LEVEL_INIT_SYMBOL: &str = "__thaw_top_level_init";
+const TOP_LEVEL_INIT_GUARD_SYMBOL: &str = "__thaw_top_level_initialized";
 /// A null pointer means normal execution; a non-null pointer is the string
 /// value currently unwinding through generated Thaw calls. Keeping this in
 /// generated-module state preserves the existing function ABI (important for
@@ -167,6 +169,7 @@ pub struct HirCompiler<'ctx> {
     builder: Builder<'ctx>,
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     variable_hir_types: HashMap<String, HirType>,
+    global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
     function_return_types: HashMap<String, HirType>,
     ffi_signatures: HashMap<String, FfiSignature>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
@@ -191,6 +194,7 @@ impl<'ctx> HirCompiler<'ctx> {
             builder: context.create_builder(),
             variables: HashMap::new(),
             variable_hir_types: HashMap::new(),
+            global_variables: HashMap::new(),
             function_return_types: HashMap::new(),
             ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
@@ -205,6 +209,7 @@ impl<'ctx> HirCompiler<'ctx> {
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.declare_runtime_builtins();
         self.declare_exception_state();
+        self.declare_globals(program)?;
         self.discover_frame_async_functions(program);
         self.function_return_types = program
             .functions
@@ -223,6 +228,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for func in &program.functions {
             self.declare_function(func)?;
         }
+        self.emit_top_level_init(program)?;
         for func in &program.functions {
             self.compile_function_body(func)?;
         }
@@ -256,6 +262,89 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_EXCEPTION_SYMBOL);
         pending.set_linkage(Linkage::Internal);
         pending.set_initializer(&ptr_ty.const_null());
+    }
+
+    fn declare_globals(&mut self, program: &HirProgram) -> Result<(), String> {
+        for global in &program.globals {
+            let ty = self.basic_type(&global.ty)?;
+            let symbol = format!("__thaw_global_{}", global.name);
+            let value = self.module.add_global(ty, None, &symbol);
+            value.set_linkage(Linkage::Internal);
+            value.set_initializer(&ty.const_zero());
+            self.global_variables.insert(
+                global.name.clone(),
+                (value.as_pointer_value(), ty, global.ty.clone()),
+            );
+        }
+        Ok(())
+    }
+
+    fn seed_global_variables(&mut self) {
+        for (name, (pointer, llvm_type, hir_type)) in &self.global_variables {
+            self.variables.insert(name.clone(), (*pointer, *llvm_type));
+            self.variable_hir_types
+                .insert(name.clone(), hir_type.clone());
+        }
+    }
+
+    fn emit_top_level_init(&mut self, program: &HirProgram) -> Result<(), String> {
+        if program.globals.is_empty() {
+            return Ok(());
+        }
+        let bool_type = self.context.bool_type();
+        let guard = self
+            .module
+            .add_global(bool_type, None, TOP_LEVEL_INIT_GUARD_SYMBOL);
+        guard.set_linkage(Linkage::Internal);
+        guard.set_initializer(&bool_type.const_zero());
+
+        let init = self.module.add_function(
+            TOP_LEVEL_INIT_SYMBOL,
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(init, "entry");
+        let initialize = self.context.append_basic_block(init, "initialize");
+        let done = self.context.append_basic_block(init, "done");
+        self.builder.position_at_end(entry);
+        let initialized = self
+            .builder
+            .build_load(bool_type, guard.as_pointer_value(), "top_level_initialized")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        self.builder
+            .build_conditional_branch(initialized, done, initialize)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(initialize);
+        self.builder
+            .build_store(guard.as_pointer_value(), bool_type.const_int(1, false))
+            .map_err(|error| error.to_string())?;
+        self.variables.clear();
+        self.variable_hir_types.clear();
+        self.catch_stack.clear();
+        self.seed_global_variables();
+        for global in &program.globals {
+            let value = self.compile_expr(&global.init)?;
+            let (pointer, _, _) = self.global_variables[&global.name];
+            self.builder
+                .build_store(pointer, value)
+                .map_err(|error| error.to_string())?;
+        }
+        if self
+            .builder
+            .get_insert_block()
+            .is_some_and(|block| block.get_terminator().is_none())
+        {
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.position_at_end(done);
+        self.builder
+            .build_return(None)
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     fn discover_frame_async_functions(&mut self, program: &HirProgram) {
@@ -1898,6 +1987,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.variables.clear();
         self.variable_hir_types.clear();
         self.catch_stack.clear();
+        self.seed_global_variables();
         for (param_val, hir_param) in function.get_param_iter().zip(func.params.iter()) {
             let ty = self.basic_type(&hir_param.ty)?;
             let slot = self.allocate_variable_cell(ty, &hir_param.name)?;
@@ -3680,6 +3770,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.variables.clear();
         self.variable_hir_types.clear();
         self.catch_stack.clear();
+        self.seed_global_variables();
 
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
         let frame = self
@@ -3737,6 +3828,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.variables.clear();
         self.variable_hir_types.clear();
         self.catch_stack.clear();
+        self.seed_global_variables();
         let resume_frame = resume.get_nth_param(0).unwrap().into_pointer_value();
         let resume_result = resume.get_nth_param(1).unwrap().into_pointer_value();
         let waiting_slot =
@@ -12276,6 +12368,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (symbol, call_name) in [
             (MODULE_INIT_SYMBOL, "call_thaw_module_init"),
             (NATIVE_MODULE_INIT_SYMBOL, "call_thaw_native_module_init"),
+            (TOP_LEVEL_INIT_SYMBOL, "call_thaw_top_level_init"),
         ] {
             if let Some(init_fn) = self.module.get_function(symbol) {
                 self.builder.build_call(init_fn, &[], call_name).unwrap();
@@ -18214,6 +18307,46 @@ mod tests {
             compile_and_run(source, "module_init_main"),
             "hi from registry\n"
         );
+    }
+
+    #[test]
+    fn initializes_top_level_bindings_in_source_order_and_shares_mutation() {
+        let source = r#"
+            const base = 40;
+            let answer = base + 2;
+
+            function next(): number {
+                answer = answer + 1;
+                return answer;
+            }
+
+            function main(): void {
+                console.log(answer);
+                console.log(next());
+                console.log(next());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "top_level_bindings"),
+            "42\n43\n44\n"
+        );
+    }
+
+    #[test]
+    fn guards_top_level_initialization_against_reentry() {
+        let source = r#"
+            const answer = 42;
+            function main(): void { console.log(answer); }
+        "#;
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "guarded_top_level_init");
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.module.print_to_string().to_string();
+        assert!(ir.contains("@__thaw_top_level_initialized = internal global i1 false"));
+        assert!(ir.contains("define internal void @__thaw_top_level_init()"));
+        assert!(ir.contains("br i1 %top_level_initialized"));
     }
 
     /// Same mechanism, but through the Lambda `handler` entry point instead
