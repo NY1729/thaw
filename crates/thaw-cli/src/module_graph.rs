@@ -857,18 +857,44 @@ pub fn bundle(
                         _ => return Err("default class exports are not supported yet".to_string()),
                     }
                 }
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(export)) => {
-                    let Expr::Ident(ident) = export.expr.as_ref() else {
-                        return Err(
-                            "default export expressions must reference a top-level declaration"
-                                .to_string(),
-                        );
-                    };
-                    let original = ident.sym.to_string();
-                    let target = names.get(&original).ok_or_else(|| {
-                        format!("cannot default-export unknown name `{original}`")
-                    })?;
-                    public.insert("default".to_string(), target.clone());
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(mut export)) => {
+                    if let Expr::Ident(ident) = export.expr.as_ref() {
+                        let original = ident.sym.to_string();
+                        if let Some(target) = names.get(&original) {
+                            public.insert("default".to_string(), target.clone());
+                            explicit_exports.insert("default".to_string());
+                            continue;
+                        }
+                    }
+
+                    export.expr.visit_mut_with(&mut RenameReferences {
+                        names: &names,
+                        namespaces: &namespaces,
+                        import_meta_url: &import_meta_url,
+                        import_meta_main: is_entry,
+                        module_path: &modules[index].path,
+                        external_resolutions,
+                        shadowed: HashSet::new(),
+                        function_depth: 0,
+                    });
+                    let symbol = format!("__thawmod{index}_default_value");
+                    let ident =
+                        thaw_parser::ast::Ident::new_no_ctxt(symbol.clone().into(), export.span);
+                    items.push(ModuleItem::Stmt(thaw_parser::ast::Stmt::Decl(Decl::Var(
+                        Box::new(thaw_parser::ast::VarDecl {
+                            span: export.span,
+                            ctxt: Default::default(),
+                            kind: thaw_parser::ast::VarDeclKind::Const,
+                            declare: false,
+                            decls: vec![thaw_parser::ast::VarDeclarator {
+                                span: export.span,
+                                name: thaw_parser::ast::Pat::Ident(ident.into()),
+                                init: Some(export.expr),
+                                definite: false,
+                            }],
+                        }),
+                    ))));
+                    public.insert("default".to_string(), symbol);
                     explicit_exports.insert("default".to_string());
                 }
                 ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export)) => {
