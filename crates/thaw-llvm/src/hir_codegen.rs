@@ -16572,11 +16572,45 @@ mod tests {
                 if (asyncKind !== "success") {
                     if (asyncKind === "failure") console.log(asyncValue + asyncDetail);
                 }
+                let assignedNestedKind: string = "failure";
+                let assignedNestedValue: number | string = "initial";
+                let assignedNestedExtra: number | string = "initial";
+                const nestedSource: Nested = {
+                    kind: "success", nested: { value: 7 }, extra: 8
+                };
+                ({
+                    kind: assignedNestedKind,
+                    nested: { value: assignedNestedValue },
+                    extra: assignedNestedExtra
+                } = nestedSource);
+                if (assignedNestedKind === "success") {
+                    console.log(assignedNestedValue + assignedNestedExtra);
+                }
+                let assignedDefaultKind: string = "number";
+                let assignedDefaultValue: number | string = 0;
+                const defaultSource: Defaulted = { kind: "text", value: undefined };
+                ({
+                    kind: assignedDefaultKind,
+                    value: assignedDefaultValue = "assigned missing"
+                } = defaultSource);
+                if (assignedDefaultKind === "text") console.log(assignedDefaultValue + "!");
+                let assignedRestKind: string = "success";
+                let assignedRest:
+                    { value: number; detail: number } |
+                    { value: string; detail: string } |
+                    { value: boolean; detail: boolean } = { value: 0, detail: 0 };
+                const restSource: Result = {
+                    kind: "failure", value: "rest", detail: "!"
+                };
+                ({ kind: assignedRestKind, ...assignedRest } = restSource);
+                if (assignedRestKind === "failure") {
+                    console.log(assignedRest.value + assignedRest.detail);
+                }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "correlated_object_union_destructuring"),
-            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n10\nbad alias\n7\nswitch!\npending\n10\nbad switch\npending\n22\nasync!\n"
+            "7\nbad!\nwaiting\n9\nno?\nwaiting\n6\nerror!\n10\noff!\n10\nbad parameter\n10\nnested!\n5\nmissing!\n7\ntuple!\n10\nmissing!\n10\nbad alias\n7\nswitch!\npending\n10\nbad switch\npending\n22\nasync!\n15\nassigned missing!\nrest!\n"
         );
     }
 
