@@ -12747,6 +12747,8 @@ impl<'a> FnLowerer<'a> {
                             | "filter"
                             | "reverse"
                             | "slice"
+                            | "sort"
+                            | "toSorted"
                             | "toReversed"
                             | "toSpliced"
                             | "with"
@@ -25074,17 +25076,6 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
-                    let prefix = match &element_type {
-                        HirType::F64 => "number",
-                        HirType::Str => "string",
-                        HirType::Bool => "bool",
-                        HirType::Object(_) => "object",
-                        other => {
-                            return Err(format!(
-                                "array sort does not support element type {other:?}"
-                            ))
-                        }
-                    };
                     if let Some(argument) = call.args.first() {
                         let comparator = self.lower_promise_callback(
                             &argument.expr,
@@ -25099,6 +25090,17 @@ impl<'a> FnLowerer<'a> {
                             property.sym == *"toSorted",
                         );
                     }
+                    let prefix = match &element_type {
+                        HirType::F64 => "number",
+                        HirType::Str => "string",
+                        HirType::Bool => "bool",
+                        HirType::Object(_) => "object",
+                        other => {
+                            return Err(format!(
+                                "default array sort does not support element type {other:?}"
+                            ))
+                        }
+                    };
                     let suffix = if property.sym == *"sort" {
                         "sort"
                     } else {
