@@ -2407,9 +2407,6 @@ impl<'a> FnLowerer<'a> {
                     let [callback] = call.args.as_slice() else {
                         return Err(format!("`.{}` expects exactly one callback", property.sym));
                     };
-                    if callback.spread.is_some() {
-                        return Err("Promise callback spread is not supported".into());
-                    }
                     let on_rejected = property.sym == *"catch";
                     let callback_input = if on_rejected {
                         HirType::Str
@@ -2421,8 +2418,34 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         vec![callback_input]
                     };
-                    let callback =
-                        self.lower_promise_callback(&callback.expr, &callback_params, None)?;
+                    let (source, callback, bindings) = if callback.spread.is_some() {
+                        let source_name = format!("__thaw_promise_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let source_type = HirType::Promise(input.clone());
+                        self.scope
+                            .insert(source_name.clone(), source_type.clone());
+                        let (callbacks, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Promise callback")?;
+                        let [callback] = callbacks.as_slice() else {
+                            return Err(format!(
+                                "`.{}` expects exactly one callback after spread expansion",
+                                property.sym
+                            ));
+                        };
+                        self.validate_promise_callback_value(callback, &callback_params, None)?;
+                        bindings.insert(0, (source_name.clone(), source_type, source));
+                        (HirExpr::Var(source_name), callback.clone(), bindings)
+                    } else {
+                        (
+                            source,
+                            self.lower_promise_callback(
+                                &callback.expr,
+                                &callback_params,
+                                None,
+                            )?,
+                            Vec::new(),
+                        )
+                    };
                     let HirType::Function(_, callback_output) = self.infer_expr_type(&callback)?
                     else {
                         unreachable!()
@@ -2437,14 +2460,15 @@ impl<'a> FnLowerer<'a> {
                             input
                         ));
                     }
-                    return Ok(HirExpr::PromiseThen(
+                    let result = HirExpr::PromiseThen(
                         Box::new(source),
                         Box::new(callback),
                         input.as_ref().clone(),
                         output,
                         on_rejected,
                         flatten,
-                    ));
+                    );
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
             }
         }
