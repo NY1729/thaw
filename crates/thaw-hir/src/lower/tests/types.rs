@@ -703,6 +703,21 @@ fn validates_generic_type_alias_instantiations() {
 }
 
 #[test]
+fn lowers_constructor_signatures_and_generic_aliases() {
+    let program = lower(
+        r#"type Factory<T> = new (value: T) => { value: T };
+           function accept(factory: Factory<number>): void {}"#,
+    );
+    assert_eq!(
+        program.functions[0].params[0].ty,
+        HirType::Function(
+            vec![HirType::F64],
+            Box::new(HirType::Object(vec![("value".into(), HirType::F64)])),
+        )
+    );
+}
+
+#[test]
 fn lowers_string_index_signatures_as_typed_dictionaries() {
     let program = lower(
         r#"
