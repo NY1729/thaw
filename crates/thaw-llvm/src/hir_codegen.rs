@@ -16214,6 +16214,55 @@ mod tests {
     }
 
     #[test]
+    fn narrows_object_unions_by_literal_discriminants() {
+        let source = r#"
+            type Result =
+                { kind: "success"; value: number } |
+                { kind: "failure"; value: string } |
+                { kind: true; value: boolean };
+            type Numeric =
+                { code: 200; value: number } |
+                { code: 500; value: string };
+            function describe(result: Result): string {
+                if (result.kind === "success") return String(result.value + 1);
+                if ("failure" === result.kind) return result.value + "!";
+                return result.value ? "true" : "false";
+            }
+            function numeric(result: Numeric): string {
+                if (result.code !== 200) return result.value + "!";
+                return String(result.value + 2);
+            }
+            function local(ok: boolean): string {
+                let result: Result = { kind: "success", value: 9 };
+                if (!ok) result = { kind: "failure", value: "local" };
+                if (!(result.kind !== "success")) return String(result.value + 1);
+                if (result.kind === "failure") return result.value + "!";
+                return result.value ? "true" : "false";
+            }
+            async function delayed(ok: boolean): Promise<Result> {
+                await sleep(1);
+                if (ok) return { kind: "success", value: 41 };
+                return { kind: "failure", value: "async" };
+            }
+            async function main(): Promise<void> {
+                console.log(describe({ kind: "success", value: 2 }));
+                console.log(describe({ kind: "failure", value: "sync" }));
+                console.log(describe({ kind: true, value: false }));
+                console.log(numeric({ code: 200, value: 5 }));
+                console.log(numeric({ code: 500, value: "error" }));
+                console.log(local(true));
+                console.log(local(false));
+                console.log(describe(await delayed(true)));
+                console.log(describe(await delayed(false)));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "literal_object_union_discriminants"),
+            "3\nsync!\nfalse\n7\nerror!\n10\nlocal!\n42\nasync!\n"
+        );
+    }
+
+    #[test]
     fn compiles_nested_destructuring_with_rest_and_awaited_sources() {
         let source = r#"
             async function source(): Promise<{
