@@ -152,6 +152,7 @@ enum GenericTypePattern {
     Concrete(HirType),
     Array(Box<GenericTypePattern>),
     Promise(Box<GenericTypePattern>),
+    Optional(Box<GenericTypePattern>),
     Awaited(Box<GenericTypePattern>),
     NonNullable(Box<GenericTypePattern>),
     Partial(Box<GenericTypePattern>),
@@ -6415,6 +6416,7 @@ fn generic_pattern_contains_variable(pattern: &GenericTypePattern, variable: &st
         GenericTypePattern::Variable(name) => name == variable,
         GenericTypePattern::Array(inner)
         | GenericTypePattern::Promise(inner)
+        | GenericTypePattern::Optional(inner)
         | GenericTypePattern::Awaited(inner)
         | GenericTypePattern::NonNullable(inner)
         | GenericTypePattern::Partial(inner)
@@ -6446,6 +6448,9 @@ fn instantiate_generic_pattern(
         GenericTypePattern::Promise(inner) => Ok(HirType::Promise(Box::new(
             instantiate_generic_pattern(inner, substitution)?,
         ))),
+        GenericTypePattern::Optional(inner) => Ok(optional_parameter_type(
+            instantiate_generic_pattern(inner, substitution)?,
+        )),
         GenericTypePattern::Awaited(inner) => Ok(awaited_hir_type(instantiate_generic_pattern(
             inner,
             substitution,
@@ -6614,7 +6619,7 @@ fn generic_type_pattern(
                     .body
                     .iter()
                     .map(|member| {
-                        let (key, ty) = match member {
+                        let (key, ty, optional) = match member {
                             TsTypeElement::TsPropertySignature(property) => {
                                 let annotation = property.type_ann.as_ref().ok_or_else(|| {
                                     "generic interface property needs a type annotation".to_string()
@@ -6622,11 +6627,13 @@ fn generic_type_pattern(
                                 (
                                     property.key.as_ref(),
                                     std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                    property.optional,
                                 )
                             }
                             TsTypeElement::TsMethodSignature(method) => (
                                 method.key.as_ref(),
                                 std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                                false,
                             ),
                             _ => {
                                 return Err(format!(
@@ -6639,15 +6646,20 @@ fn generic_type_pattern(
                                 "generic interface `{name}` has an unsupported property key"
                             ));
                         };
+                        let ty = generic_type_pattern(
+                            &ty,
+                            &nested_substitutions,
+                            interfaces,
+                            generic_interfaces,
+                            in_progress,
+                        )?;
                         Ok((
                             field.sym.to_string(),
-                            generic_type_pattern(
-                                &ty,
-                                &nested_substitutions,
-                                interfaces,
-                                generic_interfaces,
-                                in_progress,
-                            )?,
+                            if optional {
+                                GenericTypePattern::Optional(Box::new(ty))
+                            } else {
+                                ty
+                            },
                         ))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -6812,7 +6824,7 @@ fn generic_type_pattern(
                 .members
                 .iter()
                 .map(|member| {
-                    let (key, ty) = match member {
+                    let (key, ty, optional) = match member {
                         TsTypeElement::TsPropertySignature(property) => {
                             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                                 "generic object property needs a type annotation".to_string()
@@ -6820,11 +6832,13 @@ fn generic_type_pattern(
                             (
                                 property.key.as_ref(),
                                 std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                property.optional,
                             )
                         }
                         TsTypeElement::TsMethodSignature(method) => (
                             method.key.as_ref(),
                             std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                            false,
                         ),
                         _ => {
                             return Err(
@@ -6836,15 +6850,20 @@ fn generic_type_pattern(
                     let Expr::Ident(field) = key else {
                         return Err("generic object pattern has an unsupported key".into());
                     };
+                    let ty = generic_type_pattern(
+                        &ty,
+                        substitutions,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )?;
                     Ok((
                         field.sym.to_string(),
-                        generic_type_pattern(
-                            &ty,
-                            substitutions,
-                            interfaces,
-                            generic_interfaces,
-                            in_progress,
-                        )?,
+                        if optional {
+                            GenericTypePattern::Optional(Box::new(ty))
+                        } else {
+                            ty
+                        },
                     ))
                 })
                 .collect::<Result<Vec<_>, String>>()?,
@@ -6877,6 +6896,9 @@ fn match_generic_pattern(
         }
         (GenericTypePattern::Array(expected), HirType::Array(value))
         | (GenericTypePattern::Promise(expected), HirType::Promise(value)) => {
+            match_generic_pattern(expected, value, inferred)
+        }
+        (GenericTypePattern::Optional(expected), HirType::Optional(value)) => {
             match_generic_pattern(expected, value, inferred)
         }
         (GenericTypePattern::Awaited(expected), actual) => {
@@ -8662,16 +8684,21 @@ fn resolve_interface(
     }
 
     for member in &iface.body.body {
-        let (key, field_type) = match member {
+        let (key, field_type, optional) = match member {
             TsTypeElement::TsPropertySignature(property) => {
                 let annotation = property.type_ann.as_ref().ok_or_else(|| {
                     "interface property needs an explicit type annotation".to_string()
                 })?;
-                (property.key.as_ref(), annotation.type_ann.as_ref().clone())
+                (
+                    property.key.as_ref(),
+                    annotation.type_ann.as_ref().clone(),
+                    property.optional,
+                )
             }
             TsTypeElement::TsMethodSignature(method) => (
                 method.key.as_ref(),
                 method_signature_function_type(method)?,
+                false,
             ),
             _ => {
                 return Err(format!(
@@ -8692,7 +8719,7 @@ fn resolve_interface(
                 "interface `{name}` declares field `{field_name}`, which collides with an inherited field of the same name"
             ));
         }
-        let field_ty = resolve_type_with_interfaces(
+        let mut field_ty = resolve_type_with_interfaces(
             &field_type,
             raw,
             aliases,
@@ -8700,6 +8727,9 @@ fn resolve_interface(
             resolved,
             in_progress,
         )?;
+        if optional {
+            field_ty = optional_parameter_type(field_ty);
+        }
         fields.push((field_name, field_ty));
     }
 
@@ -10571,7 +10601,7 @@ fn lower_ts_type(
                 .members
                 .iter()
                 .map(|member| {
-                    let (key, ty) = match member {
+                    let (key, ty, optional) = match member {
                         TsTypeElement::TsPropertySignature(property) => {
                             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                                 "object property needs an explicit type annotation".to_string()
@@ -10579,11 +10609,13 @@ fn lower_ts_type(
                             (
                                 property.key.as_ref(),
                                 std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                property.optional,
                             )
                         }
                         TsTypeElement::TsMethodSignature(method) => (
                             method.key.as_ref(),
                             std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                            false,
                         ),
                         _ => return Err("object types only support properties and methods".into()),
                     };
@@ -10591,7 +10623,11 @@ fn lower_ts_type(
                         Expr::Ident(ident) => ident.sym.to_string(),
                         _ => return Err("unsupported object type literal key".into()),
                     };
-                    Ok((name, lower_ts_type(&ty, interfaces, generic_interfaces)?))
+                    let mut ty = lower_ts_type(&ty, interfaces, generic_interfaces)?;
+                    if optional {
+                        ty = optional_parameter_type(ty);
+                    }
+                    Ok((name, ty))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(HirType::Object(fields))
@@ -10749,7 +10785,7 @@ fn resolve_generic_interface(
         }
     }
     for member in &decl.body.body {
-        let (key, ty) = match member {
+        let (key, ty, optional) = match member {
             TsTypeElement::TsPropertySignature(property) => {
                 let annotation = property.type_ann.as_ref().ok_or_else(|| {
                     "generic interface property needs an explicit type annotation".to_string()
@@ -10757,11 +10793,13 @@ fn resolve_generic_interface(
                 (
                     property.key.as_ref(),
                     std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                    property.optional,
                 )
             }
             TsTypeElement::TsMethodSignature(method) => (
                 method.key.as_ref(),
                 std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                false,
             ),
             _ => {
                 return Err(format!(
@@ -10777,13 +10815,16 @@ fn resolve_generic_interface(
                 ))
             }
         };
-        let field_ty = resolve_ts_type_with_substitution(
+        let mut field_ty = resolve_ts_type_with_substitution(
             &ty,
             &substitution,
             interfaces,
             generic_interfaces,
             in_progress,
         )?;
+        if optional {
+            field_ty = optional_parameter_type(field_ty);
+        }
         if fields.iter().any(|(existing, _)| existing == &field_name) {
             return Err(format!(
                 "interface `{name}` declares field `{field_name}`, which collides with an inherited field"
@@ -11245,7 +11286,7 @@ fn resolve_ts_type_with_substitution(
                 .members
                 .iter()
                 .map(|member| {
-                    let (key, ty) = match member {
+                    let (key, ty, optional) = match member {
                         TsTypeElement::TsPropertySignature(property) => {
                             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                                 "object property needs an explicit type annotation".to_string()
@@ -11253,11 +11294,13 @@ fn resolve_ts_type_with_substitution(
                             (
                                 property.key.as_ref(),
                                 std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                                property.optional,
                             )
                         }
                         TsTypeElement::TsMethodSignature(method) => (
                             method.key.as_ref(),
                             std::borrow::Cow::Owned(method_signature_function_type(method)?),
+                            false,
                         ),
                         _ => return Err("object types only support properties and methods".into()),
                     };
@@ -11265,13 +11308,16 @@ fn resolve_ts_type_with_substitution(
                         Expr::Ident(ident) => ident.sym.to_string(),
                         _ => return Err("unsupported object type literal key".to_string()),
                     };
-                    let field_ty = resolve_ts_type_with_substitution(
+                    let mut field_ty = resolve_ts_type_with_substitution(
                         &ty,
                         substitution,
                         interfaces,
                         generic_interfaces,
                         in_progress,
                     )?;
+                    if optional {
+                        field_ty = optional_parameter_type(field_ty);
+                    }
                     Ok((name, field_ty))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
