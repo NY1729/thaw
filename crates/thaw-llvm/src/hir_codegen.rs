@@ -16869,6 +16869,11 @@ mod tests {
             }
             type ServiceFactory = () => ResultService;
             type AsyncServiceFactory = () => Promise<ResultService>;
+            interface HigherOrderService {
+                service: ServiceFactory;
+                asyncService: AsyncServiceFactory;
+            }
+            type HigherOrderFactory = () => HigherOrderService;
             interface DerivedService extends CombinedService, HolderServiceBase {
                 nestedHolder: ResultHolder;
             }
@@ -16972,10 +16977,23 @@ mod tests {
                     nested: { load: producedResults }
                 };
             }
+            function producedHigherOrderService(): HigherOrderService {
+                return {
+                    service: producedService,
+                    asyncService: delayedService
+                };
+            }
             function consumeServiceFactory(factory: ServiceFactory): string {
                 for (const item of factory().load()) {
                     if (item.kind === "number") return String(item.value + 11);
                     return item.value + " service factory";
+                }
+                return "empty";
+            }
+            function consumeHigherOrderService(service: HigherOrderService): string {
+                for (const item of service.service().load()) {
+                    if (item.kind === "number") return String(item.value + 210);
+                    return item.value + " higher service";
                 }
                 return "empty";
             }
@@ -17185,6 +17203,17 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 100);
                     else console.log(item.value + " async service factory");
                 }
+                const higherOrderService: HigherOrderService = producedHigherOrderService();
+                console.log(consumeHigherOrderService(higherOrderService));
+                for (const item of (await higherOrderService.asyncService()).nested.load()) {
+                    if (item.kind === "number") console.log(item.value + 211);
+                    else console.log(item.value + " async higher service");
+                }
+                const higherOrderFactory: HigherOrderFactory = producedHigherOrderService;
+                for (const item of higherOrderFactory().service().holder().results) {
+                    if (item.kind === "number") console.log(item.value + 212);
+                    else console.log(item.value + " higher factory");
+                }
                 const {
                     load: extractedLoad,
                     holder: extractedServiceHolder,
@@ -17303,7 +17332,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n169\n170\n171\n177\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n218\n210\ngeneric inherited\n216\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n156\nsync array method\n157\nsync copied\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n169\n170\n171\n177\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n219\n220\n226\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n218\n210\ngeneric inherited\n216\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
