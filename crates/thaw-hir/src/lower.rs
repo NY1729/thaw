@@ -76,6 +76,10 @@ struct FnSignature {
     abstract_class_constructor: bool,
     ret: HirType,
     is_async: bool,
+    /// Whether a native class method observes its call-site `this` value.
+    /// This distinguishes safely extractable methods from methods that need
+    /// the dedicated unbound-method ABI rather than an ordinary closure.
+    uses_this: bool,
     /// A function declared with no body (`declare function foo(...): T;`,
     /// or the same syntax without `declare` in a regular `.ts` file --
     /// SWC represents both identically, `body: None`). See
@@ -89,6 +93,23 @@ struct FnSignature {
     generic_param_patterns: Vec<GenericTypePattern>,
     generic_param_optional: Vec<bool>,
     generic_return_type: Option<Box<TsType>>,
+}
+
+#[derive(Default)]
+struct ThisUseCollector {
+    found: bool,
+}
+
+impl Visit for ThisUseCollector {
+    fn visit_this_expr(&mut self, _: &swc_ecma_ast::ThisExpr) {
+        self.found = true;
+    }
+}
+
+fn function_uses_this(function: &swc_ecma_ast::Function) -> bool {
+    let mut collector = ThisUseCollector::default();
+    function.visit_with(&mut collector);
+    collector.found
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4329,6 +4350,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         abstract_class_constructor: false,
                         ret,
                         is_async: func.is_async,
+                        uses_this: false,
                         is_extern,
                         source_range: (func.span.lo.0, func.span.hi.0),
                         generic_type_params,
@@ -4395,6 +4417,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         abstract_class_constructor: class_decl.class.is_abstract,
                         ret: instance_type.clone(),
                         is_async: false,
+                        uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
                         generic_type_params: Vec::new(),
@@ -4421,6 +4444,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         abstract_class_constructor: false,
                         ret: instance_type.clone(),
                         is_async: false,
+                        uses_this: false,
                         is_extern: false,
                         source_range: (class_decl.class.span.lo.0, class_decl.class.span.hi.0),
                         generic_type_params: Vec::new(),
@@ -4568,6 +4592,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             abstract_class_constructor: false,
                             ret,
                             is_async: method.function.is_async,
+                            uses_this: function_uses_this(&method.function),
                             is_extern: false,
                             source_range: (method.span.lo.0, method.span.hi.0),
                             generic_type_params: Vec::new(),
@@ -5015,6 +5040,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         abstract_class_constructor: false,
                         ret: ty.clone(),
                         is_async: false,
+                        uses_this: false,
                         is_extern: false,
                         source_range,
                         generic_type_params: Vec::new(),
@@ -5043,6 +5069,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             abstract_class_constructor: false,
                             ret: ty.clone(),
                             is_async: false,
+                            uses_this: false,
                             is_extern: false,
                             source_range,
                             generic_type_params: Vec::new(),
@@ -10014,6 +10041,87 @@ impl<'a> FnLowerer<'a> {
             .map(Some)
     }
 
+    fn lower_native_method_reference(
+        &mut self,
+        member: &MemberExpr,
+        method_name: &str,
+    ) -> Result<Option<HirExpr>, String> {
+        if let Expr::Ident(class) = member.obj.as_ref() {
+            let symbol = class_static_method_symbol(class.sym.as_ref(), method_name);
+            if let Some(signature) = self.signatures.get(&symbol) {
+                if signature.uses_this {
+                    return Err(format!(
+                        "cannot extract native static method `{}.{method_name}` because it uses `this`; bind it explicitly",
+                        class.sym
+                    ));
+                }
+                let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
+                {
+                    HirType::Promise(Box::new(signature.ret.clone()))
+                } else {
+                    signature.ret.clone()
+                };
+                return Ok(Some(HirExpr::FunctionRef(
+                    symbol,
+                    signature.params.clone(),
+                    result,
+                )));
+            }
+        }
+
+        let Some(receiver_type) = self.native_class_expression_type(&member.obj) else {
+            return Ok(None);
+        };
+        let Some(class_name) = class_name_from_type(&receiver_type) else {
+            return Ok(None);
+        };
+        let symbol = class_method_symbol(class_name, method_name);
+        let Some(signature) = self.signatures.get(&symbol).cloned() else {
+            return Ok(None);
+        };
+        if signature.uses_this {
+            return Err(format!(
+                "cannot extract native class method `{class_name}.{method_name}` because it uses `this`; bind it explicitly"
+            ));
+        }
+        let receiver = self.lower_expr(&member.obj)?;
+        self.expect_type(&receiver_type, &receiver, "method reference receiver")?;
+        let receiver_name = format!("__thaw_method_reference_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope
+            .insert(receiver_name.clone(), receiver_type.clone());
+        let parameters = signature.params[1..]
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| HirParam {
+                name: format!("__thaw_method_reference_argument_{index}"),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut arguments = vec![HirExpr::Var(receiver_name.clone())];
+        arguments.extend(
+            parameters
+                .iter()
+                .map(|parameter| HirExpr::Var(parameter.name.clone())),
+        );
+        let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+            HirType::Promise(Box::new(signature.ret.clone()))
+        } else {
+            signature.ret.clone()
+        };
+        let closure = HirExpr::Lambda(
+            vec![HirParam {
+                name: receiver_name.clone(),
+                ty: receiver_type.clone(),
+            }],
+            parameters,
+            result,
+            Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol)), arguments)),
+        );
+        self.wrap_call_argument_bindings(closure, &[(receiver_name, receiver_type, receiver)])
+            .map(Some)
+    }
+
     fn lower_native_class_call_or_apply(
         &mut self,
         call: &CallExpr,
@@ -14077,6 +14185,7 @@ impl<'a> FnLowerer<'a> {
                 abstract_class_constructor: false,
                 ret: HirType::Dynamic,
                 is_async: false,
+                uses_this: false,
                 is_extern: false,
                 source_range: (arrow.span.lo.0, arrow.span.hi.0),
                 generic_type_params,
@@ -14818,6 +14927,9 @@ impl<'a> FnLowerer<'a> {
                         }
                     }
                 }
+            }
+            if let Some(reference) = self.lower_native_method_reference(member, &property)? {
+                return Ok(reference);
             }
         }
         // `process.env.NAME` -- checked before the general cases since it's
@@ -20729,6 +20841,7 @@ impl<'a> FnLowerer<'a> {
             abstract_class_constructor: false,
             ret: HirType::Dynamic,
             is_async: false,
+            uses_this: false,
             is_extern: false,
             source_range: (arrow.span.lo.0, arrow.span.hi.0),
             generic_type_params,
@@ -20875,6 +20988,7 @@ impl<'a> FnLowerer<'a> {
             abstract_class_constructor: false,
             ret: HirType::Dynamic,
             is_async: false,
+            uses_this: false,
             is_extern: false,
             source_range: (interface.span.lo.0, interface.span.hi.0),
             generic_type_params,
@@ -20981,6 +21095,7 @@ impl<'a> FnLowerer<'a> {
             abstract_class_constructor: false,
             ret: HirType::Dynamic,
             is_async: false,
+            uses_this: false,
             is_extern: false,
             source_range: (alias.span.lo.0, alias.span.hi.0),
             generic_type_params,
@@ -25972,6 +26087,47 @@ mod tests {
             error.contains("spread source must have statically known tuple length"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn extracts_this_independent_native_methods_as_function_values() {
+        let program = lower(
+            r#"class Operations {
+                pass(value: string): string { return value; }
+                static double(value: number): number { return value * 2; }
+            }
+            function main(): void {
+                const operations = new Operations();
+                const pass = operations.pass;
+                const double = Operations.double;
+                console.log(pass("extracted"));
+                console.log(double(21));
+            }"#,
+        );
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let body = format!("{:?}", main.body);
+        assert!(body.contains("__thaw_class_Operations_method_pass"));
+        assert!(body.contains("__thaw_class_Operations_static_double"));
+        assert!(body.contains("Lambda"));
+        assert!(body.contains("FunctionRef"));
+
+        for source in [
+            r#"class Box { value: string = "value"; read(): string { return this.value; } }
+            function main(): void { const box = new Box(); const read = box.read; }"#,
+            r#"class Box { static value: string = "value"; static read(): string { return this.value; } }
+            function main(): void { const read = Box.read; }"#,
+        ] {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let error = lower_module(&module).unwrap_err();
+            assert!(
+                error.contains("because it uses `this`; bind it explicitly"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

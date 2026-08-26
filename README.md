@@ -1427,6 +1427,10 @@ The workspace crates have narrow responsibilities:
   `.bind()` produces synchronous or async typed closures, captures partially applied
   leading arguments, accepts statically sized tuple spreads while evaluating each spread
   source once in JavaScript order, and evaluates but does not retain its ignored static `thisArg`.
+  Instance and static methods that do not observe `this` can also be extracted directly as
+  synchronous or async typed function values. Extraction evaluates an instance receiver once;
+  methods that observe call-site `this` require explicit `.bind()` until the native function-value
+  ABI carries JavaScript's unbound `this` state.
   Instance calls through `this` are specialized directly, including calls nested inside
   an enclosing generic method after its outer type tuple has become concrete.
   Static methods resolve `this.field`, `this.getter` and `this.method(...)` against their
