@@ -19496,10 +19496,14 @@ mod tests {
                 fallback<U = string>(): U { return "fallback"; }
                 first<U>(values: U[]): U { return values[0]; }
                 field<U>(value: { item: U }): U { return value.item; }
+                collect<U>(first: U, ...rest: U[]): U { return rest[0]; }
+                withDefault<U = string>(value: number = 50): number { return value; }
+                async convertAsync<U>(value: U): Promise<U> { return value; }
                 static identity<U>(value: U): U { return value; }
+                static async identityAsync<U>(value: U): Promise<U> { return value; }
             }
             class DerivedBox extends Box<number> {}
-            function main(): void {
+            async function main(): Promise<void> {
                 const box = new Box(40);
                 const derived = new DerivedBox(40);
                 console.log(box.convert<string>("converted"));
@@ -19511,15 +19515,20 @@ mod tests {
                 console.log(box.fallback());
                 console.log(box.first([46, 47]));
                 console.log(box.field({ item: "nested" }));
+                console.log(box.collect(48, 49));
+                console.log(box.withDefault());
+                console.log(box.withDefault<boolean>());
                 console.log(derived.convert("inherited"));
+                console.log(await box.convertAsync("async-method"));
                 console.log(Box.identity<boolean>(true));
                 console.log(Box.identity<string>("static"));
                 console.log(Box.identity(45));
+                console.log(await Box.identityAsync(51));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "native_generic_class_methods"),
-            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\ninherited\ntrue\nstatic\n45\n"
+            "converted\n42\ninferred\ndefaulted\n43\n44\nfallback\n46\nnested\n49\n50\n50\ninherited\nasync-method\ntrue\nstatic\n45\n51\n"
         );
     }
 
