@@ -618,29 +618,30 @@ impl<'a> FnLowerer<'a> {
                         );
                     }
                     if object.sym == *"Array" && property.sym == *"isArray" {
-                        let [argument] = call.args.as_slice() else {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Array.isArray")?;
+                        let [value] = arguments.as_slice() else {
                             return Err("`Array.isArray` expects exactly one argument".into());
                         };
-                        if argument.spread.is_some() {
-                            return Err("Array.isArray spread is not supported".into());
-                        }
-                        let value = self.lower_expr(&argument.expr)?;
+                        let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
                         if ty == HirType::Json {
-                            return Ok(HirExpr::Call(
+                            let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_is_array".to_string())),
                                 vec![value],
-                            ));
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
                         }
                         let name = format!("__thaw_is_array_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), ty.clone());
+                        bindings.push((name, ty.clone(), value));
                         return self.wrap_call_argument_bindings(
                             HirExpr::Lit(HirLit::Bool(matches!(
                                 ty,
                                 HirType::Array(_) | HirType::Tuple(_)
                             ))),
-                            &[(name, ty, value)],
+                            &bindings,
                         );
                     }
                     if (object.sym == *"Object"
@@ -648,13 +649,12 @@ impl<'a> FnLowerer<'a> {
                         || (object.sym == *"Reflect" && property.sym == *"ownKeys")
                     {
                         let label = format!("{}.{}", object.sym, property.sym);
-                        let [argument] = call.args.as_slice() else {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        let [value] = arguments.as_slice() else {
                             return Err(format!("`{label}` expects exactly one argument"));
                         };
-                        if argument.spread.is_some() {
-                            return Err(format!("{label} spread is not supported"));
-                        }
-                        let value = self.lower_expr(&argument.expr)?;
+                        let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
@@ -670,16 +670,16 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_object_keys_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), ty.clone());
-                        return self.wrap_call_argument_bindings(keys, &[(name, ty, value)]);
+                        bindings.push((name, ty, value));
+                        return self.wrap_call_argument_bindings(keys, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"values" {
-                        let [argument] = call.args.as_slice() else {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.values")?;
+                        let [value] = arguments.as_slice() else {
                             return Err("`Object.values` expects exactly one argument".into());
                         };
-                        if argument.spread.is_some() {
-                            return Err("Object.values spread is not supported".into());
-                        }
-                        let value = self.lower_expr(&argument.expr)?;
+                        let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
@@ -705,16 +705,16 @@ impl<'a> FnLowerer<'a> {
                                 })
                                 .collect(),
                         );
-                        return self.wrap_call_argument_bindings(values, &[(name, ty, value)]);
+                        bindings.push((name, ty, value));
+                        return self.wrap_call_argument_bindings(values, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"entries" {
-                        let [argument] = call.args.as_slice() else {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.entries")?;
+                        let [value] = arguments.as_slice() else {
                             return Err("`Object.entries` expects exactly one argument".into());
                         };
-                        if argument.spread.is_some() {
-                            return Err("Object.entries spread is not supported".into());
-                        }
-                        let value = self.lower_expr(&argument.expr)?;
+                        let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
@@ -755,16 +755,16 @@ impl<'a> FnLowerer<'a> {
                                 })
                                 .collect(),
                         );
-                        return self.wrap_call_argument_bindings(entries, &[(name, ty, value)]);
+                        bindings.push((name, ty, value));
+                        return self.wrap_call_argument_bindings(entries, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"hasOwn" {
-                        let [object, key] = call.args.as_slice() else {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.hasOwn")?;
+                        let [object_value, key_value] = arguments.as_slice() else {
                             return Err("`Object.hasOwn` expects exactly two arguments".into());
                         };
-                        if object.spread.is_some() || key.spread.is_some() {
-                            return Err("Object.hasOwn spread is not supported".into());
-                        }
-                        let object_value = self.lower_expr(&object.expr)?;
+                        let object_value = object_value.clone();
                         let object_type = self.infer_expr_type(&object_value)?;
                         let HirType::Object(fields) = &object_type else {
                             return Err(format!(
@@ -775,8 +775,7 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .map(|(name, _)| name.clone())
                             .collect::<Vec<_>>();
-                        let key_value = self.lower_expr(&key.expr)?;
-                        let key_value = self.coerce_primitive_to_string(key_value)?;
+                        let key_value = self.coerce_primitive_to_string(key_value.clone())?;
                         let object_name = format!("__thaw_has_own_object_{}", self.next_binding);
                         self.next_binding += 1;
                         let key_name = format!("__thaw_has_own_key_{}", self.next_binding);
@@ -796,23 +795,18 @@ impl<'a> FnLowerer<'a> {
                         for comparison in comparisons {
                             result = self.lower_logical_expr(result, comparison, false)?;
                         }
-                        return self.wrap_call_argument_bindings(
-                            result,
-                            &[
-                                (object_name, object_type, object_value),
-                                (key_name, HirType::Str, key_value),
-                            ],
-                        );
+                        bindings.push((object_name, object_type, object_value));
+                        bindings.push((key_name, HirType::Str, key_value));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"is" {
-                        let [left, right] = call.args.as_slice() else {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.is")?;
+                        let [left_value, right_value] = arguments.as_slice() else {
                             return Err("`Object.is` expects exactly two arguments".into());
                         };
-                        if left.spread.is_some() || right.spread.is_some() {
-                            return Err("Object.is spread is not supported".into());
-                        }
-                        let left_value = self.lower_expr(&left.expr)?;
-                        let right_value = self.lower_expr(&right.expr)?;
+                        let left_value = left_value.clone();
+                        let right_value = right_value.clone();
                         let left_type = self.infer_expr_type(&left_value)?;
                         let right_type = self.infer_expr_type(&right_value)?;
                         if matches!(left_type, HirType::Json | HirType::Dynamic)
@@ -843,13 +837,9 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirExpr::Var(right_name.clone())),
                             )
                         };
-                        return self.wrap_call_argument_bindings(
-                            result,
-                            &[
-                                (left_name, left_type, left_value),
-                                (right_name, right_type, right_value),
-                            ],
-                        );
+                        bindings.push((left_name, left_type, left_value));
+                        bindings.push((right_name, right_type, right_value));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Number"
                         && matches!(property.sym.as_ref(), "parseFloat" | "parseInt")

@@ -1317,6 +1317,8 @@ The workspace crates have narrow responsibilities:
   values compare equal, signed zeros remain distinct, primitive strings compare
   by contents, and aggregate/Promise values use reference identity; both
   operands are evaluated once in order and may await
+- `Array.isArray`, the fixed-object reflection helpers above and `Object.is`
+  accept statically sized tuple spreads with the same single-evaluation order
 - Native strings implement `.indexOf()`, `.lastIndexOf()`, `.includes()`,
   `.startsWith()` and `.endsWith()` using JavaScript UTF-16 code-unit positions rather than UTF-8
   byte offsets. Search values and positions are coerced left-to-right, clamped
