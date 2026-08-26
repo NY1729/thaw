@@ -1286,6 +1286,9 @@ The workspace crates have narrow responsibilities:
   contextual callbacks may change the final element type; captures, empty
   inner/outer arrays, nested aggregates, `thisArg` ordering and awaited
   receivers are supported
+- Named typed callbacks and optional `thisArg` values can be supplied to native
+  array map/filter/flatMap/forEach/predicate/sort/reduce methods through fixed
+  tuple spreads
 - Nested homogeneous arrays implement `.flat()` with the default depth and
   non-negative, fractional or negative numeric-literal depths. Each requested
   static level is flattened into an arena-owned shallow result; depth zero and
