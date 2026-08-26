@@ -6928,6 +6928,9 @@ fn lower_generic_instance(
 /// non-generic interface to extend a concrete generic base or contain a
 /// concretely instantiated generic interface field, including forward
 /// references to the generic declaration and its non-generic bases.
+type UnionDiscriminants = HashMap<Symbol, Vec<Option<HirLit>>>;
+type ObjectArrayPropertyDiscriminants = HashMap<Vec<Symbol>, UnionDiscriminants>;
+
 #[derive(Default)]
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
@@ -6940,8 +6943,7 @@ struct GenericInterfaces<'a> {
     function_interface_chains: HashMap<Symbol, Symbol>,
     function_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
-    function_object_array_property_discriminants:
-        HashMap<Symbol, HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>>,
+    function_object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
 }
 
 impl GenericInterfaces<'_> {
@@ -7091,57 +7093,88 @@ fn array_element_union_discriminants(
 fn object_array_property_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
-) -> HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>> {
-    let raw = strip_parenthesized_ts_type(ty);
-    let unwrapped = if let TsType::TsTypeRef(reference) = raw {
-        if matches!(&reference.type_name, swc_ecma_ast::TsEntityName::Ident(name) if name.sym == *"Promise")
-        {
-            reference
-                .type_params
-                .as_ref()
-                .and_then(|arguments| arguments.params.first())
-                .map(AsRef::as_ref)
-                .unwrap_or(raw)
+) -> ObjectArrayPropertyDiscriminants {
+    fn collect(
+        ty: &TsType,
+        generic: &GenericInterfaces<'_>,
+        prefix: &mut Vec<Symbol>,
+        visiting: &mut HashSet<Symbol>,
+        result: &mut ObjectArrayPropertyDiscriminants,
+    ) {
+        let raw = strip_parenthesized_ts_type(ty);
+        let unwrapped = if let TsType::TsTypeRef(reference) = raw {
+            if matches!(&reference.type_name, swc_ecma_ast::TsEntityName::Ident(name) if name.sym == *"Promise")
+            {
+                reference
+                    .type_params
+                    .as_ref()
+                    .and_then(|arguments| arguments.params.first())
+                    .map(AsRef::as_ref)
+                    .unwrap_or(raw)
+            } else {
+                raw
+            }
         } else {
             raw
-        }
-    } else {
-        raw
-    };
-    let resolved = resolve_plain_alias_type(unwrapped, generic).unwrap_or(unwrapped);
-    let members = match resolved {
-        TsType::TsTypeLit(object) => object.members.as_slice(),
-        TsType::TsTypeRef(reference) => {
-            let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else {
-                return HashMap::new();
-            };
-            let Some(interface) = generic
-                .interfaces
-                .get(name.sym.as_ref())
-                .or_else(|| generic.plain_interfaces.get(name.sym.as_ref()))
-            else {
-                return HashMap::new();
-            };
-            interface.body.body.as_slice()
-        }
-        _ => return HashMap::new(),
-    };
-    members
-        .iter()
-        .filter_map(|member| {
+        };
+        let resolved = resolve_plain_alias_type(unwrapped, generic).unwrap_or(unwrapped);
+        let (members, visited_name) = match resolved {
+            TsType::TsTypeLit(object) => (object.members.as_slice(), None),
+            TsType::TsTypeRef(reference) => {
+                let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else {
+                    return;
+                };
+                let name = name.sym.to_string();
+                if !visiting.insert(name.clone()) {
+                    return;
+                }
+                let Some(interface) = generic
+                    .interfaces
+                    .get(&name)
+                    .or_else(|| generic.plain_interfaces.get(&name))
+                else {
+                    visiting.remove(&name);
+                    return;
+                };
+                (interface.body.body.as_slice(), Some(name))
+            }
+            _ => return,
+        };
+        for member in members {
             let TsTypeElement::TsPropertySignature(property) = member else {
-                return None;
+                continue;
             };
             let name = match property.key.as_ref() {
                 Expr::Ident(name) => name.sym.to_string(),
                 Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
-                _ => return None,
+                _ => continue,
             };
-            let annotation = property.type_ann.as_ref()?;
+            let Some(annotation) = &property.type_ann else {
+                continue;
+            };
+            prefix.push(name);
             let discriminants = array_element_union_discriminants(&annotation.type_ann, generic);
-            (!discriminants.is_empty()).then_some((name, discriminants))
-        })
-        .collect()
+            if discriminants.is_empty() {
+                collect(&annotation.type_ann, generic, prefix, visiting, result);
+            } else {
+                result.insert(prefix.clone(), discriminants);
+            }
+            prefix.pop();
+        }
+        if let Some(name) = visited_name {
+            visiting.remove(&name);
+        }
+    }
+
+    let mut result = HashMap::new();
+    collect(
+        ty,
+        generic,
+        &mut Vec::new(),
+        &mut HashSet::new(),
+        &mut result,
+    );
+    result
 }
 
 fn function_return_discriminants(
@@ -7197,7 +7230,7 @@ fn function_return_array_discriminants(
 fn function_return_object_array_property_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
-) -> HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>> {
+) -> ObjectArrayPropertyDiscriminants {
     let Some(resolved) = resolve_plain_alias_type(ty, generic) else {
         return HashMap::new();
     };
@@ -10836,14 +10869,13 @@ struct FnLowerer<'a> {
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     array_element_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
-    object_array_property_discriminants:
-        HashMap<Symbol, HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>>,
+    object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_object_array_property_discriminants:
-        HashMap<Symbol, HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>>,
+        HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     next_binding: usize,
@@ -12339,7 +12371,7 @@ impl<'a> FnLowerer<'a> {
             Expr::Member(member) => {
                 let property = member_property_name(&member.prop)?;
                 self.expression_object_array_property_discriminants(&member.obj)?
-                    .get(&property)
+                    .get(&vec![property])
                     .cloned()
             }
             Expr::Call(call) => {
@@ -12370,7 +12402,7 @@ impl<'a> FnLowerer<'a> {
     fn expression_object_array_property_discriminants(
         &self,
         expression: &Expr,
-    ) -> Option<HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>> {
+    ) -> Option<ObjectArrayPropertyDiscriminants> {
         match expression {
             Expr::Ident(identifier) => self
                 .object_array_property_discriminants
@@ -12398,6 +12430,18 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::Await(awaited) => {
                 self.expression_object_array_property_discriminants(&awaited.arg)
+            }
+            Expr::Member(member) => {
+                let property = member_property_name(&member.prop)?;
+                let nested = self
+                    .expression_object_array_property_discriminants(&member.obj)?
+                    .into_iter()
+                    .filter_map(|(path, discriminants)| {
+                        (path.first() == Some(&property) && path.len() > 1)
+                            .then(|| (path[1..].to_vec(), discriminants))
+                    })
+                    .collect::<ObjectArrayPropertyDiscriminants>();
+                (!nested.is_empty()).then_some(nested)
             }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
@@ -12544,7 +12588,7 @@ impl<'a> FnLowerer<'a> {
     fn expression_function_object_array_property_discriminants(
         &self,
         expression: &Expr,
-    ) -> Option<HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>> {
+    ) -> Option<ObjectArrayPropertyDiscriminants> {
         match expression {
             Expr::Ident(identifier) => self
                 .function_value_object_array_property_discriminants
