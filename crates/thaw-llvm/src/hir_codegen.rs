@@ -18781,6 +18781,34 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_static_block_super_members() {
+        let source = r#"
+            class Base {
+                static value: number = 40;
+                static bump(value: number): number { return value + 1; }
+                static get current(): number { return Base.value; }
+                static set current(value: number) { Base.value = value; }
+            }
+            class Derived extends Base {
+                static before: number = super.current;
+                static viaMethod: number = super.bump(super.value);
+                static { super.current = super.value + 2; }
+                static after: number = super.current;
+            }
+            function main(): void {
+                console.log(Derived.before);
+                console.log(Derived.viaMethod);
+                console.log(Derived.after);
+                console.log(Base.value);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "static_block_super_members"),
+            "40\n41\n42\n42\n"
+        );
+    }
+
+    #[test]
     fn compiles_and_runs_native_class_instance_methods() {
         let source = r#"
             class Counter {
