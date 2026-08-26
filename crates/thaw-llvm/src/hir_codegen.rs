@@ -19830,6 +19830,15 @@ mod tests {
                 }
                 write(value: string): string { this.value = value; return value; }
                 append(suffix: string): string { this.value += suffix; return this.value; }
+                format(label: string = "default", ...parts: string[]): string {
+                    if (label === "use-this") return this.value;
+                    return label + ":" + parts.join("|");
+                }
+                async formatAsync(label: string = "async-default", ...parts: string[]): Promise<string> {
+                    if (label === "use-this") return this.value;
+                    return label + ":" + parts.join("|");
+                }
+                defaultFromThis(value: string = this.value): string { return value; }
                 static staticValue: string = "static";
                 static staticRead(suffix: string): string { return this.staticValue + suffix; }
                 static async staticReadAsync(suffix: string): Promise<string> {
@@ -19841,6 +19850,7 @@ mod tests {
                 }
             }
             class Holder { constructor(public box: Box) {} }
+            class DerivedBox extends Box {}
             function make(): Box {
                 console.log("extract-receiver");
                 return new Box("discarded");
@@ -19853,6 +19863,10 @@ mod tests {
                 const maybeAsync = extracted.maybeAsync;
                 const write = extracted.write;
                 const append = extracted.append;
+                const format = extracted.format;
+                const formatAsync = extracted.formatAsync;
+                const defaultFromThis = extracted.defaultFromThis;
+                const inheritedFormat = new DerivedBox("derived").format;
                 const holderRead = new Holder(new Box("holder")).box.read;
                 const alias = read;
                 const args: [string] = ["?"];
@@ -19893,11 +19907,18 @@ mod tests {
                 try { staticMaybe(true); } catch (error) { console.log(error); }
                 try { write((console.log("assignment-rhs"), "changed")); } catch (error) { console.log(error); }
                 try { append((console.log("compound-rhs"), "!")); } catch (error) { console.log(error); }
+                console.log(format());
+                console.log(format(undefined, "a", "b"));
+                console.log(format("plain", "x", "y"));
+                console.log(await formatAsync());
+                console.log(defaultFromThis("explicit"));
+                console.log(inheritedFormat());
+                try { defaultFromThis(); } catch (error) { console.log(error); }
             }
         "#;
         assert_eq!(
             compile_and_run(source, "saved_unbound_native_method_call_apply"),
-            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\n"
+            "extract-receiver\nstatic-bind-this\ncall!\napply?\nasync!\nbound!\nasync-bound!\nstatic-call-this\nstatic!\nstatic?\nstatic!\nchain!\nordinary\nreassigned!\nundefined-this\nundefined-async-this\nundefined-static-this\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'value')\nCannot read properties of undefined (reading 'staticValue')\nassignment-rhs\nCannot set properties of undefined (setting 'value')\ncompound-rhs\nCannot read properties of undefined (reading 'value')\ndefault:\ndefault:a|b\nplain:x|y\nasync-default:\nexplicit\ndefault:\nCannot read properties of undefined (reading 'value')\n"
         );
     }
 

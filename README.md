@@ -1443,6 +1443,8 @@ The workspace crates have narrow responsibilities:
   executes through an unbound adapter with `this === undefined`; control flow that does not touch a
   member can complete normally, while a reached `this.member` access raises the corresponding
   JavaScript-style `TypeError` message at that point. This applies to synchronous, async and static methods;
+  Ordinary unbound calls reuse the native default, optional, explicit-`undefined`, tuple-spread and rest-packing
+  adapters, including inherited methods and default expressions that themselves observe `this`.
   saved static operations evaluate but otherwise ignore `thisArg`, matching direct native static operations.
   Instance calls through `this` are specialized directly, including calls nested inside
   an enclosing generic method after its outer type tuple has become concrete.
