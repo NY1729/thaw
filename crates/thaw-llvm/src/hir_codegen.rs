@@ -19525,9 +19525,13 @@ mod tests {
     }
 
     #[test]
-    fn compiles_async_arrows_without_await() {
+    fn compiles_async_arrows() {
         let source = r#"
             interface Worker { run(): Promise<number>; }
+            async function delayed(value: number): Promise<number> {
+                await sleep(1);
+                return value;
+            }
             async function main(): Promise<void> {
                 const offset: number = 2;
                 const double: (value: number) => Promise<number> =
@@ -19546,11 +19550,14 @@ mod tests {
                     run: async (): Promise<number> => 40 + offset,
                 };
                 console.log(await worker.run());
+                const adopted: (value: number) => Promise<number> =
+                    async value => await delayed(value);
+                console.log(await adopted(42));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "expression_bodied_async_arrow"),
-            "42\n42\ndone\n42\n"
+            "42\n42\ndone\n42\n42\n"
         );
     }
 
