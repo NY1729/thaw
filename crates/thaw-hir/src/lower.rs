@@ -1143,7 +1143,11 @@ fn collect_native_classes<'a>(
             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                 format!("class `{name}` field `{field_name}` needs a type annotation")
             })?;
-            let field_type = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            let mut field_type =
+                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            if property.is_optional {
+                field_type = optional_parameter_type(field_type);
+            }
             if let Some((_, inherited_type)) =
                 fields.iter().find(|(existing, _)| existing == &field_name)
             {
@@ -2118,13 +2122,17 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                 format!("class `{class_name}` static field `{field}` needs a type annotation")
             })?;
-            if property.value.is_none() {
+            let symbol = class_static_field_symbol(class_name, &field);
+            let mut ty = lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)?;
+            if property.is_optional {
+                ty = optional_parameter_type(ty);
+            }
+            if property.value.is_none() && !matches!(ty, HirType::Optional(_) | HirType::Nullish(_))
+            {
                 return Err(format!(
-                    "class `{class_name}` static field `{field}` needs an initializer"
+                    "class `{class_name}` static field `{field}` without an initializer needs an optional or undefined-capable type"
                 ));
             }
-            let symbol = class_static_field_symbol(class_name, &field);
-            let ty = lower_ts_type(&annotation.type_ann, &interfaces, &generic_interfaces)?;
             if global_types.insert(symbol.clone(), ty).is_some() {
                 return Err(format!(
                     "class `{class_name}` static field `{field}` conflicts with an existing generated binding"
@@ -2658,13 +2666,21 @@ fn lower_top_level_initializers(
                     let field = class_property_name(&property.key)?;
                     let symbol = class_static_field_symbol(class_name, &field);
                     let expected = global_types[&symbol].clone();
-                    let init = lowerer.lower_expr(
-                        property
-                            .value
-                            .as_deref()
-                            .expect("static fields were validated above"),
-                    )?;
-                    let init = lowerer.coerce_to_declared(&expected, init)?;
+                    let init = match property.value.as_deref() {
+                        Some(value) => {
+                            let init = lowerer.lower_expr(value)?;
+                            lowerer.coerce_to_declared(&expected, init)?
+                        }
+                        None => match &expected {
+                            HirType::Optional(payload) => {
+                                HirExpr::OptionalNone(payload.as_ref().clone())
+                            }
+                            HirType::Nullish(payload) => {
+                                HirExpr::NullishUndefined(payload.as_ref().clone())
+                            }
+                            _ => unreachable!("uninitialized static fields were validated above"),
+                        },
+                    };
                     steps.push(HirInitStep::StoreGlobal(symbol, init));
                 }
                 lowerer.super_initializer = saved_super;
@@ -2815,13 +2831,19 @@ fn lower_static_class_globals(
             let field = class_property_name(&property.key)?;
             let symbol = class_static_field_symbol(class_name, &field);
             let ty = global_types[&symbol].clone();
-            let init = lowerer.lower_expr(
-                property
-                    .value
-                    .as_deref()
-                    .expect("static fields were validated above"),
-            )?;
-            let init = lowerer.coerce_to_declared(&ty, init)?;
+            let init = match property.value.as_deref() {
+                Some(value) => {
+                    let init = lowerer.lower_expr(value)?;
+                    lowerer.coerce_to_declared(&ty, init)?
+                }
+                None => match &ty {
+                    HirType::Optional(payload) => HirExpr::OptionalNone(payload.as_ref().clone()),
+                    HirType::Nullish(payload) => {
+                        HirExpr::NullishUndefined(payload.as_ref().clone())
+                    }
+                    _ => unreachable!("uninitialized static fields were validated above"),
+                },
+            };
             globals.push(crate::HirGlobal {
                 name: symbol.clone(),
                 ty,
@@ -4837,17 +4859,28 @@ fn lower_class_constructor(
         if property.is_static {
             continue;
         }
-        if let Some(initializer) = &property.value {
-            let field = class_property_name(&property.key)?;
-            let HirType::Object(fields) = &instance_type else {
-                unreachable!("native class layouts are fixed objects")
-            };
-            let expected = fields
-                .iter()
-                .find_map(|(name, ty)| (name == &field).then(|| ty.clone()))
-                .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
-            let value = lowerer.lower_expr(initializer)?;
-            let value = lowerer.coerce_to_declared(&expected, value)?;
+        let field = class_property_name(&property.key)?;
+        let HirType::Object(fields) = &instance_type else {
+            unreachable!("native class layouts are fixed objects")
+        };
+        let expected = fields
+            .iter()
+            .find_map(|(name, ty)| (name == &field).then(|| ty.clone()))
+            .ok_or_else(|| format!("class `{class_name}` has no field `{field}`"))?;
+        let value = match property.value.as_deref() {
+            Some(initializer) => {
+                let value = lowerer.lower_expr(initializer)?;
+                Some(lowerer.coerce_to_declared(&expected, value)?)
+            }
+            None => match &expected {
+                HirType::Optional(payload) => Some(HirExpr::OptionalNone(payload.as_ref().clone())),
+                HirType::Nullish(payload) => {
+                    Some(HirExpr::NullishUndefined(payload.as_ref().clone()))
+                }
+                _ => None,
+            },
+        };
+        if let Some(value) = value {
             own_initializers.push(HirStmt::Expr(HirExpr::PropAssign(
                 Box::new(HirExpr::Var(this_name.clone())),
                 instance_type.clone(),
@@ -22344,6 +22377,17 @@ mod tests {
         let error = lower_module(&wrong_field).unwrap_err();
         assert!(
             error.contains("implements abstract field `name`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_uninitialized_non_optional_native_static_fields() {
+        let module =
+            thaw_parser::parse_typescript("class Invalid { static value: number; }").unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(
+            error.contains("needs an optional or undefined-capable type"),
             "{error}"
         );
     }

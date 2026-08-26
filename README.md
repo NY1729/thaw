@@ -1381,7 +1381,7 @@ The workspace crates have narrow responsibilities:
   descendants must provide a same-typed field implementation, including through abstract
   intermediate classes.
   Runtime class values, dynamically computed members, `new.target`,
-  constructor object returns, uninitialized static fields and full JavaScript
+  constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
 - Tagged native `T | undefined` values now support annotations, returns,
   strict undefined comparison, logging and array lookup APIs without sentinel

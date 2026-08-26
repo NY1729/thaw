@@ -117,6 +117,9 @@ specialized along with the body.
 Abstract instance fields reserve their declaration-ordered base slot. The nearest concrete
 field declaration implements that slot without duplicating layout storage; missing and
 type-incompatible implementations are rejected for every constructible descendant.
+Uninitialized optional or explicitly undefined-capable instance/private/static fields receive
+an explicit native `undefined` tag. Inherited static accessors continue sharing the declaring
+class's storage; an uninitialized static field whose type excludes `undefined` is rejected.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing
