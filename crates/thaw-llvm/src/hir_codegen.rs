@@ -18935,6 +18935,29 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_super_accessors() {
+        let source = r#"
+            class Base {
+                stored: number;
+                constructor(value: number) { this.stored = value; }
+                get value(): number { return this.stored; }
+                set value(next: number) { this.stored = next; }
+            }
+            class Derived extends Base {
+                constructor(value: number) { super(value); }
+                get value(): number { return super.value + 1; }
+                set value(next: number) { super.value = next + 1; }
+            }
+            function main(): void {
+                const value = new Derived(1);
+                console.log(value.value = 20);
+                console.log(value.value);
+            }
+        "#;
+        assert_eq!(compile_and_run(source, "super_accessors"), "20\n22\n");
+    }
+
+    #[test]
     fn frame_split_preserves_and_mutates_locals_across_awaits() {
         let source = r#"
             async function main(): Promise<void> {
