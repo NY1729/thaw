@@ -19093,6 +19093,7 @@ mod tests {
                 constructor(public scale: number = 2) {}
                 abstract area(multiplier?: number): number;
                 abstract get label(): string;
+                describe(): string { return String(this.area()); }
             }
             abstract class Deferred extends Shape {}
             class Square extends Shape {
@@ -19101,16 +19102,15 @@ mod tests {
                     return this.side * this.side * this.scale * (multiplier ?? 1);
                 }
                 get label(): string { return "square"; }
-                describe(): string { return this.label + ":" + String(this.area()); }
             }
             class Concrete extends Deferred {
                 area(multiplier?: number): number { return this.scale * (multiplier ?? 1); }
                 get label(): string { return "concrete"; }
-                describe(): string { return this.label + ":" + String(this.area()); }
             }
             function main(): void {
                 const square = new Square();
                 const concrete = new Concrete();
+                console.log(square.label);
                 console.log(square.describe());
                 console.log(square.area(2));
                 console.log(concrete.describe());
@@ -19118,7 +19118,44 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "native_abstract_classes"),
-            "square:18\n36\nconcrete:2\n"
+            "square\n18\n36\n2\n"
+        );
+    }
+
+    #[test]
+    fn compiles_virtual_dispatch_in_inherited_native_methods() {
+        let source = r#"
+            class Base {
+                value(): number { return 1; }
+                get label(): string { return "base"; }
+                read(): number { return this.value(); }
+                readLabel(): string { return this.label; }
+                async readAsync(): Promise<number> {
+                    await sleep(1);
+                    return this.value();
+                }
+            }
+            class Derived extends Base {
+                value(): number { return super.value() + 1; }
+                get label(): string { return "derived"; }
+            }
+            class Leaf extends Derived {
+                get label(): string { return "leaf"; }
+            }
+            async function main(): Promise<void> {
+                const derived = new Derived();
+                const leaf = new Leaf();
+                console.log(derived.read());
+                console.log(derived.readLabel());
+                console.log(await derived.readAsync());
+                console.log(leaf.read());
+                console.log(leaf.readLabel());
+                console.log(await leaf.readAsync());
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "native_virtual_dispatch"),
+            "2\nderived\n2\n2\nleaf\n2\n"
         );
     }
 

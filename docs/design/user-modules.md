@@ -77,8 +77,7 @@ across source-file boundaries without a second type system.
 
 ## Current boundaries
 
-Generic classes, abstract fields and fully virtual override dispatch from inherited concrete
-method bodies, dynamically computed members, non-top-level or differently
+Generic classes, abstract fields, dynamically computed members, non-top-level or differently
 internally named class expressions, top-level
 declarations/statements outside the general HIR-supported subset, package multi-capture
 package export keys, and full ESM live bindings are outside the current typed AOT subset.
@@ -111,6 +110,10 @@ class collection. This preserves distinct base/derived slots, static storage, pr
 Abstract classes retain constructor/layout inheritance but reject direct construction.
 Concrete descendants must implement every inherited abstract method/accessor with matching
 parameter, return, async and rest signatures, including through abstract intermediate classes.
+Inherited concrete instance methods are re-lowered against each concrete derived receiver rather
+than forwarding to one base symbol. Calls through `this` therefore select the final method/getter,
+while `super` retains the declaring method's lexical base; async/default/rest adapters are
+specialized along with the body.
 Native `instanceof` evaluates its left operand exactly once and checks the encoded fixed-layout
 inheritance chain; runtime class values and union-polymorphic instance tests remain separate gaps.
 Cyclic user-module graphs are diagnosed rather than executed. Missing

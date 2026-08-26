@@ -1375,8 +1375,9 @@ The workspace crates have narrow responsibilities:
   writes, calls, private brand checks and same-spelling members in base/derived classes.
   Abstract classes provide non-constructible base layouts and require compatible
   concrete implementations for inherited abstract methods/accessors across multiple
-  levels. Abstract fields and fully virtual override dispatch from inherited concrete
-  method bodies remain outside the fixed-dispatch subset.
+  levels. Inherited concrete instance methods are specialized for each derived receiver,
+  preserving virtual method/accessor overrides, lexical `super`, async execution and
+  abstract-member dispatch. Abstract fields remain outside the fixed-layout subset.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model

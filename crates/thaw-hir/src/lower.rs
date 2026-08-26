@@ -1008,51 +1008,6 @@ fn class_member_symbol(class: &str, member: &swc_ecma_ast::ClassMethod) -> Resul
     })
 }
 
-fn inherited_class_forwarder(
-    base_symbol: Symbol,
-    derived_symbol: Symbol,
-    signature: &FnSignature,
-    is_static: bool,
-) -> HirFunction {
-    let params = signature
-        .params
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| HirParam {
-            name: if !is_static && index == 0 {
-                "__thaw_this".into()
-            } else {
-                format!("__thaw_inherited_arg_{index}")
-            },
-            ty: ty.clone(),
-        })
-        .collect::<Vec<_>>();
-    let call = HirExpr::Call(
-        Box::new(HirExpr::Var(base_symbol)),
-        params
-            .iter()
-            .map(|parameter| HirExpr::Var(parameter.name.clone()))
-            .collect(),
-    );
-    let call = if signature.is_async {
-        HirExpr::Await(Box::new(call))
-    } else {
-        call
-    };
-    let body = if signature.ret == HirType::Void {
-        vec![HirStmt::Expr(call), HirStmt::Return(None)]
-    } else {
-        vec![HirStmt::Return(Some(call))]
-    };
-    HirFunction {
-        name: derived_symbol,
-        params,
-        ret: signature.ret.clone(),
-        is_async: signature.is_async,
-        body,
-    }
-}
-
 fn super_property_name(property: &SuperProp) -> Result<Symbol, String> {
     match property {
         SuperProp::Ident(name) => Ok(name.sym.to_string()),
@@ -1906,6 +1861,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         ))
     };
     let mut inherited_class_functions = Vec::new();
+    let mut inherited_virtual_class_decls = Vec::new();
     for derived in &class_decls {
         let derived_name = derived.ident.sym.to_string();
         let derived_type = interfaces[&derived_name].clone();
@@ -1973,12 +1929,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     signature.params[0] = derived_type.clone();
                 }
                 signatures.insert(derived_symbol.clone(), signature.clone());
-                inherited_class_functions.push(inherited_class_forwarder(
-                    base_symbol.clone(),
-                    derived_symbol.clone(),
-                    &signature,
-                    method.is_static,
-                ));
+                if !derived.class.is_abstract {
+                    let mut inherited = (*base).clone();
+                    inherited.ident = derived.ident.clone();
+                    inherited.class.body = vec![ClassMember::Method(method.clone())];
+                    inherited.class.is_abstract = false;
+                    inherited.class.implements.clear();
+                    inherited_virtual_class_decls.push(inherited);
+                }
 
                 let patterns = method
                     .function
@@ -2000,12 +1958,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             wrapper_signature.params[0] = derived_type.clone();
                         }
                         signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
-                        inherited_class_functions.push(inherited_class_forwarder(
-                            base_wrapper,
-                            derived_wrapper,
-                            &wrapper_signature,
-                            method.is_static,
-                        ));
                     }
                 }
                 for mask in omitted_parameter_masks(&patterns, receiver_count)? {
@@ -2018,12 +1970,6 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         wrapper_signature.params[0] = derived_type.clone();
                     }
                     signatures.insert(derived_wrapper.clone(), wrapper_signature.clone());
-                    inherited_class_functions.push(inherited_class_forwarder(
-                        base_wrapper,
-                        derived_wrapper,
-                        &wrapper_signature,
-                        method.is_static,
-                    ));
                 }
             }
             base_name = base
@@ -2450,6 +2396,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         )?);
     }
     for declaration in class_decls {
+        specialized.extend(lower_class_methods(
+            declaration,
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            &global_types,
+            &immutable_globals,
+        )?);
+    }
+    for declaration in &inherited_virtual_class_decls {
         specialized.extend(lower_class_methods(
             declaration,
             &signatures,
@@ -5168,7 +5126,7 @@ fn lower_class_methods(
             MethodKind::Method => class_method_symbol(&class_name, &method_name),
         };
         let signature = &signatures[&symbol];
-        if method.is_abstract {
+        if method.is_abstract || (declaration.class.is_abstract && !method.is_static) {
             continue;
         }
         let mut params = if method.is_static {
