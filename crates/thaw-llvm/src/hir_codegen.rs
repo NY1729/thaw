@@ -5057,6 +5057,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::ObjectLit(fields) => self.compile_object_lit(fields),
+            HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type),
             HirExpr::PropAccess(obj, object_ty, field) => {
                 let field_ty = self.field_type(object_ty, field)?;
                 let llvm_ty = self.basic_type(&field_ty)?;
@@ -6292,6 +6293,57 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         Ok(base_ptr.into())
+    }
+
+    fn compile_object_alloc(
+        &mut self,
+        object_type: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let HirType::Object(fields) = object_type else {
+            return Err(format!(
+                "object allocation requires an object type, got {object_type:?}"
+            ));
+        };
+        let size = fields
+            .iter()
+            .map(|(_, field_type)| object_field_storage_bytes(field_type))
+            .sum::<u64>()
+            .max(1);
+        let i64_type = self.context.i64_type();
+        let allocation = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    i64_type.const_int(size, false).into(),
+                    i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
+                ],
+                "object_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an object allocation")?
+            .into_pointer_value();
+        let mut byte_offset = 0u64;
+        for (_, field_type) in fields {
+            let field_pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        allocation,
+                        &[i64_type.const_int(byte_offset, false)],
+                        "object_zero_field",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let zero = self.compile_zero_value(field_type)?;
+            self.builder
+                .build_store(field_pointer, zero)
+                .map_err(|error| error.to_string())?;
+            byte_offset += object_field_storage_bytes(field_type);
+        }
+        Ok(allocation.into())
     }
 
     /// Looks up `field`'s declared type within `object_ty`, so a read
@@ -18477,6 +18529,53 @@ mod tests {
             compile_and_run(source, "top_level_destructuring_default_rest"),
             "42\n42\nready\n42\n"
         );
+    }
+
+    #[test]
+    fn allocates_object_identity_before_field_assignment() {
+        let object_type = HirType::Object(vec![
+            ("value".into(), HirType::F64),
+            ("label".into(), HirType::Str),
+        ]);
+        let object = HirExpr::Var("instance".into());
+        let program = HirProgram {
+            functions: vec![HirFunction {
+                name: "main".into(),
+                params: Vec::new(),
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Let(
+                        "instance".into(),
+                        object_type.clone(),
+                        HirExpr::ObjectAlloc(object_type.clone()),
+                    ),
+                    HirStmt::Expr(HirExpr::PropAssign(
+                        Box::new(object.clone()),
+                        object_type.clone(),
+                        "value".into(),
+                        Box::new(HirExpr::Lit(HirLit::F64(42.0))),
+                    )),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("console.log".into())),
+                        vec![HirExpr::PropAccess(
+                            Box::new(object),
+                            object_type,
+                            "value".into(),
+                        )],
+                    )),
+                    HirStmt::Return(None),
+                ],
+            }],
+            ..HirProgram::default()
+        };
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, "object_identity_allocation");
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.print_to_string();
+        assert!(ir.contains("%object_alloc = call ptr @thaw_arena_alloc"));
+        assert!(ir.contains("%object_zero_field"));
+        assert!(ir.contains("store double 4.200000e+01"));
     }
 
     /// Same mechanism, but through the Lambda `handler` entry point instead
