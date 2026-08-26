@@ -12028,6 +12028,23 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn expression_identifier_alias_source(&self, expression: &Expr) -> Option<Symbol> {
+        match expression {
+            Expr::Ident(identifier) => Some(self.resolve_binding(identifier.sym.as_ref())),
+            Expr::Paren(parenthesized) => {
+                self.expression_identifier_alias_source(&parenthesized.expr)
+            }
+            Expr::TsAs(assertion) => self.expression_identifier_alias_source(&assertion.expr),
+            Expr::TsTypeAssertion(assertion) => {
+                self.expression_identifier_alias_source(&assertion.expr)
+            }
+            Expr::TsConstAssertion(assertion) => {
+                self.expression_identifier_alias_source(&assertion.expr)
+            }
+            _ => None,
+        }
+    }
+
     fn expression_function_discriminants(
         &self,
         expression: &Expr,
@@ -13409,6 +13426,7 @@ impl<'a> FnLowerer<'a> {
                     .init
                     .as_deref()
                     .ok_or_else(|| format!("`{name}` needs an initializer"))?;
+                let correlated_alias_source = self.expression_identifier_alias_source(init);
                 if let (Expr::Arrow(arrow), Some(annotation)) = (init, binding.type_ann.as_ref()) {
                     if arrow.type_params.is_some() {
                         if let Some((expected, callable_name)) =
@@ -13652,6 +13670,9 @@ impl<'a> FnLowerer<'a> {
                 let value = self.coerce_to_declared(&ty, value)?;
 
                 let hir_name = self.bind_local(&name, ty.clone());
+                if let Some(source) = correlated_alias_source {
+                    self.propagate_destructured_union_alias(&source, &hir_name);
+                }
                 if let Some(annotation) = &binding.type_ann {
                     let discriminants =
                         object_union_discriminants(&annotation.type_ann, self.generic_interfaces);
@@ -14679,6 +14700,59 @@ impl<'a> FnLowerer<'a> {
         self.destructured_union_correlations.remove(name);
         for correlation in self.destructured_union_correlations.values_mut() {
             correlation.targets.retain(|target| target.name != name);
+        }
+    }
+
+    fn propagate_destructured_union_alias(&mut self, source: &str, alias: &str) {
+        if let Some(correlation) = self.destructured_union_correlations.get(source).cloned() {
+            self.destructured_union_correlations
+                .insert(alias.to_string(), correlation);
+        }
+        for correlation in self.destructured_union_correlations.values_mut() {
+            let Some(source_target) = correlation
+                .targets
+                .iter()
+                .find(|target| target.name == source)
+                .cloned()
+            else {
+                continue;
+            };
+            if correlation
+                .targets
+                .iter()
+                .any(|target| target.name == alias)
+            {
+                continue;
+            }
+            let Some(HirType::Union(alias_elements)) = self.scope.get(alias) else {
+                continue;
+            };
+            let mut source_members = Vec::with_capacity(source_target.source_members.len());
+            let mut compatible = true;
+            for source_group in &source_target.source_members {
+                let mut aliases = Vec::new();
+                for source_index in source_group {
+                    let source_type = &source_target.elements[*source_index];
+                    let Some(alias_index) = alias_elements
+                        .iter()
+                        .position(|alias_type| alias_type == source_type)
+                    else {
+                        compatible = false;
+                        break;
+                    };
+                    if !aliases.contains(&alias_index) {
+                        aliases.push(alias_index);
+                    }
+                }
+                source_members.push(aliases);
+            }
+            if compatible {
+                correlation.targets.push(CorrelatedUnionTarget {
+                    name: alias.to_string(),
+                    elements: alias_elements.clone(),
+                    source_members,
+                });
+            }
         }
     }
 
