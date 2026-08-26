@@ -16779,6 +16779,13 @@ mod tests {
                 await sleep(1);
                 return [{ kind: "text", value: "returned" }];
             }
+            function producedHolder(): ResultHolder {
+                return { results: [{ kind: "number", value: 14 }] };
+            }
+            async function delayedHolder(): Promise<ResultHolder> {
+                await sleep(1);
+                return { results: [{ kind: "text", value: "async holder" }] };
+            }
             function consumeResults(results: Result[]): string {
                 for (const { kind, value } of results) {
                     if (kind === "number") return String(value + 4);
@@ -16845,6 +16852,14 @@ mod tests {
                 console.log(consumeHolder({
                     results: [{ kind: "text", value: "nested" }]
                 }));
+                for (const { kind, value } of producedHolder().results) {
+                    if (kind === "number") console.log(value + 1);
+                    else console.log(value + " produced holder");
+                }
+                for (const item of (await delayedHolder()).results) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + "!");
+                }
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -16902,7 +16917,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
