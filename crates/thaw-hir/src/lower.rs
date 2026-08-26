@@ -32,7 +32,8 @@ use swc_ecma_ast::{
     MemberProp, MethodKind, Module, ModuleDecl, ModuleItem, ObjectLit as SwcObjectLit,
     ObjectPatProp, OptChainBase, ParamOrTsParamProp, Pat, Prop, PropName, PropOrSpread,
     SimpleAssignTarget, Stmt, TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind,
-    TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl, VarDeclOrExpr,
+    TsParamPropParam, TsType, TsTypeElement, TsUnionOrIntersectionType, UnaryOp, UpdateOp, VarDecl,
+    VarDeclOrExpr,
 };
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -748,6 +749,28 @@ fn class_name_from_type(ty: &HirType) -> Option<&str> {
     })
 }
 
+fn class_constructor_param_pattern(parameter: &ParamOrTsParamProp) -> Pat {
+    match parameter {
+        ParamOrTsParamProp::Param(parameter) => parameter.pat.clone(),
+        ParamOrTsParamProp::TsParamProp(property) => match &property.param {
+            TsParamPropParam::Ident(binding) => Pat::Ident(binding.clone()),
+            TsParamPropParam::Assign(assignment) => Pat::Assign(assignment.clone()),
+        },
+    }
+}
+
+fn parameter_property_binding(
+    property: &swc_ecma_ast::TsParamProp,
+) -> Result<&swc_ecma_ast::BindingIdent, String> {
+    match &property.param {
+        TsParamPropParam::Ident(binding) => Ok(binding),
+        TsParamPropParam::Assign(assignment) => match assignment.left.as_ref() {
+            Pat::Ident(binding) => Ok(binding),
+            _ => Err("constructor parameter properties require identifier bindings".into()),
+        },
+    }
+}
+
 fn collect_native_classes<'a>(
     module: &'a Module,
     interfaces: &mut HashMap<Symbol, HirType>,
@@ -793,6 +816,35 @@ fn collect_native_classes<'a>(
             }
             let annotation = property.type_ann.as_ref().ok_or_else(|| {
                 format!("class `{name}` field `{field_name}` needs a type annotation")
+            })?;
+            fields.push((
+                field_name,
+                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?,
+            ));
+        }
+        for property in declaration
+            .class
+            .body
+            .iter()
+            .filter_map(|member| match member {
+                ClassMember::Constructor(constructor) => Some(&constructor.params),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|parameter| match parameter {
+                ParamOrTsParamProp::TsParamProp(property) => Some(property),
+                ParamOrTsParamProp::Param(_) => None,
+            })
+        {
+            let binding = parameter_property_binding(property)?;
+            let field_name = binding.id.sym.to_string();
+            if fields.iter().any(|(existing, _)| existing == &field_name) {
+                return Err(format!(
+                    "class `{name}` parameter property duplicates field `{field_name}`"
+                ));
+            }
+            let annotation = binding.type_ann.as_ref().ok_or_else(|| {
+                format!("class `{name}` parameter property `{field_name}` needs a type annotation")
             })?;
             fields.push((
                 field_name,
@@ -1001,18 +1053,15 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         constructor
                             .params
                             .iter()
-                            .map(|parameter| match parameter {
-                                ParamOrTsParamProp::Param(parameter) => lower_param(
-                                    &parameter.pat,
+                            .map(|parameter| {
+                                lower_param(
+                                    &class_constructor_param_pattern(parameter),
                                     &interfaces,
                                     &generic_interfaces,
                                     false,
                                     &HashMap::new(),
                                 )
-                                .map(|parameter| parameter.ty),
-                                ParamOrTsParamProp::TsParamProp(_) => Err(format!(
-                                    "class `{name}` constructor parameter properties are not supported yet"
-                                )),
+                                .map(|parameter| parameter.ty)
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -3283,13 +3332,9 @@ fn lower_class_constructor(
         .unwrap_or_default();
     let mut params = Vec::with_capacity(source_params.len());
     for (index, parameter) in source_params.iter().enumerate() {
-        let ParamOrTsParamProp::Param(parameter) = parameter else {
-            return Err(format!(
-                "class `{class_name}` constructor parameter properties are not supported yet"
-            ));
-        };
+        let pattern = class_constructor_param_pattern(parameter);
         let mut parameter = lower_param(
-            &parameter.pat,
+            &pattern,
             interfaces,
             generic_interfaces,
             false,
@@ -3359,6 +3404,18 @@ fn lower_class_constructor(
                 Box::new(value),
             )));
         }
+    }
+    for (source, parameter) in source_params.iter().zip(&params) {
+        let ParamOrTsParamProp::TsParamProp(property) = source else {
+            continue;
+        };
+        let field = parameter_property_binding(property)?.id.sym.to_string();
+        body.push(HirStmt::Expr(HirExpr::PropAssign(
+            Box::new(HirExpr::Var(this_name.clone())),
+            instance_type.clone(),
+            field,
+            Box::new(HirExpr::Var(parameter.name.clone())),
+        )));
     }
     if let Some(constructor) = constructor {
         let block = constructor.body.as_ref().ok_or_else(|| {
@@ -19156,5 +19213,42 @@ mod tests {
             setter.body.last(),
             Some(HirStmt::Return(Some(HirExpr::Var(name)))) if name == "next"
         ));
+    }
+
+    #[test]
+    fn lowers_constructor_parameter_properties_as_instance_fields() {
+        let program = lower(
+            r#"class Point {
+                constructor(public x: number, readonly label: string) {}
+                sum(y: number): number { return this.x + y; }
+            }
+            function main(): number {
+                const point = new Point(40, "ready");
+                console.log(point.label);
+                return point.sum(2);
+            }"#,
+        );
+        let constructor = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Point_constructor")
+            .unwrap();
+        let HirType::Object(fields) = &constructor.ret else {
+            panic!("class layout")
+        };
+        assert!(fields
+            .iter()
+            .any(|(name, ty)| name == "x" && ty == &HirType::F64));
+        assert!(fields
+            .iter()
+            .any(|(name, ty)| name == "label" && ty == &HirType::Str));
+        assert_eq!(
+            constructor
+                .body
+                .iter()
+                .filter(|statement| matches!(statement, HirStmt::Expr(HirExpr::PropAssign(..))))
+                .count(),
+            2
+        );
     }
 }
