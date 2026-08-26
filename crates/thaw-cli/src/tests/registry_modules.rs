@@ -385,7 +385,7 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let request = |target: &str| {
+    fn request(port: u16, target: &str) -> String {
         let mut stream = (0..200)
             .find_map(|_| match TcpStream::connect(("127.0.0.1", port)) {
                 Ok(stream) => Some(stream),
@@ -401,9 +401,10 @@ fn node_http_serves_a_real_request_from_a_static_binary() {
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
-    };
-    let response = request("/health");
-    let second_response = request("/ready");
+    }
+    let first_request = std::thread::spawn(move || request(port, "/health"));
+    let second_response = request(port, "/ready");
+    let response = first_request.join().unwrap();
     let result = child.wait_with_output().unwrap();
     assert!(
         result.status.success(),
@@ -749,4 +750,3 @@ fn runs_a_multifile_lambda_with_two_bare_import_packages() {
     assert!(String::from_utf8_lossy(&result.stdout).contains("42"));
     let _ = std::fs::remove_dir_all(dir);
 }
-
