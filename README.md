@@ -1432,6 +1432,8 @@ The workspace crates have narrow responsibilities:
   declaring native class, including nested inference into generic static methods.
   Static methods and blocks also route `this` field/accessor assignment, compound updates
   and prefix/postfix updates through shared static storage with readonly checks.
+  Static field initializers use the same declaring-class resolution for source-ordered
+  `this.field` reads and explicitly instantiated generic static method calls.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model

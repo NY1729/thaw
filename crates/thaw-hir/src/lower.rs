@@ -25499,6 +25499,27 @@ mod tests {
     }
 
     #[test]
+    fn lowers_generic_static_this_initializers_on_the_shared_owner() {
+        let program = lower(
+            r#"class Box<T> {
+                static label: string = "ready";
+                static identity<U>(value: U): U { return value; }
+                static initialized: string = this.identity<string>(this.label);
+                constructor(public value: T) {}
+            }
+            function main(): void { new Box(1); console.log(Box.initialized); }"#,
+        );
+        let owner = generic_class_static_owner("Box");
+        for field in ["label", "initialized"] {
+            let symbol = class_static_field_symbol(&owner, field);
+            assert!(
+                program.globals.iter().any(|global| global.name == symbol),
+                "missing shared static global {symbol}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_assignment_to_readonly_native_static_field() {
         let module = thaw_parser::parse_typescript(
             r#"class Constants { static readonly answer: number = 42; }
