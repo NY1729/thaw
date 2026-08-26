@@ -630,6 +630,7 @@ struct StandaloneWasmMemory {
 #[derive(Default)]
 struct WasmStoreData {
     wasi: Option<WasiCtx>,
+    externrefs: HashMap<u32, wasmi::ExternRef>,
 }
 
 struct WasmTable {
@@ -791,6 +792,31 @@ fn wasm_restore_value<'js>(ctx: Ctx<'js>, handle: u32) -> rquickjs::Result<Value
     value.value.restore(&ctx)
 }
 
+fn wasm_reference_stats() -> String {
+    let imports = WASM_JS_IMPORTS.with(|imports| imports.borrow().1.len());
+    let values = WASM_JS_VALUES.with(|values| values.borrow().1.len());
+    let (modules, instances, store_externrefs) = WASM.with(|table| {
+        let table = table.borrow();
+        (
+            table.modules.len(),
+            table.instances.len(),
+            table
+                .instances
+                .values()
+                .map(|instance| instance.store.data().externrefs.len())
+                .sum::<usize>(),
+        )
+    });
+    serde_json::json!({
+        "imports": imports,
+        "values": values,
+        "modules": modules,
+        "instances": instances,
+        "storeExternrefs": store_externrefs,
+    })
+    .to_string()
+}
+
 fn wasm_js_value<'js>(
     value: &WasmVal,
     ctx: Ctx<'js>,
@@ -850,7 +876,12 @@ fn wasm_from_js_value(
             if handle == 0 {
                 Ok(WasmVal::ExternRef(wasmi::Ref::Null))
             } else {
-                Ok(wasmi::ExternRef::new(caller, handle).into())
+                if let Some(reference) = caller.data().externrefs.get(&handle).copied() {
+                    return Ok(reference.into());
+                }
+                let reference = wasmi::ExternRef::new(&mut *caller, handle);
+                caller.data_mut().externrefs.insert(handle, reference);
+                Ok(reference.into())
             }
         }
         other => Err(wasmi::Error::new(format!(
@@ -936,7 +967,13 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
             Ok(wasi) => wasi,
             Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
         };
-        let mut store = WasmStore::new(&table.engine, WasmStoreData { wasi });
+        let mut store = WasmStore::new(
+            &table.engine,
+            WasmStoreData {
+                wasi,
+                externrefs: HashMap::new(),
+            },
+        );
         let mut linker = WasmLinker::new(&table.engine);
         if store.data().wasi.is_some() {
             if let Err(error) = wasmi_wasi::add_to_linker(&mut linker, |data: &mut WasmStoreData| {
@@ -1230,7 +1267,12 @@ fn wasm_runtime_value(
     }
     let handle =
         u32::try_from(handle).map_err(|_| "invalid WebAssembly externref handle".to_string())?;
-    Ok(wasmi::ExternRef::new(store, handle).into())
+    if let Some(reference) = store.data().externrefs.get(&handle).copied() {
+        return Ok(reference.into());
+    }
+    let reference = wasmi::ExternRef::new(&mut *store, handle);
+    store.data_mut().externrefs.insert(handle, reference);
+    Ok(reference.into())
 }
 
 fn wasm_foreign_funcref(
@@ -3667,6 +3709,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                     .expect("failed to create WebAssembly externref retainer");
                 let wasm_restore_value_function = Function::new(ctx.clone(), wasm_restore_value)
                     .expect("failed to create WebAssembly externref restorer");
+                let wasm_reference_stats_function =
+                    Function::new(ctx.clone(), wasm_reference_stats)
+                        .expect("failed to create WebAssembly reference statistics reader");
                 let wasm_call_function = Function::new(ctx.clone(), wasm_call)
                     .expect("failed to create WebAssembly function caller");
                 let wasm_call_funcref_function = Function::new(ctx.clone(), wasm_call_funcref)
@@ -3702,6 +3747,9 @@ fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
                 ctx.globals()
                     .set("__thaw_wasm_restore_value", wasm_restore_value_function)
                     .expect("failed to install WebAssembly externref restorer");
+                ctx.globals()
+                    .set("__thaw_wasm_reference_stats", wasm_reference_stats_function)
+                    .expect("failed to install WebAssembly reference statistics reader");
                 ctx.globals()
                     .set("__thaw_wasm_call", wasm_call_function)
                     .expect("failed to install WebAssembly function caller");
@@ -4431,12 +4479,20 @@ const PLATFORM_GLOBALS: &str = r#"
     return result;
   };
   const wasmFuncrefs = new Map();
+  const wasmExternrefObjects = new WeakMap(), wasmExternrefPrimitives = new Map();
+  const wasmRetainExternref = value => {
+    if (value === null) return 0;
+    const objectLike = (typeof value === 'object' && value !== null) || typeof value === 'function';
+    const references = objectLike ? wasmExternrefObjects : wasmExternrefPrimitives;
+    if (references.has(value)) return references.get(value);
+    const handle = __thaw_wasm_retain_value(value); references.set(value, handle); return handle;
+  };
   const wasmEncodeValue = value => typeof value === 'function' && value.__thawWasmFuncref !== undefined
     ? { t: 'funcref', v: value.__thawWasmFuncref, instance: value.__thawWasmInstance, bridge: value.__thawWasmBridge, restore: value.__thawWasmRestore, parameters: value.__thawWasmParameters, results: value.__thawWasmResults }
     : typeof value === 'bigint'
     ? { t: 'bigint', v: String(value) }
     : typeof value === 'number' ? { t: 'number', v: Number.isFinite(value) ? value : null }
-    : { t: 'externref', v: value === null ? 0 : __thaw_wasm_retain_value(value) };
+    : { t: 'externref', v: wasmRetainExternref(value) };
   const wasmDecodeValue = (value, instance) => {
     if (value.t === 'bigint') return BigInt(value.v);
     if (value.t === 'externref') return __thaw_wasm_restore_value(Number(value.v));
@@ -8039,6 +8095,26 @@ mod tests {
             call("wasmExternRefs", "[]"),
             r#"[true,true,true,true,true,true]"#
         );
+    }
+
+    #[test]
+    fn webassembly_externref_handles_are_reused_for_repeated_values() {
+        assert_eq!(
+            load(
+                "function wasmExternRefReuse() {\n\
+                   const source = new TextEncoder().encode(`(module (func (export \"echo\") (param externref) (result externref) local.get 0))`);\n\
+                   const instance = new WebAssembly.Instance(new WebAssembly.Module(source)), object = { stable: true }, text = 'stable externref';\n\
+                   instance.exports.echo(object); instance.exports.echo(text); instance.exports.echo(undefined);\n\
+                   const seeded = JSON.parse(__thaw_wasm_reference_stats());\n\
+                   for (let index = 0; index < 1000; index++) {\n\
+                     if (instance.exports.echo(object) !== object || instance.exports.echo(text) !== text || instance.exports.echo(undefined) !== undefined) return false;\n\
+                   }\n\
+                   const final = JSON.parse(__thaw_wasm_reference_stats()); return final.values === seeded.values && final.storeExternrefs === seeded.storeExternrefs;\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(call("wasmExternRefReuse", "[]"), "true");
     }
 
     #[test]
