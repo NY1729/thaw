@@ -6859,6 +6859,13 @@ fn lower_generic_instance(
                     .array_element_discriminants
                     .insert(param.name.clone(), element_discriminants);
             }
+            let property_discriminants =
+                object_array_property_discriminants(&annotation.type_ann, generic_interfaces);
+            if !property_discriminants.is_empty() {
+                lowerer
+                    .object_array_property_discriminants
+                    .insert(param.name.clone(), property_discriminants);
+            }
             let return_discriminants =
                 function_return_discriminants(&annotation.type_ann, generic_interfaces);
             if !return_discriminants.is_empty() {
@@ -6915,6 +6922,7 @@ fn lower_generic_instance(
 #[derive(Default)]
 struct GenericInterfaces<'a> {
     interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
+    plain_interfaces: HashMap<Symbol, &'a TsInterfaceDecl>,
     aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     plain_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
     function_aliases: HashMap<Symbol, &'a swc_ecma_ast::TsTypeAliasDecl>,
@@ -7067,6 +7075,47 @@ fn array_element_union_discriminants(
     element
         .map(|element| object_union_discriminants(element, generic))
         .unwrap_or_default()
+}
+
+fn object_array_property_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>> {
+    let resolved =
+        resolve_plain_alias_type(ty, generic).unwrap_or_else(|| strip_parenthesized_ts_type(ty));
+    let members = match resolved {
+        TsType::TsTypeLit(object) => object.members.as_slice(),
+        TsType::TsTypeRef(reference) => {
+            let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else {
+                return HashMap::new();
+            };
+            let Some(interface) = generic
+                .interfaces
+                .get(name.sym.as_ref())
+                .or_else(|| generic.plain_interfaces.get(name.sym.as_ref()))
+            else {
+                return HashMap::new();
+            };
+            interface.body.body.as_slice()
+        }
+        _ => return HashMap::new(),
+    };
+    members
+        .iter()
+        .filter_map(|member| {
+            let TsTypeElement::TsPropertySignature(property) = member else {
+                return None;
+            };
+            let name = match property.key.as_ref() {
+                Expr::Ident(name) => name.sym.to_string(),
+                Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
+                _ => return None,
+            };
+            let annotation = property.type_ann.as_ref()?;
+            let discriminants = array_element_union_discriminants(&annotation.type_ann, generic);
+            (!discriminants.is_empty()).then_some((name, discriminants))
+        })
+        .collect()
 }
 
 fn function_return_discriminants(
@@ -7396,7 +7445,8 @@ fn resolve_interfaces(
                 ) {
                     generic.function_interfaces.insert(name, iface.as_ref());
                 } else {
-                    raw.insert(name, iface.as_ref());
+                    raw.insert(name.clone(), iface.as_ref());
+                    generic.plain_interfaces.insert(name, iface.as_ref());
                 }
             }
             ModuleItem::Stmt(Stmt::Decl(Decl::TsTypeAlias(alias))) => {
@@ -9058,6 +9108,13 @@ fn lower_fn_decl(
                     .array_element_discriminants
                     .insert(param.name.clone(), element_discriminants);
             }
+            let property_discriminants =
+                object_array_property_discriminants(&annotation.type_ann, generic_interfaces);
+            if !property_discriminants.is_empty() {
+                lowerer
+                    .object_array_property_discriminants
+                    .insert(param.name.clone(), property_discriminants);
+            }
             let return_discriminants =
                 function_return_discriminants(&annotation.type_ann, generic_interfaces);
             if !return_discriminants.is_empty() {
@@ -10712,6 +10769,8 @@ struct FnLowerer<'a> {
     union_narrowings: HashMap<Symbol, (Vec<usize>, Vec<HirType>)>,
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     array_element_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    object_array_property_discriminants:
+        HashMap<Symbol, HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
@@ -12095,6 +12154,7 @@ impl<'a> FnLowerer<'a> {
             union_narrowings: HashMap::new(),
             union_discriminants: HashMap::new(),
             array_element_discriminants: HashMap::new(),
+            object_array_property_discriminants: HashMap::new(),
             destructured_union_correlations: HashMap::new(),
             destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
@@ -12206,6 +12266,12 @@ impl<'a> FnLowerer<'a> {
                 self.expression_array_element_discriminants(&assertion.expr)
             }
             Expr::Await(awaited) => self.expression_array_element_discriminants(&awaited.arg),
+            Expr::Member(member) => {
+                let property = member_property_name(&member.prop)?;
+                self.expression_object_array_property_discriminants(&member.obj)?
+                    .get(&property)
+                    .cloned()
+            }
             Expr::Call(call) => {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
@@ -12225,6 +12291,49 @@ impl<'a> FnLowerer<'a> {
             Expr::Cond(conditional) => {
                 let consequent = self.expression_array_element_discriminants(&conditional.cons)?;
                 (self.expression_array_element_discriminants(&conditional.alt)? == consequent)
+                    .then_some(consequent)
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_object_array_property_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .object_array_property_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::Paren(parenthesized) => {
+                self.expression_object_array_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsAs(assertion) => {
+                let metadata = object_array_property_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata = object_array_property_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsConstAssertion(assertion) => {
+                self.expression_object_array_property_discriminants(&assertion.expr)
+            }
+            Expr::Await(awaited) => {
+                self.expression_object_array_property_discriminants(&awaited.arg)
+            }
+            Expr::Cond(conditional) => {
+                let consequent =
+                    self.expression_object_array_property_discriminants(&conditional.cons)?;
+                (self.expression_object_array_property_discriminants(&conditional.alt)?
+                    == consequent)
                     .then_some(consequent)
             }
             _ => None,
@@ -14026,6 +14135,8 @@ impl<'a> FnLowerer<'a> {
                 let propagated_discriminants = self.expression_union_discriminants(init);
                 let propagated_array_discriminants =
                     self.expression_array_element_discriminants(init);
+                let propagated_object_array_property_discriminants =
+                    self.expression_object_array_property_discriminants(init);
                 let propagated_function_discriminants =
                     self.expression_function_discriminants(init);
                 let propagated_function_array_discriminants =
@@ -14111,6 +14222,14 @@ impl<'a> FnLowerer<'a> {
                         self.array_element_discriminants
                             .insert(hir_name.clone(), element_discriminants);
                     }
+                    let property_discriminants = object_array_property_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    if !property_discriminants.is_empty() {
+                        self.object_array_property_discriminants
+                            .insert(hir_name.clone(), property_discriminants);
+                    }
                     let return_discriminants = function_return_discriminants(
                         &annotation.type_ann,
                         self.generic_interfaces,
@@ -14134,6 +14253,10 @@ impl<'a> FnLowerer<'a> {
                 if binding.type_ann.is_none() {
                     if let Some(discriminants) = propagated_array_discriminants {
                         self.array_element_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
+                    if let Some(discriminants) = propagated_object_array_property_discriminants {
+                        self.object_array_property_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
                 }

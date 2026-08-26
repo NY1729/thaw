@@ -16766,6 +16766,7 @@ mod tests {
                 { kind: "text"; value: string };
             type ResultFactory = () => Result[];
             type AsyncResultFactory = () => Promise<Result[]>;
+            interface ResultHolder { results: Result[]; }
             async function result(number: boolean): Promise<Result> {
                 await sleep(1);
                 if (number) return { kind: "number", value: 8 };
@@ -16789,6 +16790,13 @@ mod tests {
                 for (const item of factory()) {
                     if (item.kind === "number") return String(item.value + 4);
                     return item.value + " factory";
+                }
+                return "empty";
+            }
+            function consumeHolder(holder: ResultHolder): string {
+                for (const { kind, value } of holder.results) {
+                    if (kind === "number") return String(value + 6);
+                    return value + " holder parameter";
                 }
                 return "empty";
             }
@@ -16826,6 +16834,17 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 2);
                     else console.log(item.value + " item");
                 }
+                const holder: ResultHolder = {
+                    results: [{ kind: "number", value: 12 }]
+                };
+                const holderAlias = holder;
+                for (const item of holderAlias.results) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + " holder");
+                }
+                console.log(consumeHolder({
+                    results: [{ kind: "text", value: "nested" }]
+                }));
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -16883,7 +16902,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
