@@ -23576,6 +23576,46 @@ mod tests {
     }
 
     #[test]
+    fn promise_chains_preserve_union_values_and_discriminants() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            async function value(): Promise<Result> {
+                await sleep(1);
+                return { kind: "number", value: 1 };
+            }
+            async function failure(): Promise<Result> {
+                await sleep(1);
+                throw "failed";
+            }
+            function transform(item: Result): Result {
+                if (item.kind === "number") return { kind: "text", value: "then" };
+                return item;
+            }
+            function recover(reason: string): Result {
+                return { kind: "text", value: reason };
+            }
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            async function main(): Promise<void> {
+                const transformed = await value().then(transform);
+                print(transformed);
+                const recovered = await failure().catch(recover);
+                print(recovered);
+                const preserved = await value().finally(() => console.log("finally"));
+                print(preserved);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_union_chains"),
+            "then!\nfailed!\nfinally\n11\n"
+        );
+    }
+
+    #[test]
     fn frame_split_async_functions_return_objects_arrays_and_tuples_from_branches() {
         let source = r#"
             interface Item { value: number; }
