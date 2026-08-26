@@ -6981,6 +6981,23 @@ struct FunctionPropertyDiscriminants {
 
 type ObjectFunctionPropertyDiscriminants = HashMap<Vec<Symbol>, FunctionPropertyDiscriminants>;
 
+fn method_signature_function_type(
+    method: &swc_ecma_ast::TsMethodSignature,
+) -> Result<TsType, String> {
+    let type_ann = method
+        .type_ann
+        .clone()
+        .ok_or("interface method needs an explicit return type")?;
+    Ok(TsType::TsFnOrConstructorType(
+        TsFnOrConstructorType::TsFnType(swc_ecma_ast::TsFnType {
+            span: method.span,
+            params: method.params.clone(),
+            type_params: method.type_params.clone(),
+            type_ann,
+        }),
+    ))
+}
+
 fn replace_metadata<T>(metadata: &mut HashMap<Symbol, T>, name: &str, value: Option<T>) {
     if let Some(value) = value {
         metadata.insert(name.to_string(), value);
@@ -7606,28 +7623,37 @@ fn object_function_property_discriminants(
             _ => return,
         };
         for member in members {
-            let TsTypeElement::TsPropertySignature(property) = member else {
-                continue;
+            let (key, annotation) = match member {
+                TsTypeElement::TsPropertySignature(property) => {
+                    let Some(annotation) = &property.type_ann else {
+                        continue;
+                    };
+                    (
+                        property.key.as_ref(),
+                        std::borrow::Cow::Borrowed(annotation.type_ann.as_ref()),
+                    )
+                }
+                TsTypeElement::TsMethodSignature(method) => (
+                    method.key.as_ref(),
+                    std::borrow::Cow::Owned(match method_signature_function_type(method) {
+                        Ok(ty) => ty,
+                        Err(_) => continue,
+                    }),
+                ),
+                _ => continue,
             };
-            let name = match property.key.as_ref() {
+            let name = match key {
                 Expr::Ident(name) => name.sym.to_string(),
                 Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
                 _ => continue,
             };
-            let Some(annotation) = &property.type_ann else {
-                continue;
-            };
             prefix.push(name);
-            let value = function_return_discriminants(&annotation.type_ann, generic);
-            let array = function_return_array_discriminants(&annotation.type_ann, generic);
-            let nested_array =
-                function_return_nested_array_discriminants(&annotation.type_ann, generic);
-            let object =
-                function_return_object_array_property_discriminants(&annotation.type_ann, generic);
+            let value = function_return_discriminants(&annotation, generic);
+            let array = function_return_array_discriminants(&annotation, generic);
+            let nested_array = function_return_nested_array_discriminants(&annotation, generic);
+            let object = function_return_object_array_property_discriminants(&annotation, generic);
             let mut functions = ObjectFunctionPropertyDiscriminants::new();
-            if let Some(return_type) =
-                function_return_type_annotation(&annotation.type_ann, generic)
-            {
+            if let Some(return_type) = function_return_type_annotation(&annotation, generic) {
                 collect(
                     return_type,
                     generic,
@@ -7653,7 +7679,7 @@ fn object_function_property_discriminants(
                     },
                 );
             } else {
-                collect(&annotation.type_ann, generic, prefix, visiting, result);
+                collect(&annotation, generic, prefix, visiting, result);
             }
             prefix.pop();
         }
@@ -8340,12 +8366,24 @@ fn resolve_interface(
     }
 
     for member in &iface.body.body {
-        let TsTypeElement::TsPropertySignature(prop) = member else {
-            return Err(format!(
-                "interface `{name}` has an unsupported member (only plain properties are supported, no methods/index signatures)"
-            ));
+        let (key, field_type) = match member {
+            TsTypeElement::TsPropertySignature(property) => {
+                let annotation = property.type_ann.as_ref().ok_or_else(|| {
+                    "interface property needs an explicit type annotation".to_string()
+                })?;
+                (property.key.as_ref(), annotation.type_ann.as_ref().clone())
+            }
+            TsTypeElement::TsMethodSignature(method) => (
+                method.key.as_ref(),
+                method_signature_function_type(method)?,
+            ),
+            _ => {
+                return Err(format!(
+                    "interface `{name}` has an unsupported member (properties and methods are supported; index signatures are not)"
+                ))
+            }
         };
-        let field_name = match prop.key.as_ref() {
+        let field_name = match key {
             Expr::Ident(ident) => ident.sym.to_string(),
             _ => {
                 return Err(format!(
@@ -8358,11 +8396,8 @@ fn resolve_interface(
                 "interface `{name}` declares field `{field_name}`, which collides with an inherited field of the same name"
             ));
         }
-        let ann = prop.type_ann.as_ref().ok_or_else(|| {
-            format!("field `{field_name}` on interface `{name}` needs an explicit type annotation")
-        })?;
         let field_ty = resolve_type_with_interfaces(
-            &ann.type_ann,
+            &field_type,
             raw,
             aliases,
             generic,
@@ -8421,17 +8456,18 @@ fn resolve_generic_interface_dependencies(
         in_progress.push(name.to_string());
     }
     for member in &decl.body.body {
-        if let TsTypeElement::TsPropertySignature(property) = member {
-            if let Some(annotation) = &property.type_ann {
-                resolve_type_dependencies(
-                    &annotation.type_ann,
-                    raw,
-                    aliases,
-                    generic,
-                    resolved,
-                    in_progress,
-                )?;
+        let ty = match member {
+            TsTypeElement::TsPropertySignature(property) => property
+                .type_ann
+                .as_ref()
+                .map(|value| value.type_ann.clone()),
+            TsTypeElement::TsMethodSignature(method) => {
+                Some(Box::new(method_signature_function_type(method)?))
             }
+            _ => None,
+        };
+        if let Some(ty) = ty {
+            resolve_type_dependencies(&ty, raw, aliases, generic, resolved, in_progress)?;
         }
     }
     if inserted_progress {
