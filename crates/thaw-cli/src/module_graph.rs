@@ -205,6 +205,8 @@ fn load_module(
     };
     let module = thaw_parser::parse_typescript(&source)
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
+    let module = thaw_hir::normalize_top_level_destructuring(&module)
+        .map_err(|error| format!("failed to normalize `{}`: {error}", path.display()))?;
     let mut dependencies = HashMap::new();
     for specifier in dependency_specifiers(&module)? {
         if !specifier.starts_with('.') {

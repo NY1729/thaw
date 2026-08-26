@@ -18441,6 +18441,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn executes_top_level_destructuring_once() {
+        let source = r#"
+            const { point: { x, y }, values: [first, second] } = {
+                point: { x: 40, y: 2 },
+                values: [20, 22]
+            };
+            function main(): void {
+                console.log(x + y);
+                console.log(first + second);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "top_level_destructuring"),
+            "42\n42\n"
+        );
+    }
+
     /// Same mechanism, but through the Lambda `handler` entry point instead
     /// of `main` (`emit_lambda_entry` has its own copy of the
     /// `call_module_init_if_present` call, see hir_codegen.rs).

@@ -64,6 +64,10 @@ stores in the same HIR initializer sequence, rather than being reordered around 
 Each generated initializer call is followed by a pending-exception check; a failure
 branches directly to process cleanup, skips later initialization and user entry code,
 and contributes a nonzero native process status.
+Top-level object/array destructuring is normalized before graph symbol collection:
+one private temporary evaluates the source, then typed field/index globals preserve
+nested binding order. Exported patterns expose only user bindings, never the private
+temporaries. Defaults and rest patterns remain diagnosed at this normalization boundary.
 The entry module's `main` or `handler` keeps its ABI name. HIR then sees one
 ordinary module, so its existing fixed-point inference, forward-reference
 resolution, generic tuple specialization and specialization deduplication apply
@@ -86,7 +90,8 @@ multi-argument generic specialization. Another executable graph covers exported
 `const`/`let` initialization, a forward function call from an initializer and
 shared mutation through an imported function. Default-expression coverage uses a
 diamond import graph to verify dependency-before-importer ordering and exactly-once
-initialization of the shared dependency. A separate test compiles and invokes a
+initialization of the shared dependency. A destructuring graph exports object aliases
+and array elements and consumes them from the entry executable. A separate test compiles and invokes a
 multi-file resumable async `Json` Lambda handler against a mock Runtime API.
 Further E2E coverage imports two registry packages with colliding export names
 from that Lambda and verifies package initialization, async execution and the

@@ -127,6 +127,9 @@ The workspace crates have narrow responsibilities:
   async functions, and preserve shared `let` mutation across module boundaries.
   Executable top-level expressions and supported control-flow statements share the
   same dependency-ordered, exactly-once initializer sequence
+- Nested object/array destructuring in module-scoped declarations evaluates its
+  source once, creates typed globals for each binding, and can export/import those
+  bindings across bundled files; top-level destructuring defaults/rest remain explicit errors
 - An uncaught exception from registry/native/module initialization stops later
   initializers, skips `main` or the Lambda polling loop, and makes the native
   process exit unsuccessfully instead of running user code with a pending error
