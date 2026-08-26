@@ -52,7 +52,8 @@ use rustls::{
     ServerConfig, ServerConnection, SignatureScheme, StreamOwned,
 };
 use sha2::{Digest, Sha256, Sha512};
-use wasmi::{Engine as WasmEngine, Extern as WasmExtern, Linker as WasmLinker};
+use wasmi::Linker as WasmLinker;
+use wasmi::{Caller as WasmCaller, Engine as WasmEngine, Extern as WasmExtern};
 use wasmi::{Memory as WasmMemory, MemoryType as WasmMemoryType, Module as WasmModule};
 use wasmi::{Store as WasmStore, Val as WasmVal, ValType as WasmValType};
 use wasmi_wasi::sync::{ambient_authority, Dir as WasiDir, WasiCtxBuilder};
@@ -752,7 +753,11 @@ fn wasm_restore_value<'js>(ctx: Ctx<'js>, handle: u32) -> rquickjs::Result<Value
     value.value.restore(&ctx)
 }
 
-fn wasm_js_value<'js>(value: &WasmVal, ctx: Ctx<'js>) -> Result<Value<'js>, wasmi::Error> {
+fn wasm_js_value<'js>(
+    value: &WasmVal,
+    ctx: Ctx<'js>,
+    caller: &WasmCaller<'_, WasmStoreData>,
+) -> Result<Value<'js>, wasmi::Error> {
     match value {
         WasmVal::I32(value) => Ok(Value::new_int(ctx, *value)),
         WasmVal::I64(value) => {
@@ -760,6 +765,16 @@ fn wasm_js_value<'js>(value: &WasmVal, ctx: Ctx<'js>) -> Result<Value<'js>, wasm
         }
         WasmVal::F32(value) => Ok(Value::new_float(ctx, f32::from(*value).into())),
         WasmVal::F64(value) => Ok(Value::new_float(ctx, f64::from(*value))),
+        WasmVal::ExternRef(reference) => {
+            let handle = match reference.val() {
+                None => 0,
+                Some(reference) => *reference
+                    .data(caller)
+                    .downcast_ref::<u32>()
+                    .ok_or_else(|| wasmi::Error::new("invalid WebAssembly externref payload"))?,
+            };
+            wasm_restore_value(ctx, handle).map_err(|error| wasmi::Error::new(error.to_string()))
+        }
         other => Err(wasmi::Error::new(format!(
             "unsupported JavaScript WebAssembly import value {:?}",
             other.ty()
@@ -767,7 +782,11 @@ fn wasm_js_value<'js>(value: &WasmVal, ctx: Ctx<'js>) -> Result<Value<'js>, wasm
     }
 }
 
-fn wasm_from_js_value(value: Value<'_>, ty: WasmValType) -> Result<WasmVal, wasmi::Error> {
+fn wasm_from_js_value(
+    value: Value<'_>,
+    ty: WasmValType,
+    caller: &mut WasmCaller<'_, WasmStoreData>,
+) -> Result<WasmVal, wasmi::Error> {
     match ty {
         WasmValType::I32 => value
             .as_number()
@@ -787,6 +806,15 @@ fn wasm_from_js_value(value: Value<'_>, ty: WasmValType) -> Result<WasmVal, wasm
             .as_number()
             .map(|value| WasmVal::F64(value.into()))
             .ok_or_else(|| wasmi::Error::new("WebAssembly f64 import result must be a number")),
+        WasmValType::ExternRef => {
+            let ctx = value.ctx().clone();
+            let handle = wasm_retain_value(ctx, value);
+            if handle == 0 {
+                Ok(WasmVal::ExternRef(wasmi::Ref::Null))
+            } else {
+                Ok(wasmi::ExternRef::new(caller, handle).into())
+            }
+        }
         other => Err(wasmi::Error::new(format!(
             "unsupported JavaScript WebAssembly import result {other:?}"
         ))),
@@ -795,6 +823,7 @@ fn wasm_from_js_value(value: Value<'_>, ty: WasmValType) -> Result<WasmVal, wasm
 
 fn wasm_call_js_import(
     handle: u32,
+    mut caller: WasmCaller<'_, WasmStoreData>,
     inputs: &[WasmVal],
     outputs: &mut [WasmVal],
 ) -> Result<(), wasmi::Error> {
@@ -809,7 +838,7 @@ fn wasm_call_js_import(
     let mut arguments = Args::new_unsized(ctx.clone());
     for input in inputs {
         arguments
-            .push_arg(wasm_js_value(input, ctx.clone())?)
+            .push_arg(wasm_js_value(input, ctx.clone(), &caller)?)
             .map_err(|error| wasmi::Error::new(error.to_string()))?;
     }
     let result: Value = function.call_arg(arguments).map_err(|error| {
@@ -820,7 +849,7 @@ fn wasm_call_js_import(
         wasmi::Error::new(message)
     })?;
     if outputs.len() == 1 {
-        outputs[0] = wasm_from_js_value(result, outputs[0].ty())?;
+        outputs[0] = wasm_from_js_value(result, outputs[0].ty(), &mut caller)?;
     } else if outputs.len() > 1 {
         let array = result.into_array().ok_or_else(|| {
             wasmi::Error::new("multi-value WebAssembly import result must be an array")
@@ -836,7 +865,7 @@ fn wasm_call_js_import(
             let value = array
                 .get(index)
                 .map_err(|error| wasmi::Error::new(error.to_string()))?;
-            *output = wasm_from_js_value(value, output.ty())?;
+            *output = wasm_from_js_value(value, output.ty(), &mut caller)?;
         }
     }
     Ok(())
@@ -897,7 +926,9 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                         import.module(),
                         import.name(),
                         function_type.clone(),
-                        move |_caller, inputs, outputs| wasm_call_js_import(handle, inputs, outputs),
+                        move |caller, inputs, outputs| {
+                            wasm_call_js_import(handle, caller, inputs, outputs)
+                        },
                     ) {
                         return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
                     }
@@ -7619,6 +7650,36 @@ mod tests {
         assert_eq!(
             call("wasmImports", "[]"),
             r#"[42,[21],"42",[3.5,4],true,true,5]"#
+        );
+    }
+
+    #[test]
+    fn webassembly_javascript_function_imports_preserve_externrefs() {
+        assert_eq!(
+            load(
+                "function wasmImportExternRefs() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (import \"host\" \"echo\" (func $echo (param externref) (result externref)))\n\
+                     (import \"host\" \"pair\" (func $pair (param externref) (result externref externref)))\n\
+                     (import \"host\" \"empty\" (func $empty (result externref)))\n\
+                     (func (export \"run\") (param externref) (result externref) local.get 0 call $echo)\n\
+                     (func (export \"many\") (param externref) (result externref externref) local.get 0 call $pair)\n\
+                     (func (export \"none\") (result externref) call $empty))`);\n\
+                   const first = { id: 1 }, second = [2], seen = [];\n\
+                   const instance = new WebAssembly.Instance(new WebAssembly.Module(source), { host: {\n\
+                     echo(value) { seen.push(value); return value; },\n\
+                     pair(value) { return [value, second]; },\n\
+                     empty() { return null; }\n\
+                   } });\n\
+                   const echoed = instance.exports.run(first), many = instance.exports.many(first), missing = instance.exports.run(undefined);\n\
+                   return [seen[0] === first, echoed === first, many[0] === first, many[1] === second, seen[1] === undefined, missing === undefined, instance.exports.none() === null];\n\
+                 }"
+            ),
+            1
+        );
+        assert_eq!(
+            call("wasmImportExternRefs", "[]"),
+            r#"[true,true,true,true,true,true,true]"#
         );
     }
 
