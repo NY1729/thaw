@@ -1558,9 +1558,13 @@ The workspace crates have narrow responsibilities:
   propagate their declared result discriminants through calls and `await`.
   Object unions can also be destructured after one source evaluation, including
   renamed and nested bindings, defaults over flattened nullish fields, and
-  object rest rebuilt according to the selected runtime member. Correlating a
-  separately destructured discriminant with its sibling payload binding, and
-  untyped/dynamically callable boundaries, remain outside this subset
+  object rest rebuilt according to the selected runtime member. Direct sibling
+  bindings retain their common source correlation: comparisons on a renamed
+  string, number or boolean discriminant narrow every union-valued payload in
+  branches, logical operands and terminating guards, including after `await`.
+  Assigning either side invalidates the affected correlation. Correlation through
+  nested or rest bindings and untyped/dynamically callable boundaries remains
+  outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
