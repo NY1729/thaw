@@ -11533,7 +11533,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     promises.into(),
                     len.into(),
                     i64_type
-                        .const_int(if *element == HirType::Bool { 1 } else { 8 }, false)
+                        .const_int(array_element_storage_bytes(element), false)
                         .into(),
                 ],
                 name,
@@ -23536,6 +23536,42 @@ mod tests {
         assert_eq!(
             compile_and_run(source, "promise_all_settled_shapes"),
             "text\ntrue\n8\n10\n"
+        );
+    }
+
+    #[test]
+    fn promise_combinators_preserve_union_values_and_discriminants() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            async function number(delay: number): Promise<Result> {
+                await sleep(delay);
+                return { kind: "number", value: 1 };
+            }
+            async function text(delay: number): Promise<Result> {
+                await sleep(delay);
+                return { kind: "text", value: "async" };
+            }
+            function print(item: Result): void {
+                if (item.kind === "number") console.log(item.value + 10);
+                else console.log(item.value + "!");
+            }
+            async function main(): Promise<void> {
+                const racing: Promise<Result>[] = [text(10), number(1)];
+                const raced = await Promise.race(racing);
+                print(raced);
+                const any = await Promise.any([text(1), number(10)]);
+                print(any);
+                const settled = await Promise.allSettled([number(1), text(1)]);
+                for (const item of settled) {
+                    if (item.status === "fulfilled") print(item.value);
+                }
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "promise_union_combinators"),
+            "11\nasync!\n11\nasync!\n"
         );
     }
 
