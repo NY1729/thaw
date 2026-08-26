@@ -2636,8 +2636,42 @@ impl GenericClassMethodUseCollector<'_, '_> {
             Expr::Paren(parenthesized) => self.receiver_class(&parenthesized.expr),
             Expr::TsAs(assertion) => self.receiver_class(&assertion.expr),
             Expr::TsTypeAssertion(assertion) => self.receiver_class(&assertion.expr),
-            _ => None,
+            _ => infer_generic_constructor_expr_type(
+                expression,
+                self.interfaces,
+                self.generic_interfaces,
+                &self.scopes,
+                self.call_results,
+            )
+            .ok()
+            .as_ref()
+            .and_then(class_name_from_type)
+            .map(str::to_owned),
         }
+    }
+
+    fn call_actual_params(&self, call: &CallExpr) -> Result<Vec<HirType>, String> {
+        let mut actual = Vec::new();
+        for argument in &call.args {
+            let ty = infer_generic_constructor_expr_type(
+                &argument.expr,
+                self.interfaces,
+                self.generic_interfaces,
+                &self.scopes,
+                self.call_results,
+            )?;
+            if argument.spread.is_none() {
+                actual.push(ty);
+                continue;
+            }
+            let HirType::Tuple(elements) = ty else {
+                return Err(format!(
+                    "generic class method inference requires a statically sized tuple spread, got {ty:?}"
+                ));
+            };
+            actual.extend(elements);
+        }
+        Ok(actual)
     }
 }
 
@@ -2719,23 +2753,7 @@ impl Visit for GenericClassMethodUseCollector<'_, '_> {
                 ) {
                     if let Some(owner) = self.template_owner(&class, &method) {
                         let actual_params = if call.type_args.is_none() {
-                            match call
-                                .args
-                                .iter()
-                                .map(|argument| {
-                                    if argument.spread.is_some() {
-                                        return Err("generic class method inference does not support spread arguments".into());
-                                    }
-                                    infer_generic_constructor_expr_type(
-                                        &argument.expr,
-                                        self.interfaces,
-                                        self.generic_interfaces,
-                                        &self.scopes,
-                                        self.call_results,
-                                    )
-                                })
-                                .collect::<Result<Vec<_>, String>>()
-                            {
+                            match self.call_actual_params(call) {
                                 Ok(actual) => Some(actual),
                                 Err(error) => {
                                     self.error = Some(format!(
@@ -16924,27 +16942,31 @@ impl<'a> FnLowerer<'a> {
                         });
                     }
                 }
-                let known_class_receiver = match member.obj.as_ref() {
+                let receiver_type = match member.obj.as_ref() {
                     Expr::Ident(receiver) => {
                         let name = self.resolve_binding(receiver.sym.as_ref());
-                        self.scope
-                            .get(&name)
-                            .and_then(class_name_from_type)
-                            .is_some()
+                        self.scope.get(&name).cloned()
                     }
-                    Expr::New(construction) => {
-                        matches!(construction.callee.as_ref(), Expr::Ident(class) if self.signatures.contains_key(&class_constructor_symbol(class.sym.as_ref())))
+                    Expr::New(construction) => construction
+                        .callee
+                        .as_ident()
+                        .and_then(|class| self.interfaces.get(class.sym.as_ref()).cloned()),
+                    Expr::This(_) => self.scope.get(&self.resolve_binding("this")).cloned(),
+                    Expr::Member(_) | Expr::Paren(_) | Expr::TsAs(_) | Expr::TsTypeAssertion(_) => {
+                        infer_generic_constructor_expr_type(
+                            &member.obj,
+                            self.interfaces,
+                            self.generic_interfaces,
+                            std::slice::from_ref(&self.scope),
+                            &self.generic_call_returns,
+                        )
+                        .ok()
                     }
-                    Expr::This(_) => self
-                        .scope
-                        .get(&self.resolve_binding("this"))
-                        .and_then(class_name_from_type)
-                        .is_some(),
-                    _ => false,
+                    _ => None,
                 };
-                if known_class_receiver {
-                    let receiver = self.lower_expr(&member.obj)?;
-                    let receiver_type = self.infer_expr_type(&receiver)?;
+                if let Some(receiver_type) =
+                    receiver_type.filter(|ty| class_name_from_type(ty).is_some())
+                {
                     let class_name = class_name_from_type(&receiver_type)
                         .expect("the receiver was classified as a native class");
                     let symbol = class_method_symbol(class_name, &property);
@@ -24009,6 +24031,10 @@ mod tests {
             (
                 "class Box { collect<T>(first: T, ...rest: T[]): T { return first; } } function main(): void { const box = new Box(); box.collect(1, \"bad\"); }",
                 "conflicting call-site types",
+            ),
+            (
+                "class Box { convert<T>(value: T): T { return value; } } function main(): void { const box = new Box(); const values: string[] = [\"bad\"]; box.convert(...values); }",
+                "requires a statically sized tuple spread",
             ),
         ] {
             let module = thaw_parser::parse_typescript(source).unwrap();

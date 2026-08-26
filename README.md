@@ -1406,6 +1406,9 @@ The workspace crates have narrow responsibilities:
   receivers, shared generic static owners and bundled-module receivers. Typed rest
   parameters unify every variadic argument, omitted default parameters use the ordinary
   class wrappers, and async generic methods preserve specialized `Promise<T>` results.
+  Receiver inference follows fixed-layout object member chains, and statically sized
+  tuple spreads participate in method-local type inference before ordinary native-call
+  spread expansion.
   Runtime class values, dynamically computed members, `new.target`,
   constructor object returns, non-undefined-capable uninitialized static fields and full JavaScript
   prototype mutation remain outside that native fixed-layout model
