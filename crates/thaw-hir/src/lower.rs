@@ -752,6 +752,16 @@ fn class_member_symbol(class: &str, member: &swc_ecma_ast::ClassMethod) -> Resul
     })
 }
 
+fn super_property_name(property: &SuperProp) -> Result<Symbol, String> {
+    match property {
+        SuperProp::Ident(name) => Ok(name.sym.to_string()),
+        SuperProp::Computed(computed) => match computed.expr.as_ref() {
+            Expr::Lit(Lit::Str(name)) => Ok(name.value.to_string_lossy().into_owned()),
+            _ => Err("computed super properties require a string literal name".into()),
+        },
+    }
+}
+
 fn class_name_from_type(ty: &HirType) -> Option<&str> {
     let HirType::Object(fields) = ty else {
         return None;
@@ -8918,6 +8928,24 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Member(member) => self.lower_member_read(member),
 
+            Expr::SuperProp(member) => {
+                let (_, _, base_name) = self
+                    .super_initializer
+                    .clone()
+                    .ok_or("`super` property access is only valid in a derived class")?;
+                let property = super_property_name(&member.prop)?;
+                let symbol = class_getter_symbol(&base_name, &property, false);
+                if !self.signatures.contains_key(&symbol) {
+                    return Err(format!(
+                        "base class `{base_name}` has no getter `{property}`"
+                    ));
+                }
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var(symbol)),
+                    vec![HirExpr::Var(self.resolve_binding("this"))],
+                ))
+            }
+
             Expr::Assign(assign) => self.lower_assign(assign),
 
             Expr::Update(update) => self.lower_update(update),
@@ -10235,6 +10263,23 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_assign(&mut self, assign: &swc_ecma_ast::AssignExpr) -> Result<HirExpr, String> {
         if assign.op == AssignOp::Assign {
+            if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = &assign.left {
+                let (_, _, base_name) = self
+                    .super_initializer
+                    .clone()
+                    .ok_or("`super` property assignment is only valid in a derived class")?;
+                let property = super_property_name(&member.prop)?;
+                let symbol = class_setter_symbol(&base_name, &property, false);
+                let signature = self.signatures.get(&symbol).cloned().ok_or_else(|| {
+                    format!("base class `{base_name}` has no setter `{property}`")
+                })?;
+                let rhs = self.lower_expr(&assign.right)?;
+                let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var(symbol)),
+                    vec![HirExpr::Var(self.resolve_binding("this")), rhs],
+                ));
+            }
             if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
                 if let (Expr::Ident(receiver), MemberProp::Ident(property)) =
                     (member.obj.as_ref(), &member.prop)
@@ -19779,5 +19824,39 @@ mod tests {
         assert!(format!("{:?}", method.body).contains(
             "Call(Var(\"__thaw_class_Base_method_answer\"), [Var(\"__thaw_this\"), Var(\"delta\")])"
         ));
+    }
+
+    #[test]
+    fn lowers_super_getter_and_setter_access_to_base_accessors() {
+        let program = lower(
+            r#"class Base {
+                stored: number;
+                constructor(value: number) { this.stored = value; }
+                get value(): number { return this.stored; }
+                set value(next: number) { this.stored = next; }
+            }
+            class Derived extends Base {
+                constructor(value: number) { super(value); }
+                get value(): number { return super.value + 1; }
+                set value(next: number) { super.value = next + 1; }
+            }
+            function main(): number {
+                const value = new Derived(1);
+                value.value = 20;
+                return value.value;
+            }"#,
+        );
+        let getter = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Derived_instance_getter_value")
+            .unwrap();
+        assert!(format!("{:?}", getter.body).contains("__thaw_class_Base_instance_getter_value"));
+        let setter = program
+            .functions
+            .iter()
+            .find(|function| function.name == "__thaw_class_Derived_instance_setter_value")
+            .unwrap();
+        assert!(format!("{:?}", setter.body).contains("__thaw_class_Base_instance_setter_value"));
     }
 }
