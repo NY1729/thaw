@@ -300,6 +300,10 @@ pub enum HirExpr {
     /// codegen never has to reconcile two different field orderings.
     /// Phase 2 codegen only supports `f64`-valued fields.
     ObjectLit(Vec<(Symbol, HirExpr)>),
+    /// Allocates a fixed-shape object and initializes every field to its
+    /// native zero value before the reference escapes. Constructors use this
+    /// to establish instance identity before executing `this.field = ...`.
+    ObjectAlloc(HirType),
     /// `object.field`. Unlike `ArrayLen`/`EnvVar`, this *is* a general
     /// member-access node -- but it still isn't resolved by a real type
     /// checker at codegen time, so lowering bakes in the object's full
@@ -526,6 +530,7 @@ pub fn set_ffi_error_abi(
             | HirExpr::NullishUndefined(_)
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
+            | HirExpr::ObjectAlloc(_)
             | HirExpr::FunctionRef(..) => {}
         }
     }
@@ -691,6 +696,7 @@ pub fn set_ffi_ownership(
             | HirExpr::NullishUndefined(_)
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
+            | HirExpr::ObjectAlloc(_)
             | HirExpr::FunctionRef(..) => {}
         }
     }
@@ -1042,6 +1048,7 @@ pub fn set_ffi_string_abi(
             | HirExpr::NullishUndefined(_)
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
+            | HirExpr::ObjectAlloc(_)
             | HirExpr::FunctionRef(..) => {}
         }
     }

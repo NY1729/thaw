@@ -4108,6 +4108,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishNull(_)
         | HirExpr::NullishUndefined(_)
         | HirExpr::EnvVar(_)
+        | HirExpr::ObjectAlloc(_)
         | HirExpr::FunctionRef(..) => {}
     }
 }
@@ -4181,7 +4182,8 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::NullishNull(_)
         | HirExpr::NullishUndefined(_)
         | HirExpr::Var(_)
-        | HirExpr::EnvVar(_) => false,
+        | HirExpr::EnvVar(_)
+        | HirExpr::ObjectAlloc(_) => false,
     }
 }
 
@@ -6860,6 +6862,10 @@ impl<'a> FnLowerer<'a> {
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(HirType::Object(fields))
             }
+            HirExpr::ObjectAlloc(ty @ HirType::Object(_)) => Ok(ty.clone()),
+            HirExpr::ObjectAlloc(other) => Err(format!(
+                "object allocation requires an object type, got {other:?}"
+            )),
             HirExpr::PropAccess(_, object_ty, field) => match object_ty {
                 HirType::Object(fields) => fields
                     .iter()
