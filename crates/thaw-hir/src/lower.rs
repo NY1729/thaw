@@ -7440,6 +7440,31 @@ fn function_return_array_discriminants(
         .unwrap_or_default()
 }
 
+fn function_return_nested_array_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> NestedArrayDiscriminants {
+    let Some(resolved) = resolve_plain_alias_type(ty, generic) else {
+        return HashMap::new();
+    };
+    let result = match resolved {
+        TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) => {
+            Some(function.type_ann.type_ann.as_ref())
+        }
+        TsType::TsTypeLit(literal) => match literal.members.as_slice() {
+            [TsTypeElement::TsCallSignatureDecl(call)] => call
+                .type_ann
+                .as_ref()
+                .map(|annotation| annotation.type_ann.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    };
+    result
+        .map(|result| nested_array_union_discriminants(result, generic))
+        .unwrap_or_default()
+}
+
 fn function_return_object_array_property_discriminants(
     ty: &TsType,
     generic: &GenericInterfaces<'_>,
@@ -11294,6 +11319,7 @@ struct FnLowerer<'a> {
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
+    function_value_nested_array_discriminants: HashMap<Symbol, NestedArrayDiscriminants>,
     function_value_object_array_property_discriminants:
         HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     function_value_object_function_property_discriminants:
@@ -12684,6 +12710,7 @@ impl<'a> FnLowerer<'a> {
             destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
             function_value_array_discriminants: HashMap::new(),
+            function_value_nested_array_discriminants: HashMap::new(),
             function_value_object_array_property_discriminants: HashMap::new(),
             function_value_object_function_property_discriminants: HashMap::new(),
             bindings: HashMap::new(),
@@ -13024,9 +13051,13 @@ impl<'a> FnLowerer<'a> {
                         return None;
                     };
                     return self
-                        .generic_interfaces
-                        .function_nested_array_discriminants
-                        .get(callee.sym.as_ref())
+                        .function_value_nested_array_discriminants
+                        .get(&self.resolve_binding(callee.sym.as_ref()))
+                        .or_else(|| {
+                            self.generic_interfaces
+                                .function_nested_array_discriminants
+                                .get(callee.sym.as_ref())
+                        })
                         .cloned();
                 };
                 let property = member_property_name(&member.prop)?;
@@ -13063,6 +13094,67 @@ impl<'a> FnLowerer<'a> {
                     return self.expression_nested_array_discriminants(&member.obj);
                 }
                 None
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_function_nested_array_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<NestedArrayDiscriminants> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .function_value_nested_array_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .or_else(|| {
+                    self.generic_interfaces
+                        .function_nested_array_discriminants
+                        .get(identifier.sym.as_ref())
+                })
+                .cloned(),
+            Expr::Paren(parenthesized) => {
+                self.expression_function_nested_array_discriminants(&parenthesized.expr)
+            }
+            Expr::OptChain(chain) => self.expression_function_nested_array_discriminants(
+                &ordinary_optional_chain_expression(chain),
+            ),
+            Expr::TsAs(assertion) => {
+                let metadata = function_return_nested_array_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata = function_return_nested_array_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::Arrow(arrow) => arrow.return_type.as_ref().and_then(|annotation| {
+                let metadata =
+                    nested_array_union_discriminants(&annotation.type_ann, self.generic_interfaces);
+                (!metadata.is_empty()).then_some(metadata)
+            }),
+            Expr::Fn(function) => function
+                .function
+                .return_type
+                .as_ref()
+                .and_then(|annotation| {
+                    let metadata = nested_array_union_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    (!metadata.is_empty()).then_some(metadata)
+                }),
+            Expr::Cond(conditional) => {
+                let consequent =
+                    self.expression_function_nested_array_discriminants(&conditional.cons)?;
+                (self.expression_function_nested_array_discriminants(&conditional.alt)?
+                    == consequent)
+                    .then_some(consequent)
             }
             _ => None,
         }
@@ -15443,6 +15535,8 @@ impl<'a> FnLowerer<'a> {
                     self.expression_function_discriminants(init);
                 let propagated_function_array_discriminants =
                     self.expression_function_array_discriminants(init);
+                let propagated_function_nested_array_discriminants =
+                    self.expression_function_nested_array_discriminants(init);
                 let propagated_function_object_array_property_discriminants =
                     self.expression_function_object_array_property_discriminants(init);
                 let propagated_function_object_function_property_discriminants =
@@ -15568,6 +15662,14 @@ impl<'a> FnLowerer<'a> {
                         self.function_value_array_discriminants
                             .insert(hir_name.clone(), return_array_discriminants);
                     }
+                    let return_nested_discriminants = function_return_nested_array_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    if !return_nested_discriminants.is_empty() {
+                        self.function_value_nested_array_discriminants
+                            .insert(hir_name.clone(), return_nested_discriminants);
+                    }
                     let return_property_discriminants =
                         function_return_object_array_property_discriminants(
                             &annotation.type_ann,
@@ -15615,6 +15717,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     if let Some(discriminants) = propagated_function_array_discriminants {
                         self.function_value_array_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
+                    if let Some(discriminants) = propagated_function_nested_array_discriminants {
+                        self.function_value_nested_array_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
                     if let Some(discriminants) =
