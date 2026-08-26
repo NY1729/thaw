@@ -18831,6 +18831,27 @@ mod tests {
     }
 
     #[test]
+    fn compiles_and_runs_super_initialization_on_the_derived_instance() {
+        let source = r#"
+            class Derived extends Base {
+                label: string = "ready";
+                constructor(value: number) { super(value); }
+                answer(): number { return this.value; }
+            }
+            class Base { constructor(public value: number) {} }
+            function main(): void {
+                const value = new Derived(42);
+                console.log(value.answer());
+                console.log(value.label);
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "super_initializes_derived_instance"),
+            "42\nready\n"
+        );
+    }
+
+    #[test]
     fn await_sleep_is_driven_by_the_runtime_event_loop() {
         let source = r#"
             async function main(): Promise<void> {
