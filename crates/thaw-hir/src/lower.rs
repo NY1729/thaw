@@ -6866,6 +6866,13 @@ fn lower_generic_instance(
                     .object_array_property_discriminants
                     .insert(param.name.clone(), property_discriminants);
             }
+            let function_property_discriminants =
+                object_function_property_discriminants(&annotation.type_ann, generic_interfaces);
+            if !function_property_discriminants.is_empty() {
+                lowerer
+                    .object_function_property_discriminants
+                    .insert(param.name.clone(), function_property_discriminants);
+            }
             let return_discriminants =
                 function_return_discriminants(&annotation.type_ann, generic_interfaces);
             if !return_discriminants.is_empty() {
@@ -6930,6 +6937,14 @@ fn lower_generic_instance(
 /// references to the generic declaration and its non-generic bases.
 type UnionDiscriminants = HashMap<Symbol, Vec<Option<HirLit>>>;
 type ObjectArrayPropertyDiscriminants = HashMap<Vec<Symbol>, UnionDiscriminants>;
+
+#[derive(Clone, PartialEq)]
+struct FunctionPropertyDiscriminants {
+    array: Option<UnionDiscriminants>,
+    object: ObjectArrayPropertyDiscriminants,
+}
+
+type ObjectFunctionPropertyDiscriminants = HashMap<Vec<Symbol>, FunctionPropertyDiscriminants>;
 
 #[derive(Default)]
 struct GenericInterfaces<'a> {
@@ -7250,6 +7265,86 @@ fn function_return_object_array_property_discriminants(
     result
         .map(|result| object_array_property_discriminants(result, generic))
         .unwrap_or_default()
+}
+
+fn object_function_property_discriminants(
+    ty: &TsType,
+    generic: &GenericInterfaces<'_>,
+) -> ObjectFunctionPropertyDiscriminants {
+    fn collect(
+        ty: &TsType,
+        generic: &GenericInterfaces<'_>,
+        prefix: &mut Vec<Symbol>,
+        visiting: &mut HashSet<Symbol>,
+        result: &mut ObjectFunctionPropertyDiscriminants,
+    ) {
+        let resolved = resolve_plain_alias_type(ty, generic)
+            .unwrap_or_else(|| strip_parenthesized_ts_type(ty));
+        let (members, visited_name) = match resolved {
+            TsType::TsTypeLit(object) => (object.members.as_slice(), None),
+            TsType::TsTypeRef(reference) => {
+                let swc_ecma_ast::TsEntityName::Ident(name) = &reference.type_name else {
+                    return;
+                };
+                let name = name.sym.to_string();
+                if !visiting.insert(name.clone()) {
+                    return;
+                }
+                let Some(interface) = generic
+                    .interfaces
+                    .get(&name)
+                    .or_else(|| generic.plain_interfaces.get(&name))
+                else {
+                    visiting.remove(&name);
+                    return;
+                };
+                (interface.body.body.as_slice(), Some(name))
+            }
+            _ => return,
+        };
+        for member in members {
+            let TsTypeElement::TsPropertySignature(property) = member else {
+                continue;
+            };
+            let name = match property.key.as_ref() {
+                Expr::Ident(name) => name.sym.to_string(),
+                Expr::Lit(Lit::Str(name)) => name.value.to_string_lossy().into_owned(),
+                _ => continue,
+            };
+            let Some(annotation) = &property.type_ann else {
+                continue;
+            };
+            prefix.push(name);
+            let array = function_return_array_discriminants(&annotation.type_ann, generic);
+            let object =
+                function_return_object_array_property_discriminants(&annotation.type_ann, generic);
+            if !array.is_empty() || !object.is_empty() {
+                result.insert(
+                    prefix.clone(),
+                    FunctionPropertyDiscriminants {
+                        array: (!array.is_empty()).then_some(array),
+                        object,
+                    },
+                );
+            } else {
+                collect(&annotation.type_ann, generic, prefix, visiting, result);
+            }
+            prefix.pop();
+        }
+        if let Some(name) = visited_name {
+            visiting.remove(&name);
+        }
+    }
+
+    let mut result = HashMap::new();
+    collect(
+        ty,
+        generic,
+        &mut Vec::new(),
+        &mut HashSet::new(),
+        &mut result,
+    );
+    result
 }
 
 fn function_expression_as_arrow(
@@ -9206,6 +9301,13 @@ fn lower_fn_decl(
                     .object_array_property_discriminants
                     .insert(param.name.clone(), property_discriminants);
             }
+            let function_property_discriminants =
+                object_function_property_discriminants(&annotation.type_ann, generic_interfaces);
+            if !function_property_discriminants.is_empty() {
+                lowerer
+                    .object_function_property_discriminants
+                    .insert(param.name.clone(), function_property_discriminants);
+            }
             let return_discriminants =
                 function_return_discriminants(&annotation.type_ann, generic_interfaces);
             if !return_discriminants.is_empty() {
@@ -10870,6 +10972,7 @@ struct FnLowerer<'a> {
     union_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     array_element_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
+    object_function_property_discriminants: HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
@@ -12256,6 +12359,7 @@ impl<'a> FnLowerer<'a> {
             union_discriminants: HashMap::new(),
             array_element_discriminants: HashMap::new(),
             object_array_property_discriminants: HashMap::new(),
+            object_function_property_discriminants: HashMap::new(),
             destructured_union_correlations: HashMap::new(),
             destructuring_default_types: HashMap::new(),
             function_value_discriminants: HashMap::new(),
@@ -12378,6 +12482,11 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
+                if matches!(callee.as_ref(), Expr::Member(_)) {
+                    return self
+                        .expression_called_function_property_discriminants(callee)
+                        .and_then(|metadata| metadata.array);
+                }
                 let Expr::Ident(callee) = callee.as_ref() else {
                     return None;
                 };
@@ -12447,6 +12556,12 @@ impl<'a> FnLowerer<'a> {
                 let Callee::Expr(callee) = &call.callee else {
                     return None;
                 };
+                if matches!(callee.as_ref(), Expr::Member(_)) {
+                    let metadata = self
+                        .expression_called_function_property_discriminants(callee)?
+                        .object;
+                    return (!metadata.is_empty()).then_some(metadata);
+                }
                 let Expr::Ident(callee) = callee.as_ref() else {
                     return None;
                 };
@@ -12538,6 +12653,71 @@ impl<'a> FnLowerer<'a> {
             }
         }
         (!metadata.is_empty()).then_some(metadata)
+    }
+
+    fn expression_object_function_property_discriminants(
+        &self,
+        expression: &Expr,
+    ) -> Option<ObjectFunctionPropertyDiscriminants> {
+        match expression {
+            Expr::Ident(identifier) => self
+                .object_function_property_discriminants
+                .get(&self.resolve_binding(identifier.sym.as_ref()))
+                .cloned(),
+            Expr::Paren(parenthesized) => {
+                self.expression_object_function_property_discriminants(&parenthesized.expr)
+            }
+            Expr::TsAs(assertion) => {
+                let metadata = object_function_property_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsTypeAssertion(assertion) => {
+                let metadata = object_function_property_discriminants(
+                    &assertion.type_ann,
+                    self.generic_interfaces,
+                );
+                (!metadata.is_empty()).then_some(metadata)
+            }
+            Expr::TsConstAssertion(assertion) => {
+                self.expression_object_function_property_discriminants(&assertion.expr)
+            }
+            Expr::Member(member) => {
+                let property = member_property_name(&member.prop)?;
+                let nested = self
+                    .expression_object_function_property_discriminants(&member.obj)?
+                    .into_iter()
+                    .filter_map(|(path, discriminants)| {
+                        (path.first() == Some(&property) && path.len() > 1)
+                            .then(|| (path[1..].to_vec(), discriminants))
+                    })
+                    .collect::<ObjectFunctionPropertyDiscriminants>();
+                (!nested.is_empty()).then_some(nested)
+            }
+            Expr::Cond(conditional) => {
+                let consequent =
+                    self.expression_object_function_property_discriminants(&conditional.cons)?;
+                (self.expression_object_function_property_discriminants(&conditional.alt)?
+                    == consequent)
+                    .then_some(consequent)
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_called_function_property_discriminants(
+        &self,
+        callee: &Expr,
+    ) -> Option<FunctionPropertyDiscriminants> {
+        let Expr::Member(member) = callee else {
+            return None;
+        };
+        let property = member_property_name(&member.prop)?;
+        self.expression_object_function_property_discriminants(&member.obj)?
+            .get(std::slice::from_ref(&property))
+            .cloned()
     }
 
     fn hir_array_element_discriminants(&self, expression: &HirExpr) -> Option<UnionDiscriminants> {
@@ -14439,6 +14619,8 @@ impl<'a> FnLowerer<'a> {
                     self.expression_array_element_discriminants(init);
                 let propagated_object_array_property_discriminants =
                     self.expression_object_array_property_discriminants(init);
+                let propagated_object_function_property_discriminants =
+                    self.expression_object_function_property_discriminants(init);
                 let propagated_function_discriminants =
                     self.expression_function_discriminants(init);
                 let propagated_function_array_discriminants =
@@ -14534,6 +14716,14 @@ impl<'a> FnLowerer<'a> {
                         self.object_array_property_discriminants
                             .insert(hir_name.clone(), property_discriminants);
                     }
+                    let function_property_discriminants = object_function_property_discriminants(
+                        &annotation.type_ann,
+                        self.generic_interfaces,
+                    );
+                    if !function_property_discriminants.is_empty() {
+                        self.object_function_property_discriminants
+                            .insert(hir_name.clone(), function_property_discriminants);
+                    }
                     let return_discriminants = function_return_discriminants(
                         &annotation.type_ann,
                         self.generic_interfaces,
@@ -14570,6 +14760,10 @@ impl<'a> FnLowerer<'a> {
                     }
                     if let Some(discriminants) = propagated_object_array_property_discriminants {
                         self.object_array_property_discriminants
+                            .insert(hir_name.clone(), discriminants);
+                    }
+                    if let Some(discriminants) = propagated_object_function_property_discriminants {
+                        self.object_function_property_discriminants
                             .insert(hir_name.clone(), discriminants);
                     }
                 }
@@ -25169,19 +25363,29 @@ impl<'a> FnLowerer<'a> {
         // synthetic `object.method` global symbol (the latter is reserved for
         // builtins such as `console.log` and `JSON.parse`).
         if let Expr::Member(member) = callee_expr.as_ref() {
-            if let Expr::Ident(object) = member.obj.as_ref() {
-                let property = match &member.prop {
-                    MemberProp::Ident(property) => Some(property.sym.to_string()),
-                    MemberProp::Computed(computed) => match computed.expr.as_ref() {
-                        Expr::Lit(Lit::Str(property)) => {
-                            Some(property.value.to_string_lossy().into_owned())
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(property) = property {
+            let property = member_property_name(&member.prop);
+            if let Some(property) = property {
+                let lowered_object = if let Expr::Ident(object) = member.obj.as_ref() {
                     let object_name = self.resolve_binding(object.sym.as_ref());
+                    let object_ty = self
+                        .narrowings
+                        .get(&object_name)
+                        .cloned()
+                        .or_else(|| self.nullable_narrowings.get(&object_name).cloned())
+                        .or_else(|| self.nullish_narrowings.get(&object_name).cloned())
+                        .or_else(|| self.scope.get(&object_name).cloned());
+                    object_ty
+                        .map(|object_ty| {
+                            self.lower_expr(&member.obj)
+                                .map(|object_expr| (object_expr, object_ty, object.sym.to_string()))
+                        })
+                        .transpose()?
+                } else {
+                    let object_expr = self.lower_expr(&member.obj)?;
+                    let object_ty = self.infer_expr_type(&object_expr)?;
+                    Some((object_expr, object_ty, "<expression>".to_string()))
+                };
+                if let Some((object_expr, object_ty, object_label)) = lowered_object {
                     let requested_property = property.as_str();
                     let resolved_property = match (requested_property, call.args.len()) {
                         ("listen", 2) => "__listenWithCallback",
@@ -25196,14 +25400,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         _ => requested_property,
                     };
-                    let object_ty = self
-                        .narrowings
-                        .get(&object_name)
-                        .cloned()
-                        .or_else(|| self.nullable_narrowings.get(&object_name).cloned())
-                        .or_else(|| self.nullish_narrowings.get(&object_name).cloned())
-                        .or_else(|| self.scope.get(&object_name).cloned());
-                    let callable = object_ty.as_ref().and_then(|ty| match ty {
+                    let callable = match &object_ty {
                         HirType::Object(fields) => fields
                             .iter()
                             .find(|(name, _)| name == resolved_property)
@@ -25223,15 +25420,14 @@ impl<'a> FnLowerer<'a> {
                                 _ => None,
                             }),
                         _ => None,
-                    });
+                    };
                     if let Some((params, _, rest, optional)) = callable {
-                        let object_expr = self.lower_expr(&member.obj)?;
                         let callee = HirExpr::PropAccess(
                             Box::new(object_expr),
-                            object_ty.unwrap(),
+                            object_ty,
                             resolved_property.to_string(),
                         );
-                        let label = format!("method `{}.{}`", object.sym, property);
+                        let label = format!("method `{object_label}.{property}`");
                         let (mut args, bindings) =
                             self.lower_native_spread_values(&call.args, &label)?;
                         if args.len() < params.len()
@@ -25240,7 +25436,7 @@ impl<'a> FnLowerer<'a> {
                         {
                             return Err(format!(
                                 "method `{}.{}` expects at least {} argument(s), got {}",
-                                object.sym,
+                                object_label,
                                 property,
                                 params.len(),
                                 args.len()
@@ -25262,7 +25458,7 @@ impl<'a> FnLowerer<'a> {
                                     format!(
                                         "argument {} of `{}.{}` is invalid: {error}",
                                         index + 1,
-                                        object.sym,
+                                        object_label,
                                         property
                                     )
                                 })

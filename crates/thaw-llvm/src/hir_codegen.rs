@@ -16771,6 +16771,11 @@ mod tests {
             type HolderFactory = () => ResultHolder;
             type AsyncHolderFactory = () => Promise<ResultHolder>;
             type NestedHolderFactory = () => NestedResultHolder;
+            interface ResultService {
+                load: ResultFactory;
+                holder: HolderFactory;
+                nested: { load: ResultFactory };
+            }
             async function result(number: boolean): Promise<Result> {
                 await sleep(1);
                 if (number) return { kind: "number", value: 8 };
@@ -16836,6 +16841,13 @@ mod tests {
                 for (const item of results) {
                     if (item.kind === "number") return String(item.value + 9);
                     return item.value + " destructured parameter";
+                }
+                return "empty";
+            }
+            function consumeService(service: ResultService): string {
+                for (const item of service.load()) {
+                    if (item.kind === "number") return String(item.value + 10);
+                    return item.value + " service parameter";
                 }
                 return "empty";
             }
@@ -16941,6 +16953,27 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 1);
                     else console.log(item.value + " nested rest");
                 }
+                const serviceLoader: ResultFactory = producedResults;
+                const serviceHolder: HolderFactory = producedHolder;
+                const service: ResultService = {
+                    load: serviceLoader,
+                    holder: serviceHolder,
+                    nested: { load: serviceLoader }
+                };
+                const serviceAlias = service;
+                for (const item of serviceAlias.load()) {
+                    if (item.kind === "number") console.log(item.value + 60);
+                    else console.log(item.value + " service");
+                }
+                for (const { kind, value } of serviceAlias.holder().results) {
+                    if (kind === "number") console.log(value + 1);
+                    else console.log(value + " service holder");
+                }
+                for (const item of serviceAlias.nested.load()) {
+                    if (item.kind === "number") console.log(item.value + 70);
+                    else console.log(item.value + " nested service");
+                }
+                console.log(consumeService(serviceAlias));
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -16998,7 +17031,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
