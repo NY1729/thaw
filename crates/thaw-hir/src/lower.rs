@@ -12754,6 +12754,47 @@ impl<'a> FnLowerer<'a> {
                 let callee = ordinary_optional_expression(callee);
                 if let Expr::Member(member) = &callee {
                     let property = member_property_name(&member.prop)?;
+                    if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == *"Array")
+                    {
+                        if property == "of" {
+                            let metadata = call
+                                .type_args
+                                .as_ref()
+                                .and_then(|arguments| arguments.params.first())
+                                .map(|ty| object_union_discriminants(ty, self.generic_interfaces))
+                                .unwrap_or_default();
+                            return (!metadata.is_empty()).then_some(metadata);
+                        }
+                        if property == "from" {
+                            if call.args.len() == 1 {
+                                return self
+                                    .expression_array_element_discriminants(&call.args[0].expr);
+                            }
+                            let explicit_output = call.type_args.as_ref().and_then(|arguments| {
+                                arguments.params.get(1).or_else(|| arguments.params.first())
+                            });
+                            if let Some(output) = explicit_output {
+                                let metadata =
+                                    object_union_discriminants(output, self.generic_interfaces);
+                                if !metadata.is_empty() {
+                                    return Some(metadata);
+                                }
+                            }
+                            return call.args.get(1).and_then(|argument| {
+                                self.expression_function_discriminants(&argument.expr)
+                            });
+                        }
+                    }
+                    if property == "map" {
+                        return call.args.first().and_then(|argument| {
+                            self.expression_function_discriminants(&argument.expr)
+                        });
+                    }
+                    if property == "flatMap" {
+                        return call.args.first().and_then(|argument| {
+                            self.expression_function_array_discriminants(&argument.expr)
+                        });
+                    }
                     if matches!(
                         property.as_str(),
                         "concat"

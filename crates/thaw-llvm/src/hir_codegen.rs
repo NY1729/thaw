@@ -19439,6 +19439,37 @@ mod tests {
     }
 
     #[test]
+    fn preserves_union_discriminants_for_array_construction_and_mapping() {
+        let source = r#"
+            type Result =
+                { kind: "number"; value: number } |
+                { kind: "text"; value: string };
+            function identity(item: Result): Result { return item; }
+            function expand(item: Result): Result[] { return [item]; }
+            function print(values: Result[]): void {
+                for (const item of values) {
+                    if (item.kind === "number") console.log(item.value + 10);
+                    else console.log(item.value + "!");
+                }
+            }
+            function main(): void {
+                const number: Result = { kind: "number", value: 1 };
+                const text: Result = { kind: "text", value: "mapped" };
+                const values = Array.of<Result>(number, text);
+                print(values);
+                print(Array.from<Result>(values));
+                print(Array.from<Result, Result>(values, identity));
+                print(values.map(identity));
+                print(values.flatMap(expand));
+            }
+        "#;
+        assert_eq!(
+            compile_and_run(source, "union_array_construction_metadata"),
+            "11\nmapped!\n11\nmapped!\n11\nmapped!\n11\nmapped!\n11\nmapped!\n"
+        );
+    }
+
+    #[test]
     fn compiles_array_is_array_for_native_and_json_values() {
         let source = r#"
             function scalar(): number {
