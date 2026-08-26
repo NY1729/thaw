@@ -1592,7 +1592,9 @@ The workspace crates have narrow responsibilities:
   Inferred object literals retain typed function-property results through
   shorthand/key-value fields, nested fixed objects and object spreads. Named
   synchronous and asynchronous functions preserve the same service metadata
-  in their direct or awaited fixed-object returns.
+  in their direct or awaited fixed-object returns. Typed service factories,
+  aliases and callback parameters preserve it across synchronous and
+  asynchronous function-value calls.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
