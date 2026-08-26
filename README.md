@@ -1553,8 +1553,11 @@ The workspace crates have narrow responsibilities:
   conditionals, annotated function returns and their synchronous or awaited
   call results. Logical `&&` narrows the right operand and true branch, while
   `||` narrows its right operand and false/terminating-guard continuation
-  without unsafely narrowing the joined branch. Destructuring and arbitrary
-  function-value boundaries remain outside this subset
+  without unsafely narrowing the joined branch. Typed function aliases,
+  callback parameters, synchronous arrows and named async function values
+  propagate their declared result discriminants through calls and `await`.
+  Correlated destructuring and untyped/dynamically callable boundaries remain
+  outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata
 - Full Node.js module resolution, all core modules and the complete Node global
