@@ -596,6 +596,7 @@ fn compiles_native_array_map() {
         }
         async function main(): Promise<void> {
             console.log([1, 2, 3].map(project).join(","));
+            console.log([1, 2].map(...[project]).join(","));
             const suffix: string = "!";
             console.log(["a", "b"].map((value, index) => value + String(index) + suffix).join("|"));
             console.log([true, false].map(value => value === false).join("-"));
@@ -612,7 +613,7 @@ fn compiles_native_array_map() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_map"),
-        "5,8,11\na0!|b1!\nfalse-true\n23\n2\n0\nreceiver\nthisArg\n2,3\nawaited\naa,bb\n"
+        "5,8,11\n4,7\na0!|b1!\nfalse-true\n23\n2\n0\nreceiver\nthisArg\n2,3\nawaited\naa,bb\n"
     );
 }
 
@@ -892,6 +893,31 @@ fn compiles_tuple_spreads_for_array_positional_methods() {
     assert_eq!(
         compile_and_run(source, "array_positional_tuple_spreads"),
         "1-2-3\n3\n1,9,3\n1,2,3\n"
+    );
+}
+
+#[test]
+fn compiles_tuple_spreads_for_array_callbacks() {
+    let source = r#"
+        function double(value: number): number { return value * 2; }
+        function even(value: number): boolean { return value % 2 === 0; }
+        function expand(value: number): number[] { return [value, value]; }
+        function emit(value: number): void { console.log(value); }
+        function compare(left: number, right: number): number { return left - right; }
+        function sum(total: number, value: number): number { return total + value; }
+        function main(): void {
+            console.log([1, 2].map(...[double]).join(","));
+            console.log([1, 2, 3].filter(...[even]).join(","));
+            console.log([1, 2].some(...[even]));
+            console.log([1, 2].flatMap(...[expand]).join(","));
+            [3, 4].forEach(...[emit]);
+            console.log([3, 1, 2].toSorted(...[compare]).join(","));
+            console.log([1, 2, 3].reduce(...[sum, 0]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_callback_tuple_spreads"),
+        "2,4\n2\ntrue\n1,1,2,2\n3\n4\n1,2,3\n6\n"
     );
 }
 

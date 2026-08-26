@@ -1,4 +1,30 @@
 impl<'a> FnLowerer<'a> {
+    fn validate_array_callback_value(
+        &self,
+        callback: HirExpr,
+        available: &[HirType],
+        expected_return: Option<&HirType>,
+        label: &str,
+    ) -> Result<HirExpr, String> {
+        let (params, ret) = match self.infer_expr_type(&callback)? {
+            HirType::Function(params, ret) => (params, ret),
+            HirType::CallableFunction(params, _, None, ret) => (params, ret),
+            _ => return Err(format!("{label} callback is not a function value")),
+        };
+        if params.len() > available.len() || params != available[..params.len()] {
+            return Err(format!(
+                "{label} callback has parameters {params:?}, expected a prefix of {available:?}"
+            ));
+        }
+        if expected_return.is_some_and(|expected| ret.as_ref() != expected) {
+            return Err(format!(
+                "{label} callback returns {ret:?}, expected {:?}",
+                expected_return.unwrap()
+            ));
+        }
+        Ok(callback)
+    }
+
     fn lower_promise_array_value(
         &mut self,
         expr: &Expr,

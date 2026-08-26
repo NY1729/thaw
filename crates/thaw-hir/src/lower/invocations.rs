@@ -1230,15 +1230,6 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if matches!(property.sym.as_ref(), "sort" | "toSorted") {
-                    if call.args.len() > 1 {
-                        return Err(format!(
-                            "native `.{}()` expects zero or one comparator",
-                            property.sym
-                        ));
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array sort comparator spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &receiver_type else {
@@ -1248,6 +1239,69 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_sort_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), receiver_type.clone());
+                        let label = format!("Array.{}", property.sym);
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        if arguments.len() > 1 {
+                            return Err(format!(
+                                "native `.{}()` expects zero or one comparator",
+                                property.sym
+                            ));
+                        }
+                        let result = if let Some(comparator) = arguments.first() {
+                            let available = [element_type.clone(), element_type.clone()];
+                            let comparator = self.validate_array_callback_value(
+                                comparator.clone(),
+                                &available,
+                                Some(&HirType::F64),
+                                "array comparator",
+                            )?;
+                            self.lower_array_sort_comparator(
+                                HirExpr::Var(source_name.clone()),
+                                receiver_type.clone(),
+                                element_type,
+                                comparator,
+                                property.sym == *"toSorted",
+                            )?
+                        } else {
+                            let prefix = match &element_type {
+                                HirType::F64 => "number",
+                                HirType::Str => "string",
+                                HirType::Bool => "bool",
+                                HirType::Object(_) => "object",
+                                other => {
+                                    return Err(format!(
+                                        "default array sort does not support element type {other:?}"
+                                    ))
+                                }
+                            };
+                            let suffix = if property.sym == *"sort" {
+                                "sort"
+                            } else {
+                                "to_sorted"
+                            };
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(format!(
+                                    "__thaw_{prefix}_array_{suffix}"
+                                ))),
+                                vec![HirExpr::Var(source_name.clone())],
+                            )
+                        };
+                        let mut bindings = vec![(source_name, receiver_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if call.args.len() > 1 {
+                        return Err(format!(
+                            "native `.{}()` expects zero or one comparator",
+                            property.sym
+                        ));
+                    }
                     if let Some(argument) = call.args.first() {
                         let comparator = self.lower_promise_callback(
                             &argument.expr,
@@ -1287,15 +1341,6 @@ impl<'a> FnLowerer<'a> {
                     property.sym.as_ref(),
                     "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex"
                 ) {
-                    if !(1..=2).contains(&call.args.len()) {
-                        return Err(format!(
-                            "native `.{}()` expects a predicate and optional thisArg",
-                            property.sym
-                        ));
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array predicate spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1305,6 +1350,57 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_predicate_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), array_type.clone());
+                        let label = format!("Array.{}", property.sym);
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        if !(1..=2).contains(&arguments.len()) {
+                            return Err(format!(
+                                "native `.{}()` expects a predicate and optional thisArg",
+                                property.sym
+                            ));
+                        }
+                        let available = [
+                            element_type.clone(),
+                            HirType::F64,
+                            array_type.clone(),
+                        ];
+                        let callback = self.validate_array_callback_value(
+                            arguments[0].clone(),
+                            &available,
+                            Some(&HirType::Bool),
+                            "array predicate",
+                        )?;
+                        let result = self.lower_array_predicate_method(
+                            HirExpr::Var(source_name.clone()),
+                            array_type.clone(),
+                            element_type,
+                            callback,
+                            arguments.get(1).cloned(),
+                            match property.sym.as_ref() {
+                                "some" => ArrayPredicateMode::Some,
+                                "every" => ArrayPredicateMode::Every,
+                                "find" => ArrayPredicateMode::Find,
+                                "findIndex" => ArrayPredicateMode::FindIndex,
+                                "findLast" => ArrayPredicateMode::FindLast,
+                                "findLastIndex" => ArrayPredicateMode::FindLastIndex,
+                                _ => unreachable!(),
+                            },
+                        )?;
+                        let mut bindings = vec![(source_name, array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(format!(
+                            "native `.{}()` expects a predicate and optional thisArg",
+                            property.sym
+                        ));
+                    }
                     let callback = self.lower_array_callback(
                         &call.args[0].expr,
                         &element_type,
@@ -1334,15 +1430,6 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if matches!(property.sym.as_ref(), "reduce" | "reduceRight") {
-                    if !(1..=2).contains(&call.args.len()) {
-                        return Err(format!(
-                            "native `.{}()` expects a reducer and optional initial value",
-                            property.sym
-                        ));
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array reducer spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1352,6 +1439,58 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_reduce_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), array_type.clone());
+                        let label = format!("Array.{}", property.sym);
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, &label)?;
+                        if !(1..=2).contains(&arguments.len()) {
+                            return Err(format!(
+                                "native `.{}()` expects a reducer and optional initial value",
+                                property.sym
+                            ));
+                        }
+                        let initial = arguments.get(1).cloned().map(|value| {
+                            let ty = self.infer_expr_type(&value)?;
+                            Ok::<_, String>((value, ty))
+                        }).transpose()?;
+                        let accumulator_type = initial
+                            .as_ref()
+                            .map(|(_, ty)| ty)
+                            .unwrap_or(&element_type);
+                        let available = [
+                            accumulator_type.clone(),
+                            element_type.clone(),
+                            HirType::F64,
+                            array_type.clone(),
+                        ];
+                        let callback = self.validate_array_callback_value(
+                            arguments[0].clone(),
+                            &available,
+                            Some(accumulator_type),
+                            "array reducer",
+                        )?;
+                        let result = self.lower_array_reduce(
+                            HirExpr::Var(source_name.clone()),
+                            array_type.clone(),
+                            element_type,
+                            callback,
+                            initial,
+                            property.sym == *"reduceRight",
+                        )?;
+                        let mut bindings = vec![(source_name, array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(format!(
+                            "native `.{}()` expects a reducer and optional initial value",
+                            property.sym
+                        ));
+                    }
                     let initial = call
                         .args
                         .get(1)
@@ -1554,14 +1693,6 @@ impl<'a> FnLowerer<'a> {
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"flatMap" {
-                    if !(1..=2).contains(&call.args.len()) {
-                        return Err(
-                            "native `.flatMap()` expects a callback and optional thisArg".into(),
-                        );
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array flatMap spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1570,6 +1701,61 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_flat_map_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), array_type.clone());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Array.flatMap")?;
+                        if !(1..=2).contains(&arguments.len()) {
+                            return Err(
+                                "native `.flatMap()` expects a callback and optional thisArg"
+                                    .into(),
+                            );
+                        }
+                        let available = [
+                            element_type.clone(),
+                            HirType::F64,
+                            array_type.clone(),
+                        ];
+                        let callback = self.validate_array_callback_value(
+                            arguments[0].clone(),
+                            &available,
+                            None,
+                            "array mapper",
+                        )?;
+                        let mapped = self.lower_array_map(
+                            HirExpr::Var(source_name.clone()),
+                            array_type.clone(),
+                            element_type,
+                            callback,
+                            arguments.get(1).cloned(),
+                        )?;
+                        let mapped_type = self.infer_expr_type(&mapped)?;
+                        let HirType::Array(mapped_element) = &mapped_type else {
+                            unreachable!("array map always returns an array")
+                        };
+                        let HirType::Array(flat_element) = mapped_element.as_ref() else {
+                            return Err(format!(
+                                "native `.flatMap()` callback must return a homogeneous array, got {mapped_element:?}"
+                            ));
+                        };
+                        let flat_element = flat_element.as_ref().clone();
+                        let result = self.lower_array_flat_one(
+                            mapped,
+                            mapped_type,
+                            flat_element,
+                        )?;
+                        let mut bindings = vec![(source_name, array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.flatMap()` expects a callback and optional thisArg".into(),
+                        );
+                    }
                     let callback = self.lower_array_mapping_callback(
                         &call.args[0].expr,
                         &element_type,
@@ -1600,14 +1786,6 @@ impl<'a> FnLowerer<'a> {
                     return self.lower_array_flat_one(mapped, mapped_type, flat_element);
                 }
                 if property.sym == *"map" {
-                    if !(1..=2).contains(&call.args.len()) {
-                        return Err(
-                            "native `.map()` expects a callback and optional thisArg".into()
-                        );
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array mapper spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1616,6 +1794,46 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_map_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), array_type.clone());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Array.map")?;
+                        if !(1..=2).contains(&arguments.len()) {
+                            return Err(
+                                "native `.map()` expects a callback and optional thisArg".into(),
+                            );
+                        }
+                        let available = [
+                            element_type.clone(),
+                            HirType::F64,
+                            array_type.clone(),
+                        ];
+                        let callback = self.validate_array_callback_value(
+                            arguments[0].clone(),
+                            &available,
+                            None,
+                            "array mapper",
+                        )?;
+                        let this_arg = arguments.get(1).cloned();
+                        let result = self.lower_array_map(
+                            HirExpr::Var(source_name.clone()),
+                            array_type.clone(),
+                            element_type,
+                            callback,
+                            this_arg,
+                        )?;
+                        let mut bindings = vec![(source_name, array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.map()` expects a callback and optional thisArg".into()
+                        );
+                    }
                     let callback = self.lower_array_mapping_callback(
                         &call.args[0].expr,
                         &element_type,
@@ -1635,14 +1853,6 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"filter" {
-                    if !(1..=2).contains(&call.args.len()) {
-                        return Err(
-                            "native `.filter()` expects a predicate and optional thisArg".into(),
-                        );
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array filter spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1651,6 +1861,46 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_filter_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), array_type.clone());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Array.filter")?;
+                        if !(1..=2).contains(&arguments.len()) {
+                            return Err(
+                                "native `.filter()` expects a predicate and optional thisArg"
+                                    .into(),
+                            );
+                        }
+                        let available = [
+                            element_type.clone(),
+                            HirType::F64,
+                            array_type.clone(),
+                        ];
+                        let callback = self.validate_array_callback_value(
+                            arguments[0].clone(),
+                            &available,
+                            Some(&HirType::Bool),
+                            "array predicate",
+                        )?;
+                        let result = self.lower_array_filter(
+                            HirExpr::Var(source_name.clone()),
+                            array_type.clone(),
+                            element_type,
+                            callback,
+                            arguments.get(1).cloned(),
+                        )?;
+                        let mut bindings = vec![(source_name, array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.filter()` expects a predicate and optional thisArg".into(),
+                        );
+                    }
                     let callback = self.lower_array_callback(
                         &call.args[0].expr,
                         &element_type,
@@ -1671,14 +1921,6 @@ impl<'a> FnLowerer<'a> {
                     );
                 }
                 if property.sym == *"forEach" {
-                    if !(1..=2).contains(&call.args.len()) {
-                        return Err(
-                            "native `.forEach()` expects a callback and optional thisArg".into(),
-                        );
-                    }
-                    if call.args.iter().any(|argument| argument.spread.is_some()) {
-                        return Err("array forEach spread is not supported".into());
-                    }
                     let receiver = self.lower_expr(&member.obj)?;
                     let array_type = self.infer_expr_type(&receiver)?;
                     let HirType::Array(element) = &array_type else {
@@ -1687,6 +1929,46 @@ impl<'a> FnLowerer<'a> {
                         ));
                     };
                     let element_type = element.as_ref().clone();
+                    if call.args.iter().any(|argument| argument.spread.is_some()) {
+                        let source_name = format!("__thaw_for_each_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope
+                            .insert(source_name.clone(), array_type.clone());
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Array.forEach")?;
+                        if !(1..=2).contains(&arguments.len()) {
+                            return Err(
+                                "native `.forEach()` expects a callback and optional thisArg"
+                                    .into(),
+                            );
+                        }
+                        let available = [
+                            element_type.clone(),
+                            HirType::F64,
+                            array_type.clone(),
+                        ];
+                        let callback = self.validate_array_callback_value(
+                            arguments[0].clone(),
+                            &available,
+                            Some(&HirType::Void),
+                            "array callback",
+                        )?;
+                        let result = self.lower_array_for_each(
+                            HirExpr::Var(source_name.clone()),
+                            array_type.clone(),
+                            element_type,
+                            callback,
+                            arguments.get(1).cloned(),
+                        )?;
+                        let mut bindings = vec![(source_name, array_type, receiver)];
+                        bindings.extend(spread_bindings);
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if !(1..=2).contains(&call.args.len()) {
+                        return Err(
+                            "native `.forEach()` expects a callback and optional thisArg".into(),
+                        );
+                    }
                     let callback = self.lower_array_callback(
                         &call.args[0].expr,
                         &element_type,
