@@ -627,7 +627,9 @@ thaw-quickjs（QuickJS-NG）で実行するテスト、`module.exports.default`
    ことに気づいて直した（最初は `@hapi/hoek.stringify(...)` という
    構文的に無効なコードを想定していた）。2つの異なるスコープ付き
    パッケージが同じ最終セグメントを持つケース（`@foo/utils` と
-   `@bar/utils`）は未対応（今のところ実例に遭遇していない）。
+   `@bar/utils`）は、単独なら従来どおり`utils`、衝突時はそれぞれ
+   `_foo_utils`／`_bar_utils`へ展開する。sanitize後も衝突する稀な名前は
+   package名のhex suffixを加え、生成される修飾子を決定的かつ一意にする。
 5. `thaw-cli` は最後に、ユーザー自身の `.ts` ソースを（`swc_ecma_visit`
    の `Visit` でファイル全体を走査し）解析して `pkg.name(...)` という
    形の呼び出し式を全て見つけ、対応するエイリアス識別子に**該当

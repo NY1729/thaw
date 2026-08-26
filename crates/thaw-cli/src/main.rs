@@ -599,13 +599,54 @@ type RegistryShims = (
 /// name (`@hapi/hoek`) isn't a valid identifier at all (`@`, `/`), so
 /// this uses its last path segment (`hoek`) instead -- an unscoped name
 /// has no `/` to split on and passes through unchanged. Two different
-/// scoped packages sharing a last segment (`@foo/utils`/`@bar/utils`)
-/// would collide *here* instead, ambiguously; not handled specially --
-/// no real package pair triggering this has been found yet, matching
-/// how every other gap in this project got filled (see
-/// docs/design/registry.md).
 fn qualifier_identifier(package: &str) -> &str {
     package.rsplit('/').next().unwrap_or(package)
+}
+
+fn package_qualifier_identifiers<'a>(
+    packages: impl IntoIterator<Item = &'a str>,
+) -> std::collections::HashMap<String, String> {
+    let packages = packages
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut counts = std::collections::HashMap::new();
+    for package in &packages {
+        *counts
+            .entry(qualifier_identifier(package).to_string())
+            .or_insert(0usize) += 1;
+    }
+    let candidates = packages
+        .into_iter()
+        .map(|package| {
+            let base = qualifier_identifier(&package);
+            let qualifier = if counts[base] == 1 {
+                base.to_string()
+            } else {
+                sanitize_identifier(&package)
+            };
+            (package, qualifier)
+        })
+        .collect::<Vec<_>>();
+    let mut candidate_counts = std::collections::HashMap::new();
+    for (_, candidate) in &candidates {
+        *candidate_counts.entry(candidate.clone()).or_insert(0usize) += 1;
+    }
+    candidates
+        .into_iter()
+        .map(|(package, candidate)| {
+            if candidate_counts[candidate.as_str()] == 1 {
+                (package, candidate)
+            } else {
+                let encoded = package
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                (package, format!("{candidate}__{encoded}"))
+            }
+        })
+        .collect()
 }
 
 fn is_native_builtin(package: &str) -> bool {
@@ -743,6 +784,8 @@ fn generate_registry_shims(
         .filter(|(_, pkgs)| pkgs.len() > 1)
         .map(|(name, _)| name)
         .collect();
+    let qualifier_by_package =
+        package_qualifier_identifiers(resolved.iter().map(|package| package.name.as_str()));
 
     // Every Fallback name of every `--use`d package also gets a package-
     // qualified alias -- not just names that actually collide -- so
@@ -774,11 +817,7 @@ fn generate_registry_shims(
                     qualified_key,
                     suppress_bare: colliding.contains(name),
                 });
-            rewrites.push((
-                qualifier_identifier(&pkg.name).to_string(),
-                name.clone(),
-                alias,
-            ));
+            rewrites.push((qualifier_by_package[&pkg.name].clone(), name.clone(), alias));
         }
     }
 
@@ -847,10 +886,7 @@ fn generate_registry_shims(
                     "declare function {symbol}({rendered}): JsValue;\n"
                 ));
                 class_targets.insert((pkg.name.clone(), class.name.clone()), symbol);
-                class_rewrites.push((
-                    qualifier_identifier(&pkg.name).to_string(),
-                    class.name.clone(),
-                ));
+                class_rewrites.push((qualifier_by_package[&pkg.name].clone(), class.name.clone()));
 
                 for (method, symbol, argument_count, has_callback, parameter_types) in
                     generate_napi_class_method_overloads(class, false, &observed_arities, &mut shim)
@@ -944,7 +980,7 @@ fn generate_registry_shims(
                     let symbol = format!("__thaw_typed_napi_{encoded}");
                     shim.push_str(&format!("declare function {symbol}(): {return_type};\n"));
                     static_class_getter_rewrites.push((
-                        qualifier_identifier(&pkg.name).to_string(),
+                        qualifier_by_package[&pkg.name].clone(),
                         class.name.clone(),
                         getter.name.clone(),
                         symbol,
@@ -977,7 +1013,7 @@ fn generate_registry_shims(
                         "declare function {symbol}(value: {rendered_type}): {rendered_type};\n"
                     ));
                     static_class_setter_rewrites.push((
-                        qualifier_identifier(&pkg.name).to_string(),
+                        qualifier_by_package[&pkg.name].clone(),
                         class.name.clone(),
                         setter.name.clone(),
                         symbol,
@@ -988,7 +1024,7 @@ fn generate_registry_shims(
                     generate_napi_class_method_overloads(class, true, &observed_arities, &mut shim)
                 {
                     static_class_method_rewrites.push((
-                        qualifier_identifier(&pkg.name).to_string(),
+                        qualifier_by_package[&pkg.name].clone(),
                         class.name.clone(),
                         method,
                         symbol,
@@ -2952,9 +2988,11 @@ fn build_with_link_mode(
         external_exports,
     ) = generate_registry_shims(registry_dir, &resolved_packages, &user_source)?;
     let external_resolutions = registry_import_meta_resolutions(registry_dir, &resolved_packages);
+    let qualifier_by_package =
+        package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
     let use_qualifiers: std::collections::HashSet<&str> = use_packages
         .iter()
-        .map(|package| qualifier_identifier(package))
+        .filter_map(|package| qualifier_by_package.get(package).map(String::as_str))
         .collect();
     qualified_call_rewrites.retain(|(qualifier, _, _)| use_qualifiers.contains(qualifier.as_str()));
     // `qs.stringify(x)`-style calls, for a name that collided across two
@@ -4588,6 +4626,27 @@ mod tests {
     fn qualifier_identifier_uses_the_last_segment_of_a_scoped_name() {
         assert_eq!(qualifier_identifier("@hapi/hoek"), "hoek");
         assert_eq!(qualifier_identifier("@babel/core"), "core");
+    }
+
+    #[test]
+    fn qualifier_identifiers_disambiguate_equal_scoped_package_tails() {
+        let qualifiers = package_qualifier_identifiers(["@foo/utils", "@bar/utils", "@hapi/hoek"]);
+        assert_eq!(qualifiers["@foo/utils"], "_foo_utils");
+        assert_eq!(qualifiers["@bar/utils"], "_bar_utils");
+        assert_eq!(qualifiers["@hapi/hoek"], "hoek");
+    }
+
+    #[test]
+    fn qualifier_identifiers_remain_unique_after_sanitization() {
+        let qualifiers =
+            package_qualifier_identifiers(["@foo-bar/utils", "@foo_bar/utils", "_foo_bar_utils"]);
+        let unique = qualifiers
+            .values()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), qualifiers.len());
+        assert!(qualifiers.values().all(|qualifier| qualifier
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')));
     }
 
     #[test]
