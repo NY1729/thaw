@@ -1600,6 +1600,9 @@ The workspace crates have narrow responsibilities:
   Monomorphic named functions are first-class native function values in object
   literals and other expression positions; their union/service return metadata
   is read from the named signature without an intermediate typed local.
+  Forward, transitive and multiple plain-interface inheritance carries tracked
+  union-array and typed function properties in the same base-to-derived order
+  as the fixed native object layout.
   Untyped or dynamically callable boundaries remain outside this subset
 - Automatic exception propagation through external C calls that use the legacy
   direct ABI; error-aware calls must opt into `thaw-result` metadata

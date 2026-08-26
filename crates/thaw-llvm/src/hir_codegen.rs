@@ -16778,6 +16778,13 @@ mod tests {
             }
             type ServiceFactory = () => ResultService;
             type AsyncServiceFactory = () => Promise<ResultService>;
+            interface DerivedService extends CombinedService, HolderServiceBase {
+                nestedHolder: ResultHolder;
+            }
+            interface CombinedService extends ArrayServiceBase, LoaderServiceBase {}
+            interface ArrayServiceBase { inheritedResults: Result[]; }
+            interface LoaderServiceBase { inheritedLoad: ResultFactory; }
+            interface HolderServiceBase { inheritedHolder: HolderFactory; }
             async function result(number: boolean): Promise<Result> {
                 await sleep(1);
                 if (number) return { kind: "number", value: 8 };
@@ -16872,6 +16879,13 @@ mod tests {
                 for (const item of factory().load()) {
                     if (item.kind === "number") return String(item.value + 11);
                     return item.value + " service factory";
+                }
+                return "empty";
+            }
+            function consumeDerivedService(service: DerivedService): string {
+                for (const item of service.inheritedResults) {
+                    if (item.kind === "number") return String(item.value + 12);
+                    return item.value + " inherited array";
                 }
                 return "empty";
             }
@@ -17048,6 +17062,27 @@ mod tests {
                     if (item.kind === "number") console.log(item.value + 130);
                     else console.log(item.value + " service rest");
                 }
+                const derivedService: DerivedService = {
+                    nestedHolder: {
+                        results: [{ kind: "text", value: "derived nested" }]
+                    },
+                    inheritedHolder: producedHolder,
+                    inheritedLoad: producedResults,
+                    inheritedResults: [{ kind: "number", value: 10 }]
+                };
+                console.log(consumeDerivedService(derivedService));
+                for (const item of derivedService.inheritedLoad()) {
+                    if (item.kind === "number") console.log(item.value + 140);
+                    else console.log(item.value + " inherited load");
+                }
+                for (const item of derivedService.inheritedHolder().results) {
+                    if (item.kind === "number") console.log(item.value + 5);
+                    else console.log(item.value + " inherited holder");
+                }
+                for (const item of derivedService.nestedHolder.results) {
+                    if (item.kind === "number") console.log(item.value + 1);
+                    else console.log(item.value + "!");
+                }
                 let assignedKind: string = "text";
                 let assignedValue: number | string = "initial";
                 for ({ kind: assignedKind, value: assignedValue } of results) {
@@ -17105,7 +17140,7 @@ mod tests {
         "#;
         assert_eq!(
             compile_and_run(source, "for_of_destructuring"),
-            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
+            "1\ntrue\n3\ntrue\n1\n4\nfour\n5\nfive\n7\nsync!\n8\nsync item\n13\nnested holder parameter\n15\nasync holder!\n21\nasync holder function value\ndeep nested holder\n17\n39\n52\ndeep destructured\nparameter destructured parameter\n62\ndeep nested rest\n69\n15\n79\n19\n89\n16\n99\n17\n20\n109\n119\n18\n129\n139\n22\n149\n19\nderived nested!\n16\nsync assigned\n26\nsync ordinary\nloop parameter\n10\n11\nreturned!\n13\ninline!\nreturned!\n11\nasync!\nasync assigned async\n"
         );
     }
 
