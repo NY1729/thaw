@@ -9794,7 +9794,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishUndefined(_)
         | HirExpr::EnvVar(_)
         | HirExpr::ObjectAlloc(_)
-        | HirExpr::FunctionRef(..) => {}
+        | HirExpr::FunctionRef(..)
+        | HirExpr::MethodRef(..) => {}
     }
 }
 
@@ -9865,6 +9866,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         // function value is evaluated at this expression boundary.
         HirExpr::Lambda(..)
         | HirExpr::FunctionRef(..)
+        | HirExpr::MethodRef(..)
         | HirExpr::Lit(_)
         | HirExpr::OptionalNone(_)
         | HirExpr::NullableNone(_)
@@ -10521,10 +10523,12 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             signature.ret.clone()
                         };
-                    return Ok(Some(HirExpr::FunctionRef(
+                    return Ok(Some(HirExpr::MethodRef(
                         unbound_class_method_symbol(&symbol),
+                        symbol,
                         signature.params.clone(),
                         result,
+                        true,
                     )));
                 }
                 let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_))
@@ -10558,31 +10562,17 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope
                 .insert(receiver_name.clone(), receiver_type.clone());
-            let parameters = signature.params[1..]
-                .iter()
-                .enumerate()
-                .map(|(index, ty)| HirParam {
-                    name: format!("__thaw_unbound_method_argument_{index}"),
-                    ty: ty.clone(),
-                })
-                .collect::<Vec<_>>();
             let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
                 HirType::Promise(Box::new(signature.ret.clone()))
             } else {
                 signature.ret.clone()
             };
-            let arguments = parameters
-                .iter()
-                .map(|parameter| HirExpr::Var(parameter.name.clone()))
-                .collect();
-            let unbound = HirExpr::Lambda(
-                Vec::new(),
-                parameters,
+            let unbound = HirExpr::MethodRef(
+                unbound_class_method_symbol(&symbol),
+                symbol,
+                signature.params[1..].to_vec(),
                 result,
-                Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var(unbound_class_method_symbol(&symbol))),
-                    arguments,
-                )),
+                false,
             );
             return self
                 .wrap_call_argument_bindings(unbound, &[(receiver_name, receiver_type, receiver)])
@@ -12873,6 +12863,9 @@ impl<'a> FnLowerer<'a> {
                 .cloned()
                 .ok_or_else(|| format!("unknown variable `{name}`")),
             HirExpr::FunctionRef(_, params, ret) => {
+                Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
+            }
+            HirExpr::MethodRef(_, _, params, ret, _) => {
                 Ok(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::OptionalSome(value, payload) => {

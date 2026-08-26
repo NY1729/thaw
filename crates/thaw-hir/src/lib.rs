@@ -270,6 +270,8 @@ pub enum HirExpr {
     Lambda(Vec<HirParam>, Vec<HirParam>, HirType, Box<HirExpr>),
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
+    /// A native method value with separate unbound and explicit-receiver entries.
+    MethodRef(String, String, Vec<HirType>, HirType, bool),
     Block(Vec<HirStmt>),
     /// Raises `error` from an expression position. `fallback` supplies the
     /// unreachable native value required by the surrounding typed expression.
@@ -553,7 +555,8 @@ pub fn set_ffi_error_abi(
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
-            | HirExpr::FunctionRef(..) => {}
+            | HirExpr::FunctionRef(..)
+            | HirExpr::MethodRef(..) => {}
         }
     }
 
@@ -730,7 +733,8 @@ pub fn set_ffi_ownership(
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
-            | HirExpr::FunctionRef(..) => {}
+            | HirExpr::FunctionRef(..)
+            | HirExpr::MethodRef(..) => {}
         }
     }
     fn update_stmts(
@@ -1133,7 +1137,8 @@ pub fn set_ffi_string_abi(
             | HirExpr::Var(_)
             | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_)
-            | HirExpr::FunctionRef(..) => {}
+            | HirExpr::FunctionRef(..)
+            | HirExpr::MethodRef(..) => {}
         }
     }
     fn update_stmts(
