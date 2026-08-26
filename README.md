@@ -121,7 +121,10 @@ The workspace crates have narrow responsibilities:
 
 ### Implemented
 
-- Typed top-level functions, calls, forward references and recursion
+- Typed top-level functions, calls, forward references and recursion. Module-scoped
+  `const`/`let` bindings infer or validate their native type, initialize in source
+  order exactly once before user code, remain visible to synchronous and resumable
+  async functions, and preserve shared `let` mutation across module boundaries
 - `number`, `string`, `boolean`, `null`, `void`, `Json`, number arrays and fixed-shape
   objects; function types may be parenthesized where TypeScript grammar
   requires it (including `FunctionType | undefined`)
