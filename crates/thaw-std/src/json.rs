@@ -111,6 +111,28 @@ pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
+    let keys = match unsafe { value.as_ref() } {
+        Some(Value::Object(fields)) => fields.keys().cloned().collect::<Vec<_>>(),
+        Some(Value::Array(items)) => (0..items.len()).map(|index| index.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    let output = thaw_arena::thaw_arena_alloc(8 + keys.len() * 8, 8);
+    if output.is_null() {
+        return output;
+    }
+    unsafe { (output as *mut i64).write(keys.len() as i64) };
+    for (index, key) in keys.into_iter().enumerate() {
+        let key = CString::new(key).unwrap_or_default().into_raw();
+        unsafe { (output.add(8 + index * 8) as *mut *mut c_char).write(key) };
+    }
+    output
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
     if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
         items.push(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number));
@@ -276,6 +298,33 @@ mod tests {
         assert_eq!(
             thaw_json_as_number(thaw_json_get(obj, length_key.as_ptr())),
             42.0
+        );
+    }
+
+    #[test]
+    fn returns_object_and_array_keys_in_javascript_order() {
+        let object = parse(r#"{"second": 2, "first": 1}"#);
+        let keys = unsafe { thaw_json_keys(object) };
+        assert_eq!(unsafe { (keys as *const i64).read() }, 2);
+        assert_eq!(
+            read_c_string(unsafe { (keys.add(8) as *const *const c_char).read() }),
+            "second"
+        );
+        assert_eq!(
+            read_c_string(unsafe { (keys.add(16) as *const *const c_char).read() }),
+            "first"
+        );
+
+        let array = parse("[10, 20]");
+        let keys = unsafe { thaw_json_keys(array) };
+        assert_eq!(unsafe { (keys as *const i64).read() }, 2);
+        assert_eq!(
+            read_c_string(unsafe { (keys.add(8) as *const *const c_char).read() }),
+            "0"
+        );
+        assert_eq!(
+            read_c_string(unsafe { (keys.add(16) as *const *const c_char).read() }),
+            "1"
         );
     }
 
