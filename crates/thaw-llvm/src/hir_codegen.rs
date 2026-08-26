@@ -19553,11 +19553,16 @@ mod tests {
                 const adopted: (value: number) => Promise<number> =
                     async value => await delayed(value);
                 console.log(await adopted(42));
+                const adoptedBlock: (enabled: boolean) => Promise<number> = async enabled => {
+                    if (enabled) return await delayed(40 + offset);
+                    return await delayed(0);
+                };
+                console.log(await adoptedBlock(true));
             }
         "#;
         assert_eq!(
             compile_and_run(source, "expression_bodied_async_arrow"),
-            "42\n42\ndone\n42\n42\n"
+            "42\n42\ndone\n42\n42\n42\n"
         );
     }
 
