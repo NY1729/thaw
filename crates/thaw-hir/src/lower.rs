@@ -72,6 +72,7 @@ fn dynamic_symbol(name: &str) -> Option<(DynamicBackend, String)> {
 struct FnSignature {
     params: Vec<HirType>,
     variadic: Option<HirType>,
+    native_rest: Option<HirType>,
     ret: HirType,
     is_async: bool,
     /// A function declared with no body (`declare function foo(...): T;`,
@@ -790,6 +791,37 @@ fn omitted_parameter_masks(patterns: &[Pat], receiver_count: usize) -> Result<Ve
     Ok(masks)
 }
 
+fn native_rest_element(patterns: &[Pat], params: &[HirType]) -> Result<Option<HirType>, String> {
+    if patterns
+        .iter()
+        .take(patterns.len().saturating_sub(1))
+        .any(|pattern| matches!(pattern, Pat::Rest(_)))
+    {
+        return Err("native class rest parameter must be last".into());
+    }
+    if !patterns
+        .last()
+        .is_some_and(|pattern| matches!(pattern, Pat::Rest(_)))
+    {
+        return Ok(None);
+    }
+    match params.last() {
+        Some(HirType::Array(element)) => Ok(Some(element.as_ref().clone())),
+        Some(other) => Err(format!(
+            "native class rest parameter needs an array annotation, got {other:?}"
+        )),
+        None => Err("native class rest parameter is missing its signature type".into()),
+    }
+}
+
+fn native_rest_array(values: Vec<HirExpr>, element: &HirType) -> HirExpr {
+    if values.is_empty() {
+        HirExpr::ArrayAlloc(Box::new(HirExpr::Lit(HirLit::F64(0.0))), element.clone())
+    } else {
+        HirExpr::ArrayLit(values)
+    }
+}
+
 fn insert_omitted_parameter_signatures(
     signatures: &mut HashMap<Symbol, FnSignature>,
     symbol: &str,
@@ -1263,6 +1295,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     FnSignature {
                         params,
                         variadic,
+                        native_rest: None,
                         ret,
                         is_async: func.is_async,
                         is_extern,
@@ -1327,6 +1360,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     FnSignature {
                         params,
                         variadic: None,
+                        native_rest: None,
                         ret: instance_type.clone(),
                         is_async: false,
                         is_extern: false,
@@ -1351,6 +1385,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     FnSignature {
                         params: initializer_params,
                         variadic: None,
+                        native_rest: None,
                         ret: instance_type.clone(),
                         is_async: false,
                         is_extern: false,
@@ -1369,9 +1404,19 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .iter()
                         .map(class_constructor_param_pattern)
                         .collect::<Vec<_>>();
+                    let constructor_symbol = class_constructor_symbol(&name);
+                    let initializer_symbol = class_initializer_symbol(&name);
+                    let native_rest =
+                        native_rest_element(&patterns, &signatures[&constructor_symbol].params)?;
+                    signatures
+                        .get_mut(&constructor_symbol)
+                        .expect("class constructor signature")
+                        .native_rest = native_rest.clone();
+                    signatures
+                        .get_mut(&initializer_symbol)
+                        .expect("class initializer signature")
+                        .native_rest = native_rest;
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
-                        let constructor_symbol = class_constructor_symbol(&name);
-                        let initializer_symbol = class_initializer_symbol(&name);
                         for arity in default_start..patterns.len() {
                             let mut constructor_signature = signatures[&constructor_symbol].clone();
                             constructor_signature.params.truncate(arity);
@@ -1486,6 +1531,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         FnSignature {
                             params,
                             variadic: None,
+                            native_rest: None,
                             ret,
                             is_async: method.function.is_async,
                             is_extern: false,
@@ -1504,9 +1550,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .iter()
                         .map(|parameter| parameter.pat.clone())
                         .collect::<Vec<_>>();
+                    let symbol = class_member_symbol(&name, method)?;
+                    let native_rest = native_rest_element(&patterns, &signatures[&symbol].params)?;
+                    signatures
+                        .get_mut(&symbol)
+                        .expect("class method signature")
+                        .native_rest = native_rest;
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
                         let receiver_count = usize::from(!method.is_static);
-                        let symbol = class_member_symbol(&name, method)?;
                         for arity in default_start..patterns.len() {
                             let total_arity = arity + receiver_count;
                             let mut wrapper = signatures[&symbol].clone();
@@ -1571,6 +1622,9 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             let base_params = signatures[&class_constructor_symbol(base.sym.as_ref())]
                 .params
                 .clone();
+            let base_native_rest = signatures[&class_constructor_symbol(base.sym.as_ref())]
+                .native_rest
+                .clone();
             let constructor = signatures
                 .get_mut(&class_constructor_symbol(derived_name))
                 .expect("derived constructor signature");
@@ -1578,12 +1632,14 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                 constructor.params = base_params.clone();
                 changed = true;
             }
+            constructor.native_rest = base_native_rest.clone();
             let mut initializer_params = vec![interfaces[derived_name].clone()];
             initializer_params.extend(base_params.iter().cloned());
-            signatures
+            let initializer = signatures
                 .get_mut(&class_initializer_symbol(derived_name))
-                .expect("derived initializer signature")
-                .params = initializer_params;
+                .expect("derived initializer signature");
+            initializer.params = initializer_params;
+            initializer.native_rest = base_native_rest;
             for arity in 0..base_params.len() {
                 let base_constructor =
                     default_arity_symbol(&class_constructor_symbol(base.sym.as_ref()), arity);
@@ -1877,6 +1933,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     FnSignature {
                         params: Vec::new(),
                         variadic: None,
+                        native_rest: None,
                         ret: ty.clone(),
                         is_async: false,
                         is_extern: false,
@@ -1903,6 +1960,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         FnSignature {
                             params: vec![ty.clone()],
                             variadic: None,
+                            native_rest: None,
                             ret: ty.clone(),
                             is_async: false,
                             is_extern: false,
@@ -4174,6 +4232,7 @@ fn lower_class_default_wrappers(
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
 ) -> Result<Vec<HirFunction>, String> {
+    let is_async = signatures[symbol].is_async;
     let Some(default_start) = trailing_omittable_start(patterns) else {
         return Ok(Vec::new());
     };
@@ -4257,6 +4316,11 @@ fn lower_class_default_wrappers(
                 .map(|parameter| HirExpr::Var(parameter.name.clone()))
                 .collect(),
         );
+        let call = if is_async {
+            HirExpr::Await(Box::new(call))
+        } else {
+            call
+        };
         if *ret == HirType::Void {
             body.push(HirStmt::Expr(call));
             body.push(HirStmt::Return(None));
@@ -4267,7 +4331,7 @@ fn lower_class_default_wrappers(
             name: default_arity_symbol(symbol, total_arity),
             params: wrapper_params,
             ret: ret.clone(),
-            is_async: false,
+            is_async,
             body,
         });
     }
@@ -4289,6 +4353,7 @@ fn lower_class_omitted_parameter_wrappers(
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
 ) -> Result<Vec<HirFunction>, String> {
+    let is_async = signatures[symbol].is_async;
     let mut wrappers = Vec::new();
     for mask in omitted_parameter_masks(patterns, receiver_count)? {
         let wrapper_params = params
@@ -4375,6 +4440,11 @@ fn lower_class_omitted_parameter_wrappers(
                 .map(|parameter| HirExpr::Var(parameter.name.clone()))
                 .collect(),
         );
+        let call = if is_async {
+            HirExpr::Await(Box::new(call))
+        } else {
+            call
+        };
         if *ret == HirType::Void {
             body.push(HirStmt::Expr(call));
             body.push(HirStmt::Return(None));
@@ -4385,7 +4455,7 @@ fn lower_class_omitted_parameter_wrappers(
             name: omitted_parameter_symbol(symbol, mask),
             params: wrapper_params,
             ret: ret.clone(),
-            is_async: false,
+            is_async,
             body,
         });
     }
@@ -5119,6 +5189,22 @@ fn lower_param(
     if let Pat::Assign(assignment) = pat {
         return lower_param(
             &assignment.left,
+            interfaces,
+            generic_interfaces,
+            allow_inference,
+            type_substitution,
+        );
+    }
+    if let Pat::Rest(rest) = pat {
+        let mut argument = rest.arg.as_ref().clone();
+        match &mut argument {
+            Pat::Ident(binding) => binding.type_ann = rest.type_ann.clone(),
+            Pat::Array(pattern) => pattern.type_ann = rest.type_ann.clone(),
+            Pat::Object(pattern) => pattern.type_ann = rest.type_ann.clone(),
+            _ => {}
+        }
+        return lower_param(
+            &argument,
             interfaces,
             generic_interfaces,
             allow_inference,
@@ -10390,6 +10476,7 @@ impl<'a> FnLowerer<'a> {
             let signature = FnSignature {
                 params: Vec::new(),
                 variadic: None,
+                native_rest: None,
                 ret: HirType::Dynamic,
                 is_async: false,
                 is_extern: false,
@@ -13995,11 +14082,22 @@ impl<'a> FnLowerer<'a> {
         receiver_count: usize,
         label: &str,
     ) -> Result<Vec<HirExpr>, String> {
-        if signature.params.len() < usize::BITS as usize
-            && arguments.len() + receiver_count <= signature.params.len()
+        let native_rest_values = signature.native_rest.clone().map(|element| {
+            let fixed_argument_count = signature.params.len() - receiver_count - 1;
+            let values = if arguments.len() > fixed_argument_count {
+                arguments.split_off(fixed_argument_count)
+            } else {
+                Vec::new()
+            };
+            (element, values)
+        });
+        let logical_param_count =
+            signature.params.len() - usize::from(signature.native_rest.is_some());
+        if logical_param_count < usize::BITS as usize
+            && arguments.len() + receiver_count <= logical_param_count
         {
             let mut omitted_mask = 0usize;
-            for index in receiver_count..signature.params.len() {
+            for index in receiver_count..logical_param_count {
                 let omitted = match arguments.get(index - receiver_count) {
                     None => true,
                     Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
@@ -14024,12 +14122,21 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        if arguments.len() + receiver_count != signature.params.len() {
+        if signature.native_rest.is_none()
+            && arguments.len() + receiver_count != signature.params.len()
+        {
             let wrapper = default_arity_symbol(symbol, arguments.len() + receiver_count);
             if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
                 *symbol = wrapper;
                 *signature = wrapper_signature;
             }
+        }
+        if let Some((element, values)) = native_rest_values {
+            let values = values
+                .into_iter()
+                .map(|value| self.coerce_to_declared(&element, value))
+                .collect::<Result<Vec<_>, _>>()?;
+            arguments.push(native_rest_array(values, &element));
         }
         let expected = &signature.params[receiver_count..];
         if arguments.len() != expected.len() {
@@ -16497,12 +16604,27 @@ impl<'a> FnLowerer<'a> {
             }));
         }
 
+        let native_rest_values = signature.as_ref().and_then(|signature| {
+            signature.native_rest.clone().map(|element| {
+                let fixed_count = signature.params.len() - 1;
+                let values = if lowered_arguments.len() > fixed_count {
+                    lowered_arguments.split_off(fixed_count)
+                } else {
+                    Vec::new()
+                };
+                (element, values)
+            })
+        });
+
         if let Some(full_signature) = signature.clone() {
+            let logical_param_count =
+                full_signature.params.len() - usize::from(full_signature.native_rest.is_some());
             if full_signature.variadic.is_none()
-                && lowered_arguments.len() <= full_signature.params.len()
+                && logical_param_count < usize::BITS as usize
+                && lowered_arguments.len() <= logical_param_count
             {
                 let mut omitted_mask = 0usize;
-                for index in 0..full_signature.params.len() {
+                for index in 0..logical_param_count {
                     let omitted = match lowered_arguments.get(index) {
                         None => true,
                         Some(value) => self.infer_expr_type(value)? == HirType::Undefined,
@@ -16529,8 +16651,19 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        if let Some((element, values)) = native_rest_values {
+            let values = values
+                .into_iter()
+                .map(|value| self.coerce_to_declared(&element, value))
+                .collect::<Result<Vec<_>, _>>()?;
+            lowered_arguments.push(native_rest_array(values, &element));
+            param_types = signature.as_ref().map(|signature| signature.params.clone());
+        }
+
         if signature.as_ref().is_some_and(|signature| {
-            signature.variadic.is_none() && lowered_arguments.len() != signature.params.len()
+            signature.variadic.is_none()
+                && signature.native_rest.is_none()
+                && lowered_arguments.len() != signature.params.len()
         }) {
             let wrapper = default_arity_symbol(&callee_name, lowered_arguments.len());
             if let Some(wrapper_signature) = self.signatures.get(&wrapper).cloned() {
@@ -16849,6 +16982,7 @@ impl<'a> FnLowerer<'a> {
         Ok(FnSignature {
             params: Vec::new(),
             variadic: None,
+            native_rest: None,
             ret: HirType::Dynamic,
             is_async: false,
             is_extern: false,
@@ -16993,6 +17127,7 @@ impl<'a> FnLowerer<'a> {
         Ok(FnSignature {
             params: Vec::new(),
             variadic: None,
+            native_rest: None,
             ret: HirType::Dynamic,
             is_async: false,
             is_extern: false,
@@ -17097,6 +17232,7 @@ impl<'a> FnLowerer<'a> {
         Ok(FnSignature {
             params: Vec::new(),
             variadic: None,
+            native_rest: None,
             ret: HirType::Dynamic,
             is_async: false,
             is_extern: false,

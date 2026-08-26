@@ -1362,6 +1362,7 @@ The workspace crates have narrow responsibilities:
   omitted trailing default and optional parameters on constructors, instance/static methods,
   explicit `super` calls and inherited implicit constructors,
   plus explicit `undefined` defaulting at any defaulted position (including tuple spreads),
+  and typed rest parameters packed into native arrays across constructors, methods and `super`,
   inheritance-aware native `instanceof`, implicit derived-constructor forwarding
   and structural `implements`
   validation for object types and generic interfaces. Named and anonymous default
