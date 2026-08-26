@@ -741,10 +741,23 @@ fn default_arity_symbol(symbol: &str, arity: usize) -> Symbol {
     format!("{symbol}__thawdefault_arity_{arity}")
 }
 
-fn trailing_default_start(patterns: &[Pat]) -> Option<usize> {
+fn pattern_is_omittable(pattern: &Pat) -> bool {
+    matches!(pattern, Pat::Assign(_))
+        || matches!(pattern, Pat::Ident(binding) if binding.id.optional)
+}
+
+fn optional_parameter_type(ty: HirType) -> HirType {
+    match ty {
+        HirType::Optional(_) | HirType::Nullish(_) => ty,
+        HirType::Nullable(payload) => HirType::Nullish(payload),
+        other => HirType::Optional(Box::new(other)),
+    }
+}
+
+fn trailing_omittable_start(patterns: &[Pat]) -> Option<usize> {
     let start = patterns
         .iter()
-        .rposition(|pattern| !matches!(pattern, Pat::Assign(_)))
+        .rposition(|pattern| !pattern_is_omittable(pattern))
         .map_or(0, |index| index + 1);
     (start < patterns.len()).then_some(start)
 }
@@ -958,10 +971,11 @@ fn collect_native_classes<'a>(
             let annotation = binding.type_ann.as_ref().ok_or_else(|| {
                 format!("class `{name}` parameter property `{field_name}` needs a type annotation")
             })?;
-            fields.push((
-                field_name,
-                lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?,
-            ));
+            let mut ty = lower_ts_type(&annotation.type_ann, interfaces, generic_interfaces)?;
+            if binding.id.optional {
+                ty = optional_parameter_type(ty);
+            }
+            fields.push((field_name, ty));
         }
         for implementation in &declaration.class.implements {
             let Expr::Ident(target) = implementation.expr.as_ref() else {
@@ -1307,7 +1321,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .iter()
                         .map(class_constructor_param_pattern)
                         .collect::<Vec<_>>();
-                    if let Some(default_start) = trailing_default_start(&patterns) {
+                    if let Some(default_start) = trailing_omittable_start(&patterns) {
                         let constructor_symbol = class_constructor_symbol(&name);
                         let initializer_symbol = class_initializer_symbol(&name);
                         for arity in default_start..patterns.len() {
@@ -1430,7 +1444,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .iter()
                         .map(|parameter| parameter.pat.clone())
                         .collect::<Vec<_>>();
-                    if let Some(default_start) = trailing_default_start(&patterns) {
+                    if let Some(default_start) = trailing_omittable_start(&patterns) {
                         let receiver_count = usize::from(!method.is_static);
                         let symbol = class_member_symbol(&name, method)?;
                         for arity in default_start..patterns.len() {
@@ -4061,7 +4075,7 @@ fn lower_class_default_wrappers(
     global_types: &HashMap<Symbol, HirType>,
     immutable_globals: &HashSet<Symbol>,
 ) -> Result<Vec<HirFunction>, String> {
-    let Some(default_start) = trailing_default_start(patterns) else {
+    let Some(default_start) = trailing_omittable_start(patterns) else {
         return Ok(Vec::new());
     };
     let mut wrappers = Vec::new();
@@ -4097,14 +4111,32 @@ fn lower_class_default_wrappers(
         }
         let mut body = Vec::new();
         for (index, pattern) in patterns.iter().enumerate().skip(arity) {
-            let Pat::Assign(default) = pattern else {
-                return Err(format!(
-                    "default parameters of `{symbol}` must form a trailing sequence"
-                ));
-            };
             let parameter = &params[receiver_count + index];
-            let value = lowerer.lower_expr(&default.right)?;
-            let value = lowerer.coerce_to_declared(&parameter.ty, value)?;
+            let value = match pattern {
+                Pat::Assign(default) => {
+                    let value = lowerer.lower_expr(&default.right)?;
+                    lowerer.coerce_to_declared(&parameter.ty, value)?
+                }
+                Pat::Ident(binding) if binding.id.optional => match &parameter.ty {
+                    HirType::Optional(payload) => {
+                        HirExpr::OptionalNone(payload.as_ref().clone())
+                    }
+                    HirType::Nullish(payload) => {
+                        HirExpr::NullishUndefined(payload.as_ref().clone())
+                    }
+                    other => {
+                        return Err(format!(
+                            "optional parameter `{}` of `{symbol}` needs an undefined-capable type, got {other:?}",
+                            parameter.name
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(format!(
+                        "omittable parameters of `{symbol}` must form a trailing sequence"
+                    ))
+                }
+            };
             body.push(HirStmt::Let(
                 parameter.name.clone(),
                 parameter.ty.clone(),
@@ -4760,19 +4792,25 @@ fn lower_param(
             type_substitution,
         );
     }
-    let (name, type_ann) = match pat {
-        Pat::Ident(binding) => (binding.id.sym.to_string(), binding.type_ann.as_ref()),
+    let (name, type_ann, optional) = match pat {
+        Pat::Ident(binding) => (
+            binding.id.sym.to_string(),
+            binding.type_ann.as_ref(),
+            binding.id.optional,
+        ),
         Pat::Object(pattern) => (
             format!("__thaw_param_{}", pattern.span.lo.0),
             pattern.type_ann.as_ref(),
+            false,
         ),
         Pat::Array(pattern) => (
             format!("__thaw_param_{}", pattern.span.lo.0),
             pattern.type_ann.as_ref(),
+            false,
         ),
         _ => return Err("unsupported function parameter pattern".into()),
     };
-    let ty = match type_ann {
+    let mut ty = match type_ann {
         Some(ann) => resolve_ts_type_with_substitution(
             &ann.type_ann,
             type_substitution,
@@ -4787,6 +4825,9 @@ fn lower_param(
         ))
         }
     };
+    if optional {
+        ty = optional_parameter_type(ty);
+    }
     Ok(HirParam { name, ty })
 }
 
