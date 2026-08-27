@@ -400,6 +400,17 @@ fn validates_generic_function_type_alias_assignments() {
 }
 
 #[test]
+fn validates_inline_generic_function_type_assignments() {
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const invalid: <T>(value: T) => T = <U>(value: U): string => String(value); }",
+    )
+    .unwrap();
+    let error = lower_module(&module).unwrap_err();
+    assert!(error.contains("inline generic function type"), "{error}");
+    assert!(error.contains("incompatible"), "{error}");
+}
+
+#[test]
 fn validates_generic_callable_interface_assignments() {
     for (source, name) in [
         (

@@ -974,9 +974,10 @@ The workspace crates have narrow responsibilities:
 - User-defined function parameters with a monomorphic function type provide
   the same contextual specialization for named generic functions, local
   generic arrows and inline generic arrows
-- Generic function type aliases such as `type Identity = <T>(value: T) => T`
-  retain a polymorphic template when assigned a compatible generic arrow or
-  named generic function; parameter/return shapes and constraints are checked
+- Generic function type aliases such as `type Identity = <T>(value: T) => T`,
+  and the same function type written directly on a variable, retain a
+  polymorphic template when assigned a compatible generic arrow or named
+  generic function; parameter/return shapes and constraints are checked
   modulo type-parameter names before call-site specialization. Generic defaults
   are checked the same way so omitted call-site types retain the annotated
   contract. Assignments to these polymorphic annotations require an explicit

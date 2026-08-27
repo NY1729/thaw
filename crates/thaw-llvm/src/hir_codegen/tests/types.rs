@@ -451,6 +451,27 @@ fn compiles_generic_function_type_alias_arrows() {
 }
 
 #[test]
+fn compiles_inline_generic_function_type_arrows() {
+    let source = r#"
+        function named<T>(value: T): T { return value; }
+        function main(): void {
+            const identity: <T>(value: T) => T = <U>(value: U): U => value;
+            const choose: <T, U>(left: T, right: U) => T =
+                <Left, Right>(left: Left, right: Right): Left => left;
+            const forwarded: <T>(value: T) => T = named;
+            console.log(identity(21));
+            console.log(identity("inline"));
+            console.log(choose(true, 22));
+            console.log(forwarded("named"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "inline_generic_function_types"),
+        "21\ninline\ntrue\nnamed\n"
+    );
+}
+
+#[test]
 fn compiles_generic_callable_interfaces() {
     let source = r#"
         interface Identity { <T>(value: T): T; }

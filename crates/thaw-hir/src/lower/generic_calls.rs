@@ -216,7 +216,23 @@ impl<'a> FnLowerer<'a> {
         &self,
         ty: &TsType,
     ) -> Result<Option<(FnSignature, Symbol)>, String> {
-        let TsType::TsTypeRef(reference) = strip_parenthesized_ts_type(ty) else {
+        let ty = strip_parenthesized_ts_type(ty);
+        if let TsType::TsFnOrConstructorType(TsFnOrConstructorType::TsFnType(function)) = ty {
+            if let Some(type_params) = &function.type_params {
+                let label = "inline generic function type";
+                return Ok(Some((
+                    self.generic_function_type_signature(
+                        label,
+                        type_params,
+                        &function.params,
+                        &function.type_ann.type_ann,
+                        (function.span.lo.0, function.span.hi.0),
+                    )?,
+                    label.into(),
+                )));
+            }
+        }
+        let TsType::TsTypeRef(reference) = ty else {
             return Ok(None);
         };
         let swc_ecma_ast::TsEntityName::Ident(identifier) = &reference.type_name else {
@@ -391,11 +407,33 @@ impl<'a> FnLowerer<'a> {
             }
         };
         let type_params = type_params
-            .as_ref()
             .ok_or_else(|| format!("callable type alias `{}` is not generic", alias.id.sym))?;
+        let return_type = return_type.ok_or_else(|| {
+            format!(
+                "generic callable type alias `{}` needs a return type",
+                alias.id.sym
+            )
+        })?;
+        self.generic_function_type_signature(
+            &format!("generic function type alias `{}`", alias.id.sym),
+            type_params,
+            params,
+            return_type,
+            (alias.span.lo.0, alias.span.hi.0),
+        )
+    }
+
+    fn generic_function_type_signature(
+        &self,
+        label: &str,
+        type_params: &swc_ecma_ast::TsTypeParamDecl,
+        params: &[TsFnParam],
+        return_type: &TsType,
+        source_range: (u32, u32),
+    ) -> Result<FnSignature, String> {
         validate_trailing_type_parameter_defaults(
-            "generic function type alias",
-            alias.id.sym.as_ref(),
+            label,
+            label,
             type_params,
         )?;
         let generic_type_params = type_params
@@ -411,16 +449,10 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|parameter| {
                 let TsFnParam::Ident(parameter) = parameter else {
-                    return Err(format!(
-                        "generic function type alias `{}` requires identifier parameters",
-                        alias.id.sym
-                    ));
+                    return Err(format!("{label} requires identifier parameters"));
                 };
                 let annotation = parameter.type_ann.as_ref().ok_or_else(|| {
-                    format!(
-                        "generic function type alias `{}` parameter `{}` needs an annotation",
-                        alias.id.sym, parameter.id.sym
-                    )
+                    format!("{label} parameter `{}` needs an annotation", parameter.id.sym)
                 })?;
                 generic_type_pattern(
                     &annotation.type_ann,
@@ -440,7 +472,7 @@ impl<'a> FnLowerer<'a> {
             is_async: false,
             uses_this: false,
             is_extern: false,
-            source_range: (alias.span.lo.0, alias.span.hi.0),
+            source_range,
             generic_type_params,
             generic_type_constraints: type_params
                 .params
@@ -459,16 +491,7 @@ impl<'a> FnLowerer<'a> {
                     matches!(parameter, TsFnParam::Ident(binding) if binding.id.optional)
                 })
                 .collect(),
-            generic_return_type: Some(Box::new(
-                return_type
-                    .ok_or_else(|| {
-                        format!(
-                            "generic callable type alias `{}` needs a return type",
-                            alias.id.sym
-                        )
-                    })?
-                    .clone(),
-            )),
+            generic_return_type: Some(Box::new(return_type.clone())),
         })
     }
 
