@@ -1329,7 +1329,8 @@ The workspace crates have narrow responsibilities:
   single evaluation, and `for...in` iterates JSON object keys or array indices
   in JavaScript key order
 - `for...of` iterates runtime JSON arrays as `Json` values alongside typed
-  native arrays
+  native arrays. Strings are iterated by Unicode code point in both
+  `for...of` and `for await...of`
 - `Object.is` applies SameValue comparison to native and runtime JSON
   primitives, preserves JSON object/array identity, and compares JSON
   primitives directly with native numbers, strings and booleans

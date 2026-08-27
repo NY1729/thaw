@@ -963,8 +963,15 @@ impl<'a> FnLowerer<'a> {
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
                     let item_discriminants =
                         self.expression_array_element_discriminants(&for_of.right);
-                    let values = self.lower_expr(&for_of.right)?;
-                    let values_type = self.infer_expr_type(&values)?;
+                    let mut values = self.lower_expr(&for_of.right)?;
+                    let mut values_type = self.infer_expr_type(&values)?;
+                    if values_type == HirType::Str {
+                        values = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_to_array".into())),
+                            vec![values],
+                        );
+                        values_type = HirType::Array(Box::new(HirType::Str));
+                    }
                     let (element, json_array) = match &values_type {
                         HirType::Array(element) => (element.as_ref().clone(), false),
                         HirType::Json if !for_of.is_await => (HirType::Json, true),
