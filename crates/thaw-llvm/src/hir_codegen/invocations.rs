@@ -641,7 +641,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_date_set_hours"
             | "__thaw_date_set_minutes"
             | "__thaw_date_set_seconds"
-            | "__thaw_date_set_milliseconds" => {
+            | "__thaw_date_set_milliseconds"
+            | "__thaw_date_utc" => {
                 let mut compiled = Vec::with_capacity(args.len());
                 for argument in args {
                     compiled.push(self.compile_expr(argument)?.into());
@@ -659,6 +660,23 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("Date setter returned no value".into());
+            }
+            "__thaw_date_parse" => {
+                let [text] = args else {
+                    return Err("Date.parse expects one operand".into());
+                };
+                let text = self.compile_expr(text)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_date_parse").unwrap(),
+                        &[text.into()],
+                        "date_parse",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Date.parse returned no value".into());
             }
             "__thaw_regex_exec" => {
                 let [source, flags, value] = args else {
