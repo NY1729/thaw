@@ -51,8 +51,10 @@ object intersectionは同型fieldを共有しながら統合し、field型が衝
 解決し、function戻り値を含むoverload選択へ渡す。
 `Pick`／`Omit`／`Record`／`Readonly`／`Partial`／`Required`／`NonNullable`も
 同じfield表とoptional wrapperを再利用して解決する。
-number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<number>`も
-同じnative array型へ正規化する。
+primitive配列注釈は`number[]`／`string[]`／`boolean[]`に加えて
+`Array<T>`と`ReadonlyArray<T>`も同じnative array型へ正規化する。
+typed N-API constructor／method／propertyでは既存のnative array↔JSON変換を
+再利用し、これらの配列を引数と戻り値の両方向でmarshalする。
 固定tupleは要素型を保持したままtyped constructor／method／property shimを生成し、
 LLVMで既存のnative tuple↔JSON変換を使って引数と戻り値をmarshalする。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、
@@ -99,7 +101,7 @@ private/non-default loop向けにはhost拡張`thaw_napi_register_uv_loop`／
 同名instance methodは対応可能な全signatureへ固有symbolを生成し、source rewrite時に
 実引数個数と末尾callbackの有無で選択するよう拡張した。inline callbackに加えて、
 local変数へ代入したarrow/functionも追跡する。同じ引数個数を持つ非callback overloadも、
-number、string、boolean、number array、objectのliteralと、それらを代入したlocal変数を
+number、string、boolean、primitive array、objectのliteralと、それらを代入したlocal変数を
 使って選択する。算術、文字列連結、比較、条件式、template、括弧／type assertion、
 primitive変換call、`.length`の結果もlocal変数を通して追跡する。末尾optional parameterは
 必須prefixから完全signatureまでの各arityを個別に生成し、実行ファイルE2Eで0引数・1引数
