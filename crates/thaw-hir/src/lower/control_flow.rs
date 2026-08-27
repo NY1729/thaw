@@ -72,7 +72,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::TypedIndex(left, right, _)
         | HirExpr::ArraySetLen(left, right, _)
         | HirExpr::DynamicPropAccess(left, right, _, _)
-        | HirExpr::JsonKey(left, right) => {
+        | HirExpr::JsonKey(left, right)
+        | HirExpr::JsonDelete(left, right) => {
             collect_referenced_bindings(left, names);
             collect_referenced_bindings(right, names);
         }
@@ -204,7 +205,8 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::ArraySetLen(left, right, _)
         | HirExpr::DynamicPropAccess(left, right, _, _)
         | HirExpr::JsonIndex(left, right)
-        | HirExpr::JsonKey(left, right) => contains_await(left) || contains_await(right),
+        | HirExpr::JsonKey(left, right)
+        | HirExpr::JsonDelete(left, right) => contains_await(left) || contains_await(right),
         HirExpr::JsonSet(object, key, value, _) => {
             contains_await(object) || contains_await(key) || contains_await(value)
         }

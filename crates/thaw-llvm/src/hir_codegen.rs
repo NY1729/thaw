@@ -485,7 +485,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::JsonAsBool(obj) => Self::expr_awaits_frame_source(obj, frame_functions),
             HirExpr::PropAssign(obj, _, _, value)
             | HirExpr::JsonIndex(obj, value)
-            | HirExpr::JsonKey(obj, value) => {
+            | HirExpr::JsonKey(obj, value)
+            | HirExpr::JsonDelete(obj, value) => {
                 Self::expr_awaits_frame_source(obj, frame_functions)
                     || Self::expr_awaits_frame_source(value, frame_functions)
             }

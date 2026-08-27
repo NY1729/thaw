@@ -495,6 +495,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_json_object_delete",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
 
         // thaw-quickjs: the QuickJS-NG fallback path (docs/design/bridge.md
         // section 7). Same i8-not-i1 reasoning as `thaw_json_as_bool`.

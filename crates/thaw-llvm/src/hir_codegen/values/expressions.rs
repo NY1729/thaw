@@ -259,6 +259,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::JsonSet(obj, key, value, element) => {
                 self.compile_json_set(obj, key, value, element)
             }
+            HirExpr::JsonDelete(obj, key) => self.compile_json_delete(obj, key),
             HirExpr::JsonAsNumber(inner) => self.compile_json_as(inner, "thaw_json_as_number"),
             HirExpr::JsonAsString(inner) => self.compile_json_as(inner, "thaw_json_as_string"),
             HirExpr::JsonAsBool(inner) => self.compile_json_as_bool(inner),

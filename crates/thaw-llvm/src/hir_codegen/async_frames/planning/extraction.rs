@@ -150,7 +150,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::PropAccess(obj, _, _) => self.extract_first_frame_await(obj, temporary),
             HirExpr::PropAssign(obj, _, _, value)
             | HirExpr::JsonIndex(obj, value)
-            | HirExpr::JsonKey(obj, value) => {
+            | HirExpr::JsonKey(obj, value)
+            | HirExpr::JsonDelete(obj, value) => {
                 if let Some(found) = self.extract_first_frame_await(obj, temporary)? {
                     Ok(Some(found))
                 } else {
