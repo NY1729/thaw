@@ -351,6 +351,9 @@ extern "C" fn thaw_dynamic_call(
   単位への展開に加え、4配列型と`Object`のportable struct戻り値、文字列の
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
+  固定引数のoptional/nullableは`uint8_t present`とpayload、nullishは
+  `uint8_t state`（0=value、1=null、2=undefined）とpayloadへ展開し、
+  固定object内でも再帰適用する。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
   booleanおよび符号付き／符号なし整数bitfieldも明示できる。
   scalar、number/boolean/string/handle配列、タグ付きnullable、これらから再帰構成した固定object以外のvariadicは未対応。
