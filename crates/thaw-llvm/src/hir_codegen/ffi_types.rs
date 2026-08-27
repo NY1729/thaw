@@ -456,6 +456,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| format!("FFI object field `{name}`: {error}"))?;
                 }
             }
+            HirType::Optional(payload) | HirType::Nullable(payload) => {
+                out.push(self.context.i8_type().into());
+                self.append_ffi_param_type(payload, out)?;
+            }
+            HirType::Nullish(payload) => {
+                out.push(self.context.i8_type().into());
+                self.append_ffi_param_type(payload, out)?;
+            }
             other => out.push(self.basic_type(other).map(BasicMetadataTypeEnum::from)?),
         }
         Ok(())
