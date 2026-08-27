@@ -2606,7 +2606,9 @@ include!("lower/assignments.rs");
 
 impl<'a> FnLowerer<'a> {}
 
-include!("lower/arrays.rs");
+include!("lower/arrays/support.rs");
+include!("lower/arrays/transformations.rs");
+include!("lower/arrays/operations.rs");
 
 impl<'a> FnLowerer<'a> {}
 
