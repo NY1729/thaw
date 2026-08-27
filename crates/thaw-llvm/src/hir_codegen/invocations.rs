@@ -488,6 +488,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("string repeat returned no value".into());
             }
+            "__thaw_string_pad_start" | "__thaw_string_pad_end" => {
+                let [value, pad, length] = args else {
+                    return Err("string pad expects three operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let pad = self.compile_expr(pad)?;
+                let length = self.compile_expr(length)?;
+                let runtime = if name == "__thaw_string_pad_start" {
+                    "thaw_string_pad_start"
+                } else {
+                    "thaw_string_pad_end"
+                };
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[value.into(), pad.into(), length.into()],
+                        "string_pad",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string pad returned no value".into());
+            }
             "__thaw_string_length" => {
                 return self.compile_single_arg_call("thaw_string_length", args, "string length")
             }

@@ -481,6 +481,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, count, "string repeat count")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_string_pad_start" | "__thaw_string_pad_end" => {
+                        let [value, pad, length] = args.as_slice() else {
+                            return Err("string pad expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "string pad receiver")?;
+                        self.expect_type(&HirType::Str, pad, "string pad value")?;
+                        self.expect_type(&HirType::F64, length, "string pad target length")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_length" => {
                         let [argument] = args.as_slice() else {
                             return Err("string length expects one operand".into());
