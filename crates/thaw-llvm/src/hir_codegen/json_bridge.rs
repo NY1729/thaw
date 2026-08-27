@@ -136,11 +136,67 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "marshal_field")
                     .map_err(|error| error.to_string())?
             };
-            let mut value = self
+            let value = self
                 .builder
                 .build_load(self.basic_type(field_ty)?, pointer, "marshal_field_value")
                 .map_err(|error| error.to_string())?;
-            let setter = match field_ty {
+            let key = self
+                .builder
+                .build_global_string_ptr(name, "dynamic_object_key")
+                .map_err(|error| error.to_string())?;
+            self.compile_json_object_set_native(
+                json,
+                key.as_pointer_value(),
+                value,
+                field_ty,
+            )?;
+        }
+        Ok(json)
+    }
+
+    fn compile_json_object_set_native(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
+        mut value: BasicValueEnum<'ctx>,
+        field_type: &HirType,
+    ) -> Result<(), String> {
+        match field_type {
+            HirType::Optional(payload) => {
+                return self.compile_json_object_set_tagged(
+                    json,
+                    key,
+                    value.into_struct_value(),
+                    payload,
+                    false,
+                    false,
+                );
+            }
+            HirType::Nullable(payload) => {
+                return self.compile_json_object_set_tagged(
+                    json,
+                    key,
+                    value.into_struct_value(),
+                    payload,
+                    true,
+                    false,
+                );
+            }
+            HirType::Nullish(payload) => {
+                return self.compile_json_object_set_tagged(
+                    json,
+                    key,
+                    value.into_struct_value(),
+                    payload,
+                    false,
+                    true,
+                );
+            }
+            HirType::Undefined => return Ok(()),
+            HirType::Null => value = self.compile_json_null()?,
+            _ => {}
+        }
+        let setter = match field_type {
                 HirType::F64 => "thaw_json_object_set_number",
                 HirType::Str => "thaw_json_object_set_string",
                 HirType::Bool => {
@@ -163,26 +219,109 @@ impl<'ctx> HirCompiler<'ctx> {
                     )?;
                     "thaw_json_object_set_json"
                 }
-                HirType::Object(_) => {
-                    value =
-                        self.compile_native_object_to_json(value.into_pointer_value(), field_ty)?;
+                HirType::Tuple(elements) => {
+                    value = self.compile_native_tuple_to_json(
+                        value.into_pointer_value(),
+                        elements,
+                    )?;
                     "thaw_json_object_set_json"
                 }
+                HirType::Object(_) => {
+                    value =
+                        self.compile_native_object_to_json(value.into_pointer_value(), field_type)?;
+                    "thaw_json_object_set_json"
+                }
+                HirType::Null => "thaw_json_object_set_json",
                 other => return Err(format!("unsupported dynamic object field {other:?}")),
             };
-            let key = self
-                .builder
-                .build_global_string_ptr(name, "dynamic_object_key")
-                .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function(setter).unwrap(),
+                &[json.into(), key.into(), value.into()],
+                "set_dynamic_object_field",
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn compile_json_object_set_tagged(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        key: PointerValue<'ctx>,
+        tagged: StructValue<'ctx>,
+        payload_type: &HirType,
+        absent_is_null: bool,
+        three_state: bool,
+    ) -> Result<(), String> {
+        let tag = self
+            .builder
+            .build_extract_value(tagged, 0, "json_object_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(tagged, 1, "json_object_payload")
+            .map_err(|error| error.to_string())?;
+        let present = if three_state {
             self.builder
-                .build_call(
-                    self.module.get_function(setter).unwrap(),
-                    &[json.into(), key.as_pointer_value().into(), value.into()],
-                    "set_dynamic_object_field",
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.context.i8_type().const_zero(),
+                    "json_object_has_value",
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            tag
+        };
+        let function = self.current_function();
+        let value_block = self.context.append_basic_block(function, "json_object_value");
+        let absent_block = self.context.append_basic_block(function, "json_object_absent");
+        let done = self.context.append_basic_block(function, "json_object_tagged_done");
+        self.builder
+            .build_conditional_branch(present, value_block, absent_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(absent_block);
+        if three_state {
+            let null_block = self.context.append_basic_block(function, "json_object_null");
+            let undefined_block = self
+                .context
+                .append_basic_block(function, "json_object_undefined");
+            let is_null = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.context.i8_type().const_int(1, false),
+                    "json_object_is_null",
                 )
                 .map_err(|error| error.to_string())?;
+            self.builder
+                .build_conditional_branch(is_null, null_block, undefined_block)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(null_block);
+            let null = self.compile_json_null()?;
+            self.compile_json_object_set_native(json, key, null, &HirType::Null)?;
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(undefined_block);
+        } else if absent_is_null {
+            let null = self.compile_json_null()?;
+            self.compile_json_object_set_native(json, key, null, &HirType::Null)?;
         }
-        Ok(json)
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_block);
+        self.compile_json_object_set_native(json, key, payload, payload_type)?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
     }
 
     fn compile_native_array_to_json(
@@ -350,6 +489,28 @@ impl<'ctx> HirCompiler<'ctx> {
         mut value: BasicValueEnum<'ctx>,
         element_type: &HirType,
     ) -> Result<(), String> {
+        match element_type {
+            HirType::Optional(payload) | HirType::Nullable(payload) => {
+                return self.compile_json_array_push_tagged(
+                    json,
+                    value.into_struct_value(),
+                    payload,
+                    false,
+                );
+            }
+            HirType::Nullish(payload) => {
+                return self.compile_json_array_push_tagged(
+                    json,
+                    value.into_struct_value(),
+                    payload,
+                    true,
+                );
+            }
+            HirType::Null | HirType::Undefined => {
+                value = self.compile_json_null()?;
+            }
+            _ => {}
+        }
         let push = match element_type {
             HirType::F64 => "thaw_json_array_push_number",
             HirType::Str => "thaw_json_array_push_string",
@@ -378,6 +539,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 value = self.compile_native_object_to_json(value.into_pointer_value(), element_type)?;
                 "thaw_json_array_push_json"
             }
+            HirType::Null | HirType::Undefined => "thaw_json_array_push_json",
             other => {
                 return Err(format!(
                     "console.log cannot serialize collection element {other:?}"
@@ -391,6 +553,79 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_array_push",
             )
             .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn compile_json_null(&mut self) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_null").unwrap(),
+                &[],
+                "json_null",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_null returned no value".to_string())
+    }
+
+    fn compile_json_array_push_tagged(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        tagged: StructValue<'ctx>,
+        payload_type: &HirType,
+        three_state: bool,
+    ) -> Result<(), String> {
+        let tag = self
+            .builder
+            .build_extract_value(tagged, 0, "json_collection_tag")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(tagged, 1, "json_collection_payload")
+            .map_err(|error| error.to_string())?;
+        let present = if three_state {
+            self.builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    self.context.i8_type().const_zero(),
+                    "json_collection_has_value",
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            tag
+        };
+        let function = self.current_function();
+        let value_block = self.context.append_basic_block(function, "json_collection_value");
+        let null_block = self.context.append_basic_block(function, "json_collection_null");
+        let done = self.context.append_basic_block(function, "json_collection_tagged_done");
+        self.builder
+            .build_conditional_branch(present, value_block, null_block)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(null_block);
+        let null = self.compile_json_null()?;
+        self.builder
+            .build_call(
+                self.module
+                    .get_function("thaw_json_array_push_json")
+                    .unwrap(),
+                &[json.into(), null.into()],
+                "push_collection_null",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(value_block);
+        self.compile_json_array_push_native(json, payload, payload_type)?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
         Ok(())
     }
 
