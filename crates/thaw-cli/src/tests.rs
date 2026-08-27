@@ -304,6 +304,66 @@ fn generates_typed_napi_tuple_class_shims() {
 }
 
 #[test]
+fn generates_typed_napi_string_and_boolean_array_shims() {
+    let class = thaw_bridge::parse_dts_classes(
+        r#"export class ArrayBox {
+                constructor(labels: string[]);
+                flags(values: boolean[]): string[];
+                labels: string[];
+            }"#,
+    )
+    .unwrap()
+    .remove(0);
+    let strings = thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Str));
+    let booleans = thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::Bool));
+    let mut shim = String::new();
+    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    assert_eq!(constructors[0].2, vec![strings.clone()]);
+    let methods = generate_napi_class_method_overloads(
+        &class,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+    );
+    assert_eq!(methods[0].4, vec![booleans]);
+    let property = &class.properties[0];
+    assert!(generate_napi_class_property_getter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(generate_napi_class_property_setter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(shim.contains("labels: string[]"));
+    assert!(shim.contains("values: boolean[]"));
+
+    let rewritten = rewrite_external_class_methods(
+        "const box = new ArrayBox([\"a\"]); box.flags([true, false]);",
+        &[("pkg".into(), "ArrayBox".into(), constructors)],
+        &[(
+            "ArrayBox".into(),
+            "flags".into(),
+            methods[0].1.clone(),
+            1,
+            false,
+            methods[0].4.clone(),
+        )],
+    )
+    .unwrap();
+    assert!(!rewritten.contains("new ArrayBox"));
+    assert!(rewritten.contains(&methods[0].1));
+}
+
+#[test]
 fn generates_napi_class_property_accessor_helpers() {
     let mut shim = String::new();
     let ty = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);

@@ -572,6 +572,15 @@ impl<'ctx> HirCompiler<'ctx> {
                         .unwrap();
                     "thaw_json_array_push_json"
                 }
+                HirType::Array(element)
+                    if matches!(**element, HirType::Str | HirType::Bool) =>
+                {
+                    value = self.compile_native_array_to_json(
+                        value.into_pointer_value(),
+                        element,
+                    )?;
+                    "thaw_json_array_push_json"
+                }
                 HirType::Tuple(elements) => {
                     value = self.compile_native_tuple_to_json(
                         value.into_pointer_value(),
@@ -736,6 +745,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+                self.compile_json_to_native_array(json, element)
+            }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
@@ -830,6 +842,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
+                "thaw_json_array_push_json"
+            }
+            HirType::Array(element) if matches!(**element, HirType::Str | HirType::Bool) => {
+                assigned_value = self.compile_native_array_to_json(
+                    assigned_value.into_pointer_value(),
+                    element,
+                )?;
                 "thaw_json_array_push_json"
             }
             HirType::Tuple(elements) => {
@@ -934,6 +953,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+                self.compile_json_to_native_array(json, element)
+            }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
@@ -1041,6 +1063,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+                self.compile_json_to_native_array(json, element)
+            }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
@@ -1142,6 +1167,15 @@ impl<'ctx> HirCompiler<'ctx> {
                         .try_as_basic_value()
                         .basic()
                         .unwrap();
+                    "thaw_json_array_push_json"
+                }
+                HirType::Array(element)
+                    if matches!(**element, HirType::Str | HirType::Bool) =>
+                {
+                    value = self.compile_native_array_to_json(
+                        value.into_pointer_value(),
+                        element,
+                    )?;
                     "thaw_json_array_push_json"
                 }
                 HirType::Tuple(elements) => {
@@ -1254,6 +1288,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Array(ref element) if matches!(**element, HirType::Str | HirType::Bool) => {
+                self.compile_json_to_native_array(json, element)
+            }
             HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
