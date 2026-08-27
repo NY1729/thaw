@@ -157,6 +157,65 @@ pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
     )
 }
 
+fn object_values(value: *const Value) -> Vec<Value> {
+    match unsafe { value.as_ref() } {
+        Some(Value::Object(fields)) => fields.values().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn alloc_scalar_array(
+    values: &[Value],
+    element_bytes: usize,
+    write: impl Fn(*mut u8, &Value),
+) -> *mut u8 {
+    let output =
+        thaw_arena::thaw_arena_alloc(8 + values.len() * element_bytes, element_bytes.min(8));
+    if output.is_null() {
+        return output;
+    }
+    unsafe { (output as *mut i64).write(values.len() as i64) };
+    for (index, value) in values.iter().enumerate() {
+        write(unsafe { output.add(8 + index * element_bytes) }, value);
+    }
+    output
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON object containing numbers.
+pub unsafe extern "C" fn thaw_json_number_values(value: *const Value) -> *mut u8 {
+    alloc_scalar_array(&object_values(value), 8, |slot, value| unsafe {
+        (slot as *mut f64).write(value.as_f64().unwrap_or(0.0));
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON object containing strings.
+pub unsafe extern "C" fn thaw_json_string_values(value: *const Value) -> *mut u8 {
+    alloc_scalar_array(&object_values(value), 8, |slot, value| unsafe {
+        (slot as *mut *mut u8).write(
+            CString::new(value.as_str().unwrap_or_default())
+                .unwrap_or_default()
+                .into_raw()
+                .cast(),
+        );
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON object containing booleans.
+pub unsafe extern "C" fn thaw_json_bool_values(value: *const Value) -> *mut u8 {
+    alloc_scalar_array(&object_values(value), 1, |slot, value| unsafe {
+        slot.write(value.as_bool().unwrap_or(false).into());
+    })
+}
+
 #[no_mangle]
 /// # Safety
 ///
@@ -185,6 +244,70 @@ pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
             })
             .collect(),
     )
+}
+
+fn alloc_typed_entries(value: *const Value, write: impl Fn(*mut u8, &Value)) -> *mut u8 {
+    let entries = match unsafe { value.as_ref() } {
+        Some(Value::Object(fields)) => fields.iter().collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    alloc_pointer_array(
+        entries
+            .into_iter()
+            .map(|(key, value)| {
+                let entry = thaw_arena::thaw_arena_alloc(24, 8);
+                if entry.is_null() {
+                    return entry;
+                }
+                unsafe {
+                    (entry as *mut i64).write(2);
+                    (entry.add(8) as *mut *mut u8).write(
+                        CString::new(key.as_str())
+                            .unwrap_or_default()
+                            .into_raw()
+                            .cast(),
+                    );
+                }
+                write(unsafe { entry.add(16) }, value);
+                entry
+            })
+            .collect(),
+    )
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON object containing numbers.
+pub unsafe extern "C" fn thaw_json_number_entries(value: *const Value) -> *mut u8 {
+    alloc_typed_entries(value, |slot, value| unsafe {
+        (slot as *mut f64).write(value.as_f64().unwrap_or(0.0));
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON object containing strings.
+pub unsafe extern "C" fn thaw_json_string_entries(value: *const Value) -> *mut u8 {
+    alloc_typed_entries(value, |slot, value| unsafe {
+        (slot as *mut *mut u8).write(
+            CString::new(value.as_str().unwrap_or_default())
+                .unwrap_or_default()
+                .into_raw()
+                .cast(),
+        );
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON object containing booleans.
+pub unsafe extern "C" fn thaw_json_bool_entries(value: *const Value) -> *mut u8 {
+    alloc_typed_entries(value, |slot, value| unsafe {
+        slot.write(value.as_bool().unwrap_or(false).into());
+    })
 }
 
 #[no_mangle]

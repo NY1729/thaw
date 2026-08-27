@@ -1320,10 +1320,11 @@ The workspace crates have narrow responsibilities:
   synchronous or awaited receivers exactly once;
   `Object.getOwnPropertyNames` and `Reflect.ownKeys` share this result because
   these native/JSON models have only string-named own fields
-- `Object.values` returns fixed-object field values or dynamic JSON values in
-  key order, retaining homogeneous native arrays or heterogeneous typed tuples
-  as appropriate, including empty objects and synchronous/awaited receivers
-- `Object.entries` returns fixed-object typed entries or dynamic
+- `Object.values` returns fixed-object fields, typed `Record` values, or
+  dynamic JSON values in key order, retaining homogeneous native arrays or
+  heterogeneous typed tuples as appropriate, including empty objects and
+  synchronous/awaited receivers
+- `Object.entries` returns fixed-object or typed `Record` entries and dynamic
   `[string, Json][]` entries in the same key order
 - `Object.hasOwn` checks fixed-object, runtime-keyed `Record`, and runtime JSON
   object/array own properties, including array indices and `length`

@@ -2314,12 +2314,19 @@ fn compiles_object_values_for_fixed_objects() {
             const jsonValues: Json[] = Object.values(JSON.parse("{\"second\":2,\"first\":\"one\"}"));
             console.log(Number(jsonValues[0]));
             console.log(String(jsonValues[1]));
+            const numberRecord: Record<string, number> = { second: 2, first: 1 };
+            const numberValues: number[] = Object.values(numberRecord);
+            console.log(numberValues.join(","));
+            const stringRecord: Record<string, string> = { left: "a", right: "b" };
+            console.log(Object.values(stringRecord).join("+"));
+            const boolRecord: Record<string, boolean> = { yes: true, no: false };
+            console.log(Object.values(boolRecord).join("|"));
             console.log(Object.values(JSON.parse("[true,false]")).length);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_values"),
-        "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n2\none\n2\n"
+        "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n2\none\n2,1\na+b\ntrue|false\n2\n"
     );
 }
 
@@ -2357,11 +2364,23 @@ fn compiles_object_entries_for_fixed_objects() {
             console.log(Number(jsonEntries[0][1]));
             console.log(jsonEntries[1][0]);
             console.log(String(jsonEntries[1][1]));
+            const numberRecord: Record<string, number> = { second: 2, first: 1 };
+            const numberEntries: [string, number][] = Object.entries(numberRecord);
+            console.log(numberEntries[0][0]);
+            console.log(numberEntries[0][1]);
+            const stringRecord: Record<string, string> = { left: "a", right: "b" };
+            const stringEntries: [string, string][] = Object.entries(stringRecord);
+            console.log(stringEntries[1][0]);
+            console.log(stringEntries[1][1]);
+            const boolRecord: Record<string, boolean> = { yes: true, no: false };
+            const boolEntries: [string, boolean][] = Object.entries(boolRecord);
+            console.log(boolEntries[1][0]);
+            console.log(boolEntries[1][1]);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_entries"),
-        "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\nsecond\n2\nfirst\none\n"
+        "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\nsecond\n2\nfirst\none\nsecond\n2\nright\nb\nno\nfalse\n"
     );
 }
 
