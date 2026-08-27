@@ -208,15 +208,17 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
         }))
     }
 
-    fn property_name(key: &PropName) -> Result<String, String> {
+    fn property_expression(key: &PropName) -> Result<Expr, String> {
         match key {
-            PropName::Ident(identifier) => Ok(identifier.sym.to_string()),
-            PropName::Str(string) => Ok(string.value.to_string_lossy().into_owned()),
-            PropName::Computed(computed) => match computed.expr.as_ref() {
-                Expr::Lit(Lit::Str(string)) => Ok(string.value.to_string_lossy().into_owned()),
-                _ => Err("top-level object rest requires static string keys".into()),
-            },
-            _ => Err("top-level object rest requires static string keys".into()),
+            PropName::Ident(identifier) => Ok(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                span: identifier.span,
+                value: identifier.sym.clone().into(),
+                raw: None,
+            }))),
+            PropName::Str(string) => Ok(Expr::Lit(Lit::Str(string.clone()))),
+            PropName::Num(number) => Ok(Expr::Lit(Lit::Num(number.clone()))),
+            PropName::Computed(computed) => Ok(computed.expr.as_ref().clone()),
+            _ => Err("unsupported top-level object rest key".into()),
         }
     }
 
@@ -336,7 +338,7 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                                 property.key.id.sym.clone(),
                                 property.key.id.span,
                             ));
-                            used_keys.push(property.key.id.sym.to_string());
+                            used_keys.push(property_expression(&key)?);
                             let mut value = member(temporary_expr(), &key, span)?;
                             if let Some(default) = &property.value {
                                 value = undefined_default(
@@ -359,12 +361,47 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                             )?;
                         }
                         ObjectPatProp::KeyValue(property) => {
+                            let mut member_key = property.key.clone();
                             if has_rest {
-                                used_keys.push(property_name(&property.key)?);
+                                let mut omitted_key = property_expression(&property.key)?;
+                                if matches!(property.key, PropName::Computed(_)) {
+                                    let temporary = loop {
+                                        let candidate = format!("__thaw_top_key_{}", *counter);
+                                        *counter += 1;
+                                        if used.insert(candidate.clone()) {
+                                            break candidate;
+                                        }
+                                    };
+                                    let identifier = swc_ecma_ast::Ident::new_no_ctxt(
+                                        temporary.into(),
+                                        span,
+                                    );
+                                    out.push(swc_ecma_ast::VarDecl {
+                                        span,
+                                        ctxt: Default::default(),
+                                        kind: swc_ecma_ast::VarDeclKind::Const,
+                                        declare: false,
+                                        decls: vec![swc_ecma_ast::VarDeclarator {
+                                            span,
+                                            name: Pat::Ident(swc_ecma_ast::BindingIdent {
+                                                id: identifier.clone(),
+                                                type_ann: None,
+                                            }),
+                                            init: Some(Box::new(omitted_key)),
+                                            definite: false,
+                                        }],
+                                    });
+                                    omitted_key = Expr::Ident(identifier.clone());
+                                    member_key = PropName::Computed(ComputedPropName {
+                                        span,
+                                        expr: Box::new(Expr::Ident(identifier)),
+                                    });
+                                }
+                                used_keys.push(omitted_key);
                             }
                             expand_pattern(
                                 &property.value,
-                                member(temporary_expr(), &property.key, span)?,
+                                member(temporary_expr(), &member_key, span)?,
                                 kind,
                                 span,
                                 counter,
@@ -377,13 +414,9 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                                 spread: None,
                                 expr: Box::new(temporary_expr()),
                             }];
-                            args.extend(used_keys.iter().map(|key| swc_ecma_ast::ExprOrSpread {
+                            args.extend(used_keys.iter().cloned().map(|key| swc_ecma_ast::ExprOrSpread {
                                 spread: None,
-                                expr: Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
-                                    span,
-                                    value: key.clone().into(),
-                                    raw: None,
-                                }))),
+                                expr: Box::new(key),
                             }));
                             expand_pattern(
                                 &rest.arg,
@@ -484,7 +517,8 @@ pub fn normalize_top_level_destructuring(module: &Module) -> Result<Module, Stri
                 let is_temporary = declaration.decls.first().is_some_and(|declarator| {
                     matches!(&declarator.name, Pat::Ident(binding)
                         if binding.id.sym.starts_with("__thaw_top_destructure_")
-                            || binding.id.sym.starts_with("__thaw_top_default_"))
+                            || binding.id.sym.starts_with("__thaw_top_default_")
+                            || binding.id.sym.starts_with("__thaw_top_key_"))
                 });
                 if exported && !is_temporary {
                     items.push(ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(
