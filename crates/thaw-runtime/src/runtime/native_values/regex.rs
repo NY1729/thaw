@@ -225,12 +225,17 @@ pub unsafe extern "C" fn thaw_regex_split(
 #[no_mangle]
 /// Matches `value` against the regex named by `source`/`flags`, matching
 /// `String.prototype.match`. Returns every whole match when `flags`
-/// contains `g`, or a one-element array with the single whole match found
-/// otherwise (per-match capture groups, `.index` and `.input` are not
-/// exposed). Returns a null pointer both when nothing matches and when
-/// `source`/`flags` fails to compile; the generated code distinguishes
-/// these only in that both report "no match" (`undefined`), matching what
-/// a caller observes for either case.
+/// contains `g` (capture groups are not exposed in this mode, matching
+/// `String.prototype.match`'s own behavior for a global pattern), or the
+/// whole match followed by each capture group's text when it matches
+/// otherwise -- a group that did not participate in the match (for example
+/// one inside an unmatched alternative) is reported as an empty string
+/// rather than `undefined`, since the native array element type is a plain
+/// `string`. `.index` and `.input` are not exposed either way. Returns a
+/// null pointer both when nothing matches and when `source`/`flags` fails
+/// to compile; the generated code distinguishes these only in that both
+/// report "no match" (`undefined`), matching what a caller observes for
+/// either case.
 ///
 /// # Safety
 /// `value`, `source` and `flags` must be null or point to valid
@@ -255,8 +260,17 @@ pub unsafe extern "C" fn thaw_regex_match(
                 .collect::<Vec<_>>()
         } else {
             regex
-                .find(&value)
-                .map(|found| vec![found.as_str().to_string()])
+                .captures(&value)
+                .map(|captures| {
+                    (0..captures.len())
+                        .map(|index| {
+                            captures
+                                .get(index)
+                                .map(|group| group.as_str().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         }
     }) else {
