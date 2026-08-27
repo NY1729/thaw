@@ -1469,6 +1469,10 @@ The workspace crates have narrow responsibilities:
 - `String.fromCharCode` converts each coerced, `ToUint16`-normalized argument
   into its UTF-16 code unit and concatenates the results in order, decoding
   each unit losslessly or as U+FFFD when it is an unpaired surrogate
+- `String.fromCodePoint` converts each coerced argument to its full Unicode
+  scalar value and concatenates the results in order, throwing per argument
+  for a non-integer, negative, out-of-range or surrogate code point via the
+  same native null-pointer failure signal `decodeURIComponent` uses
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns
