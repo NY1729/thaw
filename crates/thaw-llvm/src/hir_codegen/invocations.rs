@@ -712,6 +712,35 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_json_entries" => {
                 return self.compile_single_arg_call("thaw_json_entries", args, "Object.entries")
             }
+            "__thaw_json_has_own" => {
+                let [value, key] = args else {
+                    return Err("Object.hasOwn expects two operands".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let key = self.compile_expr(key)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_has_own").unwrap(),
+                        &[value.into(), key.into()],
+                        "json_has_own",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_has_own returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result,
+                        self.context.i8_type().const_zero(),
+                        "json_has_own_bool",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "loadScript" => return self.compile_load_script(args),
             "callDynamic" => return self.compile_call_dynamic(args),
             "getDynamicValue" => return self.compile_get_dynamic_value(args),

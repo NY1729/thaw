@@ -1322,6 +1322,8 @@ The workspace crates have narrow responsibilities:
   as appropriate, including empty objects and synchronous/awaited receivers
 - `Object.entries` returns fixed-object typed entries or dynamic
   `[string, Json][]` entries in the same key order
+- `Object.hasOwn` checks fixed-object fields and runtime JSON object/array own
+  properties, including array indices and `length`
 - `Object.entries` returns ordered, explicitly typed `[string, value]` tuples;
   homogeneous entry shapes remain native arrays while heterogeneous field
   types retain a statically indexed outer tuple, including empty/awaited input
