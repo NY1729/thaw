@@ -733,6 +733,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     "Object.entries",
                 )
             }
+            "__thaw_json_object_from_number_entries"
+            | "__thaw_json_object_from_string_entries"
+            | "__thaw_json_object_from_bool_entries"
+            | "__thaw_json_object_from_json_entries" => {
+                return self.compile_single_arg_call(
+                    name.trim_start_matches("__"),
+                    args,
+                    "Object.fromEntries",
+                )
+            }
             "__thaw_json_has_own" => {
                 let [value, key] = args else {
                     return Err("Object.hasOwn expects two operands".to_string());

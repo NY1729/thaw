@@ -602,6 +602,29 @@ impl<'a> FnLowerer<'a> {
                             element,
                         ]))));
                     }
+                    "__thaw_json_object_from_number_entries"
+                    | "__thaw_json_object_from_string_entries"
+                    | "__thaw_json_object_from_bool_entries"
+                    | "__thaw_json_object_from_json_entries" => {
+                        let [entries] = args.as_slice() else {
+                            return Err("Object.fromEntries expects one operand".into());
+                        };
+                        let element = match name.as_str() {
+                            "__thaw_json_object_from_number_entries" => HirType::F64,
+                            "__thaw_json_object_from_string_entries" => HirType::Str,
+                            "__thaw_json_object_from_bool_entries" => HirType::Bool,
+                            _ => HirType::Json,
+                        };
+                        self.expect_type(
+                            &HirType::Array(Box::new(HirType::Tuple(vec![
+                                HirType::Str,
+                                element.clone(),
+                            ]))),
+                            entries,
+                            "Object.fromEntries operand",
+                        )?;
+                        return Ok(HirType::Dictionary(Box::new(element)));
+                    }
                     "__thaw_json_has_own" => {
                         let [value, key] = args.as_slice() else {
                             return Err("Object.hasOwn expects two operands".into());

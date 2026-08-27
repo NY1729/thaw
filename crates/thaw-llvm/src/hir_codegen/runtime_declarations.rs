@@ -427,6 +427,10 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_json_number_entries",
             "thaw_json_string_entries",
             "thaw_json_bool_entries",
+            "thaw_json_object_from_number_entries",
+            "thaw_json_object_from_string_entries",
+            "thaw_json_object_from_bool_entries",
+            "thaw_json_object_from_json_entries",
         ] {
             self.module.add_function(
                 name,
