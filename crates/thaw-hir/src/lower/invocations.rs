@@ -896,6 +896,14 @@ impl<'a> FnLowerer<'a> {
                         };
                         let object_value = object_value.clone();
                         let object_type = self.infer_expr_type(&object_value)?;
+                        let key_value = self.coerce_primitive_to_string(key_value.clone())?;
+                        if object_type == HirType::Json {
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_has_own".to_string())),
+                                vec![object_value, key_value],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let HirType::Object(fields) = &object_type else {
                             return Err(format!(
                                 "`Object.hasOwn` currently requires a fixed object, got {object_type:?}"
@@ -905,7 +913,6 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .map(|(name, _)| name.clone())
                             .collect::<Vec<_>>();
-                        let key_value = self.coerce_primitive_to_string(key_value.clone())?;
                         let object_name = format!("__thaw_has_own_object_{}", self.next_binding);
                         self.next_binding += 1;
                         let key_name = format!("__thaw_has_own_key_{}", self.next_binding);

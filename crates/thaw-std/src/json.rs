@@ -188,6 +188,25 @@ pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`; `key` must point to
+/// a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_json_has_own(value: *const Value, key: *const c_char) -> u8 {
+    let key = to_str(key);
+    match unsafe { value.as_ref() } {
+        Some(Value::Object(fields)) => fields.contains_key(&key),
+        Some(Value::Array(_)) if key == "length" => true,
+        Some(Value::Array(items)) => key
+            .parse::<usize>()
+            .ok()
+            .is_some_and(|index| index.to_string() == key && index < items.len()),
+        _ => false,
+    }
+    .into()
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
     if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
         items.push(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number));
@@ -403,6 +422,26 @@ mod tests {
         );
         let value = unsafe { (first_entry.add(16) as *const *mut Value).read() };
         assert_eq!(thaw_json_as_number(value), 2.0);
+    }
+
+    #[test]
+    fn detects_owned_json_object_and_array_properties() {
+        let object = parse(r#"{"value": 1}"#);
+        let value = CString::new("value").unwrap();
+        let missing = CString::new("missing").unwrap();
+        assert_eq!(unsafe { thaw_json_has_own(object, value.as_ptr()) }, 1);
+        assert_eq!(unsafe { thaw_json_has_own(object, missing.as_ptr()) }, 0);
+
+        let array = parse("[10, 20]");
+        let zero = CString::new("0").unwrap();
+        let leading_zero = CString::new("00").unwrap();
+        let length = CString::new("length").unwrap();
+        assert_eq!(unsafe { thaw_json_has_own(array, zero.as_ptr()) }, 1);
+        assert_eq!(
+            unsafe { thaw_json_has_own(array, leading_zero.as_ptr()) },
+            0
+        );
+        assert_eq!(unsafe { thaw_json_has_own(array, length.as_ptr()) }, 1);
     }
 
     #[test]

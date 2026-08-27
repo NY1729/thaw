@@ -1127,6 +1127,14 @@ impl<'a> FnLowerer<'a> {
                             HirType::Json,
                         ]))));
                     }
+                    "__thaw_json_has_own" => {
+                        let [value, key] = args.as_slice() else {
+                            return Err("Object.hasOwn expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "Object.hasOwn JSON operand")?;
+                        self.expect_type(&HirType::Str, key, "Object.hasOwn key")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
