@@ -1301,6 +1301,50 @@ fn compiles_decode_uri_component() {
 }
 
 #[test]
+fn compiles_native_number_to_precision() {
+    let source = r#"
+        function value(): number {
+            console.log("receiver");
+            return 123.456;
+        }
+        function digits(): number {
+            console.log("digits");
+            return 4;
+        }
+        async function delayedValue(): Promise<number> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return 123456;
+        }
+        async function main(): Promise<void> {
+            console.log((123.456).toPrecision(4));
+            console.log((0.00001234).toPrecision(2));
+            console.log((123456).toPrecision(2));
+            console.log((0).toPrecision(3));
+            console.log((-123.456).toPrecision(4));
+            console.log((42).toPrecision());
+            console.log((0 / 0).toPrecision(3));
+            console.log(value().toPrecision(digits()));
+            console.log((await delayedValue()).toPrecision(2));
+            try {
+                (1).toPrecision(0);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                (1).toPrecision(101);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_to_precision"),
+        "123.5\n0.000012\n1.2e+5\n0.00\n-123.5\n42\nNaN\nreceiver\ndigits\n123.5\nawaited receiver\n1.2e+5\ntoPrecision() argument must be between 1 and 100\ntoPrecision() argument must be between 1 and 100\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

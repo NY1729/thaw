@@ -103,6 +103,53 @@ pub extern "C" fn thaw_number_to_fixed(value: f64, digits: f64) -> *const c_char
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
+/// Formats a non-negative, finite `magnitude` with exactly `precision`
+/// significant digits, matching the digit-placement rules of
+/// `Number.prototype.toPrecision` once its sign has been stripped.
+fn format_precision_digits(magnitude: f64, precision: usize) -> String {
+    let formatted = format!("{:.*e}", precision - 1, magnitude);
+    let (mantissa, exponent) = formatted.split_once('e').expect("exponential format");
+    let exponent: i32 = exponent.parse().expect("integer exponent");
+    let digits: String = mantissa.chars().filter(|character| *character != '.').collect();
+    let precision = precision as i32;
+    if exponent < -6 || exponent >= precision {
+        let mut result = String::new();
+        result.push(digits.as_bytes()[0] as char);
+        if precision != 1 {
+            result.push('.');
+            result.push_str(&digits[1..]);
+        }
+        result.push('e');
+        if exponent >= 0 {
+            result.push('+');
+        }
+        result.push_str(&exponent.to_string());
+        result
+    } else if exponent == precision - 1 {
+        digits
+    } else if exponent >= 0 {
+        let split = exponent as usize + 1;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    } else {
+        format!("0.{}{digits}", "0".repeat((-(exponent + 1)) as usize))
+    }
+}
+
+#[no_mangle]
+/// Formats `value` with exactly `digits` significant digits, matching
+/// `Number.prototype.toPrecision` when its argument is not omitted. `digits`
+/// must already be normalized to an integer in `[1, 100]`.
+pub extern "C" fn thaw_number_to_precision(value: f64, digits: f64) -> *const c_char {
+    if value.is_nan() {
+        return arena_c_string("NaN").map_or(std::ptr::null(), |value| value.cast());
+    }
+    let negative = value < 0.0;
+    let magnitude = if negative { -value } else { value };
+    let body = format_precision_digits(magnitude, digits as usize);
+    let text = if negative { format!("-{body}") } else { body };
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
 fn javascript_string_number(text: &str) -> f64 {
     let text =
         text.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');

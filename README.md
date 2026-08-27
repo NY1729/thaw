@@ -1460,6 +1460,12 @@ The workspace crates have narrow responsibilities:
   malformed` for an incomplete or non-hexadecimal escape or a decoded byte
   sequence that is not valid UTF-8, via a native null-pointer failure signal
   checked by the generated code before returning
+- `Number.prototype.toPrecision` returns the general native number-to-string
+  result when its argument is omitted; otherwise it truncates a coerced
+  significant-digit count, throws for values outside `[1, 100]`, returns
+  `"NaN"` for `NaN` receivers, and otherwise chooses fixed or exponential
+  notation and digit placement by the same rules as the specification's
+  correctly-rounded digit sequence
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
