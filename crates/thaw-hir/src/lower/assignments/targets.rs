@@ -39,6 +39,11 @@ impl<'a> FnLowerer<'a> {
                 }
                 Ok(Target::Dictionary(object, Box::new(key), *element.clone()))
             }
+            HirType::Json => {
+                let key = self.lower_expr(&computed.expr)?;
+                self.expect_type(&HirType::Str, &key, "JSON assignment key")?;
+                Ok(Target::Dictionary(object, Box::new(key), HirType::Json))
+            }
             _ => Err(format!(
                 "cannot assign through a computed key on a value of type {object_type:?}"
             )),
@@ -104,6 +109,11 @@ impl<'a> FnLowerer<'a> {
                                     *element.clone(),
                                 ))
                             }
+                            HirType::Json => Ok(Target::Dictionary(
+                                obj,
+                                Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                                HirType::Json,
+                            )),
                             other => Err(format!(
                                 "cannot assign to `.{}` on a value of type {other:?}",
                                 prop.sym

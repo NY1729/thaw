@@ -1342,6 +1342,9 @@ The workspace crates have narrow responsibilities:
 - `delete` removes named or computed properties from runtime-keyed
   `Record<string, T>`/JSON objects, returns `true` for present and missing keys,
   evaluates the receiver and key once in source order, and supports awaited keys
+- Runtime JSON objects support named and computed string-key reads and writes,
+  including awaited keys and single left-to-right receiver/key evaluation;
+  numeric computed keys continue to index JSON arrays
 - Optional chaining reads named or computed `Record`/JSON properties through
   nullable or undefined receivers and skips computed-key evaluation when the
   receiver is absent
