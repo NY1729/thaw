@@ -967,6 +967,57 @@ fn classify_native_union(
     DtsType::Native(tagged)
 }
 
+fn remap_mapped_key(name_type: &TsType, parameter: &str, key: &str) -> Result<String, String> {
+    match name_type {
+        TsType::TsParenthesizedType(parenthesized) => {
+            remap_mapped_key(&parenthesized.type_ann, parameter, key)
+        }
+        TsType::TsTypeRef(reference)
+            if matches!(
+                &reference.type_name,
+                TsEntityName::Ident(name) if name.sym == parameter
+            ) =>
+        {
+            Ok(key.to_string())
+        }
+        TsType::TsLitType(literal) => match &literal.lit {
+            TsLit::Str(value) => Ok(value.value.to_string_lossy().into_owned()),
+            TsLit::Tpl(template) => {
+                if template.quasis.len() != template.types.len() + 1 {
+                    return Err("invalid mapped template literal key".into());
+                }
+                let mut rendered = String::new();
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    let text = quasi
+                        .cooked
+                        .as_ref()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| quasi.raw.to_string());
+                    rendered.push_str(&text);
+                    if let Some(interpolation) = template.types.get(index) {
+                        match interpolation.as_ref() {
+                            TsType::TsTypeRef(reference)
+                                if matches!(
+                                    &reference.type_name,
+                                    TsEntityName::Ident(name) if name.sym == parameter
+                                ) => rendered.push_str(key),
+                            _ => {
+                                return Err(
+                                    "mapped template keys only interpolate their key parameter"
+                                        .into(),
+                                )
+                            }
+                        }
+                    }
+                }
+                Ok(rendered)
+            }
+            _ => Err("mapped key remapping must produce a string key".into()),
+        },
+        _ => Err("mapped key remapping is not statically resolvable".into()),
+    }
+}
+
 fn classify_mapped_type(
     mapped: &swc_ecma_ast::TsMappedType,
     outer_substitution: Option<&HashMap<String, HirType>>,
@@ -974,9 +1025,6 @@ fn classify_mapped_type(
     generic_interfaces: &GenericInterfaces,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
-    if mapped.name_type.is_some() {
-        return DtsType::Unsupported("mapped key remapping is not classified yet".into());
-    }
     let Some(constraint) = &mapped.type_param.constraint else {
         return DtsType::Unsupported("mapped type key needs a finite constraint".into());
     };
@@ -1053,7 +1101,19 @@ fn classify_mapped_type(
             }
             None => {}
         }
-        fields.push((key, value));
+        let field_name = match &mapped.name_type {
+            Some(name_type) => match remap_mapped_key(name_type, parameter, &key) {
+                Ok(name) => name,
+                Err(reason) => return DtsType::Unsupported(reason),
+            },
+            None => key,
+        };
+        if fields.iter().any(|(name, _)| name == &field_name) {
+            return DtsType::Unsupported(format!(
+                "mapped key remapping produces duplicate field `{field_name}`"
+            ));
+        }
+        fields.push((field_name, value));
     }
     DtsType::Native(HirType::Object(fields))
 }
