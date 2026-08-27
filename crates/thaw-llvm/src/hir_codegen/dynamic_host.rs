@@ -10,6 +10,7 @@ fn napi_constructor_export_name(symbol: &str) -> Option<&str> {
 fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
     match ty {
         HirType::F64 | HirType::Str | HirType::Bool | HirType::Json => true,
+        HirType::Nullable(payload) => dynamic_json_collection_element_supported(payload),
         HirType::Array(element) => dynamic_json_collection_element_supported(element),
         HirType::Tuple(elements) => elements
             .iter()
@@ -22,6 +23,48 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
 }
 
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_typed_dynamic_argument(
+        &mut self,
+        array: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<(), String> {
+        self.compile_json_array_push_native(array, value, ty)
+    }
+
+    fn compile_typed_dynamic_result(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match ty {
+            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
+            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
+            HirType::Bool => self.compile_json_as_bool_value(json),
+            HirType::Json => Ok(json),
+            HirType::Nullable(payload) => self.compile_json_to_nullable_field(json, payload),
+            HirType::Array(element) if **element == HirType::F64 => self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_to_number_array")
+                        .unwrap(),
+                    &[json.into()],
+                    "dynamic_number_array_result",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Array(element) if dynamic_json_collection_element_supported(element) => {
+                self.compile_json_to_native_array(json, element)
+            }
+            HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
+            HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            other => Err(format!("typed dynamic return does not support {other:?} yet")),
+        }
+    }
+
     /// `loadScript(source): boolean`, via thaw-quickjs's `thaw_js_load`.
     /// Same `i8` -> `i1` conversion as `compile_json_as_bool` and for the
     /// same reason (the extern function avoids relying on `bool`'s C ABI
@@ -553,72 +596,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap();
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
-            let mut value = self.compile_expr(arg)?;
-            let push = match ty {
-                HirType::F64 => "thaw_json_array_push_number",
-                HirType::Str => "thaw_json_array_push_string",
-                HirType::Bool => {
-                    let widened = self
-                        .builder
-                        .build_int_z_extend(
-                            value.into_int_value(),
-                            self.context.i8_type(),
-                            &format!("dynamic_bool_{index}"),
-                        )
-                        .map_err(|error| error.to_string())?;
-                    value = widened.into();
-                    "thaw_json_array_push_bool"
-                }
-                HirType::Json => "thaw_json_array_push_json",
-                HirType::Array(element) if **element == HirType::F64 => {
-                    value = self
-                        .builder
-                        .build_call(
-                            self.module
-                                .get_function("thaw_json_from_number_array")
-                                .unwrap(),
-                            &[value.into()],
-                            "marshal_number_array",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .try_as_basic_value()
-                        .basic()
-                        .unwrap();
-                    "thaw_json_array_push_json"
-                }
-                HirType::Array(element) if dynamic_json_collection_element_supported(element) =>
-                {
-                    value = self.compile_native_array_to_json(
-                        value.into_pointer_value(),
-                        element,
-                    )?;
-                    "thaw_json_array_push_json"
-                }
-                HirType::Tuple(elements) => {
-                    value = self.compile_native_tuple_to_json(
-                        value.into_pointer_value(),
-                        elements,
-                    )?;
-                    "thaw_json_array_push_json"
-                }
-                HirType::Object(_) => {
-                    value = self.compile_native_object_to_json(value.into_pointer_value(), ty)?;
-                    "thaw_json_array_push_json"
-                }
-                other => {
-                    return Err(format!(
-                        "typed dynamic argument {} does not support {other:?} yet",
-                        index + 1
-                    ))
-                }
-            };
-            self.builder
-                .build_call(
-                    self.module.get_function(push).unwrap(),
-                    &[array.into(), value.into()],
-                    &format!("marshal_dynamic_arg_{index}"),
-                )
-                .map_err(|error| error.to_string())?;
+            let value = self.compile_expr(arg)?;
+            self.compile_typed_dynamic_argument(array, value, ty)
+                .map_err(|error| format!("typed dynamic argument {}: {error}", index + 1))?;
         }
         let name = self
             .builder
@@ -740,33 +720,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         let json =
             self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;
-        match signature.ret {
-            HirType::Json => Ok(json),
-            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
-            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
-            HirType::Bool => self.compile_json_as_bool_value(json),
-            HirType::Array(ref element) if **element == HirType::F64 => self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_json_to_number_array")
-                        .unwrap(),
-                    &[json.into()],
-                    "dynamic_number_array_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
-                self.compile_json_to_native_array(json, element)
-            }
-            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
-            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
-            ref other => Err(format!(
-                "typed dynamic return does not support {other:?} yet"
-            )),
-        }
+        self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
     fn compile_typed_napi_setter(
@@ -813,7 +767,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .params
             .get(usize::from(!is_static))
             .ok_or("typed N-API setter is missing its value type")?;
-        let mut assigned_value = self.compile_expr(assigned)?;
+        let assigned_value = self.compile_expr(assigned)?;
         let array = self
             .builder
             .build_call(
@@ -825,68 +779,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let push = match assigned_type {
-            HirType::F64 => "thaw_json_array_push_number",
-            HirType::Str => "thaw_json_array_push_string",
-            HirType::Bool => {
-                assigned_value = self
-                    .builder
-                    .build_int_z_extend(
-                        assigned_value.into_int_value(),
-                        self.context.i8_type(),
-                        "napi_setter_bool",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .into();
-                "thaw_json_array_push_bool"
-            }
-            HirType::Json => "thaw_json_array_push_json",
-            HirType::Array(element) if **element == HirType::F64 => {
-                assigned_value = self
-                    .builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_json_from_number_array")
-                            .unwrap(),
-                        &[assigned_value.into()],
-                        "marshal_napi_setter_number_array",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
-                "thaw_json_array_push_json"
-            }
-            HirType::Array(element) if dynamic_json_collection_element_supported(element) => {
-                assigned_value = self.compile_native_array_to_json(
-                    assigned_value.into_pointer_value(),
-                    element,
-                )?;
-                "thaw_json_array_push_json"
-            }
-            HirType::Tuple(elements) => {
-                assigned_value = self.compile_native_tuple_to_json(
-                    assigned_value.into_pointer_value(),
-                    elements,
-                )?;
-                "thaw_json_array_push_json"
-            }
-            HirType::Object(_) => {
-                assigned_value = self.compile_native_object_to_json(
-                    assigned_value.into_pointer_value(),
-                    assigned_type,
-                )?;
-                "thaw_json_array_push_json"
-            }
-            other => return Err(format!("N-API setter value does not support {other:?}")),
-        };
-        self.builder
-            .build_call(
-                self.module.get_function(push).unwrap(),
-                &[array.into(), assigned_value.into()],
-                "marshal_napi_setter_value",
-            )
-            .map_err(|error| error.to_string())?;
+        self.compile_typed_dynamic_argument(array, assigned_value, assigned_type)
+            .map_err(|error| format!("N-API setter value: {error}"))?;
         let property = signature
             .symbol
             .split('$')
@@ -948,33 +842,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_parse returned no setter value".to_string())?;
-        match signature.ret {
-            HirType::Json => Ok(json),
-            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
-            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
-            HirType::Bool => self.compile_json_as_bool_value(json),
-            HirType::Array(ref element) if **element == HirType::F64 => self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_json_to_number_array")
-                        .unwrap(),
-                    &[json.into()],
-                    "napi_setter_number_array_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
-                self.compile_json_to_native_array(json, element)
-            }
-            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
-            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
-            ref other => Err(format!(
-                "typed N-API setter return does not support {other:?} yet"
-            )),
-        }
+        self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
     fn compile_typed_napi_getter(
@@ -1058,33 +926,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_parse returned no getter value".to_string())?;
-        match signature.ret {
-            HirType::Json => Ok(json),
-            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
-            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
-            HirType::Bool => self.compile_json_as_bool_value(json),
-            HirType::Array(ref element) if **element == HirType::F64 => self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_json_to_number_array")
-                        .unwrap(),
-                    &[json.into()],
-                    "napi_getter_number_array_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
-                self.compile_json_to_native_array(json, element)
-            }
-            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
-            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
-            ref other => Err(format!(
-                "typed N-API getter return does not support {other:?} yet"
-            )),
-        }
+        self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
     fn compile_typed_napi_method(
@@ -1149,67 +991,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .zip(signature.params.iter().skip(usize::from(!is_static)))
             .enumerate()
         {
-            let mut value = self.compile_expr(argument)?;
-            let push = match ty {
-                HirType::F64 => "thaw_json_array_push_number",
-                HirType::Str => "thaw_json_array_push_string",
-                HirType::Bool => {
-                    value = self
-                        .builder
-                        .build_int_z_extend(
-                            value.into_int_value(),
-                            self.context.i8_type(),
-                            &format!("napi_method_bool_{index}"),
-                        )
-                        .map_err(|error| error.to_string())?
-                        .into();
-                    "thaw_json_array_push_bool"
-                }
-                HirType::Json => "thaw_json_array_push_json",
-                HirType::Array(element) if **element == HirType::F64 => {
-                    value = self
-                        .builder
-                        .build_call(
-                            self.module
-                                .get_function("thaw_json_from_number_array")
-                                .unwrap(),
-                            &[value.into()],
-                            "marshal_napi_method_number_array",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .try_as_basic_value()
-                        .basic()
-                        .unwrap();
-                    "thaw_json_array_push_json"
-                }
-                HirType::Array(element) if dynamic_json_collection_element_supported(element) =>
-                {
-                    value = self.compile_native_array_to_json(
-                        value.into_pointer_value(),
-                        element,
-                    )?;
-                    "thaw_json_array_push_json"
-                }
-                HirType::Tuple(elements) => {
-                    value = self.compile_native_tuple_to_json(
-                        value.into_pointer_value(),
-                        elements,
-                    )?;
-                    "thaw_json_array_push_json"
-                }
-                HirType::Object(_) => {
-                    value = self.compile_native_object_to_json(value.into_pointer_value(), ty)?;
-                    "thaw_json_array_push_json"
-                }
-                other => return Err(format!("N-API method argument does not support {other:?}")),
-            };
-            self.builder
-                .build_call(
-                    self.module.get_function(push).unwrap(),
-                    &[array.into(), value.into()],
-                    &format!("marshal_napi_method_arg_{index}"),
-                )
-                .map_err(|error| error.to_string())?;
+            let value = self.compile_expr(argument)?;
+            self.compile_typed_dynamic_argument(array, value, ty)
+                .map_err(|error| format!("N-API method argument {}: {error}", index + 1))?;
         }
         let method = signature
             .symbol
@@ -1282,33 +1066,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_parse returned no method value".to_string())?;
-        match signature.ret {
-            HirType::Json => Ok(json),
-            HirType::F64 => self.compile_json_as_value(json, "thaw_json_as_number"),
-            HirType::Str => self.compile_json_as_value(json, "thaw_json_as_string"),
-            HirType::Bool => self.compile_json_as_bool_value(json),
-            HirType::Array(ref element) if **element == HirType::F64 => self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_json_to_number_array")
-                        .unwrap(),
-                    &[json.into()],
-                    "napi_method_number_array_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
-            HirType::Array(ref element) if dynamic_json_collection_element_supported(element) => {
-                self.compile_json_to_native_array(json, element)
-            }
-            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
-            HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
-            ref other => Err(format!(
-                "typed N-API method return does not support {other:?} yet"
-            )),
-        }
+        self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
     fn compile_typed_napi_method_callback(

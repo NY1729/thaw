@@ -1047,6 +1047,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => self.compile_json_as_value(element_json, "thaw_json_as_string")?,
             HirType::Bool => self.compile_json_as_bool_value(element_json)?,
             HirType::Json | HirType::Dictionary(_) => element_json,
+            HirType::Nullable(payload) => {
+                self.compile_json_to_nullable_field(element_json, payload)?
+            }
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(element_json, element)?
             }
@@ -1153,6 +1156,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 HirType::Bool => self.compile_json_as_bool_value(element_json)?,
                 HirType::Json | HirType::Dictionary(_) => element_json,
+                HirType::Nullable(payload) => {
+                    self.compile_json_to_nullable_field(element_json, payload)?
+                }
                 HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                     self.compile_json_to_native(element_json, element)?
                 }

@@ -381,6 +381,65 @@ fn generates_typed_napi_recursive_array_shims() {
 }
 
 #[test]
+fn generates_typed_napi_nullable_shims() {
+    let class = thaw_bridge::parse_dts_classes(
+        r#"export class NullableBox {
+                constructor(value: string | null);
+                normalize(value: string | null): string | null;
+                value: string | null;
+            }"#,
+    )
+    .unwrap()
+    .remove(0);
+    let nullable = thaw_hir::HirType::Nullable(Box::new(thaw_hir::HirType::Str));
+    let mut shim = String::new();
+    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    assert_eq!(constructors[0].2, vec![nullable.clone()]);
+    let methods = generate_napi_class_method_overloads(
+        &class,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+    );
+    assert_eq!(methods[0].4, vec![nullable]);
+    let property = &class.properties[0];
+    assert!(generate_napi_class_property_getter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(generate_napi_class_property_setter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(shim.contains("value: string | null"));
+    assert!(shim.contains("): string | null"));
+
+    let rewritten = rewrite_external_class_methods(
+        "const box = new NullableBox(null); box.normalize(null);",
+        &[("pkg".into(), "NullableBox".into(), constructors)],
+        &[(
+            "NullableBox".into(),
+            "normalize".into(),
+            methods[0].1.clone(),
+            1,
+            false,
+            methods[0].4.clone(),
+        )],
+    )
+    .unwrap();
+    assert!(!rewritten.contains("new NullableBox"));
+    assert!(rewritten.contains(&methods[0].1));
+}
+
+#[test]
 fn generates_napi_class_property_accessor_helpers() {
     let mut shim = String::new();
     let ty = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
