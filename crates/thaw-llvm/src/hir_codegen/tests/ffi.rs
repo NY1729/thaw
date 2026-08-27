@@ -1853,6 +1853,28 @@ fn compiles_date_utc_and_parse() {
 }
 
 #[test]
+fn compiles_date_string_formatting() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const d: Date = new Date(1704067200500);
+            console.log(d.toDateString());
+            console.log(d.toTimeString());
+            console.log(d.toString());
+            console.log(d.toUTCString());
+            const invalid: Date = new Date(NaN);
+            console.log(invalid.toDateString());
+            console.log(invalid.toTimeString());
+            console.log(invalid.toString());
+            console.log(invalid.toUTCString());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_string_formatting"),
+        "Mon Jan 01 2024\n00:00:00 GMT+0000 (Coordinated Universal Time)\nMon Jan 01 2024 00:00:00 GMT+0000 (Coordinated Universal Time)\nMon, 01 Jan 2024 00:00:00 GMT\nInvalid Date\nInvalid Date\nInvalid Date\nInvalid Date\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {

@@ -38,6 +38,7 @@ impl<'a> FnLowerer<'a> {
                 | "setSeconds" | "setMilliseconds"
                 | "setUTCFullYear" | "setUTCMonth" | "setUTCDate" | "setUTCHours"
                 | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
+                | "toDateString" | "toTimeString" | "toUTCString"
         )
     }
 
@@ -2566,11 +2567,53 @@ impl<'a> FnLowerer<'a> {
                     let bindings = vec![(receiver_name, date_type, receiver)];
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
+                if matches!(
+                    property.sym.as_ref(),
+                    "toDateString" | "toTimeString" | "toUTCString"
+                ) {
+                    if !call.args.is_empty() {
+                        return Err(format!("native `.{}()` expects no arguments", property.sym));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(
+                        &date_type,
+                        &receiver,
+                        &format!("Date.{} receiver", property.sym),
+                    )?;
+                    let intrinsic = match property.sym.as_ref() {
+                        "toDateString" => "__thaw_date_to_date_string",
+                        "toTimeString" => "__thaw_date_to_time_string",
+                        "toUTCString" => "__thaw_date_to_utc_string",
+                        _ => unreachable!(),
+                    };
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(receiver),
+                        date_type,
+                        "timestamp".to_string(),
+                    );
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(intrinsic.to_string())),
+                        vec![timestamp],
+                    ));
+                }
                 if property.sym == *"toString" {
                     if !call.args.is_empty() {
                         return Err("native `.toString()` does not accept arguments yet".into());
                     }
                     let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    if self.infer_expr_type(&receiver)? == date_type {
+                        let timestamp = HirExpr::PropAccess(
+                            Box::new(receiver),
+                            date_type,
+                            "timestamp".to_string(),
+                        );
+                        return Ok(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_to_string".to_string())),
+                            vec![timestamp],
+                        ));
+                    }
                     return self.coerce_primitive_to_string(receiver);
                 }
                 if property.sym == *"valueOf" {

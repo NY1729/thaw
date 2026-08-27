@@ -642,11 +642,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, timestamp, "Date getter timestamp")?;
                         return Ok(HirType::F64);
                     }
-                    "__thaw_date_to_iso_string" => {
+                    "__thaw_date_to_iso_string"
+                    | "__thaw_date_to_date_string"
+                    | "__thaw_date_to_time_string"
+                    | "__thaw_date_to_string"
+                    | "__thaw_date_to_utc_string" => {
                         let [timestamp] = args.as_slice() else {
-                            return Err("Date.toISOString expects one operand".into());
+                            return Err(format!("{name} expects one operand"));
                         };
-                        self.expect_type(&HirType::F64, timestamp, "Date.toISOString timestamp")?;
+                        self.expect_type(&HirType::F64, timestamp, "Date timestamp")?;
                         return Ok(HirType::Str);
                     }
                     "__thaw_date_set_full_year"
