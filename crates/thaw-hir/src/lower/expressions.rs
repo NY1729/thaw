@@ -919,22 +919,36 @@ impl<'a> FnLowerer<'a> {
                                 ],
                             )?
                         } else {
-                        let HirExpr::Lit(HirLit::Str(key)) = &lhs else {
-                            return Err("fixed object `in` keys must be string literals".into());
-                        };
-                        let HirType::Object(fields) = right_type else {
-                            return Err("`in` currently requires a fixed-shape object".into());
-                        };
-                        let exists = fields.iter().any(|(name, _)| name == key);
-                        let left_name = format!("__thaw_in_key_{}", self.next_binding);
+                            let HirType::Object(fields) = right_type else {
+                                return Err("`in` currently requires a fixed-shape object".into());
+                            };
+                            let lhs = self.coerce_primitive_to_string(lhs)?;
+                            let field_names = fields
+                                .iter()
+                                .map(|(field, _)| field.clone())
+                                .collect::<Vec<_>>();
+                            let left_name = format!("__thaw_in_key_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(left_name.clone(), HirType::Str);
                         let right_type = HirType::Object(fields);
                         let right_name = format!("__thaw_in_object_{}", self.next_binding);
                         self.next_binding += 1;
-                        self.scope.insert(right_name.clone(), right_type.clone());
-                        self.wrap_call_argument_bindings(
-                            HirExpr::Lit(HirLit::Bool(exists)),
+                            self.scope.insert(right_name.clone(), right_type.clone());
+                            let mut comparisons = field_names.into_iter().map(|field| {
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::Var(left_name.clone())),
+                                    Box::new(HirExpr::Lit(HirLit::Str(field))),
+                                )
+                            });
+                            let mut result = comparisons
+                                .next()
+                                .unwrap_or(HirExpr::Lit(HirLit::Bool(false)));
+                            for comparison in comparisons {
+                                result = self.lower_logical_expr(result, comparison, false)?;
+                            }
+                            self.wrap_call_argument_bindings(
+                                result,
                             &[
                                 (left_name, HirType::Str, lhs),
                                 (right_name, right_type, rhs),
