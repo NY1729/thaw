@@ -714,19 +714,27 @@ impl<'ctx> HirCompiler<'ctx> {
         ty: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
-            HirType::Array(element) if **element == HirType::F64 => self
+            HirType::Array(element)
+                if matches!(**element, HirType::F64 | HirType::Str | HirType::Bool) =>
+            {
+                let converter = match element.as_ref() {
+                    HirType::F64 => "thaw_json_to_number_array",
+                    HirType::Str => "thaw_json_to_string_array",
+                    HirType::Bool => "thaw_json_to_bool_array",
+                    _ => unreachable!(),
+                };
+                self
                 .builder
                 .build_call(
-                    self.module
-                        .get_function("thaw_json_to_number_array")
-                        .unwrap(),
+                    self.module.get_function(converter).unwrap(),
                     &[json.into()],
                     "json_native_array",
                 )
                 .map_err(|error| error.to_string())?
                 .try_as_basic_value()
                 .basic()
-                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+                .ok_or_else(|| format!("{converter} returned no value"))
+            }
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
             other => Err(format!(
                 "JSON-backed dictionary value cannot be restored as {other:?}"

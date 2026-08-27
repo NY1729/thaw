@@ -352,6 +352,12 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
         function arrays(): Record<string, number[]> {
             return { selected: [3, 4], kept: [5] };
         }
+        function labels(): Record<string, string[]> {
+            return { selected: ["a", "b"], kept: ["c"] };
+        }
+        function flags(): Record<string, boolean[]> {
+            return { selected: [true, false], kept: [true] };
+        }
         function main(): void {
             const direct: Item = items().selected;
             const {
@@ -361,14 +367,17 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
             let selected: number[] = [];
             let arrayRest: Record<string, number[]> = {};
             ({ selected, ...arrayRest } = arrays());
+            const selectedLabels: string[] = labels().selected;
+            const { selected: selectedFlags }: Record<string, boolean[]> = flags();
             console.log(direct.value, direct.label, value, label, itemRest);
             console.log(selected, arrayRest);
+            console.log(selectedLabels, selectedFlags);
         }
     "#;
 
     assert_eq!(
         compile_and_run(source, "structured_dictionary_destructuring"),
-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n"
+        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n"
     );
 }
 
