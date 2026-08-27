@@ -194,6 +194,37 @@ fn console_assert_evaluates_all_arguments_and_only_reports_falsy_conditions() {
 }
 
 #[test]
+fn console_log_safely_formats_functions_promises_and_dynamic_handles() {
+    let source = r#"
+        async function delayed(): Promise<number> {
+            await sleep(1);
+            return 42;
+        }
+        function main(): void {
+            const callback: (value: number) => number =
+                (value: number): number => value + 1;
+            const optional: ((value: number) => number) | undefined = callback;
+            const mixed: ((value: number) => number) | string = callback;
+            const pending: Promise<number> = delayed();
+            console.log(callback);
+            console.log(optional);
+            console.log(mixed);
+            console.log(pending);
+
+            loadScript("globalThis.consoleNumber = 42; globalThis.consoleObject = { value: 7 };");
+            const numberHandle: JsValue = getDynamicValue("consoleNumber");
+            const objectHandle: JsValue = getDynamicValue("consoleObject");
+            console.log(numberHandle, objectHandle);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "opaque_console_values"),
+        "[Function]\n[Function]\n[Function]\nPromise { <pending> }\n42 [object Object]\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
