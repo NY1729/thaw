@@ -30,6 +30,8 @@ fn compiles_typed_napi_collection_arguments_and_results() {
            declare function __thaw_typed_napi_626f6f6c73(value: boolean[]): boolean[];
            declare function __thaw_typed_napi_6e6573746564(value: string[][]): string[][];
            declare function __thaw_typed_napi_6f626a65637473(value: { name: string }[]): { name: string }[];
+           declare function __thaw_typed_napi_6e756c6c61626c65(value: string | null): string | null;
+           declare function __thaw_typed_napi_6e756c6c61626c656172726179(value: (string | null)[]): (string | null)[];
            function main(): void {
                const value: [number, string] = [7, "value"];
                const swapped: [string, number] = __thaw_typed_napi_737761705475706c65(value);
@@ -37,11 +39,15 @@ fn compiles_typed_napi_collection_arguments_and_results() {
                const bools: boolean[] = __thaw_typed_napi_626f6f6c73([true, false]);
                const nested: string[][] = __thaw_typed_napi_6e6573746564([["a"]]);
                const objects: { name: string }[] = __thaw_typed_napi_6f626a65637473([{ name: "a" }]);
+               const nullable: string | null = __thaw_typed_napi_6e756c6c61626c65(null);
+               const nullableArray: (string | null)[] = __thaw_typed_napi_6e756c6c61626c656172726179(["a", null]);
                console.log(swapped[0]);
                console.log(strings[0]);
                console.log(bools[0]);
                console.log(nested[0][0]);
                console.log(objects[0].name);
+               console.log(nullable);
+               console.log(nullableArray[1]);
            }"#,
     )
     .unwrap();
