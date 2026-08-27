@@ -614,7 +614,9 @@ include!("hir_codegen/async_frames/codegen.rs");
 
 include!("hir_codegen/statements.rs");
 
-include!("hir_codegen/values.rs");
+include!("hir_codegen/values/expressions.rs");
+include!("hir_codegen/values/unions.rs");
+include!("hir_codegen/values/closures.rs");
 
 include!("hir_codegen/collections.rs");
 
