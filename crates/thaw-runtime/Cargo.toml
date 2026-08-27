@@ -14,3 +14,4 @@ ryu = "1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 thaw-arena = { path = "../thaw-arena" }
 webpki-roots = "1.0"
+icu_normalizer = { version = "2.3.0", features = ["compiled_data"] }
