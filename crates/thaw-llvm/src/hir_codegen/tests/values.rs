@@ -525,6 +525,43 @@ fn deletes_runtime_keyed_dictionary_properties() {
 }
 
 #[test]
+fn reads_and_writes_json_with_runtime_string_keys() {
+    let source = r#"
+        function objectSource(): Json {
+            console.log("object");
+            return JSON.parse("{\"value\":1}");
+        }
+        function key(): string {
+            console.log("key");
+            return "value";
+        }
+        async function asyncKey(): Promise<string> {
+            await sleep(1);
+            console.log("async-key");
+            return "other";
+        }
+        async function main(): Promise<void> {
+            const data: Json = JSON.parse("{\"value\":1}");
+            console.log(Number(data[key()]));
+            data[key()] = JSON.parse("2");
+            data.extra = JSON.parse("\"text\"");
+            data[await asyncKey()] = JSON.parse("true");
+            console.log(Number(data.value));
+            console.log(String(data["extra"]));
+            console.log(String(data.other));
+            console.log(String(objectSource()[key()]));
+            console.log(JSON.stringify(data));
+            const array: Json = JSON.parse("[10,20]");
+            console.log(Number(array[1]));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "runtime_json_keys"),
+        "key\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"value\":2,\"extra\":\"text\",\"other\":true}\n20\n"
+    );
+}
+
+#[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"
         function read(key: string): number | string | null | undefined {
