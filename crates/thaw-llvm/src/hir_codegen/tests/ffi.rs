@@ -1371,6 +1371,43 @@ fn compiles_encode_uri() {
 }
 
 #[test]
+fn compiles_decode_uri() {
+    let source = r#"
+        function value(): string {
+            console.log("argument");
+            return "http://a.com/a%20b";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited argument");
+            await sleep(1);
+            return "%F0%9F%98%80";
+        }
+        async function main(): Promise<void> {
+            console.log(decodeURI("http://a.com/a%20b?x=1&y=2#frag"));
+            console.log(decodeURI("%3B%2F%3F%3A%40%26%3D%2B%24%2C%23"));
+            console.log(decodeURI("a%20%2Fb"));
+            console.log(decodeURI("caf%C3%A9"));
+            console.log(decodeURI(value()));
+            console.log(decodeURI(await delayedValue()));
+            try {
+                decodeURI("%");
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                decodeURI("%zz");
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "decode_uri"),
+        "http://a.com/a b?x=1&y=2#frag\n%3B%2F%3F%3A%40%26%3D%2B%24%2C%23\na %2Fb\ncafé\nargument\nhttp://a.com/a b\nawaited argument\n😀\nURI malformed\nURI malformed\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
