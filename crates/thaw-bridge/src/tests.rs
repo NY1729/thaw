@@ -484,6 +484,54 @@ fn rejects_keyof_collection_from_the_string_fast_path() {
 }
 
 #[test]
+fn resolves_fixed_object_indexed_access_types() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; port: number; }
+            export declare function host(config: Config): Config["host"];
+            export declare function port(config: Config): Config["port"];"#,
+    )
+    .unwrap();
+    let Classification::FastPath(host) = classify(&funcs[0]) else {
+        panic!("fixed string indexed access should resolve");
+    };
+    let Classification::FastPath(port) = classify(&funcs[1]) else {
+        panic!("fixed number indexed access should resolve");
+    };
+    assert_eq!(host.ret, HirType::Str);
+    assert_eq!(port.ret, HirType::F64);
+}
+
+#[test]
+fn resolves_indexed_access_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; }
+            export interface Field<T> { value: T["host"]; }
+            export declare function inspect(field: Field<Config>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("indexed access should resolve after generic substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![("value".into(), HirType::Str)])]
+    );
+}
+
+#[test]
+fn rejects_unknown_indexed_access_properties() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; }
+            export declare function missing(config: Config): Config["missing"];"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn classifies_typed_callback_parameter_as_fast_path() {
     let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
     let Classification::FastPath(signature) = classify(&funcs[0]) else {
