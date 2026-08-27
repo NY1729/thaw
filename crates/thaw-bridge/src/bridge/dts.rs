@@ -810,6 +810,58 @@ fn apply_record(value: DtsType, keys: Result<Vec<String>, String>) -> DtsType {
     }
 }
 
+fn strip_non_nullable(ty: DtsType) -> DtsType {
+    match ty {
+        DtsType::Native(HirType::Optional(value))
+        | DtsType::Native(HirType::Nullable(value))
+        | DtsType::Native(HirType::Nullish(value)) => DtsType::Native(*value),
+        other => other,
+    }
+}
+
+fn classify_non_nullable_type(
+    ty: &TsType,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> DtsType {
+    let TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) = ty
+    else {
+        return strip_non_nullable(classify_ts_type(
+            ty,
+            interfaces,
+            generic_interfaces,
+        ));
+    };
+    let mut native = None;
+    for element in &union.types {
+        if matches!(
+            element.as_ref(),
+            TsType::TsKeywordType(keyword)
+                if matches!(
+                    keyword.kind,
+                    TsKeywordTypeKind::TsNullKeyword
+                        | TsKeywordTypeKind::TsUndefinedKeyword
+                )
+        ) {
+            continue;
+        }
+        match classify_ts_type(element, interfaces, generic_interfaces) {
+            DtsType::Native(ty) if native.as_ref().is_none_or(|current| current == &ty) => {
+                native = Some(ty)
+            }
+            DtsType::Native(_) => {
+                return DtsType::Unsupported(
+                    "NonNullable<T> has multiple incompatible native layouts".into(),
+                )
+            }
+            unsupported => return unsupported,
+        }
+    }
+    native
+        .map(DtsType::Native)
+        .unwrap_or_else(|| DtsType::Unsupported("NonNullable<T> has no native value".into()))
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -1158,6 +1210,19 @@ fn classify_ts_type(
                     ref_name == "Required",
                 );
             }
+            if ref_name == "NonNullable" {
+                let [inner] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return DtsType::Unsupported(
+                        "NonNullable<T> requires exactly one type argument".into(),
+                    );
+                };
+                return classify_non_nullable_type(inner, interfaces, generic_interfaces);
+            }
             if ref_name == "Record" {
                 let [keys, value] = ty_ref
                     .type_params
@@ -1434,6 +1499,7 @@ fn resolve_ts_type_with_substitution(
                         ("Required", resolved) => {
                             return apply_partial_or_required(resolved, true)
                         }
+                        ("NonNullable", resolved) => return strip_non_nullable(resolved),
                         ("Array" | "ReadonlyArray", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue))) => {
                             return DtsType::Native(HirType::Array(Box::new(element)))
                         }
