@@ -38,7 +38,7 @@ impl<'a> FnLowerer<'a> {
                 | "setSeconds" | "setMilliseconds"
                 | "setUTCFullYear" | "setUTCMonth" | "setUTCDate" | "setUTCHours"
                 | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
-                | "toDateString" | "toTimeString" | "toUTCString"
+                | "toDateString" | "toTimeString" | "toUTCString" | "toJSON"
         )
     }
 
@@ -2560,6 +2560,71 @@ impl<'a> FnLowerer<'a> {
                             captures,
                             Vec::new(),
                             HirType::Str,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let bindings = vec![(receiver_name, date_type, receiver)];
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"toJSON" {
+                    if !call.args.is_empty() {
+                        return Err("native `.toJSON()` expects no arguments".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(&date_type, &receiver, "Date.toJSON receiver")?;
+                    let receiver_name = format!("__thaw_date_json_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_date_json_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), date_type.clone());
+                    self.scope.insert(raw_name.clone(), HirType::Str);
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(var(&receiver_name)),
+                        date_type.clone(),
+                        "timestamp".to_string(),
+                    );
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            HirType::Str,
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_date_to_iso_string".into())),
+                                vec![timestamp],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                vec![var(&raw_name)],
+                            ),
+                            vec![HirStmt::Return(Some(HirExpr::NullableNone(HirType::Str)))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::NullableSome(
+                            Box::new(var(&raw_name)),
+                            HirType::Str,
+                        ))),
+                    ]);
+                    let result_type = HirType::Nullable(Box::new(HirType::Str));
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            result_type,
                             Box::new(body),
                         )),
                         Vec::new(),

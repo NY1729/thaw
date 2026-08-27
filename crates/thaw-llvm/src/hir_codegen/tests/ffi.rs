@@ -1853,6 +1853,29 @@ fn compiles_date_utc_and_parse() {
 }
 
 #[test]
+fn compiles_date_to_json() {
+    let source = r#"
+        function printJson(value: string | null): void {
+            if (value !== null) {
+                console.log(value);
+            } else {
+                console.log("null");
+            }
+        }
+        async function main(): Promise<void> {
+            const d: Date = new Date(1704067200500);
+            printJson(d.toJSON());
+            const invalid: Date = new Date(NaN);
+            printJson(invalid.toJSON());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_to_json"),
+        "2024-01-01T00:00:00.500Z\nnull\n"
+    );
+}
+
+#[test]
 fn compiles_date_string_formatting() {
     let source = r#"
         async function main(): Promise<void> {
