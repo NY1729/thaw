@@ -1313,8 +1313,9 @@ The workspace crates have narrow responsibilities:
 - `Array.isArray` recognizes native homogeneous arrays, typed tuples and
   runtime JSON arrays, returns false for other native/JSON values, evaluates
   its operand once and accepts awaited arrays
-- `Object.keys` returns an arena-owned string array for fixed-layout objects
-  plus native arrays/tuples and runtime JSON objects/arrays, preserving
+- `Object.keys` returns an arena-owned string array for fixed-layout objects,
+  runtime-keyed `Record` values, native arrays/tuples and runtime JSON
+  objects/arrays, preserving
   declaration, parsed insertion or numeric-index order and evaluating
   synchronous or awaited receivers exactly once;
   `Object.getOwnPropertyNames` and `Reflect.ownKeys` share this result because
@@ -1324,10 +1325,11 @@ The workspace crates have narrow responsibilities:
   as appropriate, including empty objects and synchronous/awaited receivers
 - `Object.entries` returns fixed-object typed entries or dynamic
   `[string, Json][]` entries in the same key order
-- `Object.hasOwn` checks fixed-object fields and runtime JSON object/array own
-  properties, including array indices and `length`
+- `Object.hasOwn` checks fixed-object, runtime-keyed `Record`, and runtime JSON
+  object/array own properties, including array indices and `length`
 - The `in` operator accepts dynamic primitive keys for fixed objects and checks
-  runtime JSON own properties with left-before-right single evaluation;
+  runtime-keyed `Record`/JSON own properties with left-before-right single
+  evaluation;
   `for...in` iterates `Record`/JSON object keys or JSON array indices in
   JavaScript key order
 - `delete` removes named or computed properties from runtime-keyed

@@ -506,7 +506,12 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
                         };
-                        self.expect_type(&HirType::Json, value, "Object.keys JSON operand")?;
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(ty, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "Object.keys expected a JSON value or dictionary, got {ty:?}"
+                            ));
+                        }
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
                     "__thaw_array_keys" => {
@@ -540,7 +545,12 @@ impl<'a> FnLowerer<'a> {
                         let [value, key] = args.as_slice() else {
                             return Err("Object.hasOwn expects two operands".into());
                         };
-                        self.expect_type(&HirType::Json, value, "Object.hasOwn JSON operand")?;
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(ty, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "Object.hasOwn expected a JSON value or dictionary, got {ty:?}"
+                            ));
+                        }
                         self.expect_type(&HirType::Str, key, "Object.hasOwn key")?;
                         return Ok(HirType::Bool);
                     }

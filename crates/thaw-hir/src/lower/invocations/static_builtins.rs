@@ -251,7 +251,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let value = value.clone();
                         let ty = self.infer_expr_type(&value)?;
-                        if ty == HirType::Json {
+                        if matches!(ty, HirType::Json | HirType::Dictionary(_)) {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_keys".to_string())),
                                 vec![value],
@@ -390,7 +390,7 @@ impl<'a> FnLowerer<'a> {
                         let object_value = object_value.clone();
                         let object_type = self.infer_expr_type(&object_value)?;
                         let key_value = self.coerce_primitive_to_string(key_value.clone())?;
-                        if object_type == HirType::Json {
+                        if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_has_own".to_string())),
                                 vec![object_value, key_value],
