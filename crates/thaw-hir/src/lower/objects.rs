@@ -330,6 +330,9 @@ impl<'a> FnLowerer<'a> {
             HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
             HirType::Bool => Ok(HirExpr::JsonAsBool(Box::new(value))),
             HirType::Json => Ok(value),
+            HirType::Object(_) | HirType::Array(_) => {
+                Ok(HirExpr::JsonAsNative(Box::new(value), element.clone()))
+            }
             other => Err(format!(
                 "dictionary reads do not yet support value type {other:?}"
             )),

@@ -183,6 +183,9 @@ pub enum HirExpr {
     /// `Boolean(json)`: converts a `Json` leaf to `Bool`. Same restriction
     /// as `JsonAsNumber`.
     JsonAsBool(Box<HirExpr>),
+    /// Restores a structured native value from its JSON-backed dictionary
+    /// representation. Lowering only emits target layouts supported by LLVM.
+    JsonAsNative(Box<HirExpr>, HirType),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -122,7 +122,8 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::JsonGet(value, _)
             | HirExpr::JsonAsNumber(value)
             | HirExpr::JsonAsString(value)
-            | HirExpr::JsonAsBool(value) => self.extract_first_frame_await(value, temporary),
+            | HirExpr::JsonAsBool(value)
+            | HirExpr::JsonAsNative(value, _) => self.extract_first_frame_await(value, temporary),
             HirExpr::IndexAssign(a, b, c) => {
                 for value in [a, b, c] {
                     if let Some(found) = self.extract_first_frame_await(value, temporary)? {

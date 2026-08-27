@@ -707,4 +707,30 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         Ok(object.into())
     }
+
+    fn compile_json_to_native(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        ty: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match ty {
+            HirType::Array(element) if **element == HirType::F64 => self
+                .builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_json_to_number_array")
+                        .unwrap(),
+                    &[json.into()],
+                    "json_native_array",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Object(_) => self.compile_json_to_native_object(json, ty),
+            other => Err(format!(
+                "JSON-backed dictionary value cannot be restored as {other:?}"
+            )),
+        }
+    }
 }
