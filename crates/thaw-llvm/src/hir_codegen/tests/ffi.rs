@@ -1782,11 +1782,14 @@ fn compiles_string_match() {
             printMatch("abc".match(/\d+/));
             printMatch(value().match(pattern()));
             printMatch((await delayedValue()).match(/\d+/));
+            printMatch("12-34".match(/(\d+)-(\d+)/));
+            printMatch("a=1".match(/(a)=(\d)|(b)=(\d)/));
+            printMatch("12-34".match(/(\d+)-(\d+)/g));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "string_match"),
-        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n"
+        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n12-34\n12\n34\na=1\na\n1\n\n\n12-34\n"
     );
 }
 
