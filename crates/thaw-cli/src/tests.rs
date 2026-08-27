@@ -104,6 +104,24 @@ fn rewrites_external_class_constructors_by_argument_count() {
 }
 
 #[test]
+fn does_not_guess_between_same_arity_constructor_helpers() {
+    let source = "const value = new NativeBox(true);";
+    let rewritten = rewrite_external_class_constructors(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![
+                (1, "NativeBox_string".into(), vec![thaw_hir::HirType::Str]),
+                (1, "NativeBox_number".into(), vec![thaw_hir::HirType::F64]),
+            ],
+        )],
+    )
+    .unwrap();
+    assert_eq!(rewritten, source);
+}
+
+#[test]
 fn generates_napi_constructor_helpers_for_each_supported_arity() {
     let class = thaw_bridge::DtsClass {
         name: "Client".into(),

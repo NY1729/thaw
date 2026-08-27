@@ -1991,8 +1991,10 @@ CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 standalone executable. Optional/default constructors generate one typed helper
 per supported arity. Same-arity overloads retain distinct helpers and select
 number, string, boolean, number-array and object arguments through the same
-call-site type flow used by methods; all helpers resolve to the same addon export. Declared
-instance/static properties use the getter ABI and, unless `readonly`, the
+call-site type flow used by methods; all helpers resolve to the same addon export.
+If a typed call matches none of the same-arity signatures, lowering leaves it
+unresolved instead of falling back to an ABI-incompatible first overload.
+Declared instance/static properties use the getter ABI and, unless `readonly`, the
 setter ABI; explicit accessor declarations take precedence. External-class
 metadata includes inherited public methods and properties,
 with derived declarations shadowing base members; private/protected members

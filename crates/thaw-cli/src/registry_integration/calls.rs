@@ -32,15 +32,17 @@ fn rewrite_external_class_constructors(
             };
             if let Some((_, _, helpers)) = class {
                 let argument_count = expression.args.as_ref().map_or(0, Vec::len);
-                if let Some((_, helper, _)) = helpers
+                let mut candidates = helpers
                     .iter()
-                    .find(|(arity, _, _)| *arity == argument_count)
-                {
-                    self.replacements.push((
-                        expression.span().lo.0,
-                        expression.callee.span().hi.0,
-                        helper.clone(),
-                    ));
+                    .filter(|(arity, _, _)| *arity == argument_count);
+                if let Some((_, helper, _)) = candidates.next() {
+                    if candidates.next().is_none() {
+                        self.replacements.push((
+                            expression.span().lo.0,
+                            expression.callee.span().hi.0,
+                            helper.clone(),
+                        ));
+                    }
                 }
             }
             expression.visit_children_with(self);
