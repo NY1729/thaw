@@ -274,7 +274,11 @@ fn extract_type_alias_decl(item: &ModuleItem) -> Option<&swc_ecma_ast::TsTypeAli
     }
 }
 
-type GenericInterfaces<'a> = HashMap<String, &'a TsInterfaceDecl>;
+#[derive(Default)]
+struct GenericInterfaces<'a> {
+    interfaces: HashMap<String, &'a TsInterfaceDecl>,
+    aliases: HashMap<String, &'a swc_ecma_ast::TsTypeAliasDecl>,
+}
 
 /// Resolves every top-level *non-generic* `interface` into a `DtsType`
 /// (first map), mirroring `thaw_hir::lower::resolve_interfaces` but
@@ -288,19 +292,27 @@ type GenericInterfaces<'a> = HashMap<String, &'a TsInterfaceDecl>;
 /// another-interface use, no `extends` on the generic interface itself).
 fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInterfaces<'_>) {
     let mut raw: HashMap<String, &TsInterfaceDecl> = HashMap::new();
-    let mut generic: GenericInterfaces = HashMap::new();
+    let mut generic = GenericInterfaces::default();
     for iface in module.body.iter().filter_map(extract_interface_decl) {
         let name = iface.id.sym.to_string();
         if iface.type_params.is_some() {
-            generic.insert(name, iface);
+            generic.interfaces.insert(name, iface);
         } else {
             raw.insert(name, iface);
         }
     }
+    for alias in module
+        .body
+        .iter()
+        .filter_map(extract_type_alias_decl)
+        .filter(|alias| alias.type_params.is_some())
+    {
+        generic.aliases.insert(alias.id.sym.to_string(), alias);
+    }
 
     let mut resolved = HashMap::new();
     for name in raw.keys().cloned().collect::<Vec<_>>() {
-        resolve_interface(&name, &raw, &mut resolved, &mut Vec::new());
+        resolve_interface(&name, &raw, &generic, &mut resolved, &mut Vec::new());
     }
     let aliases = module
         .body
@@ -313,7 +325,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
             resolved.remove(name);
         }
         for name in raw.keys() {
-            resolve_interface(name, &raw, &mut resolved, &mut Vec::new());
+            resolve_interface(name, &raw, &generic, &mut resolved, &mut Vec::new());
         }
         for alias in &aliases {
             let ty = classify_ts_type(&alias.type_ann, &resolved, &generic);
@@ -326,6 +338,7 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
 fn resolve_interface(
     name: &str,
     raw: &HashMap<String, &TsInterfaceDecl>,
+    generic: &GenericInterfaces,
     resolved: &mut HashMap<String, DtsType>,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
@@ -375,7 +388,7 @@ fn resolve_interface(
             break;
         };
         let base_name = base_ident.sym.to_string();
-        match resolve_interface(&base_name, raw, resolved, in_progress) {
+        match resolve_interface(&base_name, raw, generic, resolved, in_progress) {
             DtsType::Native(HirType::Object(base_fields)) => {
                 for (field_name, field_ty) in base_fields {
                     if fields.iter().any(|(n, _)| *n == field_name) {
@@ -418,7 +431,13 @@ fn resolve_interface(
             }
             let field_ty = match &prop.type_ann {
                 Some(ann) => {
-                    resolve_type_with_interfaces(&ann.type_ann, raw, resolved, in_progress)
+                    resolve_type_with_interfaces(
+                        &ann.type_ann,
+                        raw,
+                        generic,
+                        resolved,
+                        in_progress,
+                    )
                 }
                 None => {
                     DtsType::Unsupported(format!("field `{field_name}` has no type annotation"))
@@ -461,6 +480,7 @@ fn resolve_interface(
 fn resolve_type_with_interfaces(
     ty: &TsType,
     raw: &HashMap<String, &TsInterfaceDecl>,
+    generic: &GenericInterfaces,
     resolved: &mut HashMap<String, DtsType>,
     in_progress: &mut Vec<String>,
 ) -> DtsType {
@@ -468,13 +488,11 @@ fn resolve_type_with_interfaces(
         if let TsEntityName::Ident(id) = &ty_ref.type_name {
             let ref_name = id.sym.as_str();
             if raw.contains_key(ref_name) {
-                return resolve_interface(ref_name, raw, resolved, in_progress);
+                return resolve_interface(ref_name, raw, generic, resolved, in_progress);
             }
         }
     }
-    // No generic interfaces here by design -- see `GenericInterfaces`'s
-    // scope note.
-    classify_ts_type(ty, resolved, &GenericInterfaces::new())
+    classify_ts_type(ty, resolved, generic)
 }
 
 /// Never fails: an unsupported parameter pattern (e.g. destructuring)
@@ -1236,11 +1254,22 @@ fn classify_ts_type(
             }
             // A generic interface, referenced with concrete type
             // arguments -- resolved on demand via substitution.
-            if let Some(decl) = generic_interfaces.get(&ref_name) {
+            if let Some(decl) = generic_interfaces.interfaces.get(&ref_name) {
                 return resolve_generic_interface(
                     &ref_name,
                     decl,
                     ty_ref,
+                    interfaces,
+                    generic_interfaces,
+                    &mut Vec::new(),
+                );
+            }
+            if let Some(decl) = generic_interfaces.aliases.get(&ref_name) {
+                return resolve_generic_alias(
+                    &ref_name,
+                    decl,
+                    ty_ref,
+                    None,
                     interfaces,
                     generic_interfaces,
                     &mut Vec::new(),
@@ -1469,6 +1498,127 @@ fn resolve_generic_interface(
     }
 }
 
+fn bridge_type_satisfies_constraint(actual: &HirType, constraint: &HirType) -> bool {
+    if actual == constraint {
+        return true;
+    }
+    match constraint {
+        HirType::Union(elements) => elements
+            .iter()
+            .any(|element| bridge_type_satisfies_constraint(actual, element)),
+        HirType::Object(required) => match actual {
+            HirType::Object(fields) => required.iter().all(|(name, ty)| {
+                fields
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .is_some_and(|(_, actual)| bridge_type_satisfies_constraint(actual, ty))
+            }),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn resolve_generic_alias(
+    name: &str,
+    decl: &swc_ecma_ast::TsTypeAliasDecl,
+    ty_ref: &swc_ecma_ast::TsTypeRef,
+    outer_substitution: Option<&HashMap<String, HirType>>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> DtsType {
+    if in_progress.iter().any(|active| active == name) {
+        return DtsType::Unsupported(format!(
+            "generic type alias `{name}` is (indirectly) self-referential"
+        ));
+    }
+    let parameters = &decl
+        .type_params
+        .as_ref()
+        .expect("caller only reaches generic aliases")
+        .params;
+    let arguments = ty_ref
+        .type_params
+        .as_ref()
+        .map(|parameters| parameters.params.as_slice())
+        .unwrap_or_default();
+    let required = parameters
+        .iter()
+        .take_while(|parameter| parameter.default.is_none())
+        .count();
+    if arguments.len() < required || arguments.len() > parameters.len() {
+        return DtsType::Unsupported(format!(
+            "type alias `{name}` expects {}..={} type argument(s), got {}",
+            required,
+            parameters.len(),
+            arguments.len()
+        ));
+    }
+
+    let mut substitution = HashMap::new();
+    for (index, parameter) in parameters.iter().enumerate() {
+        let concrete = if let Some(argument) = arguments.get(index) {
+            match outer_substitution {
+                Some(outer) => resolve_ts_type_with_substitution(
+                    argument,
+                    outer,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                ),
+                None => classify_ts_type(argument, interfaces, generic_interfaces),
+            }
+        } else {
+            resolve_ts_type_with_substitution(
+                parameter
+                    .default
+                    .as_ref()
+                    .expect("arity validation requires a default"),
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        };
+        let concrete = match concrete {
+            DtsType::Native(concrete) => concrete,
+            unsupported => return unsupported,
+        };
+        if let Some(constraint) = &parameter.constraint {
+            let constraint = resolve_ts_type_with_substitution(
+                constraint,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            );
+            let constraint = match constraint {
+                DtsType::Native(constraint) => constraint,
+                unsupported => return unsupported,
+            };
+            if !bridge_type_satisfies_constraint(&concrete, &constraint) {
+                return DtsType::Unsupported(format!(
+                    "type argument {concrete:?} does not satisfy constraint {constraint:?} for `{}` in alias `{name}`",
+                    parameter.name.sym
+                ));
+            }
+        }
+        substitution.insert(parameter.name.sym.to_string(), concrete);
+    }
+
+    in_progress.push(name.to_string());
+    let result = resolve_ts_type_with_substitution(
+        &decl.type_ann,
+        &substitution,
+        interfaces,
+        generic_interfaces,
+        in_progress,
+    );
+    in_progress.pop();
+    result
+}
+
 /// Like `classify_ts_type`, but a bare `TsTypeRef` matching one of `Name`'s
 /// type parameters resolves to the corresponding concrete type instead of
 /// an unknown-reference `Unsupported`. Mirrors
@@ -1486,11 +1636,22 @@ fn resolve_ts_type_with_substitution(
             if let Some(concrete) = substitution.get(ref_name) {
                 return DtsType::Native(concrete.clone());
             }
-            if let Some(decl) = generic_interfaces.get(ref_name) {
+            if let Some(decl) = generic_interfaces.interfaces.get(ref_name) {
                 return resolve_generic_interface(
                     ref_name,
                     decl,
                     ty_ref,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+            }
+            if let Some(decl) = generic_interfaces.aliases.get(ref_name) {
+                return resolve_generic_alias(
+                    ref_name,
+                    decl,
+                    ty_ref,
+                    Some(substitution),
                     interfaces,
                     generic_interfaces,
                     in_progress,
