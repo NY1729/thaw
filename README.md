@@ -245,7 +245,8 @@ The workspace crates have narrow responsibilities:
   literals and typed tuples, preserving single left-to-right evaluation across
   ordinary, spread, and awaited arguments
 - Top-level object and array destructuring supports nesting, defaults, rest
-  bindings and runtime-computed dictionary keys while evaluating each source once
+  bindings and runtime-computed dictionary keys, including computed-key exclusion
+  from object rest, while evaluating each source and key expression once
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
 - `process.env`, JSON operations, and both legacy blocking and Promise-based

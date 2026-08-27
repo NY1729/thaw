@@ -247,19 +247,26 @@ fn top_level_destructuring_supports_nested_defaults_rests_and_runtime_keys() {
             ...remaining
         }: Source = objectSource();
         const [first, , third = 30, ...tail]: number[] = arraySource();
-        const runtimeKey: string = "chosen";
-        const dictionary: Record<string, number> = { chosen: 8 };
-        const { [runtimeKey]: chosen }: Record<string, number> = dictionary;
+        let keyCalls: number = 0;
+        function runtimeKey(): string {
+            keyCalls += 1;
+            return "chosen";
+        }
+        const dictionary: Record<string, number> = { chosen: 8, kept: 9 };
+        const {
+            [runtimeKey()]: chosen,
+            ...dictionaryRest
+        }: Record<string, number> = dictionary;
 
         function main(): void {
             console.log(calls, x, y, label, remaining.extra);
-            console.log(first, third, tail, chosen);
+            console.log(first, third, tail, keyCalls, chosen, dictionaryRest);
         }
     "#;
 
     assert_eq!(
         compile_and_run(source, "top_level_destructuring"),
-        "2 1 2 fallback 3\n4 6 [7] 8\n"
+        "2 1 2 fallback 3\n4 6 [7] 1 8 {\"kept\":9}\n"
     );
 }
 

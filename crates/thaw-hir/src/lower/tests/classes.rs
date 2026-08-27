@@ -40,6 +40,44 @@ fn keeps_top_level_default_temporaries_private_when_exporting() {
 }
 
 #[test]
+fn keeps_computed_destructuring_key_temporaries_private_when_exporting() {
+    let module = thaw_parser::parse_typescript(
+        r#"const key: string = "selected";
+           export const { [key]: selected, ...rest }: Record<string, number> =
+               { selected: 1, kept: 2 };"#,
+    )
+    .unwrap();
+    let normalized = normalize_top_level_destructuring(&module).unwrap();
+    let mut exported = Vec::new();
+    let mut private_keys = Vec::new();
+    for item in normalized.body {
+        match item {
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                if let Decl::Var(declaration) = export.decl {
+                    for declarator in declaration.decls {
+                        if let Pat::Ident(binding) = declarator.name {
+                            exported.push(binding.id.sym.to_string());
+                        }
+                    }
+                }
+            }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) => {
+                for declarator in declaration.decls {
+                    if let Pat::Ident(binding) = declarator.name {
+                        if binding.id.sym.starts_with("__thaw_top_key_") {
+                            private_keys.push(binding.id.sym.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(exported, ["selected", "rest"]);
+    assert_eq!(private_keys.len(), 1);
+}
+
+#[test]
 fn lowers_static_computed_object_reads_and_targets() {
     let program = lower(
         r#"function main(): void {
