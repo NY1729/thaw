@@ -161,6 +161,42 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
 }
 
 #[test]
+fn generates_napi_class_property_accessor_helpers() {
+    let mut shim = String::new();
+    let ty = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);
+    let instance_getter =
+        generate_napi_class_property_getter("Client", "name", &ty, false, &mut shim).unwrap();
+    let (instance_setter, setter_type) =
+        generate_napi_class_property_setter("Client", "name", &ty, false, &mut shim).unwrap();
+    let static_getter =
+        generate_napi_class_property_getter("Client", "version", &ty, true, &mut shim).unwrap();
+    let (static_setter, _) =
+        generate_napi_class_property_setter("Client", "version", &ty, true, &mut shim).unwrap();
+
+    assert_eq!(setter_type, thaw_hir::HirType::Str);
+    assert!(shim.contains(&format!(
+        "declare function {instance_getter}(receiver: JsValue): string;"
+    )));
+    assert!(shim.contains(&format!(
+        "declare function {instance_setter}(receiver: JsValue, value: string): string;"
+    )));
+    assert!(shim.contains(&format!("declare function {static_getter}(): string;")));
+    assert!(shim.contains(&format!(
+        "declare function {static_setter}(value: string): string;"
+    )));
+    assert!(generate_napi_class_property_getter(
+        "Client",
+        "optional",
+        &thaw_bridge::DtsType::Native(thaw_hir::HirType::Optional(Box::new(
+            thaw_hir::HirType::Str,
+        ))),
+        false,
+        &mut shim,
+    )
+    .is_none());
+}
+
+#[test]
 fn rewrites_methods_on_values_created_from_external_classes() {
     let source = "const db = new Database(\":memory:\"); db.configure(\"busyTimeout\", 1000); const local = new LocalBox(1); local.configure(2);";
     let rewritten = rewrite_external_class_methods(

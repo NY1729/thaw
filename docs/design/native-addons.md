@@ -35,6 +35,10 @@ instance methodをtyped N-API callへ書き換える。数値を保持する自�
 HIR、LLVM、N-API hostを通した実行ファイルE2Eで検証した。local aliasへの初期化・代入も
 class情報を伝播し、未知値への再代入で安全に追跡を破棄する。静的な名前の
 nested object propertyとproperty代入も追跡し、分岐で一致するfactだけを保持する。
+optional／default constructorは対応する各arityのtyped helperを生成し、LLVMで
+arity suffixを除去して同じaddon exportへ接続する。通常のclass property宣言も
+instance／static getterへ接続し、`readonly`でなければsetterも生成する。明示的な
+accessor宣言が同名propertyより優先される。
 parentの上書きは全descendantの追跡を破棄する。static methodはclass export自体を
 N-API receiverにし、instance methodと同じarity、overload、callback、native value
 marshal規則でnamed・namespace callを書き換える。自作addonの`NativeBox.twice(21)`を

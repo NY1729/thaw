@@ -218,6 +218,12 @@ fn lower_dts_class(
                         classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
                     })
                     .unwrap_or_else(|| DtsType::Unsupported("missing type annotation".into()));
+                let ty = match ty {
+                    DtsType::Native(ty) if property.is_optional => {
+                        DtsType::Native(optional_hir_type(ty))
+                    }
+                    other => other,
+                };
                 properties.push(DtsProperty {
                     name: property_name,
                     ty,
