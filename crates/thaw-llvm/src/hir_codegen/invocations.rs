@@ -512,6 +512,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("string pad returned no value".into());
             }
+            "__thaw_number_to_fixed" => {
+                let [value, digits] = args else {
+                    return Err("number toFixed expects two operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let digits = self.compile_expr(digits)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_number_to_fixed").unwrap(),
+                        &[value.into(), digits.into()],
+                        "number_to_fixed",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("number toFixed returned no value".into());
+            }
             "__thaw_string_length" => {
                 return self.compile_single_arg_call("thaw_string_length", args, "string length")
             }

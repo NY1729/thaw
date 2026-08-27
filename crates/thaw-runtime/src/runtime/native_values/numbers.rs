@@ -79,6 +79,30 @@ pub extern "C" fn thaw_number_to_string(value: f64) -> *const c_char {
     destination.cast()
 }
 
+#[no_mangle]
+/// Formats `value` with exactly `digits` fractional digits, matching
+/// `Number.prototype.toFixed`. `digits` must already be normalized to an
+/// integer in `[0, 100]`; values whose magnitude is at least `1e21` fall
+/// back to the general `ToString` algorithm, as the specification requires.
+pub extern "C" fn thaw_number_to_fixed(value: f64, digits: f64) -> *const c_char {
+    if value.is_nan() {
+        return arena_c_string("NaN").map_or(std::ptr::null(), |value| value.cast());
+    }
+    let negative = value < 0.0;
+    let magnitude = if negative { -value } else { value };
+    if magnitude >= 1e21 {
+        return thaw_number_to_string(value);
+    }
+    let digits = digits as usize;
+    let formatted = format!("{magnitude:.digits$}");
+    let text = if negative {
+        format!("-{formatted}")
+    } else {
+        formatted
+    };
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
 fn javascript_string_number(text: &str) -> f64 {
     let text =
         text.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}');

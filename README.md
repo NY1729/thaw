@@ -1444,6 +1444,11 @@ The workspace crates have narrow responsibilities:
   UTF-16 code units, default to a single space when the pad string is omitted,
   coerce a non-string pad argument, and return the receiver unchanged when
   already long enough or when the pad string is empty
+- `Number.prototype.toFixed` truncates a defaulted, coerced digits argument to
+  an integer, throws for values outside `[0, 100]`, returns `"NaN"` for `NaN`
+  receivers, falls back to the general native number-to-string algorithm at or
+  above `1e21` magnitude, and otherwise produces a correctly rounded
+  fixed-point string with sign handling
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
