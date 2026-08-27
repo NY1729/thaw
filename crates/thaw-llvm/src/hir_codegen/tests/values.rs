@@ -2321,12 +2321,18 @@ fn compiles_object_values_for_fixed_objects() {
             console.log(Object.values(stringRecord).join("+"));
             const boolRecord: Record<string, boolean> = { yes: true, no: false };
             console.log(Object.values(boolRecord).join("|"));
+            const jsonRecord: Record<string, Json> = {
+                first: JSON.parse("1"), second: JSON.parse("\"two\"")
+            };
+            const recordJsonValues: Json[] = Object.values(jsonRecord);
+            console.log(Number(recordJsonValues[0]));
+            console.log(String(recordJsonValues[1]));
             console.log(Object.values(JSON.parse("[true,false]")).length);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_values"),
-        "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n2\none\n2,1\na+b\ntrue|false\n2\n"
+        "receiver\n1|two|true\n1,2\nawaited\n3+4\n0\n2\none\n2,1\na+b\ntrue|false\n1\ntwo\n2\n"
     );
 }
 
@@ -2376,11 +2382,19 @@ fn compiles_object_entries_for_fixed_objects() {
             const boolEntries: [string, boolean][] = Object.entries(boolRecord);
             console.log(boolEntries[1][0]);
             console.log(boolEntries[1][1]);
+            const jsonRecord: Record<string, Json> = {
+                first: JSON.parse("1"), second: JSON.parse("\"two\"")
+            };
+            const recordJsonEntries: [string, Json][] = Object.entries(jsonRecord);
+            console.log(recordJsonEntries[0][0]);
+            console.log(Number(recordJsonEntries[0][1]));
+            console.log(recordJsonEntries[1][0]);
+            console.log(String(recordJsonEntries[1][1]));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_entries"),
-        "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\nsecond\n2\nfirst\none\nsecond\n2\nright\nb\nno\nfalse\n"
+        "receiver\nfirst\n1\nsecond\ntwo\nenabled\ntrue\nright\n2\nawaited\nleft\n3\n0\nsecond\n2\nfirst\none\nsecond\n2\nright\nb\nno\nfalse\nfirst\n1\nsecond\ntwo\n"
     );
 }
 

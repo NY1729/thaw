@@ -528,7 +528,18 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err("Object.values expects one operand".into());
                         };
-                        self.expect_type(&HirType::Json, value, "Object.values JSON operand")?;
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(ty, HirType::Json)
+                            && !matches!(
+                                &ty,
+                                HirType::Dictionary(element)
+                                    if element.as_ref() == &HirType::Json
+                            )
+                        {
+                            return Err(format!(
+                                "Object.values expected JSON or a JSON-valued dictionary, got {ty:?}"
+                            ));
+                        }
                         return Ok(HirType::Array(Box::new(HirType::Json)));
                     }
                     "__thaw_json_number_values"
@@ -553,7 +564,18 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err("Object.entries expects one operand".into());
                         };
-                        self.expect_type(&HirType::Json, value, "Object.entries JSON operand")?;
+                        let ty = self.infer_expr_type(value)?;
+                        if !matches!(ty, HirType::Json)
+                            && !matches!(
+                                &ty,
+                                HirType::Dictionary(element)
+                                    if element.as_ref() == &HirType::Json
+                            )
+                        {
+                            return Err(format!(
+                                "Object.entries expected JSON or a JSON-valued dictionary, got {ty:?}"
+                            ));
+                        }
                         return Ok(HirType::Array(Box::new(HirType::Tuple(vec![
                             HirType::Str,
                             HirType::Json,
