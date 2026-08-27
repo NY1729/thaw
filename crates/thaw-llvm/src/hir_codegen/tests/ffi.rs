@@ -3154,6 +3154,88 @@ double native_tagged(
 }
 
 #[test]
+fn ffi_call_restores_portable_tagged_returns() {
+    let source = r#"
+        declare function native_optional(present: boolean): number | undefined;
+        declare function native_nullable(present: boolean): number | null;
+        declare function native_nullish(state: number): number | null | undefined;
+
+        function main(): void {
+            console.log(native_optional(true), native_optional(false));
+            console.log(native_nullable(true), native_nullable(false));
+            console.log(native_nullish(0), native_nullish(1), native_nullish(2));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let mut program = thaw_hir::lower_module(&module).unwrap();
+    for symbol in ["native_optional", "native_nullable", "native_nullish"] {
+        thaw_hir::set_ffi_string_abi(
+            &mut program,
+            symbol,
+            vec![thaw_hir::FfiStringAbi::NullTerminated],
+            thaw_hir::FfiStringAbi::NullTerminated,
+            thaw_hir::FfiCallingConvention::C,
+            thaw_hir::FfiAggregateAbi::Portable,
+        )
+        .unwrap();
+    }
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "ffi_portable_tagged_returns");
+    compiler.compile_program(&program).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-hir-codegen-test-ffi-tagged-returns-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("out.o");
+    let exe_path = dir.join("out");
+    let native_c_path = dir.join("native.c");
+    let native_obj_path = dir.join("native.o");
+    compiler.write_object_file(&obj_path).unwrap();
+    std::fs::write(
+        &native_c_path,
+        r#"#include <stdint.h>
+typedef struct { uint8_t tag; double value; } TaggedNumber;
+TaggedNumber native_optional(uint8_t present) {
+  return (TaggedNumber){present, 21};
+}
+TaggedNumber native_nullable(uint8_t present) {
+  return (TaggedNumber){present, 22};
+}
+TaggedNumber native_nullish(double state) {
+  return (TaggedNumber){(uint8_t)state, 23};
+}
+"#,
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .arg("-c")
+        .arg(&native_c_path)
+        .arg("-o")
+        .arg(&native_obj_path)
+        .status()
+        .unwrap()
+        .success());
+    let arena_lib = build_staticlib("thaw-arena");
+    assert!(Command::new("cc")
+        .arg(&obj_path)
+        .arg(&native_obj_path)
+        .arg(&arena_lib)
+        .arg("-o")
+        .arg(&exe_path)
+        .status()
+        .unwrap()
+        .success());
+    let output = Command::new(&exe_path).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "21 undefined\n22 null\n23 null undefined\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
     let source = r#"
         declare function native_combine(p: { x: number; y: number }): number;
