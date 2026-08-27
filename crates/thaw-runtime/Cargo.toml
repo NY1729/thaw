@@ -15,3 +15,4 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 thaw-arena = { path = "../thaw-arena" }
 webpki-roots = "1.0"
 icu_normalizer = { version = "2.3.0", features = ["compiled_data"] }
+regex = "1"

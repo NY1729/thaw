@@ -527,6 +527,36 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("string replace returned no value".into());
             }
+            "__thaw_regex_test" => {
+                let [source, flags, value] = args else {
+                    return Err("RegExp.test expects three operands".into());
+                };
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                let value = self.compile_expr(value)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_test").unwrap(),
+                        &[source.into(), flags.into(), value.into()],
+                        "regex_test",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp.test returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        result,
+                        self.context.i8_type().const_zero(),
+                        "regex_test_bool",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_encode_uri_component" => {
                 return self.compile_single_arg_call(
                     "thaw_encode_uri_component",

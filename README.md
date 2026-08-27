@@ -1496,6 +1496,15 @@ The workspace crates have narrow responsibilities:
 - `String.prototype.replace`/`replaceAll` support a string search value (not
   `RegExp`), replacing the first or every occurrence respectively, including
   the JavaScript empty-search-value insertion behavior
+- Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
+  flags?)` construct a fixed native object with `source`/`flags` string
+  fields (also the `RegExp` type annotation), backed by the Rust `regex`
+  crate. `RegExp.prototype.test` supports the `i`/`m`/`s` flags, compiling
+  and caching each distinct source/flags pair once. The `regex` crate's
+  syntax lacks backreferences and lookaround, and `g`/`y` `lastIndex` state
+  is not tracked, so every call searches from the start of the string. This
+  links a regex engine into every generated binary unconditionally (about
+  1.9MB stripped), since `thaw-runtime` did not previously depend on `regex`
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns

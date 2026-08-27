@@ -604,6 +604,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, replacement, "replace value")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_regex_test" => {
+                        let [source, flags, value] = args.as_slice() else {
+                            return Err("RegExp.test expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, source, "RegExp.test source")?;
+                        self.expect_type(&HirType::Str, flags, "RegExp.test flags")?;
+                        self.expect_type(&HirType::Str, value, "RegExp.test value")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string codePointAt expects two operands".into());
