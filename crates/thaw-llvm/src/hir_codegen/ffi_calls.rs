@@ -103,6 +103,144 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(phi.as_basic_value().into_pointer_value())
     }
 
+    fn unpack_ffi_bool_array(
+        &mut self,
+        native: StructValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let data = self
+            .builder
+            .build_extract_value(native, 0, "ffi_bool_array_data")
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let length = self
+            .builder
+            .build_extract_value(native, 1, "ffi_bool_array_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let i64_type = self.context.i64_type();
+        let payload_size = self
+            .builder
+            .build_int_mul(
+                length,
+                i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                "ffi_bool_array_payload_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let size = self
+            .builder
+            .build_int_add(
+                payload_size,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "ffi_bool_array_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[size.into(), i64_type.const_int(8, false).into()],
+                "ffi_bool_array_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc returned no boolean-array result")?
+            .into_pointer_value();
+        self.builder
+            .build_store(result, length)
+            .map_err(|error| error.to_string())?;
+
+        let function = self.current_function();
+        let entry = self
+            .builder
+            .get_insert_block()
+            .ok_or("boolean-array return has no current block")?;
+        let condition = self.context.append_basic_block(function, "ffi_bool_return_next");
+        let body = self.context.append_basic_block(function, "ffi_bool_return_body");
+        let done = self.context.append_basic_block(function, "ffi_bool_return_done");
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(condition);
+        let index = self
+            .builder
+            .build_phi(i64_type, "ffi_bool_return_index")
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let current = index.as_basic_value().into_int_value();
+        let has_element = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, current, length, "ffi_bool_return_has_element")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_element, body, done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(body);
+        let source = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), data, &[current], "ffi_bool_return_source")
+                .map_err(|error| error.to_string())?
+        };
+        let byte = self
+            .builder
+            .build_load(self.context.i8_type(), source, "ffi_bool_return_byte")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let boolean = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                byte,
+                self.context.i8_type().const_zero(),
+                "ffi_bool_return_value",
+            )
+            .map_err(|error| error.to_string())?;
+        let target_offset = self
+            .builder
+            .build_int_mul(
+                current,
+                i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                "ffi_bool_return_target_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let target_offset = self
+            .builder
+            .build_int_add(
+                target_offset,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "ffi_bool_return_payload_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let target = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    result,
+                    &[target_offset],
+                    "ffi_bool_return_target",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(target, boolean)
+            .map_err(|error| error.to_string())?;
+        let next = self
+            .builder
+            .build_int_add(current, i64_type.const_int(1, false), "ffi_bool_return_increment")
+            .map_err(|error| error.to_string())?;
+        let body_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("boolean-array return lost its body block")?;
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+        self.builder.position_at_end(done);
+        Ok(result.into())
+    }
+
     fn marshal_ffi_return(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -178,6 +316,11 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?;
                 }
                 Ok(result.into())
+            }
+            HirType::Array(element)
+                if **element == HirType::Bool && value.is_struct_value() =>
+            {
+                self.unpack_ffi_bool_array(value.into_struct_value())
             }
             HirType::Array(element)
                 if matches!(element.as_ref(), HirType::F64 | HirType::Str)
@@ -488,6 +631,158 @@ impl<'ctx> HirCompiler<'ctx> {
     /// (`build_call_with`), an `Array`/`Object` argument here must be
     /// unpacked into that same adapted shape before the call -- each match
     /// arm below has a matching arm in `ffi_param_types`'s doc comment.
+    fn pack_ffi_bool_array(
+        &mut self,
+        base: PointerValue<'ctx>,
+        target_type: inkwell::types::IntType<'ctx>,
+        target_bytes: u64,
+    ) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), String> {
+        let i64_type = self.context.i64_type();
+        let length = self
+            .builder
+            .build_load(i64_type, base, "ffi_bool_array_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let byte_count = self
+            .builder
+            .build_int_mul(
+                length,
+                i64_type.const_int(target_bytes, false),
+                "ffi_bool_array_byte_count",
+            )
+            .map_err(|error| error.to_string())?;
+        let empty = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                length,
+                i64_type.const_zero(),
+                "ffi_bool_array_empty",
+            )
+            .map_err(|error| error.to_string())?;
+        let allocation_size = self
+            .builder
+            .build_select(
+                empty,
+                i64_type.const_int(target_bytes, false),
+                byte_count,
+                "ffi_bool_array_allocation_size",
+            )
+            .map_err(|error| error.to_string())?;
+        let packed = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    allocation_size.into(),
+                    i64_type.const_int(target_bytes.min(8), false).into(),
+                ],
+                "ffi_bool_array_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc returned no boolean-array pointer")?
+            .into_pointer_value();
+        let function = self.current_function();
+        let entry = self
+            .builder
+            .get_insert_block()
+            .ok_or("boolean-array marshalling has no current block")?;
+        let condition = self.context.append_basic_block(function, "ffi_bool_array_next");
+        let body = self.context.append_basic_block(function, "ffi_bool_array_body");
+        let done = self.context.append_basic_block(function, "ffi_bool_array_done");
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(condition);
+        let index = self
+            .builder
+            .build_phi(i64_type, "ffi_bool_array_index")
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let current = index.as_basic_value().into_int_value();
+        let has_element = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, current, length, "ffi_bool_array_has_element")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_element, body, done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(body);
+        let source_offset = self
+            .builder
+            .build_int_mul(
+                current,
+                i64_type.const_int(ARRAY_ELEM_BYTES, false),
+                "ffi_bool_array_source_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let source_offset = self
+            .builder
+            .build_int_add(
+                source_offset,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "ffi_bool_array_source_data_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let source = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    base,
+                    &[source_offset],
+                    "ffi_bool_array_source",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let boolean = self
+            .builder
+            .build_load(self.context.bool_type(), source, "ffi_bool_array_value")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let promoted = self
+            .builder
+            .build_int_z_extend(boolean, target_type, "ffi_bool_array_promoted")
+            .map_err(|error| error.to_string())?;
+        let target_offset = self
+            .builder
+            .build_int_mul(
+                current,
+                i64_type.const_int(target_bytes, false),
+                "ffi_bool_array_target_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let target = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    packed,
+                    &[target_offset],
+                    "ffi_bool_array_target",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(target, promoted)
+            .map_err(|error| error.to_string())?;
+        let next = self
+            .builder
+            .build_int_add(current, i64_type.const_int(1, false), "ffi_bool_array_increment")
+            .map_err(|error| error.to_string())?;
+        let body_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("boolean-array marshalling lost its body block")?;
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+        self.builder.position_at_end(done);
+        Ok((packed, length))
+    }
+
     fn append_ffi_aggregate_vararg(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -534,164 +829,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Array(element) if element.as_ref() == &HirType::Bool => {
                 let base = value.into_pointer_value();
-                let i64_type = self.context.i64_type();
-                let length = self
-                    .builder
-                    .build_load(i64_type, base, "ffi_bool_vararg_array_length")
-                    .map_err(|error| error.to_string())?
-                    .into_int_value();
-                let byte_count = self
-                    .builder
-                    .build_int_mul(
-                        length,
-                        i64_type.const_int(4, false),
-                        "ffi_bool_vararg_byte_count",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let empty = self
-                    .builder
-                    .build_int_compare(
-                        IntPredicate::EQ,
-                        length,
-                        i64_type.const_zero(),
-                        "ffi_bool_vararg_empty",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let allocation_size = self
-                    .builder
-                    .build_select(
-                        empty,
-                        i64_type.const_int(4, false),
-                        byte_count,
-                        "ffi_bool_vararg_allocation_size",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let packed = self
-                    .builder
-                    .build_call(
-                        self.module.get_function("thaw_arena_alloc").unwrap(),
-                        &[allocation_size.into(), i64_type.const_int(4, false).into()],
-                        "ffi_bool_vararg_alloc",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or("thaw_arena_alloc returned no boolean-array pointer")?
-                    .into_pointer_value();
-                let index_slot = self
-                    .builder
-                    .build_alloca(i64_type, "ffi_bool_vararg_index")
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_store(index_slot, i64_type.const_zero())
-                    .map_err(|error| error.to_string())?;
-                let function = self
-                    .builder
-                    .get_insert_block()
-                    .and_then(|block| block.get_parent())
-                    .ok_or("boolean vararg marshalling is outside a function")?;
-                let condition = self
-                    .context
-                    .append_basic_block(function, "ffi_bool_vararg_condition");
-                let body = self
-                    .context
-                    .append_basic_block(function, "ffi_bool_vararg_body");
-                let done = self
-                    .context
-                    .append_basic_block(function, "ffi_bool_vararg_done");
-                self.builder
-                    .build_unconditional_branch(condition)
-                    .map_err(|error| error.to_string())?;
-                self.builder.position_at_end(condition);
-                let index = self
-                    .builder
-                    .build_load(i64_type, index_slot, "ffi_bool_vararg_current")
-                    .map_err(|error| error.to_string())?
-                    .into_int_value();
-                let has_element = self
-                    .builder
-                    .build_int_compare(
-                        IntPredicate::ULT,
-                        index,
-                        length,
-                        "ffi_bool_vararg_has_element",
-                    )
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_conditional_branch(has_element, body, done)
-                    .map_err(|error| error.to_string())?;
-                self.builder.position_at_end(body);
-                let source_offset = self
-                    .builder
-                    .build_int_mul(
-                        index,
-                        i64_type.const_int(ARRAY_ELEM_BYTES, false),
-                        "ffi_bool_vararg_source_offset",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let source_offset = self
-                    .builder
-                    .build_int_add(
-                        source_offset,
-                        i64_type.const_int(ARRAY_HEADER_BYTES, false),
-                        "ffi_bool_vararg_source_data_offset",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let source = unsafe {
-                    self.builder
-                        .build_in_bounds_gep(
-                            self.context.i8_type(),
-                            base,
-                            &[source_offset],
-                            "ffi_bool_vararg_source",
-                        )
-                        .map_err(|error| error.to_string())?
-                };
-                let boolean = self
-                    .builder
-                    .build_load(self.context.bool_type(), source, "ffi_bool_vararg_value")
-                    .map_err(|error| error.to_string())?
-                    .into_int_value();
-                let promoted = self
-                    .builder
-                    .build_int_z_extend(
-                        boolean,
-                        self.context.i32_type(),
-                        "ffi_bool_vararg_value_i32",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let target_offset = self
-                    .builder
-                    .build_int_mul(
-                        index,
-                        i64_type.const_int(4, false),
-                        "ffi_bool_vararg_target_offset",
-                    )
-                    .map_err(|error| error.to_string())?;
-                let target = unsafe {
-                    self.builder
-                        .build_in_bounds_gep(
-                            self.context.i8_type(),
-                            packed,
-                            &[target_offset],
-                            "ffi_bool_vararg_target",
-                        )
-                        .map_err(|error| error.to_string())?
-                };
-                self.builder
-                    .build_store(target, promoted)
-                    .map_err(|error| error.to_string())?;
-                let next = self
-                    .builder
-                    .build_int_add(index, i64_type.const_int(1, false), "ffi_bool_vararg_next")
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_store(index_slot, next)
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_unconditional_branch(condition)
-                    .map_err(|error| error.to_string())?;
-                self.builder.position_at_end(done);
+                let (packed, length) =
+                    self.pack_ffi_bool_array(base, self.context.i32_type(), 4)?;
                 output.push(packed.into());
                 output.push(length.into());
             }
@@ -811,6 +950,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 // read the length back out of that header and pass
                 // `(elements pointer, len)` instead of the header
                 // pointer itself.
+                HirType::Array(elem) if elem.as_ref() == &HirType::Bool => {
+                    let (data, length) = self.pack_ffi_bool_array(
+                        value.into_pointer_value(),
+                        self.context.i8_type(),
+                        1,
+                    )?;
+                    compiled_args.push(data.into());
+                    compiled_args.push(length.into());
+                }
                 HirType::Array(elem)
                     if matches!(elem.as_ref(), HirType::F64 | HirType::Str) =>
                 {
