@@ -866,6 +866,55 @@ fn infers_external_overloads_from_deterministic_operators() {
 }
 
 #[test]
+fn infers_external_overloads_from_fixed_result_standard_methods() {
+    let source = r#"const box = new NativeBox(1); const text = " value "; const number = 42; const values = [1, 2]; box.set(text.trim()); box.set(number.toFixed(2)); box.set(values.join(",")); box.set(text.includes("a")); box.set(values.includes(2)); box.set(Math.max(1, 2)); box.set(parseInt("7")); box.set(JSON.stringify({ value: 1 })); box.set(Array.isArray(values));"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into(), vec![])],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::F64],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_boolean".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Bool],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__set_string(box, text.trim())"));
+    assert!(rewritten.contains("__set_string(box, number.toFixed(2))"));
+    assert!(rewritten.contains("__set_string(box, values.join(\",\"))"));
+    assert!(rewritten.contains("__set_boolean(box, text.includes(\"a\"))"));
+    assert!(rewritten.contains("__set_boolean(box, values.includes(2))"));
+    assert!(rewritten.contains("__set_number(box, Math.max(1, 2))"));
+    assert!(rewritten.contains("__set_number(box, parseInt(\"7\"))"));
+    assert!(rewritten.contains("__set_string(box, JSON.stringify({ value: 1 }))"));
+    assert!(rewritten.contains("__set_boolean(box, Array.isArray(values))"));
+}
+
+#[test]
 fn infers_external_overload_types_from_user_function_returns_and_forward_references() {
     let source = r#"const box = new NativeBox(1); const makeText = (): string => "text"; const makeFlag = function(): boolean { return true; }; const inferredFlag = () => true; box.set(makeNumber()); box.set(makeText()); box.set(makeFlag()); box.set(inferredNumber()); box.set(inferredText()); box.set(inferredFlag()); function makeNumber(): number { return 42; } function inferredNumber() { return 40 + 2; } function inferredText() { return forwardText(); } function forwardText() { return "text"; }"#;
     let rewritten = rewrite_external_class_methods(

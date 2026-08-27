@@ -61,6 +61,8 @@ conditionalまたは同型logical operatorで複数parameterから選ぶ戻り�
 call時の候補型が一致した場合だけ同様に伝播する。
 通常control flow内の複数returnも、全returnがparameterそのものならnested functionを除外して
 候補位置を収集し、同じ一致規則を使う。
+標準APIは結果型が固定のstring／number／array method、`Math`、`Array.isArray`、
+既知serializable値の`JSON.stringify`だけを式型へ反映する。
 派生classにはbase classのpublic instance/static methodとpropertyを展開し、派生側の
 同名宣言を優先する。private／protected memberはshimへ公開せず、private constructor
 だけを持つclassも既定0引数constructorとして誤認しない。abstract classも同様に

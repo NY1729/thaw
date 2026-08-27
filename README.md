@@ -2084,7 +2084,9 @@ annotations), and object literals, explicitly annotated local variables, or
 locals initialized from those values. The local inference also follows arithmetic,
 mixed-primitive string concatenation, bitwise and same-typed logical operators,
 comparisons, `typeof`, conditional expressions, templates, parentheses/type assertions,
-primitive conversion calls, and `.length`. Trailing optional method parameters
+primitive conversion calls, `.length`, fixed-result string/number/array methods,
+`Math` numeric calls, `Array.isArray`, and serializable-value `JSON.stringify`.
+Trailing optional method parameters
 generate every callable arity from the required prefix through the complete
 signature. Number-typed rest
 parameters are expanded only for the argument counts observed at compiled call

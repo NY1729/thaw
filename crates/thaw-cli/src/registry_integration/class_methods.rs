@@ -379,6 +379,11 @@ fn rewrite_external_class_methods_with_static(
                     Expr::Ident(identifier) if identifier.sym == *"Boolean" => {
                         Some(thaw_hir::HirType::Bool)
                     }
+                    Expr::Ident(identifier)
+                        if matches!(identifier.sym.as_str(), "parseInt" | "parseFloat") =>
+                    {
+                        Some(thaw_hir::HirType::F64)
+                    }
                     Expr::Ident(identifier) => match functions.get(identifier.sym.as_str())? {
                         SourceFunctionResult::Fixed(ty) => Some(ty.clone()),
                         SourceFunctionResult::Argument(index) => call.args.get(*index).and_then(
@@ -406,6 +411,71 @@ fn rewrite_external_class_methods_with_static(
                                 .then_some(first)
                         }
                     },
+                    Expr::Member(member) => {
+                        let method = member_property_name(&member.prop)?;
+                        if let Expr::Ident(namespace) = member.obj.as_ref() {
+                            match (namespace.sym.as_str(), method.as_str()) {
+                                ("JSON", "stringify")
+                                    if call.args.first().is_some_and(|argument| {
+                                        matches!(
+                                            source_expr_type(
+                                                argument.expr.as_ref(),
+                                                variables,
+                                                functions,
+                                                named,
+                                            ),
+                                            Some(
+                                                thaw_hir::HirType::F64
+                                                    | thaw_hir::HirType::Str
+                                                    | thaw_hir::HirType::Bool
+                                                    | thaw_hir::HirType::Object(_)
+                                                    | thaw_hir::HirType::Array(_)
+                                            )
+                                        )
+                                    }) =>
+                                {
+                                    return Some(thaw_hir::HirType::Str);
+                                }
+                                ("Array", "isArray") => return Some(thaw_hir::HirType::Bool),
+                                ("Math", _) => return Some(thaw_hir::HirType::F64),
+                                _ => {}
+                            }
+                        }
+                        let receiver =
+                            source_expr_type(&member.obj, variables, functions, named)?;
+                        match (&receiver, method.as_str()) {
+                            (_, "toString")
+                            | (
+                                thaw_hir::HirType::Str,
+                                "slice"
+                                | "substring"
+                                | "substr"
+                                | "toUpperCase"
+                                | "toLowerCase"
+                                | "trim"
+                                | "trimStart"
+                                | "trimEnd"
+                                | "concat"
+                                | "replace"
+                                | "replaceAll",
+                            )
+                            | (
+                                thaw_hir::HirType::F64,
+                                "toFixed" | "toExponential" | "toPrecision",
+                            )
+                            | (thaw_hir::HirType::Array(_), "join") => {
+                                Some(thaw_hir::HirType::Str)
+                            }
+                            (
+                                thaw_hir::HirType::Str,
+                                "includes" | "startsWith" | "endsWith",
+                            )
+                            | (thaw_hir::HirType::Array(_), "includes") => {
+                                Some(thaw_hir::HirType::Bool)
+                            }
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 },
                 _ => None,
