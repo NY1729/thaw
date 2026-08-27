@@ -311,6 +311,84 @@ pub extern "C" fn thaw_date_to_iso_string(timestamp: f64) -> *const c_char {
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
 
+const WEEKDAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The date portion shared by `toDateString` and `toString`: `"Www Mmm
+/// dd yyyy"`.
+fn date_string_part(fields: &CivilDateTime) -> String {
+    format!(
+        "{} {} {:02} {:04}",
+        WEEKDAY_NAMES[fields.weekday as usize],
+        MONTH_NAMES[(fields.month - 1) as usize],
+        fields.day,
+        fields.year
+    )
+}
+
+/// The time portion shared by `toTimeString` and `toString`. There is no
+/// host timezone database, so the offset is always UTC's, rendered the way
+/// Node.js does when its own timezone is UTC.
+fn time_string_part(fields: &CivilDateTime) -> String {
+    format!(
+        "{:02}:{:02}:{:02} GMT+0000 (Coordinated Universal Time)",
+        fields.hours, fields.minutes, fields.seconds
+    )
+}
+
+fn arena_c_string_or_invalid_date(text: Option<String>) -> *const c_char {
+    let text = text.unwrap_or_else(|| "Invalid Date".to_string());
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// `Date.prototype.toDateString`: `"Www Mmm dd yyyy"`, or the literal
+/// string `"Invalid Date"` for a non-finite timestamp (unlike
+/// `toISOString`, this does not signal failure with a null pointer --
+/// there is nothing for the generated code to check and throw on).
+pub extern "C" fn thaw_date_to_date_string(timestamp: f64) -> *const c_char {
+    arena_c_string_or_invalid_date(civil_from_timestamp(timestamp).map(|fields| date_string_part(&fields)))
+}
+
+#[no_mangle]
+/// `Date.prototype.toTimeString`: `"hh:mm:ss GMT+0000 (Coordinated
+/// Universal Time)"` (there is no host timezone database, so this is
+/// always UTC's offset and name), or `"Invalid Date"`.
+pub extern "C" fn thaw_date_to_time_string(timestamp: f64) -> *const c_char {
+    arena_c_string_or_invalid_date(civil_from_timestamp(timestamp).map(|fields| time_string_part(&fields)))
+}
+
+#[no_mangle]
+/// `Date.prototype.toString`: the date and time portions joined by a
+/// space, or `"Invalid Date"`.
+pub extern "C" fn thaw_date_to_string(timestamp: f64) -> *const c_char {
+    arena_c_string_or_invalid_date(
+        civil_from_timestamp(timestamp)
+            .map(|fields| format!("{} {}", date_string_part(&fields), time_string_part(&fields))),
+    )
+}
+
+#[no_mangle]
+/// `Date.prototype.toUTCString`: the RFC 7231 `IMF-fixdate`-shaped format
+/// `Date.prototype.toUTCString` actually specifies, `"Www, dd Mmm yyyy
+/// hh:mm:ss GMT"`, or `"Invalid Date"`.
+pub extern "C" fn thaw_date_to_utc_string(timestamp: f64) -> *const c_char {
+    arena_c_string_or_invalid_date(civil_from_timestamp(timestamp).map(|fields| {
+        format!(
+            "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+            WEEKDAY_NAMES[fields.weekday as usize],
+            fields.day,
+            MONTH_NAMES[(fields.month - 1) as usize],
+            fields.year,
+            fields.hours,
+            fields.minutes,
+            fields.seconds
+        )
+    }))
+}
+
 #[no_mangle]
 /// `Date.prototype.setFullYear`: `year`, `month` (0-based) and `date` are
 /// always explicit here -- the generated code fills in an omitted trailing
@@ -552,6 +630,37 @@ mod date_native_tests {
             .unwrap();
         assert_eq!(text, "2024-01-01T00:00:00.500Z");
         assert!(thaw_date_to_iso_string(f64::NAN).is_null());
+    }
+
+    fn text_of(pointer: *const c_char) -> String {
+        unsafe { CStr::from_ptr(pointer) }.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn formats_date_time_and_utc_strings() {
+        // 2024-01-01T00:00:00.500Z is a Monday.
+        let timestamp = 1_704_067_200_500.0;
+        assert_eq!(text_of(thaw_date_to_date_string(timestamp)), "Mon Jan 01 2024");
+        assert_eq!(
+            text_of(thaw_date_to_time_string(timestamp)),
+            "00:00:00 GMT+0000 (Coordinated Universal Time)"
+        );
+        assert_eq!(
+            text_of(thaw_date_to_string(timestamp)),
+            "Mon Jan 01 2024 00:00:00 GMT+0000 (Coordinated Universal Time)"
+        );
+        assert_eq!(
+            text_of(thaw_date_to_utc_string(timestamp)),
+            "Mon, 01 Jan 2024 00:00:00 GMT"
+        );
+    }
+
+    #[test]
+    fn formatting_functions_report_invalid_date_for_nan() {
+        assert_eq!(text_of(thaw_date_to_date_string(f64::NAN)), "Invalid Date");
+        assert_eq!(text_of(thaw_date_to_time_string(f64::NAN)), "Invalid Date");
+        assert_eq!(text_of(thaw_date_to_string(f64::NAN)), "Invalid Date");
+        assert_eq!(text_of(thaw_date_to_utc_string(f64::NAN)), "Invalid Date");
     }
 
     fn parse(text: &str) -> f64 {

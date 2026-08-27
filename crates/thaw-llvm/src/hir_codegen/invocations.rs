@@ -618,22 +618,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date getter returned no value".into());
             }
-            "__thaw_date_to_iso_string" => {
+            "__thaw_date_to_iso_string"
+            | "__thaw_date_to_date_string"
+            | "__thaw_date_to_time_string"
+            | "__thaw_date_to_string"
+            | "__thaw_date_to_utc_string" => {
                 let [timestamp] = args else {
-                    return Err("Date.toISOString expects one operand".into());
+                    return Err(format!("{name} expects one operand"));
                 };
                 let timestamp = self.compile_expr(timestamp)?;
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
                 return self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_date_to_iso_string").unwrap(),
+                        self.module.get_function(&runtime).unwrap(),
                         &[timestamp.into()],
-                        "date_to_iso_string",
+                        "date_to_string",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("Date.toISOString returned no value".into());
+                    .ok_or("Date string conversion returned no value".into());
             }
             "__thaw_date_set_full_year"
             | "__thaw_date_set_month"
