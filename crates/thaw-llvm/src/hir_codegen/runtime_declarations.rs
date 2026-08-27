@@ -487,6 +487,30 @@ impl<'ctx> HirCompiler<'ctx> {
                 .add_function(name, regex_replace_type, Some(Linkage::External));
         }
         self.module.add_function(
+            "thaw_date_now",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        let date_getter_type = f64_type.fn_type(&[f64_type.into()], false);
+        for name in [
+            "thaw_date_get_full_year",
+            "thaw_date_get_month",
+            "thaw_date_get_date",
+            "thaw_date_get_day",
+            "thaw_date_get_hours",
+            "thaw_date_get_minutes",
+            "thaw_date_get_seconds",
+            "thaw_date_get_milliseconds",
+        ] {
+            self.module
+                .add_function(name, date_getter_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_date_to_iso_string",
+            i8_ptr.fn_type(&[f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_string_repeat",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
             Some(Linkage::External),

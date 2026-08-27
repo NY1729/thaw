@@ -268,6 +268,9 @@ fn lower_ts_type(
                 if name == "RegExp" {
                     return Ok(regex_object_type());
                 }
+                if name == "Date" {
+                    return Ok(date_object_type());
+                }
                 if let Some(resolved) = interfaces.get(name) {
                     return Ok(resolved.clone());
                 }

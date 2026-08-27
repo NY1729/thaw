@@ -1031,6 +1031,34 @@ impl<'a> FnLowerer<'a> {
                             ("flags".to_string(), flags),
                         ]));
                     }
+                    if class.sym == *"Date" {
+                        let args = new_expr.args.clone().unwrap_or_default();
+                        if args.len() > 1 {
+                            return Err("`new Date()` expects zero or one argument".into());
+                        }
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err("`new Date()` does not support spread arguments".into());
+                        }
+                        let timestamp = if let Some(argument) = args.first() {
+                            let value = self.lower_expr(&argument.expr)?;
+                            if self.infer_expr_type(&value)? == HirType::Str {
+                                return Err(
+                                    "`new Date()` does not support parsing a date string; pass a millisecond timestamp instead"
+                                        .into(),
+                                );
+                            }
+                            self.coerce_primitive_to_number(value)?
+                        } else {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_date_now".to_string())),
+                                Vec::new(),
+                            )
+                        };
+                        return Ok(HirExpr::ObjectLit(vec![(
+                            "timestamp".to_string(),
+                            timestamp,
+                        )]));
+                    }
                     let constructor = class_constructor_symbol(class.sym.as_ref());
                     if let Some(signature) = self.signatures.get(&constructor) {
                         if signature.abstract_class_constructor {

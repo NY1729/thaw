@@ -5,6 +5,15 @@ fn regex_object_type() -> HirType {
     ])
 }
 
+/// `Date` is a fixed native object with a single millisecond-since-epoch
+/// `timestamp` field (reusing the existing object machinery, like
+/// `regex_object_type`, rather than a new value representation).
+/// `thaw-runtime`'s calendar math is UTC-only -- there is no host timezone
+/// database, so "local" `Date` methods alias their UTC counterparts.
+fn date_object_type() -> HirType {
+    HirType::Object(vec![("timestamp".to_string(), HirType::F64)])
+}
+
 impl<'a> FnLowerer<'a> {
     fn is_native_instance_builtin(property: &str) -> bool {
         matches!(
@@ -20,6 +29,11 @@ impl<'a> FnLowerer<'a> {
                 | "forEach" | "slice" | "copyWithin" | "fill" | "reverse" | "join"
                 | "indexOf" | "lastIndexOf" | "includes" | "startsWith" | "endsWith"
                 | "toString" | "valueOf"
+                | "getTime" | "setTime" | "toISOString"
+                | "getFullYear" | "getMonth" | "getDate" | "getDay" | "getHours"
+                | "getMinutes" | "getSeconds" | "getMilliseconds"
+                | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay"
+                | "getUTCHours" | "getUTCMinutes" | "getUTCSeconds" | "getUTCMilliseconds"
         )
     }
 
@@ -2303,6 +2317,145 @@ impl<'a> FnLowerer<'a> {
                     bindings.push((start_name, HirType::F64, from_index));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
+                if property.sym == *"getTime" {
+                    if !call.args.is_empty() {
+                        return Err("native `.getTime()` expects no arguments".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(&date_type, &receiver, "Date.getTime receiver")?;
+                    return Ok(HirExpr::PropAccess(
+                        Box::new(receiver),
+                        date_type,
+                        "timestamp".to_string(),
+                    ));
+                }
+                if property.sym == *"setTime" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(&date_type, &receiver, "Date.setTime receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "Date.setTime")?;
+                    let [value] = arguments.as_slice() else {
+                        return Err("native `.setTime()` expects exactly one argument".into());
+                    };
+                    let value = self.coerce_primitive_to_number(value.clone())?;
+                    let receiver_name =
+                        format!("__thaw_date_set_time_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let value_name = format!("__thaw_date_set_time_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), date_type.clone());
+                    self.scope.insert(value_name.clone(), HirType::F64);
+                    let result = HirExpr::PropAssign(
+                        Box::new(HirExpr::Var(receiver_name.clone())),
+                        date_type.clone(),
+                        "timestamp".to_string(),
+                        Box::new(HirExpr::Var(value_name.clone())),
+                    );
+                    let mut bindings = vec![(receiver_name, date_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((value_name, HirType::F64, value));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                let date_getter_intrinsic = match property.sym.as_ref() {
+                    "getFullYear" | "getUTCFullYear" => Some("__thaw_date_get_full_year"),
+                    "getMonth" | "getUTCMonth" => Some("__thaw_date_get_month"),
+                    "getDate" | "getUTCDate" => Some("__thaw_date_get_date"),
+                    "getDay" | "getUTCDay" => Some("__thaw_date_get_day"),
+                    "getHours" | "getUTCHours" => Some("__thaw_date_get_hours"),
+                    "getMinutes" | "getUTCMinutes" => Some("__thaw_date_get_minutes"),
+                    "getSeconds" | "getUTCSeconds" => Some("__thaw_date_get_seconds"),
+                    "getMilliseconds" | "getUTCMilliseconds" => {
+                        Some("__thaw_date_get_milliseconds")
+                    }
+                    _ => None,
+                };
+                if let Some(intrinsic) = date_getter_intrinsic {
+                    if !call.args.is_empty() {
+                        return Err(format!("native `.{}()` expects no arguments", property.sym));
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(
+                        &date_type,
+                        &receiver,
+                        &format!("Date.{} receiver", property.sym),
+                    )?;
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(receiver),
+                        date_type,
+                        "timestamp".to_string(),
+                    );
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var(intrinsic.to_string())),
+                        vec![timestamp],
+                    ));
+                }
+                if property.sym == *"toISOString" {
+                    if !call.args.is_empty() {
+                        return Err("native `.toISOString()` expects no arguments".into());
+                    }
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(&date_type, &receiver, "Date.toISOString receiver")?;
+                    let receiver_name =
+                        format!("__thaw_date_iso_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_date_iso_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), date_type.clone());
+                    self.scope.insert(raw_name.clone(), HirType::Str);
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(var(&receiver_name)),
+                        date_type.clone(),
+                        "timestamp".to_string(),
+                    );
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            HirType::Str,
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_date_to_iso_string".into())),
+                                vec![timestamp],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                vec![var(&raw_name)],
+                            ),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                "Invalid time value".into(),
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(var(&raw_name))),
+                    ]);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            HirType::Str,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let bindings = vec![(receiver_name, date_type, receiver)];
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
                 if property.sym == *"toString" {
                     if !call.args.is_empty() {
                         return Err("native `.toString()` does not accept arguments yet".into());
@@ -2316,6 +2469,13 @@ impl<'a> FnLowerer<'a> {
                     }
                     let receiver = self.lower_expr(&member.obj)?;
                     let receiver_type = self.infer_expr_type(&receiver)?;
+                    if receiver_type == date_object_type() {
+                        return Ok(HirExpr::PropAccess(
+                            Box::new(receiver),
+                            receiver_type,
+                            "timestamp".to_string(),
+                        ));
+                    }
                     if !matches!(receiver_type, HirType::F64 | HirType::Str | HirType::Bool) {
                         return Err(format!(
                             "native `.valueOf()` requires a number, string or boolean receiver, got {receiver_type:?}"

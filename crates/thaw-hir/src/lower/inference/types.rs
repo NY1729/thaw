@@ -622,6 +622,33 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, value, "RegExp.test value")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_date_now" => {
+                        if !args.is_empty() {
+                            return Err("Date.now expects no operands".into());
+                        }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_date_get_full_year"
+                    | "__thaw_date_get_month"
+                    | "__thaw_date_get_date"
+                    | "__thaw_date_get_day"
+                    | "__thaw_date_get_hours"
+                    | "__thaw_date_get_minutes"
+                    | "__thaw_date_get_seconds"
+                    | "__thaw_date_get_milliseconds" => {
+                        let [timestamp] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::F64, timestamp, "Date getter timestamp")?;
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_date_to_iso_string" => {
+                        let [timestamp] = args.as_slice() else {
+                            return Err("Date.toISOString expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, timestamp, "Date.toISOString timestamp")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_regex_search" => {
                         let [value, source, flags] = args.as_slice() else {
                             return Err("String.search expects three operands".into());
