@@ -477,6 +477,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     "encodeURIComponent",
                 )
             }
+            "__thaw_encode_uri" => {
+                return self.compile_single_arg_call("thaw_encode_uri", args, "encodeURI")
+            }
             "__thaw_decode_uri_component" => {
                 return self.compile_single_arg_call(
                     "thaw_decode_uri_component",

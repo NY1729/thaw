@@ -1456,6 +1456,9 @@ The workspace crates have narrow responsibilities:
 - `encodeURIComponent` percent-encodes every UTF-8 byte outside the ASCII
   unreserved set (letters, digits and `- _ . ! ~ * ' ( )`), accepting an
   awaited string argument
+- `encodeURI` additionally preserves the URI reserved characters
+  `; / ? : @ & = + $ , #`, leaving whole-URI syntax intact while still
+  percent-encoding spaces and non-ASCII bytes
 - `decodeURIComponent` percent-decodes its argument and throws `URI
   malformed` for an incomplete or non-hexadecimal escape or a decoded byte
   sequence that is not valid UTF-8, via a native null-pointer failure signal
