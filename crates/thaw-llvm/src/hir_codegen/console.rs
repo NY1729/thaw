@@ -128,6 +128,20 @@ impl<'ctx> HirCompiler<'ctx> {
         ) = hir_type
         {
             self.compile_console_structured(value.into_pointer_value(), &ty, newline, descriptor)?;
+        } else if matches!(
+            hir_type,
+            Some(HirType::Function(_, _) | HirType::CallableFunction(..))
+        ) {
+            self.compile_console_literal("[Function]", newline, "console_function", descriptor)?;
+        } else if matches!(hir_type, Some(HirType::Promise(_))) {
+            self.compile_console_literal(
+                "Promise { <pending> }",
+                newline,
+                "console_promise",
+                descriptor,
+            )?;
+        } else if hir_type == Some(HirType::JsValue) {
+            self.compile_console_js_value(value.into_int_value(), newline, descriptor)?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
@@ -277,6 +291,41 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_json_stringify returned no value")?
             .into_pointer_value();
         self.compile_console_text(text, newline, "console_structured", descriptor)
+    }
+
+    fn compile_console_literal(
+        &mut self,
+        text: &str,
+        newline: bool,
+        name: &str,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        let value = self
+            .builder
+            .build_global_string_ptr(text, name)
+            .map_err(|error| error.to_string())?;
+        self.compile_console_text(value.as_pointer_value(), newline, name, descriptor)
+    }
+
+    fn compile_console_js_value(
+        &mut self,
+        handle: IntValue<'ctx>,
+        newline: bool,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        let text = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_js_handle_to_string").unwrap(),
+                &[handle.into()],
+                "console_js_value",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_js_handle_to_string returned no value")?
+            .into_pointer_value();
+        self.compile_console_text(text, newline, "console_js_value", descriptor)
     }
 
     fn compile_console_union(
@@ -429,17 +478,21 @@ impl<'ctx> HirCompiler<'ctx> {
                     descriptor,
                 )?;
             }
-            HirType::Function(_, _) => {
-                let object = self
-                    .builder
-                    .build_global_string_ptr("[object Object]", "union_object")
-                    .map_err(|error| error.to_string())?;
-                self.compile_console_text(
-                    object.as_pointer_value(),
+            HirType::Function(_, _) | HirType::CallableFunction(..) => self
+                .compile_console_literal(
+                    "[Function]",
                     newline,
-                    "console_union_object",
+                    "console_union_function",
                     descriptor,
-                )?;
+                )?,
+            HirType::Promise(_) => self.compile_console_literal(
+                "Promise { <pending> }",
+                newline,
+                "console_union_promise",
+                descriptor,
+            )?,
+            HirType::JsValue => {
+                self.compile_console_js_value(value.into_int_value(), newline, descriptor)?
             }
             other => return Err(format!("console.log cannot print union member {other:?}")),
         }
@@ -562,6 +615,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     newline,
                     descriptor,
                 )?;
+            }
+            HirType::Function(_, _) | HirType::CallableFunction(..) => self
+                .compile_console_literal(
+                    "[Function]",
+                    newline,
+                    "console_optional_function",
+                    descriptor,
+                )?,
+            HirType::Promise(_) => self.compile_console_literal(
+                "Promise { <pending> }",
+                newline,
+                "console_optional_promise",
+                descriptor,
+            )?,
+            HirType::JsValue => {
+                self.compile_console_js_value(payload.into_int_value(), newline, descriptor)?
             }
             other => {
                 return Err(format!(

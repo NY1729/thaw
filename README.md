@@ -258,6 +258,8 @@ The workspace crates have narrow responsibilities:
   `console.error` on standard error, sharing the same variadic value formatting
 - `console.assert` with JavaScript truthiness, eager left-to-right argument
   evaluation, optional messages and `Assertion failed` output on standard error
+- Safe console formatting for native function values, pending promises and
+  retained QuickJS `JsValue` handles; handles use JavaScript `String(value)`
 - Synchronous lowering of `async` functions and `await`
 - Ambient declarations and C ABI calls; number-array parameters become
   `(pointer, length)`, object parameters become scalar fields, and metadata-
