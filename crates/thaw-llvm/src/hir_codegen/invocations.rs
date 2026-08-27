@@ -58,7 +58,10 @@ impl<'ctx> HirCompiler<'ctx> {
         };
 
         match name.as_str() {
-            "console.log" => return self.compile_console_log(args),
+            "console.log" | "console.info" | "console.debug" => {
+                return self.compile_console_log(args, false)
+            }
+            "console.warn" | "console.error" => return self.compile_console_log(args, true),
             "__thaw_string_concat" => return self.compile_string_concat(args),
             "__thaw_bool_to_string" => return self.compile_bool_to_string(args),
             "__thaw_number_to_string" => {

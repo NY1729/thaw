@@ -251,6 +251,8 @@ The workspace crates have narrow responsibilities:
 - `console.log` with zero or multiple arguments, left-to-right argument
   evaluation, space-separated output, optional/nullable/union values, and
   JSON serialization of typed arrays, fixed objects, dictionaries and JSON values
+- `console.info` and `console.debug` on standard output plus `console.warn` and
+  `console.error` on standard error, sharing the same variadic value formatting
 - Synchronous lowering of `async` functions and `await`
 - Ambient declarations and C ABI calls; number-array parameters become
   `(pointer, length)`, object parameters become scalar fields, and metadata-
