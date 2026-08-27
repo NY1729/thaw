@@ -525,3 +525,20 @@ pub unsafe extern "C" fn thaw_string_code_point_at(value: *const c_char, index: 
     }
     unit as f64
 }
+
+#[no_mangle]
+/// Converts a JS char code (per `ToUint16`: truncated toward zero, non-finite
+/// treated as zero, then reduced modulo 65536) into the UTF-16 code unit it
+/// names, decoded losslessly or replaced with U+FFFD when the unit is an
+/// unpaired surrogate, since Thaw's native strings are valid UTF-8. Matches
+/// one code-unit position of `String.fromCharCode`.
+pub extern "C" fn thaw_string_from_char_code(code: f64) -> *const c_char {
+    let unit = if code.is_finite() {
+        code.trunc() as i64
+    } else {
+        0
+    }
+    .rem_euclid(65536) as u16;
+    let text = String::from_utf16_lossy(&[unit]);
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
