@@ -2697,6 +2697,8 @@ fn frame_split_supports_fixed_object_for_in() {
             console.log(retained);
             const dynamic: Json = JSON.parse("{\"second\":2,\"first\":1}");
             for (const key in dynamic) console.log(key);
+            const record: Record<string, number> = { ten: 10, two: 2 };
+            for (const key in record) console.log(key);
             for (const index in JSON.parse("[10,20]")) console.log(index);
             for (const value of JSON.parse("[1,\"two\",true]")) console.log(String(value));
             for (const character of "A😀é") console.log(character);
@@ -2705,6 +2707,6 @@ fn frame_split_supports_fixed_object_for_in() {
     "#;
     assert_eq!(
         compile_and_run(source, "object_for_in"),
-        "source\nfirst\nlast\nomega\nsecond\nfirst\n0\n1\n1\ntwo\ntrue\nA\n😀\né\n雪\na\n"
+        "source\nfirst\nlast\nomega\nsecond\nfirst\nten\ntwo\n0\n1\n1\ntwo\ntrue\nA\n😀\né\n雪\na\n"
     );
 }
