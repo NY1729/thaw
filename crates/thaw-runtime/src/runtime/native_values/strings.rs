@@ -198,6 +198,61 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
 }
 
 /// # Safety
+/// `value`, `search` and `replacement` must point to valid NUL-terminated
+/// UTF-8 strings.
+unsafe fn thaw_string_replace_impl(
+    value: *const c_char,
+    search: *const c_char,
+    replacement: *const c_char,
+    all: bool,
+) -> *const c_char {
+    if value.is_null() || search.is_null() || replacement.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let search = unsafe { CStr::from_ptr(search) }.to_string_lossy();
+    let replacement = unsafe { CStr::from_ptr(replacement) }.to_string_lossy();
+    let replaced = if all {
+        value.replace(search.as_ref(), &replacement)
+    } else {
+        value.replacen(search.as_ref(), &replacement, 1)
+    };
+    arena_c_string(&replaced).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
+/// Replaces the first occurrence of `search` in `value` with `replacement`,
+/// matching `String.prototype.replace` for a string search value (`RegExp`
+/// search values are not supported).
+///
+/// # Safety
+/// `value`, `search` and `replacement` must point to valid NUL-terminated
+/// UTF-8 strings.
+pub unsafe extern "C" fn thaw_string_replace(
+    value: *const c_char,
+    search: *const c_char,
+    replacement: *const c_char,
+) -> *const c_char {
+    unsafe { thaw_string_replace_impl(value, search, replacement, false) }
+}
+
+#[no_mangle]
+/// Replaces every occurrence of `search` in `value` with `replacement`,
+/// matching `String.prototype.replaceAll` for a string search value
+/// (`RegExp` search values are not supported).
+///
+/// # Safety
+/// `value`, `search` and `replacement` must point to valid NUL-terminated
+/// UTF-8 strings.
+pub unsafe extern "C" fn thaw_string_replace_all(
+    value: *const c_char,
+    search: *const c_char,
+    replacement: *const c_char,
+) -> *const c_char {
+    unsafe { thaw_string_replace_impl(value, search, replacement, true) }
+}
+
+/// # Safety
 /// `value` and `pad` must point to valid NUL-terminated UTF-8 strings.
 unsafe fn thaw_string_pad(
     value: *const c_char,

@@ -1652,6 +1652,43 @@ fn compiles_native_string_split() {
 }
 
 #[test]
+fn compiles_native_string_replace() {
+    let source = r#"
+        function value(): string {
+            console.log("receiver");
+            return "abc abc";
+        }
+        function search(): string {
+            console.log("search");
+            return "a";
+        }
+        function replacement(): string {
+            console.log("replacement");
+            return "X";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return "abc abc";
+        }
+        async function main(): Promise<void> {
+            console.log("abc abc".replace("a", "X"));
+            console.log("abc abc".replaceAll("a", "X"));
+            console.log("abc".replace("x", "y"));
+            console.log("abc".replaceAll("x", "y"));
+            console.log("abc".replace("", "X"));
+            console.log("abc".replaceAll("", "X"));
+            console.log(value().replace(search(), replacement()));
+            console.log((await delayedValue()).replaceAll("a", "X"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_string_replace"),
+        "Xbc abc\nXbc Xbc\nabc\nabc\nXabc\nXaXbXcX\nreceiver\nsearch\nreplacement\nXbc abc\nawaited receiver\nXbc Xbc\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

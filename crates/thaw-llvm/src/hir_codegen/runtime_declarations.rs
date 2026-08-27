@@ -458,6 +458,12 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
             Some(Linkage::External),
         );
+        let string_replace_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false);
+        for name in ["thaw_string_replace", "thaw_string_replace_all"] {
+            self.module
+                .add_function(name, string_replace_type, Some(Linkage::External));
+        }
         self.module.add_function(
             "thaw_string_repeat",
             i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
