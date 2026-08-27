@@ -23,9 +23,9 @@ fn rewrite_external_class_methods_with_static(
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
         Lit, MemberProp, NewExpr, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget,
-        Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsType,
-        TsTypeAliasDecl, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType, UnaryOp,
-        VarDeclarator, WhileStmt,
+        Function, Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind,
+        TsLit, TsType, TsTypeAliasDecl, TsTypeElement, TsTypeOperatorOp,
+        TsUnionOrIntersectionType, UnaryOp, VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -197,10 +197,16 @@ fn rewrite_external_class_methods_with_static(
         }
     }
 
+    #[derive(Clone)]
+    enum SourceFunctionResult {
+        Fixed(thaw_hir::HirType),
+        Argument(usize),
+    }
+
     fn source_expr_type(
         expression: &Expr,
         variables: &std::collections::HashMap<String, thaw_hir::HirType>,
-        functions: &std::collections::HashMap<String, thaw_hir::HirType>,
+        functions: &std::collections::HashMap<String, SourceFunctionResult>,
         named: &std::collections::HashMap<String, thaw_hir::HirType>,
     ) -> Option<thaw_hir::HirType> {
         match expression {
@@ -372,7 +378,19 @@ fn rewrite_external_class_methods_with_static(
                     Expr::Ident(identifier) if identifier.sym == *"Boolean" => {
                         Some(thaw_hir::HirType::Bool)
                     }
-                    Expr::Ident(identifier) => functions.get(identifier.sym.as_str()).cloned(),
+                    Expr::Ident(identifier) => match functions.get(identifier.sym.as_str())? {
+                        SourceFunctionResult::Fixed(ty) => Some(ty.clone()),
+                        SourceFunctionResult::Argument(index) => call.args.get(*index).and_then(
+                            |argument| {
+                                source_expr_type(
+                                    argument.expr.as_ref(),
+                                    variables,
+                                    functions,
+                                    named,
+                                )
+                            },
+                        ),
+                    },
                     _ => None,
                 },
                 _ => None,
@@ -720,9 +738,94 @@ fn rewrite_external_class_methods_with_static(
         }
     }
 
+    fn returned_expression(body: &FunctionBody) -> Option<&Expr> {
+        let [Stmt::Return(statement)] = body.stmts.as_slice() else {
+            return None;
+        };
+        statement.arg.as_deref()
+    }
+
+    fn returned_identifier(body: &FunctionBody) -> Option<&str> {
+        let Expr::Ident(identifier) = returned_expression(body)? else {
+            return None;
+        };
+        Some(identifier.sym.as_str())
+    }
+
+    fn function_argument_result(function: &Function) -> Option<usize> {
+        let returned = returned_identifier(function.body.as_ref()?)?;
+        function.params.iter().position(
+            |parameter| matches!(&parameter.pat, Pat::Ident(binding) if binding.id.sym == *returned),
+        )
+    }
+
+    fn arrow_argument_result(arrow: &thaw_parser::ast::ArrowExpr) -> Option<usize> {
+        let returned = match arrow.body.as_ref() {
+            ArrowFunctionBody::Expr(expression) => {
+                let Expr::Ident(identifier) = expression.as_ref() else {
+                    return None;
+                };
+                identifier.sym.as_str()
+            }
+            ArrowFunctionBody::FunctionBody(body) => returned_identifier(body)?,
+        };
+        arrow
+            .params
+            .iter()
+            .position(|parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == *returned))
+    }
+
+    fn forwarded_argument_result(
+        expression: &Expr,
+        parameters: &[Pat],
+        known: &std::collections::HashMap<String, SourceFunctionResult>,
+    ) -> Option<usize> {
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let thaw_parser::ast::Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let Expr::Ident(function) = callee.as_ref() else {
+            return None;
+        };
+        let SourceFunctionResult::Argument(argument) = known.get(function.sym.as_str())? else {
+            return None;
+        };
+        let Expr::Ident(returned) = call.args.get(*argument)?.expr.as_ref() else {
+            return None;
+        };
+        parameters.iter().position(
+            |parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == returned.sym),
+        )
+    }
+
+    fn function_forwarded_argument(
+        function: &Function,
+        known: &std::collections::HashMap<String, SourceFunctionResult>,
+    ) -> Option<usize> {
+        let parameters = function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>();
+        forwarded_argument_result(returned_expression(function.body.as_ref()?)?, &parameters, known)
+    }
+
+    fn arrow_forwarded_argument(
+        arrow: &thaw_parser::ast::ArrowExpr,
+        known: &std::collections::HashMap<String, SourceFunctionResult>,
+    ) -> Option<usize> {
+        let expression = match arrow.body.as_ref() {
+            ArrowFunctionBody::Expr(expression) => expression.as_ref(),
+            ArrowFunctionBody::FunctionBody(body) => returned_expression(body)?,
+        };
+        forwarded_argument_result(expression, &arrow.params, known)
+    }
+
     struct FunctionTypeFinder<'a> {
         named: &'a std::collections::HashMap<String, thaw_hir::HirType>,
-        types: std::collections::HashMap<String, thaw_hir::HirType>,
+        types: std::collections::HashMap<String, SourceFunctionResult>,
     }
 
     impl Visit for FunctionTypeFinder<'_> {
@@ -733,8 +836,15 @@ fn rewrite_external_class_methods_with_static(
                 .as_ref()
                 .and_then(|annotation| source_ts_type(&annotation.type_ann, self.named))
             {
-                self.types
-                    .insert(declaration.ident.sym.to_string(), return_type);
+                self.types.insert(
+                    declaration.ident.sym.to_string(),
+                    SourceFunctionResult::Fixed(return_type),
+                );
+            } else if let Some(index) = function_argument_result(&declaration.function) {
+                self.types.insert(
+                    declaration.ident.sym.to_string(),
+                    SourceFunctionResult::Argument(index),
+                );
             }
             declaration.visit_children_with(self);
         }
@@ -751,7 +861,22 @@ fn rewrite_external_class_methods_with_static(
                     annotation
                         .and_then(|annotation| source_ts_type(&annotation.type_ann, self.named))
                 {
-                    self.types.insert(binding.id.sym.to_string(), return_type);
+                    self.types.insert(
+                        binding.id.sym.to_string(),
+                        SourceFunctionResult::Fixed(return_type),
+                    );
+                } else {
+                    let argument = match initializer.as_ref() {
+                        Expr::Arrow(arrow) => arrow_argument_result(arrow),
+                        Expr::Fn(function) => function_argument_result(&function.function),
+                        _ => None,
+                    };
+                    if let Some(index) = argument {
+                        self.types.insert(
+                            binding.id.sym.to_string(),
+                            SourceFunctionResult::Argument(index),
+                        );
+                    }
                 }
             }
             declaration.visit_children_with(self);
@@ -760,11 +885,11 @@ fn rewrite_external_class_methods_with_static(
 
     fn inferred_block_return_type(
         block: &FunctionBody,
-        functions: &std::collections::HashMap<String, thaw_hir::HirType>,
+        functions: &std::collections::HashMap<String, SourceFunctionResult>,
         named: &std::collections::HashMap<String, thaw_hir::HirType>,
     ) -> Option<thaw_hir::HirType> {
         struct Returns<'a> {
-            functions: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+            functions: &'a std::collections::HashMap<String, SourceFunctionResult>,
             named: &'a std::collections::HashMap<String, thaw_hir::HirType>,
             types: Vec<Option<thaw_hir::HirType>>,
         }
@@ -805,22 +930,28 @@ fn rewrite_external_class_methods_with_static(
     }
 
     struct InferredFunctionTypeFinder<'a> {
-        known: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+        known: &'a std::collections::HashMap<String, SourceFunctionResult>,
         named: &'a std::collections::HashMap<String, thaw_hir::HirType>,
-        additions: std::collections::HashMap<String, thaw_hir::HirType>,
+        additions: std::collections::HashMap<String, SourceFunctionResult>,
     }
 
     impl Visit for InferredFunctionTypeFinder<'_> {
         fn visit_fn_decl(&mut self, declaration: &FnDecl) {
             if !self.known.contains_key(declaration.ident.sym.as_str()) {
-                if let Some(return_type) = declaration
-                    .function
-                    .body
-                    .as_ref()
-                    .and_then(|body| inferred_block_return_type(body, self.known, self.named))
+                if let Some(argument) =
+                    function_forwarded_argument(&declaration.function, self.known)
                 {
-                    self.additions
-                        .insert(declaration.ident.sym.to_string(), return_type);
+                    self.additions.insert(
+                        declaration.ident.sym.to_string(),
+                        SourceFunctionResult::Argument(argument),
+                    );
+                } else if let Some(return_type) = declaration.function.body.as_ref().and_then(
+                    |body| inferred_block_return_type(body, self.known, self.named),
+                ) {
+                    self.additions.insert(
+                        declaration.ident.sym.to_string(),
+                        SourceFunctionResult::Fixed(return_type),
+                    );
                 }
             }
             declaration.visit_children_with(self);
@@ -830,6 +961,21 @@ fn rewrite_external_class_methods_with_static(
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
                 if !self.known.contains_key(binding.id.sym.as_str()) {
+                    let argument = match initializer.as_ref() {
+                        Expr::Arrow(arrow) => arrow_forwarded_argument(arrow, self.known),
+                        Expr::Fn(function) => {
+                            function_forwarded_argument(&function.function, self.known)
+                        }
+                        _ => None,
+                    };
+                    if let Some(argument) = argument {
+                        self.additions.insert(
+                            binding.id.sym.to_string(),
+                            SourceFunctionResult::Argument(argument),
+                        );
+                        declaration.visit_children_with(self);
+                        return;
+                    }
                     let return_type = match initializer.as_ref() {
                         Expr::Arrow(arrow) => match arrow.body.as_ref() {
                             ArrowFunctionBody::FunctionBody(block) => {
@@ -852,8 +998,10 @@ fn rewrite_external_class_methods_with_static(
                         _ => None,
                     };
                     if let Some(return_type) = return_type {
-                        self.additions
-                            .insert(binding.id.sym.to_string(), return_type);
+                        self.additions.insert(
+                            binding.id.sym.to_string(),
+                            SourceFunctionResult::Fixed(return_type),
+                        );
                     }
                 }
             }
@@ -947,7 +1095,7 @@ fn rewrite_external_class_methods_with_static(
         static_setters: &'a [StaticClassSetterRewrite],
         variables: std::collections::HashMap<String, String>,
         value_types: std::collections::HashMap<String, thaw_hir::HirType>,
-        function_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+        function_types: &'a std::collections::HashMap<String, SourceFunctionResult>,
         named_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
