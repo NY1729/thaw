@@ -418,7 +418,16 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
-        for name in ["thaw_json_values", "thaw_json_entries"] {
+        for name in [
+            "thaw_json_values",
+            "thaw_json_number_values",
+            "thaw_json_string_values",
+            "thaw_json_bool_values",
+            "thaw_json_entries",
+            "thaw_json_number_entries",
+            "thaw_json_string_entries",
+            "thaw_json_bool_entries",
+        ] {
             self.module.add_function(
                 name,
                 i8_ptr.fn_type(&[i8_ptr.into()], false),

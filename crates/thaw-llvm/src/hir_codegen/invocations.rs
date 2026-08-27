@@ -712,8 +712,26 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_json_values" => {
                 return self.compile_single_arg_call("thaw_json_values", args, "Object.values")
             }
+            "__thaw_json_number_values"
+            | "__thaw_json_string_values"
+            | "__thaw_json_bool_values" => {
+                return self.compile_single_arg_call(
+                    name.trim_start_matches("__"),
+                    args,
+                    "Object.values",
+                )
+            }
             "__thaw_json_entries" => {
                 return self.compile_single_arg_call("thaw_json_entries", args, "Object.entries")
+            }
+            "__thaw_json_number_entries"
+            | "__thaw_json_string_entries"
+            | "__thaw_json_bool_entries" => {
+                return self.compile_single_arg_call(
+                    name.trim_start_matches("__"),
+                    args,
+                    "Object.entries",
+                )
             }
             "__thaw_json_has_own" => {
                 let [value, key] = args else {
