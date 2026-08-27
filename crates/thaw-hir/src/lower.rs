@@ -2607,6 +2607,7 @@ impl<'a> FnLowerer<'a> {}
 
 include!("lower/invocations/static_builtins.rs");
 include!("lower/invocations/instance_builtins.rs");
+include!("lower/invocations/promises.rs");
 
 include!("lower/invocations.rs");
 
