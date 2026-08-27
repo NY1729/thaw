@@ -23,8 +23,9 @@ fn rewrite_external_class_methods_with_static(
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
         Lit, MemberProp, NewExpr, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget,
-        Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsType,
-        TsTypeAliasDecl, TsTypeElement, UnaryOp, VarDeclarator, WhileStmt,
+        Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsType,
+        TsTypeAliasDecl, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType, UnaryOp,
+        VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -409,6 +410,23 @@ fn rewrite_external_class_methods_with_static(
                 TsKeywordTypeKind::TsVoidKeyword => Some(thaw_hir::HirType::Void),
                 _ => None,
             },
+            TsType::TsLitType(literal) => match &literal.lit {
+                TsLit::Number(_) => Some(thaw_hir::HirType::F64),
+                TsLit::Str(_) => Some(thaw_hir::HirType::Str),
+                TsLit::Bool(_) => Some(thaw_hir::HirType::Bool),
+                _ => None,
+            },
+            TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+                let mut types = union
+                    .types
+                    .iter()
+                    .map(|element| source_ts_type(element, named));
+                let first = types.next()??;
+                types.all(|candidate| candidate.as_ref() == Some(&first)).then_some(first)
+            }
+            TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
+                source_ts_type(&operator.type_ann, named)
+            }
             TsType::TsArrayType(array) => match source_ts_type(&array.elem_type, named) {
                 Some(thaw_hir::HirType::F64) => {
                     Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))

@@ -2099,7 +2099,9 @@ property reads and same-arity structural object overloads are selected by field
 name and type. Object type-literal annotations on locals, assertions and function
 returns participate in the same structural selection. Plain type aliases and
 interfaces resolve forward references, interface inheritance and compatible
-declaration merging before that selection. Straight-line `=` assignments update local and nested property
+declaration merging before that selection. Same-layout literal unions such as
+`"read" | "write"` and readonly array annotations normalize to their native
+primitive or array layout. Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
 compound assignments invalidate the affected fact. String-literal computed
 object keys such as `{ ["value"]: 1 }` are supported. Object spreads from a
