@@ -42,6 +42,8 @@ accessor宣言が同名propertyより優先される。
 同一arityのmethod overload選択では初期化式だけでなくlocal変数の明示型注釈と
 `as`／山括弧type assertionも既存のnative型分類へ渡す。object type literalも
 propertyだけから成る場合は再帰分類し、local・assertion・function戻り値で利用する。
+非generic type aliasとinterfaceは宣言順に依存せず反復解決し、interface継承と互換な
+宣言マージを含めて同じ構造型選択へ渡す。
 number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<number>`も
 同じnative array型へ正規化する。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、
