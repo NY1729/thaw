@@ -586,17 +586,20 @@ impl<'a> FnLowerer<'a> {
                             element.as_ref(),
                         )
                     }
-                    HirType::Json => match computed.expr.as_ref() {
-                        Expr::Lit(Lit::Str(key)) => Ok(HirExpr::JsonGet(
-                            Box::new(obj),
-                            key.value.to_string_lossy().into_owned(),
-                        )),
-                        _ => {
-                            let index = self.lower_expr(&computed.expr)?;
-                            self.expect_type(&HirType::F64, &index, "JSON index expression")?;
-                            Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(index)))
+                    HirType::Json => {
+                        let key = self.lower_expr(&computed.expr)?;
+                        match self.infer_expr_type(&key)? {
+                            HirType::Str => {
+                                Ok(HirExpr::JsonKey(Box::new(obj), Box::new(key)))
+                            }
+                            HirType::F64 => {
+                                Ok(HirExpr::JsonIndex(Box::new(obj), Box::new(key)))
+                            }
+                            other => Err(format!(
+                                "JSON index expression must be string or number, got {other:?}"
+                            )),
                         }
-                    },
+                    }
                     other => Err(format!("cannot index into a value of type {other:?}")),
                 }
             }
