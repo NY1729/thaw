@@ -1990,7 +1990,7 @@ CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 `new Database(":memory:")` and constructs the real in-memory database from the
 standalone executable. Optional/default constructors generate one typed helper
 per supported arity. Same-arity overloads retain distinct helpers and select
-number, string, boolean, number-array and object arguments through the same
+number, string, boolean, primitive-array and object arguments through the same
 call-site type flow used by methods; all helpers resolve to the same addon export.
 If a typed call matches none of the same-arity signatures, lowering leaves it
 unresolved instead of falling back to an ABI-incompatible first overload.
@@ -2079,8 +2079,9 @@ Registry class shims now retain every supported overload under a distinct
 internal symbol. Calls select an overload by exact argument count and whether
 the final argument is an inline or locally-bound callback. Non-callback
 overloads with the same arity are also selected from number, string, boolean,
-number-array (including `number[]`, `Array<number>` and `ReadonlyArray<number>`
-annotations), fixed tuples, and object literals, explicitly annotated local variables, or
+primitive-array (including `number[]`, `string[]`, `boolean[]`, and their
+`Array<T>` / `ReadonlyArray<T>` forms), fixed tuples, and object literals,
+explicitly annotated local variables, or
 locals initialized from those values. The local inference also follows arithmetic,
 mixed-primitive string concatenation, bitwise and same-typed logical operators,
 comparisons, `typeof`, conditional expressions, templates, parentheses/type assertions,

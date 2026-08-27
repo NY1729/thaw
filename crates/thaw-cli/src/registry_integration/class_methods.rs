@@ -214,15 +214,21 @@ fn rewrite_external_class_methods_with_static(
             Expr::Lit(Lit::Num(_)) => Some(thaw_hir::HirType::F64),
             Expr::Lit(Lit::Str(_)) => Some(thaw_hir::HirType::Str),
             Expr::Lit(Lit::Bool(_)) => Some(thaw_hir::HirType::Bool),
-            Expr::Array(array)
-                if array.elems.iter().all(|element| {
-                    element.as_ref().is_some_and(|element| {
-                        source_expr_type(element.expr.as_ref(), variables, functions, named)
-                            == Some(thaw_hir::HirType::F64)
-                    })
-                }) =>
-            {
-                Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))
+            Expr::Array(array) => {
+                let mut elements = array.elems.iter().map(|element| {
+                    source_expr_type(
+                        element.as_ref()?.expr.as_ref(),
+                        variables,
+                        functions,
+                        named,
+                    )
+                });
+                let first = elements.next().unwrap_or(Some(thaw_hir::HirType::F64))?;
+                (matches!(
+                    first,
+                    thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool
+                ) && elements.all(|candidate| candidate.as_ref() == Some(&first)))
+                .then_some(thaw_hir::HirType::Array(Box::new(first)))
             }
             Expr::Object(object) => {
                 let mut fields = Vec::with_capacity(object.props.len());
@@ -587,12 +593,14 @@ fn rewrite_external_class_methods_with_static(
                     .find(|(field, _)| field == &name)
                     .map(|(_, ty)| ty)
             }
-            TsType::TsArrayType(array) => match source_ts_type(&array.elem_type, named) {
-                Some(thaw_hir::HirType::F64) => {
-                    Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))
-                }
-                _ => None,
-            },
+            TsType::TsArrayType(array) => {
+                let element = source_ts_type(&array.elem_type, named)?;
+                matches!(
+                    element,
+                    thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool
+                )
+                .then_some(thaw_hir::HirType::Array(Box::new(element)))
+            }
             TsType::TsTupleType(tuple) => tuple
                 .elem_types
                 .iter()
@@ -609,11 +617,15 @@ fn rewrite_external_class_methods_with_static(
                     .map(|parameters| parameters.params.as_slice())
                     .unwrap_or_default();
                 match (name.sym.as_str(), parameters) {
-                    ("Array" | "ReadonlyArray", [element])
-                        if source_ts_type(element, named) == Some(thaw_hir::HirType::F64) => {
-                        Some(thaw_hir::HirType::Array(Box::new(
-                            thaw_hir::HirType::F64,
-                        )))
+                    ("Array" | "ReadonlyArray", [element]) => {
+                        let element = source_ts_type(element, named)?;
+                        matches!(
+                            element,
+                            thaw_hir::HirType::F64
+                                | thaw_hir::HirType::Str
+                                | thaw_hir::HirType::Bool
+                        )
+                        .then_some(thaw_hir::HirType::Array(Box::new(element)))
                     }
                     ("Readonly", [inner]) => source_ts_type(inner, named),
                     ("Partial", [inner]) => {

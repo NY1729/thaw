@@ -143,7 +143,7 @@ fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: us
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-            if **element == thaw_hir::HirType::F64
+            if matches!(**element, thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool)
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Tuple(elements))
@@ -172,7 +172,7 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
-            if **element == thaw_hir::HirType::F64
+            if matches!(**element, thaw_hir::HirType::F64 | thaw_hir::HirType::Str | thaw_hir::HirType::Bool)
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Tuple(elements))

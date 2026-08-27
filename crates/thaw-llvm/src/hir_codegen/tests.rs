@@ -26,10 +26,16 @@ fn napi_constructor_arity_symbols_share_the_same_export() {
 fn compiles_typed_napi_tuple_arguments_and_results() {
     let module = thaw_parser::parse_typescript(
         r#"declare function __thaw_typed_napi_737761705475706c65(value: [number, string]): [string, number];
+           declare function __thaw_typed_napi_737472696e6773(value: string[]): string[];
+           declare function __thaw_typed_napi_626f6f6c73(value: boolean[]): boolean[];
            function main(): void {
                const value: [number, string] = [7, "value"];
                const swapped: [string, number] = __thaw_typed_napi_737761705475706c65(value);
+               const strings: string[] = __thaw_typed_napi_737472696e6773(["a", "b"]);
+               const bools: boolean[] = __thaw_typed_napi_626f6f6c73([true, false]);
                console.log(swapped[0]);
+               console.log(strings[0]);
+               console.log(bools[0]);
            }"#,
     )
     .unwrap();
