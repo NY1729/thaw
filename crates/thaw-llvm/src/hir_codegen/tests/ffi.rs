@@ -1689,6 +1689,39 @@ fn compiles_native_string_replace() {
 }
 
 #[test]
+fn compiles_regex_test() {
+    let source = r#"
+        function pattern(): RegExp {
+            console.log("pattern");
+            return /abc/;
+        }
+        function value(): string {
+            console.log("value");
+            return "xabcx";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited value");
+            await sleep(1);
+            return "xabcx";
+        }
+        async function main(): Promise<void> {
+            console.log(/abc/.test("xabcx"));
+            console.log(/abc/.test("xyz"));
+            console.log(new RegExp("abc").test("xabcx"));
+            console.log(/ABC/i.test("xabcx"));
+            console.log(/^abc$/.test("abc"));
+            console.log(/^abc$/.test("xabc"));
+            console.log(pattern().test(value()));
+            console.log(/abc/.test(await delayedValue()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_test"),
+        "true\nfalse\ntrue\ntrue\ntrue\nfalse\npattern\nvalue\ntrue\nawaited value\ntrue\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

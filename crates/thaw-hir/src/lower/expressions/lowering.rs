@@ -7,6 +7,13 @@ impl<'a> FnLowerer<'a> {
             ))),
             Expr::Lit(Lit::Bool(b)) => Ok(HirExpr::Lit(HirLit::Bool(b.value))),
             Expr::Lit(Lit::Null(_)) => Ok(HirExpr::Lit(HirLit::Null)),
+            Expr::Lit(Lit::Regex(regex)) => Ok(HirExpr::ObjectLit(vec![
+                ("source".to_string(), HirExpr::Lit(HirLit::Str(regex.exp.to_string()))),
+                (
+                    "flags".to_string(),
+                    HirExpr::Lit(HirLit::Str(regex.flags.to_string())),
+                ),
+            ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
                 if !self.scope.contains_key(&name) {
@@ -1001,6 +1008,29 @@ impl<'a> FnLowerer<'a> {
 
             Expr::New(new_expr) => {
                 if let Expr::Ident(class) = new_expr.callee.as_ref() {
+                    if class.sym == *"RegExp" {
+                        let args = new_expr.args.clone().unwrap_or_default();
+                        if !(1..=2).contains(&args.len()) {
+                            return Err("`new RegExp()` expects one or two arguments".into());
+                        }
+                        if args.iter().any(|argument| argument.spread.is_some()) {
+                            return Err(
+                                "`new RegExp()` does not support spread arguments".into()
+                            );
+                        }
+                        let source = self.lower_expr(&args[0].expr)?;
+                        let source = self.coerce_primitive_to_string(source)?;
+                        let flags = if let Some(argument) = args.get(1) {
+                            let flags = self.lower_expr(&argument.expr)?;
+                            self.coerce_primitive_to_string(flags)?
+                        } else {
+                            HirExpr::Lit(HirLit::Str(String::new()))
+                        };
+                        return Ok(HirExpr::ObjectLit(vec![
+                            ("source".to_string(), source),
+                            ("flags".to_string(), flags),
+                        ]));
+                    }
                     let constructor = class_constructor_symbol(class.sym.as_ref());
                     if let Some(signature) = self.signatures.get(&constructor) {
                         if signature.abstract_class_constructor {

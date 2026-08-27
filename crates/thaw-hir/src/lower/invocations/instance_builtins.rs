@@ -1,10 +1,17 @@
+fn regex_object_type() -> HirType {
+    HirType::Object(vec![
+        ("source".to_string(), HirType::Str),
+        ("flags".to_string(), HirType::Str),
+    ])
+}
+
 impl<'a> FnLowerer<'a> {
     fn is_native_instance_builtin(property: &str) -> bool {
         matches!(
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
-                | "normalize" | "split" | "replace" | "replaceAll"
+                | "normalize" | "split" | "replace" | "replaceAll" | "test"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -244,6 +251,41 @@ impl<'a> FnLowerer<'a> {
                     bindings.extend(spread_bindings);
                     bindings.push((search_name, HirType::Str, search));
                     bindings.push((replacement_name, HirType::Str, replacement));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"test" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let regex_type = regex_object_type();
+                    self.expect_type(&regex_type, &receiver, "RegExp.test receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "RegExp.test")?;
+                    let [value] = arguments.as_slice() else {
+                        return Err("native `.test()` expects exactly one argument".into());
+                    };
+                    let value = self.coerce_primitive_to_string(value.clone())?;
+                    let receiver_name = format!("__thaw_regex_test_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let value_name = format!("__thaw_regex_test_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), regex_type.clone());
+                    self.scope.insert(value_name.clone(), HirType::Str);
+                    let source = HirExpr::PropAccess(
+                        Box::new(HirExpr::Var(receiver_name.clone())),
+                        regex_type.clone(),
+                        "source".to_string(),
+                    );
+                    let flags = HirExpr::PropAccess(
+                        Box::new(HirExpr::Var(receiver_name.clone())),
+                        regex_type.clone(),
+                        "flags".to_string(),
+                    );
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_regex_test".to_string())),
+                        vec![source, flags, HirExpr::Var(value_name.clone())],
+                    );
+                    let mut bindings = vec![(receiver_name, regex_type, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((value_name, HirType::Str, value));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"codePointAt" {
