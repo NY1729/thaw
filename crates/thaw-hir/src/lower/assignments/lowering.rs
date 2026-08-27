@@ -273,7 +273,12 @@ impl<'a> FnLowerer<'a> {
                         || (matches!(pattern, Pat::Array(_))
                             && elements.iter().all(|element| matches!(element, HirType::Tuple(_))))
             );
-            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_)) && !destructurable_union {
+            let destructurable_dictionary =
+                matches!((&pattern, &ty), (Pat::Object(_), HirType::Dictionary(_)));
+            if !matches!(ty, HirType::Object(_) | HirType::Tuple(_))
+                && !destructurable_union
+                && !destructurable_dictionary
+            {
                 return Err(format!(
                     "destructuring assignment requires a fixed-shape object, tuple, or destructurable union, got {ty:?}"
                 ));
@@ -679,6 +684,14 @@ impl<'a> FnLowerer<'a> {
                 Ok(())
             }
             Pat::Object(pattern) => {
+                if let HirType::Dictionary(element) = ty {
+                    return self.lower_dictionary_object_assignment_pattern(
+                        pattern,
+                        value,
+                        element,
+                        statements,
+                    );
+                }
                 if let HirType::Union(elements) = ty {
                     return self.lower_union_object_assignment_pattern(
                         pattern, value, elements, statements,
@@ -858,6 +871,108 @@ impl<'a> FnLowerer<'a> {
             Pat::Rest(_) => Err("rest patterns are only valid inside object/array patterns".into()),
             _ => Err("unsupported destructuring assignment target".into()),
         }
+    }
+
+    fn lower_dictionary_object_assignment_pattern(
+        &mut self,
+        pattern: &swc_ecma_ast::ObjectPat,
+        value: HirExpr,
+        element: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        let has_rest = pattern
+            .props
+            .iter()
+            .any(|property| matches!(property, ObjectPatProp::Rest(_)));
+        let mut used_keys = Vec::new();
+        for property in &pattern.props {
+            match property {
+                ObjectPatProp::Assign(property) => {
+                    let key = HirExpr::Lit(HirLit::Str(property.key.id.sym.to_string()));
+                    used_keys.push(key.clone());
+                    let field_json =
+                        HirExpr::JsonKey(Box::new(value.clone()), Box::new(key.clone()));
+                    let mut field = Self::dictionary_element_from_json(field_json, element)?;
+                    if let Some(default) = &property.value {
+                        let default = self.lower_expr(default)?;
+                        let default = self.coerce_to_declared(element, default)?;
+                        field = self.lower_dictionary_default(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+                                vec![value.clone(), key],
+                            ),
+                            field,
+                            default,
+                            element,
+                        );
+                    }
+                    self.lower_assignment_pattern(
+                        &Pat::Ident(property.key.clone()),
+                        field,
+                        element,
+                        statements,
+                    )?;
+                }
+                ObjectPatProp::KeyValue(property) => {
+                    let key = match &property.key {
+                        PropName::Ident(key) => HirExpr::Lit(HirLit::Str(key.sym.to_string())),
+                        PropName::Str(key) => HirExpr::Lit(HirLit::Str(
+                            key.value.to_string_lossy().into_owned(),
+                        )),
+                        PropName::Num(key) => {
+                            self.coerce_primitive_to_string(HirExpr::Lit(HirLit::F64(key.value)))?
+                        }
+                        PropName::Computed(computed) => {
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.coerce_primitive_to_string(key)?
+                        }
+                        _ => return Err("unsupported dictionary destructuring key".into()),
+                    };
+                    let key = if has_rest {
+                        let name = format!("__thaw_destructure_key_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), HirType::Str);
+                        statements.push(HirStmt::Let(name.clone(), HirType::Str, key));
+                        HirExpr::Var(name)
+                    } else {
+                        key
+                    };
+                    used_keys.push(key.clone());
+                    let field_json =
+                        HirExpr::JsonKey(Box::new(value.clone()), Box::new(key.clone()));
+                    let mut field = Self::dictionary_element_from_json(field_json, element)?;
+                    let target = if let Pat::Assign(assign) = property.value.as_ref() {
+                        let default = self.lower_expr(&assign.right)?;
+                        let default = self.coerce_to_declared(element, default)?;
+                        field = self.lower_dictionary_default(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+                                vec![value.clone(), key],
+                            ),
+                            field,
+                            default,
+                            element,
+                        );
+                        assign.left.as_ref()
+                    } else {
+                        &property.value
+                    };
+                    self.lower_assignment_pattern(target, field, element, statements)?;
+                }
+                ObjectPatProp::Rest(rest) => {
+                    let rest_type = HirType::Dictionary(Box::new(element.clone()));
+                    let rest_value =
+                        self.lower_dictionary_object_rest(value.clone(), &rest_type, &used_keys);
+                    self.lower_assignment_pattern(
+                        &rest.arg,
+                        rest_value,
+                        &rest_type,
+                        statements,
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
 }
