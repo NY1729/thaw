@@ -23,9 +23,9 @@ use std::collections::HashMap;
 
 use swc_ecma_ast::{
     Class, ClassMember, Decl, DefaultDecl, Expr, Function, MethodKind, Module, ModuleDecl,
-    ModuleItem, ParamOrTsParamProp, Pat, PropName, TsEntityName, TsFnOrConstructorType, TsFnParam,
-    TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody, TsParamPropParam, TsType,
-    TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
+    ModuleItem, ParamOrTsParamProp, Pat, PropName, TruePlusMinus, TsEntityName,
+    TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody,
+    TsParamPropParam, TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
 use thaw_hir::{
     FfiAggregateAbi, FfiCallingConvention, FfiErrorAbi, FfiOwnership, FfiSignature, FfiStringAbi,
