@@ -1565,6 +1565,10 @@ The workspace crates have narrow responsibilities:
   is no host timezone database to make another one meaningful. Unlike
   `toISOString`, all four return the literal string `"Invalid Date"` for
   a non-finite timestamp instead of throwing, matching the specification
+- `Date.prototype.toJSON` returns `this.toISOString()` as `string | null`,
+  or `null` for a non-finite timestamp -- the specification has `toJSON`
+  return `null` rather than throwing in that case, unlike `toISOString`
+  itself
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`
