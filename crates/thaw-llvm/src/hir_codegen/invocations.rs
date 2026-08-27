@@ -484,6 +484,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     "string iterator array",
                 )
             }
+            "__thaw_string_split" => {
+                let [value, separator, limit] = args else {
+                    return Err("string split expects three operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let separator = self.compile_expr(separator)?;
+                let limit = self.compile_expr(limit)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_split").unwrap(),
+                        &[value.into(), separator.into(), limit.into()],
+                        "string_split",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string split returned no value".into());
+            }
             "__thaw_encode_uri_component" => {
                 return self.compile_single_arg_call(
                     "thaw_encode_uri_component",

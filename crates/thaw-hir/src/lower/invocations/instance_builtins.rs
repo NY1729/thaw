@@ -4,7 +4,7 @@ impl<'a> FnLowerer<'a> {
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
-                | "normalize"
+                | "normalize" | "split"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -151,6 +151,55 @@ impl<'a> FnLowerer<'a> {
                     let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((form_name, HirType::Str, form));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"split" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "split receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.split")?;
+                    if arguments.len() > 2 {
+                        return Err(
+                            "native `.split()` expects zero, one or two arguments".into()
+                        );
+                    }
+                    if arguments.is_empty() {
+                        let receiver_name =
+                            format!("__thaw_split_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::ArrayLit(vec![HirExpr::Var(receiver_name.clone())]),
+                            &[(receiver_name, HirType::Str, receiver)],
+                        );
+                    }
+                    let separator = self.coerce_primitive_to_string(arguments[0].clone())?;
+                    let limit = match arguments.get(1) {
+                        Some(argument) => self.coerce_primitive_to_number(argument.clone())?,
+                        None => HirExpr::Lit(HirLit::F64(f64::INFINITY)),
+                    };
+                    let receiver_name = format!("__thaw_split_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let separator_name =
+                        format!("__thaw_split_separator_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let limit_name = format!("__thaw_split_limit_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(separator_name.clone(), HirType::Str);
+                    self.scope.insert(limit_name.clone(), HirType::F64);
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_split".into())),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(separator_name.clone()),
+                            HirExpr::Var(limit_name.clone()),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((separator_name, HirType::Str, separator));
+                    bindings.push((limit_name, HirType::F64, limit));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"codePointAt" {
