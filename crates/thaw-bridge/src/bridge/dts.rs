@@ -98,11 +98,18 @@ fn lower_class_params(
             let binding = match param {
                 ParamOrTsParamProp::Param(param) => match &param.pat {
                     Pat::Ident(binding) => Some(binding),
+                    Pat::Assign(assign) => match assign.left.as_ref() {
+                        Pat::Ident(binding) => Some(binding),
+                        _ => None,
+                    },
                     _ => None,
                 },
                 ParamOrTsParamProp::TsParamProp(property) => match &property.param {
                     TsParamPropParam::Ident(binding) => Some(binding),
-                    TsParamPropParam::Assign(_) => None,
+                    TsParamPropParam::Assign(assign) => match assign.left.as_ref() {
+                        Pat::Ident(binding) => Some(binding),
+                        _ => None,
+                    },
                 },
             };
             let Some(binding) = binding else {
@@ -121,6 +128,20 @@ fn lower_class_params(
             (binding.id.sym.to_string(), ty)
         })
         .collect()
+}
+
+fn class_param_is_required(param: &ParamOrTsParamProp) -> bool {
+    match param {
+        ParamOrTsParamProp::Param(param) => match &param.pat {
+            Pat::Ident(binding) => !binding.optional,
+            Pat::Assign(_) | Pat::Rest(_) => false,
+            _ => true,
+        },
+        ParamOrTsParamProp::TsParamProp(property) => match &property.param {
+            TsParamPropParam::Ident(binding) => !binding.optional,
+            TsParamPropParam::Assign(_) => false,
+        },
+    }
 }
 
 fn lower_dts_class(
@@ -143,6 +164,11 @@ fn lower_dts_class(
         match member {
             ClassMember::Constructor(constructor) => constructors.push(DtsConstructor {
                 params: lower_class_params(&constructor.params, interfaces, generic_interfaces),
+                required_params: constructor
+                    .params
+                    .iter()
+                    .take_while(|param| class_param_is_required(param))
+                    .count(),
                 overloaded: false,
             }),
             ClassMember::Method(method) => {

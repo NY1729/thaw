@@ -5,6 +5,19 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[test]
+fn napi_constructor_arity_symbols_share_the_same_export() {
+    assert_eq!(
+        napi_constructor_export_name("$new$Database$arity0"),
+        Some("Database")
+    );
+    assert_eq!(
+        napi_constructor_export_name("$new$Database$arity2"),
+        Some("Database")
+    );
+    assert_eq!(napi_constructor_export_name("ordinary"), None);
+}
+
 /// Builds the given TS source into a standalone native binary (linking
 /// thaw-arena's staticlib too, since array-using programs call into
 /// it), runs it with the given extra environment variables, and

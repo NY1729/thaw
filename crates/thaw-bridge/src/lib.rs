@@ -54,6 +54,7 @@ pub struct DtsClass {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DtsConstructor {
     pub params: Vec<(String, DtsType)>,
+    pub required_params: usize,
     pub overloaded: bool,
 }
 

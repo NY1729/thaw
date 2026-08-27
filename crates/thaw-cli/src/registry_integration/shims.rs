@@ -98,7 +98,8 @@ fn typed_dynamic_declaration(
 /// here is the *qualifier identifier* (`qualifier_identifier`), not
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
-type ClassConstructorRewrite = (String, String);
+/// `(qualifier, class, [(argument_count, helper)])`.
+type ClassConstructorRewrite = (String, String, Vec<(usize, String)>);
 /// `(class, method, helper, argument_count, has_callback, parameter_types)`.
 type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
 /// `(class, property, helper)` for an instance getter.
@@ -160,6 +161,53 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
             if **element == thaw_hir::HirType::F64
     )
+}
+
+fn generate_napi_class_constructors(
+    class: &thaw_bridge::DtsClass,
+    shim: &mut String,
+) -> Vec<(usize, String)> {
+    let mut arities = std::collections::BTreeMap::new();
+    for constructor in &class.constructors {
+        if !constructor.params.iter().all(|(_, ty)| {
+            matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
+        }) {
+            continue;
+        }
+        for arity in constructor.required_params..=constructor.params.len() {
+            arities
+                .entry(arity)
+                .or_insert_with(|| &constructor.params[..arity]);
+        }
+    }
+    if class.constructors.is_empty() {
+        arities.insert(0, &[]);
+    }
+    let mut helpers = Vec::with_capacity(arities.len());
+    for (arity, params) in arities {
+        let rendered = params
+            .iter()
+            .map(|(name, ty)| match ty {
+                thaw_bridge::DtsType::Native(ty) => {
+                    format!("{name}: {}", render_dynamic_type(ty).unwrap())
+                }
+                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let runtime_key = format!("$new${}$arity{arity}", class.name);
+        let encoded = runtime_key
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let symbol = format!("__thaw_typed_napi_{encoded}");
+        shim.push_str(&format!(
+            "declare function {symbol}({rendered}): JsValue;\n"
+        ));
+        helpers.push((arity, symbol));
+    }
+    helpers
 }
 
 fn generate_napi_class_method_overloads(
@@ -560,45 +608,19 @@ fn generate_registry_shims(
         let qualified = qualified_by_package.get(&pkg.name).unwrap_or(&no_qualified);
         if pkg.native_addon.is_some() {
             for class in &pkg.classes {
-                let Some(params) = class
-                    .constructors
-                    .iter()
-                    .map(|constructor| {
-                        constructor
-                            .params
-                            .iter()
-                            .take_while(|(_, ty)| {
-                                matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|params| !params.is_empty())
-                    .min_by_key(|params| params.len())
-                else {
+                let helpers = generate_napi_class_constructors(class, &mut shim);
+                if helpers.is_empty() {
                     continue;
-                };
-                let rendered = params
-                    .iter()
-                    .map(|(name, ty)| match ty {
-                        thaw_bridge::DtsType::Native(ty) => {
-                            format!("{name}: {}", render_dynamic_type(ty).unwrap())
-                        }
-                        thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let runtime_key = format!("$new${}", class.name);
-                let encoded = runtime_key
-                    .as_bytes()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                let symbol = format!("__thaw_typed_napi_{encoded}");
-                shim.push_str(&format!(
-                    "declare function {symbol}({rendered}): JsValue;\n"
+                }
+                class_targets.insert(
+                    (pkg.name.clone(), class.name.clone()),
+                    helpers[0].1.clone(),
+                );
+                class_rewrites.push((
+                    qualifier_by_package[&pkg.name].clone(),
+                    class.name.clone(),
+                    helpers,
                 ));
-                class_targets.insert((pkg.name.clone(), class.name.clone()), symbol);
-                class_rewrites.push((qualifier_by_package[&pkg.name].clone(), class.name.clone()));
 
                 for (method, symbol, argument_count, has_callback, parameter_types) in
                     generate_napi_class_method_overloads(class, false, &observed_arities, &mut shim)
