@@ -48,7 +48,8 @@ pub fn set_ffi_error_abi(
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _)
-            | HirExpr::JsonKey(left, right) => {
+            | HirExpr::JsonKey(left, right)
+            | HirExpr::JsonDelete(left, right) => {
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
             }
@@ -278,7 +279,8 @@ pub fn set_ffi_ownership(
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _)
-            | HirExpr::JsonKey(left, right) => {
+            | HirExpr::JsonKey(left, right)
+            | HirExpr::JsonDelete(left, right) => {
                 update_expr(left, symbol, returns, errors, found);
                 update_expr(right, symbol, returns, errors, found);
             }
@@ -584,7 +586,8 @@ pub fn set_ffi_string_abi(
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::ArraySetLen(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _)
-            | HirExpr::JsonKey(left, right) => {
+            | HirExpr::JsonKey(left, right)
+            | HirExpr::JsonDelete(left, right) => {
                 update_expr(
                     left,
                     symbol,

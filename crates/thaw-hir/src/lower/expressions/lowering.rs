@@ -408,6 +408,32 @@ impl<'a> FnLowerer<'a> {
             }
 
             Expr::Unary(unary) => {
+                if unary.op == UnaryOp::Delete {
+                    let Expr::Member(member) = unary.arg.as_ref() else {
+                        return Err("native `delete` requires a JSON or dictionary property".into());
+                    };
+                    let object = self.lower_expr(&member.obj)?;
+                    let object_type = self.infer_expr_type(&object)?;
+                    if !matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
+                        return Err(format!(
+                            "native `delete` requires a JSON or dictionary receiver, got {object_type:?}"
+                        ));
+                    }
+                    let key = match &member.prop {
+                        MemberProp::Ident(property) => {
+                            HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                        }
+                        MemberProp::Computed(computed) => {
+                            let key = self.lower_expr(&computed.expr)?;
+                            self.expect_type(&HirType::Str, &key, "delete property key")?;
+                            key
+                        }
+                        MemberProp::PrivateName(_) => {
+                            return Err("native `delete` does not support private properties".into())
+                        }
+                    };
+                    return Ok(HirExpr::JsonDelete(Box::new(object), Box::new(key)));
+                }
                 let value = self.lower_expr(&unary.arg)?;
                 let lowered = match unary.op {
                     UnaryOp::Minus => {

@@ -841,6 +841,7 @@ impl<'a> FnLowerer<'a> {
                 Ok(HirType::Json)
             }
             HirExpr::JsonSet(_, _, _, element) => Ok(element.clone()),
+            HirExpr::JsonDelete(_, _) => Ok(HirType::Bool),
             HirExpr::JsonAsNumber(_) => Ok(HirType::F64),
             HirExpr::JsonAsString(_) => Ok(HirType::Str),
             HirExpr::JsonAsBool(_) => Ok(HirType::Bool),

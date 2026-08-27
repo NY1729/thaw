@@ -82,6 +82,36 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(result)
     }
 
+    fn compile_json_delete(
+        &mut self,
+        object: &HirExpr,
+        key: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let object = self.compile_expr(object)?;
+        let key = self.compile_expr(key)?;
+        let deleted = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_object_delete").unwrap(),
+                &[object.into(), key.into()],
+                "json_delete_u8",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_object_delete did not return a value")?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                deleted,
+                self.context.i8_type().const_zero(),
+                "json_delete",
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_json_object_lit(
         &mut self,
         fields: &[(String, HirExpr)],

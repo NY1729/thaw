@@ -494,6 +494,37 @@ fn compiles_dynamic_uniform_object_reads_as_optional_values() {
 }
 
 #[test]
+fn deletes_runtime_keyed_dictionary_properties() {
+    let source = r#"
+        function objectSource(): Record<string, number> {
+            console.log("object");
+            return { transient: 1 };
+        }
+        async function asyncKey(): Promise<string> {
+            await sleep(1);
+            console.log("key");
+            return "other";
+        }
+        async function main(): Promise<void> {
+            const values: Record<string, number> = { answer: 42, other: 7 };
+            const parsed: Json = JSON.parse("{\"answer\":42}");
+            console.log(delete values.answer);
+            console.log(values["answer"]);
+            console.log(delete values["missing"]);
+            console.log(delete values[await asyncKey()]);
+            console.log(values["other"]);
+            console.log(delete objectSource().transient);
+            console.log(delete parsed.answer);
+            console.log(JSON.stringify(parsed));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "delete_dictionary_properties"),
+        "true\n0\ntrue\nkey\ntrue\n0\nobject\ntrue\ntrue\n{}\n"
+    );
+}
+
+#[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"
         function read(key: string): number | string | null | undefined {

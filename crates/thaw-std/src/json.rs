@@ -379,6 +379,14 @@ pub extern "C" fn thaw_json_object_set_json(
     );
 }
 
+#[no_mangle]
+pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char) -> u8 {
+    if let Some(fields) = (unsafe { object.as_mut() }).and_then(Value::as_object_mut) {
+        fields.remove(&to_str(key));
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +394,18 @@ mod tests {
     fn parse(s: &str) -> *mut Value {
         let c = CString::new(s).unwrap();
         thaw_json_parse(c.as_ptr())
+    }
+
+    #[test]
+    fn deletes_object_properties_and_succeeds_for_missing_keys() {
+        let object = parse(r#"{"answer":42}"#);
+        let answer = CString::new("answer").unwrap();
+        let missing = CString::new("missing").unwrap();
+        assert_eq!(thaw_json_object_delete(object, answer.as_ptr()), 1);
+        assert_eq!(thaw_json_object_delete(object, missing.as_ptr()), 1);
+        assert!(unsafe { object.as_ref() }
+            .and_then(Value::as_object)
+            .is_some_and(|fields| fields.is_empty()));
     }
 
     fn read_c_string(ptr: *const c_char) -> String {
