@@ -552,6 +552,60 @@ fn rejects_dynamic_or_duplicate_mapped_key_remapping() {
 }
 
 #[test]
+fn resolves_concrete_conditional_types_lazily() {
+    let funcs = parse_dts(
+        r#"export type Selected = "value" extends string ? number : Date;
+            export type Rejected = number extends string ? Date : boolean;
+            export declare function inspect(value: Selected): Rejected;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("concrete conditional types should select one branch");
+    };
+    assert_eq!(signature.params, vec![HirType::F64]);
+    assert_eq!(signature.ret, HirType::Bool);
+}
+
+#[test]
+fn resolves_conditional_types_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export type Result<T> = T extends { id: number }
+                ? Pick<T, "id">
+                : { value: string };
+            export interface Good { id: number; label: string; }
+            export interface Bad { label: string; }
+            export declare function inspect(
+                good: Result<Good>,
+                bad: Result<Bad>
+            ): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("conditional aliases should resolve after generic substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Object(vec![("id".into(), HirType::F64)]),
+            HirType::Object(vec![("value".into(), HirType::Str)]),
+        ]
+    );
+}
+
+#[test]
+fn unresolved_conditional_tests_fall_back() {
+    let funcs = parse_dts(
+        r#"export type Unknown = Date extends string ? number : boolean;
+            export declare function inspect(value: Unknown): string;"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn generates_native_addon_wrapper_and_module_initializer() {
     let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
     let shim = generate_native_addon_shim(&funcs, &[]);

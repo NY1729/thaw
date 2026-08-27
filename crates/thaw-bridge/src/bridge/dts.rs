@@ -1200,6 +1200,26 @@ fn classify_ts_type(
             _ => DtsType::Unsupported("unsupported literal type".into()),
         },
 
+        TsType::TsConditionalType(conditional) => {
+            let check = classify_ts_type(&conditional.check_type, interfaces, generic_interfaces);
+            let extends =
+                classify_ts_type(&conditional.extends_type, interfaces, generic_interfaces);
+            match (check, extends) {
+                (DtsType::Native(check), DtsType::Native(extends)) => classify_ts_type(
+                    if bridge_type_satisfies_constraint(&check, &extends) {
+                        &conditional.true_type
+                    } else {
+                        &conditional.false_type
+                    },
+                    interfaces,
+                    generic_interfaces,
+                ),
+                (DtsType::Unsupported(reason), _) | (_, DtsType::Unsupported(reason)) => {
+                    DtsType::Unsupported(format!("conditional type test: {reason}"))
+                }
+            }
+        }
+
         TsType::TsIndexedAccessType(indexed) => classify_indexed_access(
             classify_ts_type(&indexed.obj_type, interfaces, generic_interfaces),
             &indexed.index_type,
@@ -1983,6 +2003,40 @@ fn resolve_ts_type_with_substitution(
                     "keyof {other:?} does not have a string-only native ABI"
                 )),
                 unsupported => unsupported,
+            }
+        }
+        TsType::TsConditionalType(conditional) => {
+            let check = resolve_ts_type_with_substitution(
+                &conditional.check_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            );
+            let extends = resolve_ts_type_with_substitution(
+                &conditional.extends_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            );
+            match (check, extends) {
+                (DtsType::Native(check), DtsType::Native(extends)) => {
+                    resolve_ts_type_with_substitution(
+                        if bridge_type_satisfies_constraint(&check, &extends) {
+                            &conditional.true_type
+                        } else {
+                            &conditional.false_type
+                        },
+                        substitution,
+                        interfaces,
+                        generic_interfaces,
+                        in_progress,
+                    )
+                }
+                (DtsType::Unsupported(reason), _) | (_, DtsType::Unsupported(reason)) => {
+                    DtsType::Unsupported(format!("conditional type test: {reason}"))
+                }
             }
         }
         TsType::TsIndexedAccessType(indexed) => classify_indexed_access(
