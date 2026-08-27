@@ -2371,7 +2371,9 @@ fn expands_inherited_external_class_members() {
         .iter()
         .find(|class| class.name == "GrandChild")
         .unwrap();
-    assert!(grand.constructors.is_empty());
+    assert_eq!(grand.constructors.len(), 1);
+    assert_eq!(grand.constructors[0].required_params, 1);
+    assert_eq!(grand.constructors[0].params.len(), 2);
     assert!(grand.methods.iter().any(|method| method.name == "own"));
     assert!(grand
         .methods
