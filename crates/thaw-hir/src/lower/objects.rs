@@ -763,6 +763,51 @@ impl<'a> FnLowerer<'a> {
                 ),
                 _ => return Err("unsupported optional string member".into()),
             },
+            HirType::Dictionary(element) => {
+                let key = match &member.prop {
+                    MemberProp::Ident(property) => {
+                        HirExpr::Lit(HirLit::Str(property.sym.to_string()))
+                    }
+                    MemberProp::Computed(computed) => {
+                        let key = self.lower_expr(&computed.expr)?;
+                        self.expect_type(&HirType::Str, &key, "optional dictionary key")?;
+                        key
+                    }
+                    _ => return Err("unsupported optional dictionary member".into()),
+                };
+                (
+                    Self::typed_dictionary_read(
+                        HirExpr::JsonKey(Box::new(unwrapped), Box::new(key)),
+                        element.as_ref(),
+                    )?,
+                    element.as_ref().clone(),
+                )
+            }
+            HirType::Json => match &member.prop {
+                MemberProp::Ident(property) => (
+                    HirExpr::JsonGet(Box::new(unwrapped), property.sym.to_string()),
+                    HirType::Json,
+                ),
+                MemberProp::Computed(computed) => {
+                    let key = self.lower_expr(&computed.expr)?;
+                    match self.infer_expr_type(&key)? {
+                        HirType::Str => (
+                            HirExpr::JsonKey(Box::new(unwrapped), Box::new(key)),
+                            HirType::Json,
+                        ),
+                        HirType::F64 => (
+                            HirExpr::JsonIndex(Box::new(unwrapped), Box::new(key)),
+                            HirType::Json,
+                        ),
+                        other => {
+                            return Err(format!(
+                                "optional JSON key must be string or number, got {other:?}"
+                            ))
+                        }
+                    }
+                }
+                _ => return Err("unsupported optional JSON member".into()),
+            },
             other => {
                 return Err(format!(
                     "optional member access is not yet supported on {other:?}"

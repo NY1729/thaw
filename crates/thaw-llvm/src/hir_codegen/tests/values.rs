@@ -1843,6 +1843,42 @@ fn compiles_optional_object_member_access() {
 }
 
 #[test]
+fn compiles_optional_record_and_json_member_access() {
+    let source = r#"
+        function record(present: boolean): Record<string, number> | undefined {
+            if (present) return { value: 42 };
+            return undefined;
+        }
+        function key(): string {
+            console.log("key");
+            return "value";
+        }
+        function json(present: boolean): Json | null {
+            if (present) return JSON.parse("{\"name\":\"thaw\",\"items\":[10]}");
+            return null;
+        }
+        async function delayed(): Promise<Record<string, number> | undefined> {
+            await sleep(1);
+            return { value: 7 };
+        }
+        async function main(): Promise<void> {
+            console.log(record(true)?.value);
+            console.log(record(false)?.value);
+            console.log(record(true)?.[key()]);
+            console.log(record(false)?.[key()]);
+            console.log(String(json(true)?.name ?? JSON.parse("\"missing\"")));
+            console.log(String(json(false)?.name ?? JSON.parse("\"missing\"")));
+            console.log(Number(json(true)?.["items"]?.[0] ?? JSON.parse("0")));
+            console.log((await delayed())?.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "optional_record_json_member"),
+        "42\nundefined\nkey\n42\nundefined\nthaw\nmissing\n10\n7\n"
+    );
+}
+
+#[test]
 fn compiles_optional_array_and_tuple_access() {
     let source = r#"
         function numbers(present: boolean): number[] | undefined {
