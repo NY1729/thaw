@@ -2101,7 +2101,9 @@ returns participate in the same structural selection. Plain type aliases and
 interfaces resolve forward references, interface inheritance and compatible
 declaration merging before that selection. Same-layout literal unions such as
 `"read" | "write"` and readonly array annotations normalize to their native
-primitive or array layout. Straight-line `=` assignments update local and nested property
+primitive or array layout. Compatible object intersections merge their fields
+for the same structural selection, while conflicting fields remain unresolved.
+Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
 compound assignments invalidate the affected fact. String-literal computed
 object keys such as `{ ["value"]: 1 }` are supported. Object spreads from a

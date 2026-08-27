@@ -424,6 +424,37 @@ fn rewrite_external_class_methods_with_static(
                 let first = types.next()??;
                 types.all(|candidate| candidate.as_ref() == Some(&first)).then_some(first)
             }
+            TsType::TsUnionOrIntersectionType(
+                TsUnionOrIntersectionType::TsIntersectionType(intersection),
+            ) => {
+                let resolved = intersection
+                    .types
+                    .iter()
+                    .map(|element| source_ts_type(element, named))
+                    .collect::<Option<Vec<_>>>()?;
+                let first = resolved.first()?.clone();
+                if resolved.iter().all(|candidate| candidate == &first) {
+                    return Some(first);
+                }
+                let mut fields = Vec::new();
+                for ty in resolved {
+                    let thaw_hir::HirType::Object(object_fields) = ty else {
+                        return None;
+                    };
+                    for (name, field_type) in object_fields {
+                        if let Some((_, existing)) =
+                            fields.iter().find(|(existing, _)| existing == &name)
+                        {
+                            if existing != &field_type {
+                                return None;
+                            }
+                        } else {
+                            fields.push((name, field_type));
+                        }
+                    }
+                }
+                Some(thaw_hir::HirType::Object(fields))
+            }
             TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
                 source_ts_type(&operator.type_ann, named)
             }

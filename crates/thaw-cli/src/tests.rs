@@ -1085,6 +1085,45 @@ fn selects_overloads_through_literal_unions_and_readonly_arrays() {
 }
 
 #[test]
+fn selects_object_overloads_through_intersection_aliases() {
+    let source = r#"type Base = { value: number }; type Numeric = Base & { enabled: boolean }; function config(): Numeric { return unknown; } const box = new NativeBox(1); box.configure(config());"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into(), vec![])],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::Str,
+                )])],
+            ),
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::F64,
+                )])],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__configure_number(box, config())"));
+}
+
+#[test]
 fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
     let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
     let rewritten = rewrite_external_class_methods(
