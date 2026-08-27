@@ -443,6 +443,67 @@ fn cyclic_generic_aliases_fall_back() {
 }
 
 #[test]
+fn classifies_finite_mapped_types() {
+    let funcs = parse_dts(
+        r#"export declare function inspect(
+                value: { [K in "left" | "right"]?: number }
+            ): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("finite mapped types should expand to fixed object fields");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            ("left".into(), HirType::Optional(Box::new(HirType::F64)),),
+            ("right".into(), HirType::Optional(Box::new(HirType::F64)),),
+        ])]
+    );
+}
+
+#[test]
+fn resolves_keyed_mapped_types_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export type Snapshot<T> = { [K in keyof T]: T[K] };
+            export type Complete<T> = { [K in keyof T]-?: T[K] };
+            export interface Config { host?: string; port: number; }
+            export declare function snapshot(value: Snapshot<Config>): Complete<Config>;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("keyed mapped types should resolve each substituted property");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            ("host".into(), HirType::Optional(Box::new(HirType::Str)),),
+            ("port".into(), HirType::F64),
+        ])]
+    );
+    assert_eq!(
+        signature.ret,
+        HirType::Object(vec![
+            ("host".into(), HirType::Str),
+            ("port".into(), HirType::F64),
+        ])
+    );
+}
+
+#[test]
+fn mapped_key_remapping_falls_back() {
+    let funcs = parse_dts(
+        r#"export type Renamed = { [K in "value" as `get${K}`]: number };
+            export declare function inspect(value: Renamed): string;"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn generates_native_addon_wrapper_and_module_initializer() {
     let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
     let shim = generate_native_addon_shim(&funcs, &[]);
