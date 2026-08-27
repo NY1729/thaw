@@ -609,7 +609,13 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 }
 
-include!("hir_codegen/async_frames/planning.rs");
+include!("hir_codegen/async_frames/planning/plan.rs");
+include!("hir_codegen/async_frames/planning/analysis.rs");
+include!("hir_codegen/async_frames/planning/extraction.rs");
+include!("hir_codegen/async_frames/planning/try.rs");
+include!("hir_codegen/async_frames/planning/loops.rs");
+include!("hir_codegen/async_frames/planning/branches.rs");
+include!("hir_codegen/async_frames/planning/validation.rs");
 include!("hir_codegen/async_frames/codegen.rs");
 
 include!("hir_codegen/statements.rs");
