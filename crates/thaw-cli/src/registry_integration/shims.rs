@@ -210,6 +210,58 @@ fn generate_napi_class_constructors(
     helpers
 }
 
+fn generate_napi_class_property_getter(
+    class: &str,
+    property: &str,
+    ty: &thaw_bridge::DtsType,
+    is_static: bool,
+    shim: &mut String,
+) -> Option<String> {
+    let thaw_bridge::DtsType::Native(ty) = ty else {
+        return None;
+    };
+    let rendered = render_dynamic_type(ty)?;
+    let prefix = if is_static { "staticgetter" } else { "getter" };
+    let runtime_key = format!("${prefix}${class}${property}");
+    let encoded = runtime_key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let symbol = format!("__thaw_typed_napi_{encoded}");
+    shim.push_str(&format!(
+        "declare function {symbol}({}): {rendered};\n",
+        if is_static { "" } else { "receiver: JsValue" }
+    ));
+    Some(symbol)
+}
+
+fn generate_napi_class_property_setter(
+    class: &str,
+    property: &str,
+    ty: &thaw_bridge::DtsType,
+    is_static: bool,
+    shim: &mut String,
+) -> Option<(String, thaw_hir::HirType)> {
+    let thaw_bridge::DtsType::Native(ty) = ty else {
+        return None;
+    };
+    let rendered = render_dynamic_type(ty)?;
+    let prefix = if is_static { "staticsetter" } else { "setter" };
+    let runtime_key = format!("${prefix}${class}${property}");
+    let encoded = runtime_key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let symbol = format!("__thaw_typed_napi_{encoded}");
+    shim.push_str(&format!(
+        "declare function {symbol}({}value: {rendered}): {rendered};\n",
+        if is_static { "" } else { "receiver: JsValue, " }
+    ));
+    Some((symbol, ty.clone()))
+}
+
 fn generate_napi_class_method_overloads(
     class: &thaw_bridge::DtsClass,
     is_static: bool,
@@ -753,6 +805,69 @@ fn generate_registry_shims(
                         symbol,
                         value_type.clone(),
                     ));
+                }
+                for property in &class.properties {
+                    let has_getter = class.methods.iter().any(|method| {
+                        method.name == property.name
+                            && method.is_static == property.is_static
+                            && method.kind == thaw_bridge::DtsMethodKind::Getter
+                    });
+                    if !has_getter {
+                        if let Some(symbol) = generate_napi_class_property_getter(
+                            &class.name,
+                            &property.name,
+                            &property.ty,
+                            property.is_static,
+                            &mut shim,
+                        ) {
+                            if property.is_static {
+                                static_class_getter_rewrites.push((
+                                    qualifier_by_package[&pkg.name].clone(),
+                                    class.name.clone(),
+                                    property.name.clone(),
+                                    symbol,
+                                ));
+                            } else {
+                                class_getter_rewrites.push((
+                                    class.name.clone(),
+                                    property.name.clone(),
+                                    symbol,
+                                ));
+                            }
+                        }
+                    }
+
+                    let has_setter = class.methods.iter().any(|method| {
+                        method.name == property.name
+                            && method.is_static == property.is_static
+                            && method.kind == thaw_bridge::DtsMethodKind::Setter
+                    });
+                    if !property.readonly && !has_setter {
+                        if let Some((symbol, value_type)) = generate_napi_class_property_setter(
+                            &class.name,
+                            &property.name,
+                            &property.ty,
+                            property.is_static,
+                            &mut shim,
+                        ) {
+                            if property.is_static {
+                                static_class_setter_rewrites.push((
+                                    qualifier_by_package[&pkg.name].clone(),
+                                    class.name.clone(),
+                                    property.name.clone(),
+                                    symbol,
+                                    value_type,
+                                ));
+                            } else {
+                                class_setter_rewrites.push((
+                                    class.name.clone(),
+                                    property.name.clone(),
+                                    symbol,
+                                    value_type,
+                                ));
+                            }
+                        }
+                    }
                 }
                 for (method, symbol, argument_count, has_callback, parameter_types) in
                     generate_napi_class_method_overloads(class, true, &observed_arities, &mut shim)
