@@ -30,7 +30,10 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
 
-include!("runtime/native_values.rs");
+include!("runtime/native_values/numbers.rs");
+include!("runtime/native_values/strings.rs");
+include!("runtime/native_values/arrays.rs");
+include!("runtime/abi.rs");
 
 #[derive(Clone, Copy)]
 struct PromiseSubscription {

@@ -772,6 +772,13 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        if matches!(ty, HirType::Array(_) | HirType::Tuple(_)) {
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_keys".to_string())),
+                                vec![value],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
                                 "`{label}` currently requires a fixed object, got {ty:?}"

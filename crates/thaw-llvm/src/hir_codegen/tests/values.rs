@@ -2194,11 +2194,16 @@ fn compiles_object_keys_for_fixed_objects() {
             console.log(Object.keys(jsonObject).join(","));
             console.log(Object.getOwnPropertyNames(JSON.parse("[10,20]")).join("|"));
             console.log(Reflect.ownKeys(JSON.parse("true")).length);
+            const array: number[] = [10, 20, 30];
+            console.log(Object.keys(array).join(","));
+            const tuple: [number, string] = [1, "two"];
+            console.log(Object.getOwnPropertyNames(tuple).join("|"));
+            console.log(Reflect.ownKeys([]).length);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_keys"),
-        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\n0|1\n0\n"
+        "receiver\nfirst,second\nfirst-second\nawaited\nfirst|second\nreceiver\nfirst/second\nawaited\nfirst+second\n0\nsecond,first\n0|1\n0\n0,1,2\n0|1\n0\n"
     );
 }
 
