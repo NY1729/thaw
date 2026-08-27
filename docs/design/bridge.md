@@ -387,7 +387,8 @@ survives native deallocation and remains valid through return and catch/finally
 paths. Null pointers are preserved and never passed to a destructor. Ownership
 metadata supports `string`, all four primitive-array types, and portable/packed object returns
 whose recursively nested fields are scalars, strings, supported arrays, or other
-supported objects; unsupported ownership combinations are compilation errors.
+supported objects, plus portable tuple returns composed from the same leaves;
+unsupported ownership combinations are compilation errors.
 Nested objects are rebuilt into arena-owned Thaw layouts. Object ownership is
 applied independently to each string and array-data leaf, so every non-null
 pointer is copied and its optional destructor is called exactly once. A
