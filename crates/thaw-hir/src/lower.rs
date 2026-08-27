@@ -2605,6 +2605,8 @@ include!("lower/arrays.rs");
 
 impl<'a> FnLowerer<'a> {}
 
+include!("lower/invocations/static_builtins.rs");
+
 include!("lower/invocations.rs");
 
 impl<'a> FnLowerer<'a> {}
