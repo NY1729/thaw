@@ -1853,6 +1853,28 @@ fn compiles_date_utc_and_parse() {
 }
 
 #[test]
+fn compiles_date_multi_arg_constructor() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const a: Date = new Date(2024, 0, 1, 0, 0, 0, 500);
+            console.log(a.toISOString());
+            const b: Date = new Date(2024, 0);
+            console.log(b.toISOString());
+            // Month index 12 (one past December) rolls into next January.
+            const c: Date = new Date(2024, 12, 1);
+            console.log(c.toISOString());
+            // Two-digit year quirk: 70 means 1970.
+            const d: Date = new Date(70, 0, 1);
+            console.log(d.getTime());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_multi_arg_constructor"),
+        "2024-01-01T00:00:00.500Z\n2024-01-01T00:00:00.000Z\n2025-01-01T00:00:00.000Z\n0\n"
+    );
+}
+
+#[test]
 fn compiles_date_to_json() {
     let source = r#"
         function printJson(value: string | null): void {
