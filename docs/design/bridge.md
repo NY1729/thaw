@@ -439,8 +439,8 @@ declaration. Scalar values are passed as C `double`, default-promoted `int`,
 NUL-terminated `const char *`, or opaque `uint64_t` handles. Each supported
 array element expands to `(const element *, int64_t)`. Each fixed object recursively
 expands its declaration-ordered number, promoted-boolean, string, handle,
-`number[]`, or child-object fields; fixed arguments remain
-subject to the ordinary marshal rules. Version 4 `variadicAbi` can replace the
+any supported primitive-array, or child-object fields. Fixed object arguments
+use the same recursive field and pointer-length expansion. Version 4 `variadicAbi` can replace the
 number default with `i32`, `i64`, `u32`, or `u64`; LLVM performs the requested
 floating-point-to-integer conversion before the variadic call. Optional and
 nullable values prepend a default-promoted `int` present tag. Nullish values

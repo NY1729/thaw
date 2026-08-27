@@ -2986,6 +2986,82 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
+    let source = r#"
+        declare function native_bundle(value: {
+            label: string;
+            numbers: number[];
+            flags: boolean[];
+            nested: { names: string[] };
+        }): number;
+
+        function main(): void {
+            console.log(native_bundle({
+                label: "bundle",
+                numbers: [1, 2],
+                flags: [true, false],
+                nested: { names: ["left", "right"] }
+            }));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "ffi_nested_object_arrays");
+    compiler.compile_program(&program).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-hir-codegen-test-ffi-nested-object-arrays-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("out.o");
+    let exe_path = dir.join("out");
+    let native_c_path = dir.join("native.c");
+    let native_obj_path = dir.join("native.o");
+    compiler.write_object_file(&obj_path).unwrap();
+    std::fs::write(
+        &native_c_path,
+        "#include <stdint.h>\n\
+         #include <string.h>\n\
+         double native_bundle(\n\
+           const char *label,\n\
+           const double *numbers, int64_t number_len,\n\
+           const uint8_t *flags, int64_t flag_len,\n\
+           const char **names, int64_t name_len\n\
+         ) {\n\
+           return strcmp(label, \"bundle\") == 0 &&\n\
+             number_len == 2 && numbers[0] == 1 && numbers[1] == 2 &&\n\
+             flag_len == 2 && flags[0] == 1 && flags[1] == 0 &&\n\
+             name_len == 2 && strcmp(names[0], \"left\") == 0 && strcmp(names[1], \"right\") == 0\n\
+             ? 42 : 0;\n\
+         }\n",
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .arg("-c")
+        .arg(&native_c_path)
+        .arg("-o")
+        .arg(&native_obj_path)
+        .status()
+        .unwrap()
+        .success());
+    let arena_lib = build_staticlib("thaw-arena");
+    assert!(Command::new("cc")
+        .arg(&obj_path)
+        .arg(&native_obj_path)
+        .arg(&arena_lib)
+        .arg("-o")
+        .arg(&exe_path)
+        .status()
+        .unwrap()
+        .success());
+    let output = Command::new(&exe_path).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Same gap, for `Object` params: a real C function is far more
 /// likely to be a flat multi-argument function than to agree with
 /// Thaw's own arena struct layout, so an object-typed FFI parameter

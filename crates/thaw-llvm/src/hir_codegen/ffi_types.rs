@@ -429,26 +429,35 @@ impl<'ctx> HirCompiler<'ctx> {
                     out.push(self.context.ptr_type(AddressSpace::default()).into());
                     out.push(self.context.i64_type().into());
                 }
-                HirType::Array(elem)
-                    if matches!(
-                        elem.as_ref(),
-                        HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
-                    ) =>
-                {
-                    out.push(self.context.ptr_type(AddressSpace::default()).into());
-                    out.push(self.context.i64_type().into());
-                }
-                HirType::Object(fields) => {
-                    for (field_name, field_ty) in fields {
-                        let field_llvm_ty = self
-                            .basic_type(field_ty)
-                            .map_err(|e| format!("FFI object field `{field_name}`: {e}"))?;
-                        out.push(field_llvm_ty.into());
-                    }
-                }
-                other => out.push(self.basic_type(other).map(BasicMetadataTypeEnum::from)?),
+                other => self.append_ffi_param_type(other, &mut out)?,
             }
         }
         Ok(out)
+    }
+
+    fn append_ffi_param_type(
+        &self,
+        ty: &HirType,
+        out: &mut Vec<BasicMetadataTypeEnum<'ctx>>,
+    ) -> Result<(), String> {
+        match ty {
+            HirType::Array(element)
+                if matches!(
+                    element.as_ref(),
+                    HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
+                ) =>
+            {
+                out.push(self.context.ptr_type(AddressSpace::default()).into());
+                out.push(self.context.i64_type().into());
+            }
+            HirType::Object(fields) => {
+                for (name, field) in fields {
+                    self.append_ffi_param_type(field, out)
+                        .map_err(|error| format!("FFI object field `{name}`: {error}"))?;
+                }
+            }
+            other => out.push(self.basic_type(other).map(BasicMetadataTypeEnum::from)?),
+        }
+        Ok(())
     }
 }
