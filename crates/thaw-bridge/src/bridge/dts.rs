@@ -626,6 +626,12 @@ fn classify_ts_type(
     generic_interfaces: &GenericInterfaces,
 ) -> DtsType {
     match ty {
+        TsType::TsParenthesizedType(parenthesized) => {
+            classify_ts_type(&parenthesized.type_ann, interfaces, generic_interfaces)
+        }
+        TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
+            classify_ts_type(&operator.type_ann, interfaces, generic_interfaces)
+        }
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => DtsType::Native(HirType::F64),
             TsKeywordTypeKind::TsStringKeyword => DtsType::Native(HirType::Str),
@@ -1102,6 +1108,22 @@ fn resolve_ts_type_with_substitution(
     }
 
     match ty {
+        TsType::TsParenthesizedType(parenthesized) => resolve_ts_type_with_substitution(
+            &parenthesized.type_ann,
+            substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        ),
+        TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
+            resolve_ts_type_with_substitution(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        }
         TsType::TsArrayType(arr) => {
             match resolve_ts_type_with_substitution(
                 &arr.elem_type,

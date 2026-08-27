@@ -376,6 +376,26 @@ fn classifies_tuples_as_fast_path() {
 }
 
 #[test]
+fn classifies_readonly_and_parenthesized_native_collections() {
+    let funcs = parse_dts(
+        "export declare function f(values: readonly string[], pair: readonly [number, string], flags: (boolean[])): readonly boolean[];",
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("readonly native collections should preserve their ABI layout");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Array(Box::new(HirType::Str)),
+            HirType::Tuple(vec![HirType::F64, HirType::Str]),
+            HirType::Array(Box::new(HirType::Bool)),
+        ]
+    );
+    assert_eq!(signature.ret, HirType::Array(Box::new(HirType::Bool)));
+}
+
+#[test]
 fn classifies_typed_callback_parameter_as_fast_path() {
     let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
     let Classification::FastPath(signature) = classify(&funcs[0]) else {
