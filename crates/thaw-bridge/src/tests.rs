@@ -532,6 +532,72 @@ fn rejects_unknown_indexed_access_properties() {
 }
 
 #[test]
+fn classifies_pick_and_omit_utility_types() {
+    let funcs = parse_dts(
+        r#"export interface Config {
+                host: string;
+                port: number;
+                secure: boolean;
+            }
+            export declare function project(
+                input: Pick<Config, "host" | "secure">
+            ): Omit<Config, "port">;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("finite Pick/Omit utility types should resolve");
+    };
+    let projected = HirType::Object(vec![
+        ("host".into(), HirType::Str),
+        ("secure".into(), HirType::Bool),
+    ]);
+    assert_eq!(signature.params, vec![projected.clone()]);
+    assert_eq!(signature.ret, projected);
+}
+
+#[test]
+fn resolves_pick_and_omit_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; port: number; }
+            export interface Projection<T> {
+                selected: Pick<T, "host">;
+                remainder: Omit<T, "host">;
+            }
+            export declare function inspect(value: Projection<Config>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("Pick/Omit should resolve after generic substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            (
+                "selected".into(),
+                HirType::Object(vec![("host".into(), HirType::Str)]),
+            ),
+            (
+                "remainder".into(),
+                HirType::Object(vec![("port".into(), HirType::F64)]),
+            ),
+        ])]
+    );
+}
+
+#[test]
+fn rejects_unknown_pick_and_omit_keys() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; }
+            export declare function inspect(value: Pick<Config, "missing">): string;"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn classifies_typed_callback_parameter_as_fast_path() {
     let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
     let Classification::FastPath(signature) = classify(&funcs[0]) else {
