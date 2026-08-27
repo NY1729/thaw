@@ -282,7 +282,14 @@ fn rewrite_external_class_methods_with_static(
                 {
                     Some(thaw_hir::HirType::F64)
                 }
+                UnaryOp::Tilde
+                    if source_expr_type(&unary.arg, variables, functions)
+                        == Some(thaw_hir::HirType::F64) =>
+                {
+                    Some(thaw_hir::HirType::F64)
+                }
                 UnaryOp::Bang => Some(thaw_hir::HirType::Bool),
+                UnaryOp::TypeOf => Some(thaw_hir::HirType::Str),
                 _ => None,
             },
             Expr::Bin(binary) => {
@@ -290,8 +297,24 @@ fn rewrite_external_class_methods_with_static(
                 let right = source_expr_type(&binary.right, variables, functions);
                 match binary.op {
                     BinaryOp::Add
-                        if left == Some(thaw_hir::HirType::Str)
-                            && right == Some(thaw_hir::HirType::Str) =>
+                        if matches!(left, Some(thaw_hir::HirType::Str))
+                            && matches!(
+                                right,
+                                Some(
+                                    thaw_hir::HirType::F64
+                                        | thaw_hir::HirType::Str
+                                        | thaw_hir::HirType::Bool
+                                )
+                            )
+                            || matches!(right, Some(thaw_hir::HirType::Str))
+                                && matches!(
+                                    left,
+                                    Some(
+                                        thaw_hir::HirType::F64
+                                            | thaw_hir::HirType::Str
+                                            | thaw_hir::HirType::Bool
+                                    )
+                                ) =>
                     {
                         Some(thaw_hir::HirType::Str)
                     }
@@ -301,6 +324,12 @@ fn rewrite_external_class_methods_with_static(
                     | BinaryOp::Div
                     | BinaryOp::Mod
                     | BinaryOp::Exp
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitAnd
+                    | BinaryOp::LShift
+                    | BinaryOp::RShift
+                    | BinaryOp::ZeroFillRShift
                         if left == Some(thaw_hir::HirType::F64)
                             && right == Some(thaw_hir::HirType::F64) =>
                     {
@@ -314,6 +343,13 @@ fn rewrite_external_class_methods_with_static(
                     | BinaryOp::LtEq
                     | BinaryOp::Gt
                     | BinaryOp::GtEq => Some(thaw_hir::HirType::Bool),
+                    BinaryOp::LogicalAnd
+                    | BinaryOp::LogicalOr
+                    | BinaryOp::NullishCoalescing
+                        if left.is_some() && left == right =>
+                    {
+                        left
+                    }
                     _ => None,
                 }
             }
