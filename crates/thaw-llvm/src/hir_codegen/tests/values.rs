@@ -2222,11 +2222,16 @@ fn compiles_object_has_own_for_fixed_objects() {
             const empty: {} = {};
             console.log(Object.hasOwn(empty, "value"));
             console.log(Object.hasOwn(await delayedConfig(), await delayedKey()));
+            const jsonObject: Json = JSON.parse("{\"value\":1}");
+            console.log(Object.hasOwn(jsonObject, "value"));
+            console.log(Object.hasOwn(jsonObject, "missing"));
+            console.log(Object.hasOwn(JSON.parse("[10,20]"), "1"));
+            console.log(Object.hasOwn(JSON.parse("[10,20]"), "length"));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_has_own"),
-        "object\nkey\ntrue\nfalse\ntrue\nfalse\nawaited-object\nawaited-key\ntrue\n"
+        "object\nkey\ntrue\nfalse\ntrue\nfalse\nawaited-object\nawaited-key\ntrue\ntrue\nfalse\ntrue\ntrue\n"
     );
 }
 
