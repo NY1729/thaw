@@ -1456,6 +1456,10 @@ The workspace crates have narrow responsibilities:
 - `encodeURIComponent` percent-encodes every UTF-8 byte outside the ASCII
   unreserved set (letters, digits and `- _ . ! ~ * ' ( )`), accepting an
   awaited string argument
+- `decodeURIComponent` percent-decodes its argument and throws `URI
+  malformed` for an incomplete or non-hexadecimal escape or a decoded byte
+  sequence that is not valid UTF-8, via a native null-pointer failure signal
+  checked by the generated code before returning
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
