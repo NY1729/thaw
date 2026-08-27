@@ -48,6 +48,35 @@ fn console_log_accepts_multiple_arguments_after_evaluating_them_in_order() {
 }
 
 #[test]
+fn console_log_serializes_arrays_objects_and_json_values() {
+    let source = r#"
+        interface Item {
+            name: string;
+            active: boolean;
+            scores: number[];
+        }
+        function main(): void {
+            const numbers: number[] = [1, 2];
+            const strings: string[] = ["a", "b"];
+            const flags: boolean[] = [true, false];
+            const matrix: number[][] = [[1, 2], [3]];
+            const item: Item = { name: "thaw", active: true, scores: [4, 5] };
+            const maybe: Item | undefined = item;
+            console.log(numbers, strings, flags);
+            console.log(matrix);
+            console.log(item);
+            console.log(maybe);
+            console.log(JSON.parse("{\"nested\":[1,true,null]}"));
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "structured_console_log"),
+        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"nested\":[1,true,null]}\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {
