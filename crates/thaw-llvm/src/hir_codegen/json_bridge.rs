@@ -265,7 +265,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?
         };
-        let mut value = self
+        let value = self
             .builder
             .build_load(
                 self.basic_type(element_type)?,
@@ -273,6 +273,83 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_array_element_value",
             )
             .map_err(|error| error.to_string())?;
+        self.compile_json_array_push_native(json, value, element_type)?;
+        let next = self
+            .builder
+            .build_int_add(
+                index.as_basic_value().into_int_value(),
+                i64_type.const_int(1, false),
+                "console_array_increment",
+            )
+            .map_err(|error| error.to_string())?;
+        let body_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("array conversion lost its body block")?;
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+
+        self.builder.position_at_end(done);
+        Ok(json)
+    }
+
+    fn compile_native_tuple_to_json(
+        &mut self,
+        tuple: PointerValue<'ctx>,
+        element_types: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "console_tuple_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_array_new returned no value")?;
+        let stride = element_types
+            .iter()
+            .map(array_element_storage_bytes)
+            .max()
+            .unwrap_or(ARRAY_ELEM_BYTES);
+        for (index, element_type) in element_types.iter().enumerate() {
+            let offset = self
+                .context
+                .i64_type()
+                .const_int(ARRAY_HEADER_BYTES + stride * index as u64, false);
+            let pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        tuple,
+                        &[offset],
+                        "console_tuple_element_pointer",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let value = self
+                .builder
+                .build_load(
+                    self.basic_type(element_type)?,
+                    pointer,
+                    "console_tuple_element_value",
+                )
+                .map_err(|error| error.to_string())?;
+            self.compile_json_array_push_native(json, value, element_type)?;
+        }
+        Ok(json)
+    }
+
+    fn compile_json_array_push_native(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        mut value: BasicValueEnum<'ctx>,
+        element_type: &HirType,
+    ) -> Result<(), String> {
         let push = match element_type {
             HirType::F64 => "thaw_json_array_push_number",
             HirType::Str => "thaw_json_array_push_string",
@@ -293,11 +370,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 value = self.compile_native_array_to_json(value.into_pointer_value(), nested)?;
                 "thaw_json_array_push_json"
             }
+            HirType::Tuple(elements) => {
+                value = self.compile_native_tuple_to_json(value.into_pointer_value(), elements)?;
+                "thaw_json_array_push_json"
+            }
             HirType::Object(_) => {
                 value = self.compile_native_object_to_json(value.into_pointer_value(), element_type)?;
                 "thaw_json_array_push_json"
             }
-            other => return Err(format!("console.log cannot serialize array element {other:?}")),
+            other => {
+                return Err(format!(
+                    "console.log cannot serialize collection element {other:?}"
+                ))
+            }
         };
         self.builder
             .build_call(
@@ -306,25 +391,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "console_array_push",
             )
             .map_err(|error| error.to_string())?;
-        let next = self
-            .builder
-            .build_int_add(
-                index.as_basic_value().into_int_value(),
-                i64_type.const_int(1, false),
-                "console_array_increment",
-            )
-            .map_err(|error| error.to_string())?;
-        let body_end = self
-            .builder
-            .get_insert_block()
-            .ok_or("array conversion lost its body block")?;
-        self.builder
-            .build_unconditional_branch(condition)
-            .map_err(|error| error.to_string())?;
-        index.add_incoming(&[(&next, body_end)]);
-
-        self.builder.position_at_end(done);
-        Ok(json)
+        Ok(())
     }
 
     fn compile_json_to_native_object(

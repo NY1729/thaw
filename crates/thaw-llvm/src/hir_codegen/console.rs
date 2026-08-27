@@ -123,6 +123,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ty @ (HirType::Json
             | HirType::Dictionary(_)
             | HirType::Array(_)
+            | HirType::Tuple(_)
             | HirType::Object(_)),
         ) = hir_type
         {
@@ -259,6 +260,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let json = match ty {
             HirType::Json | HirType::Dictionary(_) => value.into(),
             HirType::Array(element) => self.compile_native_array_to_json(value, element)?,
+            HirType::Tuple(elements) => self.compile_native_tuple_to_json(value, elements)?,
             HirType::Object(_) => self.compile_native_object_to_json(value, ty)?,
             _ => return Err(format!("console.log cannot serialize {ty:?}")),
         };
@@ -418,7 +420,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_)
             | HirType::Json
             | HirType::Dictionary(_)
-            | HirType::Array(_) => {
+            | HirType::Array(_)
+            | HirType::Tuple(_) => {
                 self.compile_console_structured(
                     value.into_pointer_value(),
                     member,
@@ -551,7 +554,8 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Object(_)
             | HirType::Json
             | HirType::Dictionary(_)
-            | HirType::Array(_) => {
+            | HirType::Array(_)
+            | HirType::Tuple(_) => {
                 self.compile_console_structured(
                     payload.into_pointer_value(),
                     payload_type,
