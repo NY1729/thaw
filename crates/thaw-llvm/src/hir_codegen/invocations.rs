@@ -706,6 +706,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "__thaw_json_keys" => {
                 return self.compile_single_arg_call("thaw_json_keys", args, "Object.keys")
             }
+            "__thaw_array_keys" => {
+                return self.compile_single_arg_call("thaw_array_keys", args, "Object.keys")
+            }
             "__thaw_json_values" => {
                 return self.compile_single_arg_call("thaw_json_values", args, "Object.values")
             }

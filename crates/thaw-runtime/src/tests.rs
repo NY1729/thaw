@@ -30,6 +30,24 @@ fn formats_numbers_with_javascript_string_boundaries() {
 }
 
 #[test]
+fn creates_numeric_property_keys_for_native_arrays() {
+    let array = [3_i64, 0, 0, 0];
+    let keys = unsafe { thaw_array_keys(array.as_ptr().cast()) };
+    assert_eq!(unsafe { keys.cast::<i64>().read() }, 3);
+    for index in 0..3 {
+        let key = unsafe {
+            keys.add(8 + index * 8)
+                .cast::<*const c_char>()
+                .read_unaligned()
+        };
+        assert_eq!(
+            unsafe { CStr::from_ptr(key) }.to_string_lossy(),
+            index.to_string()
+        );
+    }
+}
+
+#[test]
 fn parses_strings_with_javascript_number_grammar() {
     let cases = [
         ("", 0.0),
