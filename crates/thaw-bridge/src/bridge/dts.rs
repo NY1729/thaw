@@ -713,11 +713,11 @@ fn classify_ts_type(
 
         TsType::TsArrayType(arr) => {
             match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
-                DtsType::Native(HirType::F64) => {
-                    DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                DtsType::Native(element @ (HirType::F64 | HirType::Str)) => {
+                    DtsType::Native(HirType::Array(Box::new(element)))
                 }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
-                    "array element type {other:?} is not supported yet (only number[])"
+                    "array element type {other:?} is not supported yet (supports number[] and string[])"
                 )),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))
@@ -896,11 +896,11 @@ fn classify_ts_type(
                     return DtsType::Unsupported("Array<T> needs one type argument".to_string());
                 };
                 return match classify_ts_type(element, interfaces, generic_interfaces) {
-                    DtsType::Native(HirType::F64) => {
-                        DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                    DtsType::Native(element @ (HirType::F64 | HirType::Str)) => {
+                        DtsType::Native(HirType::Array(Box::new(element)))
                     }
                     _ => DtsType::Unsupported(
-                        "only number[] has a native dynamic layout".to_string(),
+                        "only number[] and string[] have native dynamic layouts".to_string(),
                     ),
                 };
             }
@@ -1058,12 +1058,12 @@ fn resolve_ts_type_with_substitution(
                         in_progress,
                     );
                     match (ref_name, resolved_elem) {
-                        ("Array", DtsType::Native(HirType::F64)) => {
-                            return DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                        ("Array", DtsType::Native(element @ (HirType::F64 | HirType::Str))) => {
+                            return DtsType::Native(HirType::Array(Box::new(element)))
                         }
                         ("Array", DtsType::Native(other)) => {
                             return DtsType::Unsupported(format!(
-                                "array element type {other:?} is not supported yet (only number[])"
+                                "array element type {other:?} is not supported yet (supports number[] and string[])"
                             ))
                         }
                         ("Array", DtsType::Unsupported(reason)) => {
@@ -1086,11 +1086,11 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             ) {
-                DtsType::Native(HirType::F64) => {
-                    DtsType::Native(HirType::Array(Box::new(HirType::F64)))
+                DtsType::Native(element @ (HirType::F64 | HirType::Str)) => {
+                    DtsType::Native(HirType::Array(Box::new(element)))
                 }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
-                    "array element type {other:?} is not supported yet (only number[])"
+                    "array element type {other:?} is not supported yet (supports number[] and string[])"
                 )),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))
@@ -1140,4 +1140,3 @@ fn resolve_ts_type_with_substitution(
         other => classify_ts_type(other, interfaces, generic_interfaces),
     }
 }
-
