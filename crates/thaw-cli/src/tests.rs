@@ -927,6 +927,47 @@ fn selects_object_overloads_from_explicit_object_types() {
 }
 
 #[test]
+fn selects_object_overloads_through_named_types_and_forward_references() {
+    let source = r#"const box = new NativeBox(1); let numeric: NumericConfig; function makeText(): TextConfig { return unknown; } box.configure(numeric); box.configure(makeText()); box.configure(unknown as NumericAlias); interface NumericConfig extends BaseConfig { nested: Detail; } type NumericAlias = NumericConfig; type TextConfig = { value: string }; interface BaseConfig { value: number; } interface BaseConfig { enabled: boolean; } type Detail = { label: string };"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into())],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::Str,
+                )])],
+            ),
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::F64,
+                )])],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__configure_number(box, numeric)"));
+    assert!(rewritten.contains("__configure_string(box, makeText())"));
+    assert!(rewritten.contains("__configure_number(box, unknown as NumericAlias)"));
+}
+
+#[test]
 fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
     let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
     let rewritten = rewrite_external_class_methods(

@@ -23,8 +23,8 @@ fn rewrite_external_class_methods_with_static(
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
         Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt,
-        SwitchStmt, TryStmt, TsEntityName, TsKeywordTypeKind, TsType, TsTypeElement, UnaryOp,
-        VarDeclarator, WhileStmt,
+        SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsType,
+        TsTypeAliasDecl, TsTypeElement, UnaryOp, VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -199,6 +199,7 @@ fn rewrite_external_class_methods_with_static(
         expression: &Expr,
         variables: &std::collections::HashMap<String, thaw_hir::HirType>,
         functions: &std::collections::HashMap<String, thaw_hir::HirType>,
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
     ) -> Option<thaw_hir::HirType> {
         match expression {
             Expr::Lit(Lit::Num(_)) => Some(thaw_hir::HirType::F64),
@@ -207,7 +208,7 @@ fn rewrite_external_class_methods_with_static(
             Expr::Array(array)
                 if array.elems.iter().all(|element| {
                     element.as_ref().is_some_and(|element| {
-                        source_expr_type(element.expr.as_ref(), variables, functions)
+                        source_expr_type(element.expr.as_ref(), variables, functions, named)
                             == Some(thaw_hir::HirType::F64)
                     })
                 }) =>
@@ -219,7 +220,7 @@ fn rewrite_external_class_methods_with_static(
                 for property in &object.props {
                     if let PropOrSpread::Spread(spread) = property {
                         let Some(thaw_hir::HirType::Object(spread_fields)) =
-                            source_expr_type(&spread.expr, variables, functions)
+                            source_expr_type(&spread.expr, variables, functions, named)
                         else {
                             return Some(thaw_hir::HirType::Object(Vec::new()));
                         };
@@ -246,7 +247,7 @@ fn rewrite_external_class_methods_with_static(
                                 _ => return Some(thaw_hir::HirType::Object(Vec::new())),
                             };
                             let Some(value_type) =
-                                source_expr_type(&property.value, variables, functions)
+                                source_expr_type(&property.value, variables, functions, named)
                             else {
                                 return Some(thaw_hir::HirType::Object(Vec::new()));
                             };
@@ -268,22 +269,22 @@ fn rewrite_external_class_methods_with_static(
             }
             Expr::Ident(identifier) => variables.get(identifier.sym.as_str()).cloned(),
             Expr::Paren(parenthesized) => {
-                source_expr_type(&parenthesized.expr, variables, functions)
+                source_expr_type(&parenthesized.expr, variables, functions, named)
             }
-            Expr::TsAs(assertion) => source_ts_type(&assertion.type_ann)
-                .or_else(|| source_expr_type(&assertion.expr, variables, functions)),
-            Expr::TsTypeAssertion(assertion) => source_ts_type(&assertion.type_ann)
-                .or_else(|| source_expr_type(&assertion.expr, variables, functions)),
+            Expr::TsAs(assertion) => source_ts_type(&assertion.type_ann, named)
+                .or_else(|| source_expr_type(&assertion.expr, variables, functions, named)),
+            Expr::TsTypeAssertion(assertion) => source_ts_type(&assertion.type_ann, named)
+                .or_else(|| source_expr_type(&assertion.expr, variables, functions, named)),
             Expr::Tpl(_) => Some(thaw_hir::HirType::Str),
             Expr::Unary(unary) => match unary.op {
                 UnaryOp::Plus | UnaryOp::Minus
-                    if source_expr_type(&unary.arg, variables, functions)
+                    if source_expr_type(&unary.arg, variables, functions, named)
                         == Some(thaw_hir::HirType::F64) =>
                 {
                     Some(thaw_hir::HirType::F64)
                 }
                 UnaryOp::Tilde
-                    if source_expr_type(&unary.arg, variables, functions)
+                    if source_expr_type(&unary.arg, variables, functions, named)
                         == Some(thaw_hir::HirType::F64) =>
                 {
                     Some(thaw_hir::HirType::F64)
@@ -293,8 +294,8 @@ fn rewrite_external_class_methods_with_static(
                 _ => None,
             },
             Expr::Bin(binary) => {
-                let left = source_expr_type(&binary.left, variables, functions);
-                let right = source_expr_type(&binary.right, variables, functions);
+                let left = source_expr_type(&binary.left, variables, functions, named);
+                let right = source_expr_type(&binary.right, variables, functions, named);
                 match binary.op {
                     BinaryOp::Add
                         if matches!(left, Some(thaw_hir::HirType::Str))
@@ -354,8 +355,8 @@ fn rewrite_external_class_methods_with_static(
                 }
             }
             Expr::Cond(conditional) => {
-                let consequent = source_expr_type(&conditional.cons, variables, functions);
-                let alternate = source_expr_type(&conditional.alt, variables, functions);
+                let consequent = source_expr_type(&conditional.cons, variables, functions, named);
+                let alternate = source_expr_type(&conditional.alt, variables, functions, named);
                 (consequent == alternate).then_some(consequent).flatten()
             }
             Expr::Call(call) => match &call.callee {
@@ -382,7 +383,7 @@ fn rewrite_external_class_methods_with_static(
                     return Some(thaw_hir::HirType::F64);
                 }
                 let thaw_hir::HirType::Object(fields) =
-                    source_expr_type(&member.obj, variables, functions)?
+                    source_expr_type(&member.obj, variables, functions, named)?
                 else {
                     return None;
                 };
@@ -395,7 +396,10 @@ fn rewrite_external_class_methods_with_static(
         }
     }
 
-    fn source_ts_type(ty: &TsType) -> Option<thaw_hir::HirType> {
+    fn source_ts_type(
+        ty: &TsType,
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
+    ) -> Option<thaw_hir::HirType> {
         match ty {
             TsType::TsKeywordType(keyword) => match keyword.kind {
                 TsKeywordTypeKind::TsNumberKeyword => Some(thaw_hir::HirType::F64),
@@ -404,7 +408,7 @@ fn rewrite_external_class_methods_with_static(
                 TsKeywordTypeKind::TsVoidKeyword => Some(thaw_hir::HirType::Void),
                 _ => None,
             },
-            TsType::TsArrayType(array) => match source_ts_type(&array.elem_type) {
+            TsType::TsArrayType(array) => match source_ts_type(&array.elem_type, named) {
                 Some(thaw_hir::HirType::F64) => {
                     Some(thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64)))
                 }
@@ -415,12 +419,12 @@ fn rewrite_external_class_methods_with_static(
                     return None;
                 };
                 if name.sym != *"Array" && name.sym != *"ReadonlyArray" {
-                    return None;
+                    return named.get(name.sym.as_str()).cloned();
                 }
                 let parameters = &reference.type_params.as_ref()?.params;
                 match parameters.as_slice() {
                     [element]
-                        if source_ts_type(element) == Some(thaw_hir::HirType::F64) =>
+                        if source_ts_type(element, named) == Some(thaw_hir::HirType::F64) =>
                     {
                         Some(thaw_hir::HirType::Array(Box::new(
                             thaw_hir::HirType::F64,
@@ -430,44 +434,127 @@ fn rewrite_external_class_methods_with_static(
                 }
             }
             TsType::TsTypeLit(literal) => {
-                let mut fields = Vec::with_capacity(literal.members.len());
-                for member in &literal.members {
-                    let TsTypeElement::TsPropertySignature(property) = member else {
-                        return None;
-                    };
-                    let name = match property.key.as_ref() {
-                        Expr::Ident(identifier) => identifier.sym.to_string(),
-                        Expr::Lit(Lit::Str(value)) => {
-                            value.value.to_string_lossy().into_owned()
-                        }
-                        Expr::Lit(Lit::Num(value)) => value.value.to_string(),
-                        _ => return None,
-                    };
-                    let mut ty = source_ts_type(&property.type_ann.as_ref()?.type_ann)?;
-                    if property.optional {
-                        ty = thaw_hir::HirType::Optional(Box::new(ty));
-                    }
-                    fields.push((name, ty));
-                }
-                Some(thaw_hir::HirType::Object(fields))
+                source_type_members(&literal.members, named).map(thaw_hir::HirType::Object)
             }
-            TsType::TsParenthesizedType(parenthesized) => source_ts_type(&parenthesized.type_ann),
+            TsType::TsParenthesizedType(parenthesized) => {
+                source_ts_type(&parenthesized.type_ann, named)
+            }
             _ => None,
         }
     }
 
+    fn source_type_property_name(key: &Expr) -> Option<String> {
+        match key {
+            Expr::Ident(identifier) => Some(identifier.sym.to_string()),
+            Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().into_owned()),
+            Expr::Lit(Lit::Num(value)) => Some(value.value.to_string()),
+            _ => None,
+        }
+    }
+
+    fn source_type_members(
+        members: &[TsTypeElement],
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
+    ) -> Option<Vec<(String, thaw_hir::HirType)>> {
+        let mut fields = Vec::with_capacity(members.len());
+        for member in members {
+            let TsTypeElement::TsPropertySignature(property) = member else {
+                return None;
+            };
+            let name = source_type_property_name(&property.key)?;
+            if fields.iter().any(|(existing, _)| existing == &name) {
+                return None;
+            }
+            let mut ty = source_ts_type(&property.type_ann.as_ref()?.type_ann, named)?;
+            if property.optional {
+                ty = thaw_hir::HirType::Optional(Box::new(ty));
+            }
+            fields.push((name, ty));
+        }
+        Some(fields)
+    }
+
+    fn source_interfaces_type(
+        name: &str,
+        declarations: &[TsInterfaceDecl],
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
+    ) -> Option<thaw_hir::HirType> {
+        let mut fields = Vec::new();
+        for declaration in declarations
+            .iter()
+            .filter(|declaration| declaration.id.sym == *name)
+        {
+            if declaration.type_params.is_some() {
+                return None;
+            }
+            for base in &declaration.extends {
+                if base.type_args.is_some() {
+                    return None;
+                }
+                let Expr::Ident(base_name) = base.expr.as_ref() else {
+                    return None;
+                };
+                let thaw_hir::HirType::Object(base_fields) =
+                    named.get(base_name.sym.as_str())?
+                else {
+                    return None;
+                };
+                for (field_name, ty) in base_fields {
+                    if let Some((_, existing)) =
+                        fields.iter().find(|(existing, _)| existing == field_name)
+                    {
+                        if existing != ty {
+                            return None;
+                        }
+                    } else {
+                        fields.push((field_name.clone(), ty.clone()));
+                    }
+                }
+            }
+            for (field_name, ty) in source_type_members(&declaration.body.body, named)? {
+                if let Some((_, existing)) = fields
+                    .iter()
+                    .find(|(existing, _)| existing == &field_name)
+                {
+                    if existing != &ty {
+                        return None;
+                    }
+                } else {
+                    fields.push((field_name, ty));
+                }
+            }
+        }
+        Some(thaw_hir::HirType::Object(fields))
+    }
+
     #[derive(Default)]
-    struct FunctionTypeFinder {
+    struct NamedTypeDeclarationFinder {
+        aliases: Vec<TsTypeAliasDecl>,
+        interfaces: Vec<TsInterfaceDecl>,
+    }
+
+    impl Visit for NamedTypeDeclarationFinder {
+        fn visit_ts_type_alias_decl(&mut self, declaration: &TsTypeAliasDecl) {
+            self.aliases.push(declaration.clone());
+        }
+
+        fn visit_ts_interface_decl(&mut self, declaration: &TsInterfaceDecl) {
+            self.interfaces.push(declaration.clone());
+        }
+    }
+
+    struct FunctionTypeFinder<'a> {
+        named: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         types: std::collections::HashMap<String, thaw_hir::HirType>,
     }
 
-    impl Visit for FunctionTypeFinder {
+    impl Visit for FunctionTypeFinder<'_> {
         fn visit_fn_decl(&mut self, declaration: &FnDecl) {
             if let Some(return_type) = declaration
                 .function
                 .return_type
                 .as_ref()
-                .and_then(|annotation| source_ts_type(&annotation.type_ann))
+                .and_then(|annotation| source_ts_type(&annotation.type_ann, self.named))
             {
                 self.types
                     .insert(declaration.ident.sym.to_string(), return_type);
@@ -484,7 +571,8 @@ fn rewrite_external_class_methods_with_static(
                     _ => None,
                 };
                 if let Some(return_type) =
-                    annotation.and_then(|annotation| source_ts_type(&annotation.type_ann))
+                    annotation
+                        .and_then(|annotation| source_ts_type(&annotation.type_ann, self.named))
                 {
                     self.types.insert(binding.id.sym.to_string(), return_type);
                 }
@@ -496,9 +584,11 @@ fn rewrite_external_class_methods_with_static(
     fn inferred_block_return_type(
         block: &FunctionBody,
         functions: &std::collections::HashMap<String, thaw_hir::HirType>,
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
     ) -> Option<thaw_hir::HirType> {
         struct Returns<'a> {
             functions: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+            named: &'a std::collections::HashMap<String, thaw_hir::HirType>,
             types: Vec<Option<thaw_hir::HirType>>,
         }
         impl Visit for Returns<'_> {
@@ -509,6 +599,7 @@ fn rewrite_external_class_methods_with_static(
                             expression,
                             &std::collections::HashMap::new(),
                             self.functions,
+                            self.named,
                         )
                     }));
             }
@@ -524,6 +615,7 @@ fn rewrite_external_class_methods_with_static(
 
         let mut returns = Returns {
             functions,
+            named,
             types: Vec::new(),
         };
         block.visit_with(&mut returns);
@@ -537,6 +629,7 @@ fn rewrite_external_class_methods_with_static(
 
     struct InferredFunctionTypeFinder<'a> {
         known: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+        named: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         additions: std::collections::HashMap<String, thaw_hir::HirType>,
     }
 
@@ -547,7 +640,7 @@ fn rewrite_external_class_methods_with_static(
                     .function
                     .body
                     .as_ref()
-                    .and_then(|body| inferred_block_return_type(body, self.known))
+                    .and_then(|body| inferred_block_return_type(body, self.known, self.named))
                 {
                     self.additions
                         .insert(declaration.ident.sym.to_string(), return_type);
@@ -563,19 +656,22 @@ fn rewrite_external_class_methods_with_static(
                     let return_type = match initializer.as_ref() {
                         Expr::Arrow(arrow) => match arrow.body.as_ref() {
                             ArrowFunctionBody::FunctionBody(block) => {
-                                inferred_block_return_type(block, self.known)
+                                inferred_block_return_type(block, self.known, self.named)
                             }
                             ArrowFunctionBody::Expr(expression) => source_expr_type(
                                 expression,
                                 &std::collections::HashMap::new(),
                                 self.known,
+                                self.named,
                             ),
                         },
                         Expr::Fn(function) => function
                             .function
                             .body
                             .as_ref()
-                            .and_then(|body| inferred_block_return_type(body, self.known)),
+                            .and_then(|body| {
+                                inferred_block_return_type(body, self.known, self.named)
+                            }),
                         _ => None,
                     };
                     if let Some(return_type) = return_type {
@@ -675,6 +771,7 @@ fn rewrite_external_class_methods_with_static(
         variables: std::collections::HashMap<String, String>,
         value_types: std::collections::HashMap<String, thaw_hir::HirType>,
         function_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
+        named_types: &'a std::collections::HashMap<String, thaw_hir::HirType>,
         callbacks: std::collections::HashSet<String>,
         edits: Vec<(u32, u32, String)>,
         switch_break_depth: usize,
@@ -935,7 +1032,9 @@ fn rewrite_external_class_methods_with_static(
                 if let Some(ty) = binding
                     .type_ann
                     .as_ref()
-                    .and_then(|annotation| source_ts_type(&annotation.type_ann))
+                    .and_then(|annotation| {
+                        source_ts_type(&annotation.type_ann, self.named_types)
+                    })
                 {
                     self.value_types.insert(binding.id.sym.to_string(), ty);
                 }
@@ -962,7 +1061,12 @@ fn rewrite_external_class_methods_with_static(
                 }
                 if binding.type_ann.is_none() {
                     if let Some(ty) =
-                        source_expr_type(initializer, &self.value_types, self.function_types)
+                        source_expr_type(
+                            initializer,
+                            &self.value_types,
+                            self.function_types,
+                            self.named_types,
+                        )
                     {
                         self.value_types.insert(binding.id.sym.to_string(), ty);
                     }
@@ -1010,6 +1114,7 @@ fn rewrite_external_class_methods_with_static(
                                         argument.expr.as_ref(),
                                         &self.value_types,
                                         self.function_types,
+                                        self.named_types,
                                     ) {
                                         score += u16::from(overload_type_score(declared, &actual)?);
                                     }
@@ -1066,6 +1171,7 @@ fn rewrite_external_class_methods_with_static(
                                             argument.expr.as_ref(),
                                             &self.value_types,
                                             self.function_types,
+                                            self.named_types,
                                         ) {
                                             score +=
                                                 u16::from(overload_type_score(declared, &actual)?);
@@ -1123,6 +1229,7 @@ fn rewrite_external_class_methods_with_static(
                                         &assignment.right,
                                         &self.value_types,
                                         self.function_types,
+                                        self.named_types,
                                     )
                                     .is_none_or(|actual| {
                                         overload_type_score(declared, &actual).is_some()
@@ -1158,6 +1265,7 @@ fn rewrite_external_class_methods_with_static(
                                                 &assignment.right,
                                                 &self.value_types,
                                                 self.function_types,
+                                                self.named_types,
                                             )
                                             .is_none_or(|actual| {
                                                 overload_type_score(declared, &actual).is_some()
@@ -1196,7 +1304,12 @@ fn rewrite_external_class_methods_with_static(
             }
             let inferred = (assignment.op == AssignOp::Assign)
                 .then(|| {
-                    source_expr_type(&assignment.right, &self.value_types, self.function_types)
+                    source_expr_type(
+                        &assignment.right,
+                        &self.value_types,
+                        self.function_types,
+                        self.named_types,
+                    )
                 })
                 .flatten();
             let assigned_class = (assignment.op == AssignOp::Assign)
@@ -1254,11 +1367,41 @@ fn rewrite_external_class_methods_with_static(
     }
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map(source)?;
-    let mut function_types = FunctionTypeFinder::default();
+    let mut named_declarations = NamedTypeDeclarationFinder::default();
+    module.visit_with(&mut named_declarations);
+    let mut named_types = std::collections::HashMap::new();
+    let interface_names = named_declarations
+        .interfaces
+        .iter()
+        .map(|interface| interface.id.sym.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    for _ in 0..=named_declarations.aliases.len() + named_declarations.interfaces.len() {
+        for alias in &named_declarations.aliases {
+            if alias.type_params.is_none() {
+                if let Some(ty) = source_ts_type(&alias.type_ann, &named_types) {
+                    named_types.insert(alias.id.sym.to_string(), ty);
+                }
+            }
+        }
+        for name in &interface_names {
+            if let Some(ty) = source_interfaces_type(
+                name,
+                &named_declarations.interfaces,
+                &named_types,
+            ) {
+                named_types.insert(name.clone(), ty);
+            }
+        }
+    }
+    let mut function_types = FunctionTypeFinder {
+        named: &named_types,
+        types: std::collections::HashMap::new(),
+    };
     module.visit_with(&mut function_types);
     loop {
         let mut inferred = InferredFunctionTypeFinder {
             known: &function_types.types,
+            named: &named_types,
             additions: std::collections::HashMap::new(),
         };
         module.visit_with(&mut inferred);
@@ -1281,6 +1424,7 @@ fn rewrite_external_class_methods_with_static(
         variables: std::collections::HashMap::new(),
         value_types: std::collections::HashMap::new(),
         function_types: &function_types.types,
+        named_types: &named_types,
         callbacks: std::collections::HashSet::new(),
         edits: Vec::new(),
         switch_break_depth: 0,
