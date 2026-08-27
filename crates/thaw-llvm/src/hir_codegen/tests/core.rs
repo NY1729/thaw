@@ -348,6 +348,11 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
             matrix: number[][];
             metadata: Record<string, number>;
         }
+        interface TaggedItem {
+            optional?: number;
+            nullable: number | null;
+            nullish: number | null | undefined;
+        }
         function items(): Record<string, Item> {
             return {
                 selected: { value: 1, label: "one" },
@@ -389,6 +394,12 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
                 selected: ["tuple", 17, { value: 18, label: "eighteen" }]
             };
         }
+        function taggedItems(): Record<string, TaggedItem> {
+            return {
+                selected: { optional: 19, nullable: null, nullish: undefined },
+                other: { nullable: 20, nullish: null }
+            };
+        }
         function main(): void {
             const direct: Item = items().selected;
             const {
@@ -405,18 +416,22 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
             ({ selected: selectedMatrix } = matrices());
             const rich: RichItem = richItems().selected;
             const tuple: [string, number, Item] = tuples().selected;
+            const tagged: TaggedItem = taggedItems().selected;
+            const taggedOther: TaggedItem = taggedItems().other;
             console.log(direct.value, direct.label, value, label, itemRest);
             console.log(selected, arrayRest);
             console.log(selectedLabels, selectedFlags);
             console.log(selectedItems[0].value, selectedItems[1].label, selectedMatrix);
             console.log(rich.tags, rich.matrix, rich.metadata.score);
             console.log(tuple[0], tuple[1], tuple[2].label);
+            console.log(tagged.optional, tagged.nullable, tagged.nullish);
+            console.log(taggedOther.optional, taggedOther.nullable, taggedOther.nullish);
         }
     "#;
 
     assert_eq!(
         compile_and_run(source, "structured_dictionary_destructuring"),
-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\ntuple 17 eighteen\n"
+        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
     );
 }
 
