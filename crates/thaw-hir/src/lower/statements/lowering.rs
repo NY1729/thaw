@@ -463,10 +463,10 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
                             .collect::<Vec<_>>(),
-                        HirType::Json => Vec::new(),
+                        HirType::Json | HirType::Dictionary(_) => Vec::new(),
                         _ => {
                             return Err(
-                                "`for...in` currently requires a fixed-shape object".into(),
+                                "`for...in` requires an object, dictionary, or JSON value".into(),
                             )
                         }
                     };
@@ -480,7 +480,7 @@ impl<'a> FnLowerer<'a> {
                         keys_name.clone(),
                         HirType::Array(Box::new(HirType::Str)),
                     );
-                    let keys = if object_type == HirType::Json {
+                    let keys = if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_json_keys".into())),
                             vec![HirExpr::Var(object_name.clone())],
