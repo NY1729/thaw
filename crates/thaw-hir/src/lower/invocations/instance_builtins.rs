@@ -3,6 +3,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             property,
             "charCodeAt" | "concat" | "trim" | "trimStart" | "trimEnd" | "repeat"
+                | "padStart" | "padEnd"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -213,6 +214,50 @@ impl<'a> FnLowerer<'a> {
                     bindings.extend(spread_bindings);
                     bindings.push((count_name, HirType::F64, count));
                     return self.wrap_call_argument_bindings(body, &bindings);
+                }
+                if matches!(property.sym.as_ref(), "padStart" | "padEnd") {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "string pad receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.padStart/padEnd")?;
+                    if arguments.is_empty() || arguments.len() > 2 {
+                        return Err(format!(
+                            "native `.{}()` expects one or two arguments",
+                            property.sym
+                        ));
+                    }
+                    let target_length = self.coerce_primitive_to_number(arguments[0].clone())?;
+                    let pad = match arguments.get(1) {
+                        Some(pad) => self.coerce_primitive_to_string(pad.clone())?,
+                        None => HirExpr::Lit(HirLit::Str(" ".into())),
+                    };
+                    let suffix = if property.sym == *"padStart" {
+                        "pad_start"
+                    } else {
+                        "pad_end"
+                    };
+                    let receiver_name = format!("__thaw_pad_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let length_name = format!("__thaw_pad_length_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let pad_name = format!("__thaw_pad_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(length_name.clone(), HirType::F64);
+                    self.scope.insert(pad_name.clone(), HirType::Str);
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(pad_name.clone()),
+                            HirExpr::Var(length_name.clone()),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((length_name, HirType::F64, target_length));
+                    bindings.push((pad_name, HirType::Str, pad));
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if matches!(property.sym.as_ref(), "toLowerCase" | "toUpperCase") {
                     if !call.args.is_empty() {
