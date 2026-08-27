@@ -249,7 +249,8 @@ The workspace crates have narrow responsibilities:
 - `process.env`, JSON operations, and both legacy blocking and Promise-based
   non-blocking HTTP GET
 - `console.log` with zero or multiple arguments, left-to-right argument
-  evaluation, space-separated output, and optional/nullable/union values
+  evaluation, space-separated output, optional/nullable/union values, and
+  JSON serialization of typed arrays, fixed objects, dictionaries and JSON values
 - Synchronous lowering of `async` functions and `await`
 - Ambient declarations and C ABI calls; number-array parameters become
   `(pointer, length)`, object parameters become scalar fields, and metadata-
