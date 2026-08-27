@@ -839,6 +839,82 @@ fn rewrite_external_class_methods_with_static(
         common_argument_result(expression, &arrow.params)
     }
 
+    fn block_argument_result(
+        body: &FunctionBody,
+        parameters: &[Pat],
+    ) -> Option<SourceFunctionResult> {
+        struct Returns<'a> {
+            parameters: &'a [Pat],
+            indices: Vec<usize>,
+            valid: bool,
+        }
+        impl Visit for Returns<'_> {
+            fn visit_return_stmt(&mut self, statement: &ReturnStmt) {
+                let Some(expression) = statement.arg.as_deref() else {
+                    self.valid = false;
+                    return;
+                };
+                let indices = if let Expr::Ident(identifier) = expression {
+                    self.parameters
+                        .iter()
+                        .position(
+                            |parameter| matches!(parameter, Pat::Ident(binding) if binding.id.sym == identifier.sym),
+                        )
+                        .map(|index| vec![index])
+                } else {
+                    common_argument_result(expression, self.parameters)
+                };
+                let Some(indices) = indices else {
+                    self.valid = false;
+                    return;
+                };
+                for index in indices {
+                    if !self.indices.contains(&index) {
+                        self.indices.push(index);
+                    }
+                }
+            }
+
+            fn visit_fn_decl(&mut self, _declaration: &FnDecl) {}
+
+            fn visit_arrow_expr(&mut self, _expression: &thaw_parser::ast::ArrowExpr) {}
+
+            fn visit_fn_expr(&mut self, _expression: &thaw_parser::ast::FnExpr) {}
+        }
+        let mut returns = Returns {
+            parameters,
+            indices: Vec::new(),
+            valid: true,
+        };
+        body.visit_with(&mut returns);
+        if !returns.valid {
+            return None;
+        }
+        match returns.indices.as_slice() {
+            [index] => Some(SourceFunctionResult::Argument(*index)),
+            [] => None,
+            _ => Some(SourceFunctionResult::CommonArguments(returns.indices)),
+        }
+    }
+
+    fn function_block_argument_result(function: &Function) -> Option<SourceFunctionResult> {
+        let parameters = function
+            .params
+            .iter()
+            .map(|parameter| parameter.pat.clone())
+            .collect::<Vec<_>>();
+        block_argument_result(function.body.as_ref()?, &parameters)
+    }
+
+    fn arrow_block_argument_result(
+        arrow: &thaw_parser::ast::ArrowExpr,
+    ) -> Option<SourceFunctionResult> {
+        let ArrowFunctionBody::FunctionBody(body) = arrow.body.as_ref() else {
+            return None;
+        };
+        block_argument_result(body, &arrow.params)
+    }
+
     fn forwarded_argument_result(
         expression: &Expr,
         parameters: &[Pat],
@@ -927,6 +1003,11 @@ fn rewrite_external_class_methods_with_static(
                     declaration.ident.sym.to_string(),
                     SourceFunctionResult::CommonArguments(indices),
                 );
+            } else if let Some(result) =
+                function_block_argument_result(&declaration.function)
+            {
+                self.types
+                    .insert(declaration.ident.sym.to_string(), result);
             }
             declaration.visit_children_with(self);
         }
@@ -971,6 +1052,17 @@ fn rewrite_external_class_methods_with_static(
                                 binding.id.sym.to_string(),
                                 SourceFunctionResult::CommonArguments(indices),
                             );
+                        } else {
+                            let result = match initializer.as_ref() {
+                                Expr::Arrow(arrow) => arrow_block_argument_result(arrow),
+                                Expr::Fn(function) => {
+                                    function_block_argument_result(&function.function)
+                                }
+                                _ => None,
+                            };
+                            if let Some(result) = result {
+                                self.types.insert(binding.id.sym.to_string(), result);
+                            }
                         }
                     }
                 }
