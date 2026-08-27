@@ -279,7 +279,8 @@ The workspace crates have narrow responsibilities:
   NUL-terminated `const char *`, or opaque 64-bit handles. Each supported array
   expands to `(const element *, int64_t)` and each fixed object expands to its
   declaration-ordered fields with C default promotions, recursively applying
-  the same rules to nested fixed objects and `number[]` fields. Optional and
+  the same rules to nested fixed objects and all four supported array fields.
+  Ordinary fixed object parameters use the same recursive expansion. Optional and
   nullable values prepend a promoted `int` present tag; nullish values prepend
   a promoted `int` state tag (`0` value, `1` null, `2` undefined), followed by
   the recursively expanded payload.

@@ -783,6 +783,76 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((packed, length))
     }
 
+    fn append_ffi_fixed_argument(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: &HirType,
+        output: &mut Vec<BasicMetadataValueEnum<'ctx>>,
+    ) -> Result<(), String> {
+        match ty {
+            HirType::Array(element) if element.as_ref() == &HirType::Bool => {
+                let (data, length) = self.pack_ffi_bool_array(
+                    value.into_pointer_value(),
+                    self.context.i8_type(),
+                    1,
+                )?;
+                output.push(data.into());
+                output.push(length.into());
+            }
+            HirType::Array(element)
+                if matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::JsValue) =>
+            {
+                let base = value.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                let length = self
+                    .builder
+                    .build_load(i64_type, base, "ffi_array_length")
+                    .map_err(|error| error.to_string())?;
+                let data = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            base,
+                            &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
+                            "ffi_array_data",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                output.push(data.into());
+                output.push(length.into());
+            }
+            HirType::Object(fields) => {
+                let base = value.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                for (index, (name, field_ty)) in fields.iter().enumerate() {
+                    let pointer = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                self.context.i8_type(),
+                                base,
+                                &[i64_type.const_int(object_field_offset(fields, index), false)],
+                                "ffi_object_field_pointer",
+                            )
+                            .map_err(|error| error.to_string())?
+                    };
+                    let field = self
+                        .builder
+                        .build_load(
+                            self.basic_type(field_ty)
+                                .map_err(|error| format!("FFI object field `{name}`: {error}"))?,
+                            pointer,
+                            "ffi_object_field",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    self.append_ffi_fixed_argument(field, field_ty, output)
+                        .map_err(|error| format!("FFI object field `{name}`: {error}"))?;
+                }
+            }
+            _ => output.push(value.into()),
+        }
+        Ok(())
+    }
+
     fn append_ffi_aggregate_vararg(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -945,74 +1015,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     compiled_args.push(pointer.into());
                     compiled_args.push(length.into());
                 }
-                // Thaw's own array value is a pointer to `[i64
-                // len][f64 elements...]` (`compile_array_lit`) --
-                // read the length back out of that header and pass
-                // `(elements pointer, len)` instead of the header
-                // pointer itself.
-                HirType::Array(elem) if elem.as_ref() == &HirType::Bool => {
-                    let (data, length) = self.pack_ffi_bool_array(
-                        value.into_pointer_value(),
-                        self.context.i8_type(),
-                        1,
-                    )?;
-                    compiled_args.push(data.into());
-                    compiled_args.push(length.into());
-                }
-                HirType::Array(elem)
-                    if matches!(elem.as_ref(), HirType::F64 | HirType::Str | HirType::JsValue) =>
-                {
-                    let base_ptr = value.into_pointer_value();
-                    let i64_type = self.context.i64_type();
-                    let len_val = self
-                        .builder
-                        .build_load(i64_type, base_ptr, "ffi_arr_len")
-                        .map_err(|e| e.to_string())?;
-                    let header_offset = i64_type.const_int(ARRAY_HEADER_BYTES, false);
-                    let elems_ptr = unsafe {
-                        self.builder
-                            .build_in_bounds_gep(
-                                self.context.i8_type(),
-                                base_ptr,
-                                &[header_offset],
-                                "ffi_arr_elems",
-                            )
-                            .map_err(|e| e.to_string())?
-                    };
-                    compiled_args.push(elems_ptr.into());
-                    compiled_args.push(len_val.into());
-                }
-                // Thaw's own object value is a pointer to a flat
-                // `[f64 field0]...[f64 fieldN-1]` buffer
-                // (`compile_object_lit`) in declared order -- read
-                // each field back out and pass it as its own scalar
-                // argument, in that same order.
-                HirType::Object(fields) => {
-                    let base_ptr = value.into_pointer_value();
-                    let i64_type = self.context.i64_type();
-                    for (i, (field_name, field_ty)) in fields.iter().enumerate() {
-                        let field_llvm_ty = self
-                            .basic_type(field_ty)
-                            .map_err(|e| format!("FFI object field `{field_name}`: {e}"))?;
-                        let offset = i64_type.const_int(object_field_offset(fields, i), false);
-                        let field_ptr = unsafe {
-                            self.builder
-                                .build_in_bounds_gep(
-                                    self.context.i8_type(),
-                                    base_ptr,
-                                    &[offset],
-                                    "ffi_field_ptr",
-                                )
-                                .map_err(|e| e.to_string())?
-                        };
-                        let field_val = self
-                            .builder
-                            .build_load(field_llvm_ty, field_ptr, "ffi_field")
-                            .map_err(|e| e.to_string())?;
-                        compiled_args.push(field_val.into());
-                    }
-                }
-                _ => compiled_args.push(value.into()),
+                _ => self.append_ffi_fixed_argument(value, param_ty, &mut compiled_args)?,
             }
         }
         if let Some(variadic) = &sig.variadic {
