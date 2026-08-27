@@ -1324,6 +1324,9 @@ The workspace crates have narrow responsibilities:
   `[string, Json][]` entries in the same key order
 - `Object.hasOwn` checks fixed-object fields and runtime JSON object/array own
   properties, including array indices and `length`
+- The `in` operator checks runtime JSON own properties with left-before-right
+  single evaluation, and `for...in` iterates JSON object keys or array indices
+  in JavaScript key order
 - `Object.is` applies SameValue comparison to native and runtime JSON
   primitives, preserves JSON object/array identity, and compares JSON
   primitives directly with native numbers, strings and booleans

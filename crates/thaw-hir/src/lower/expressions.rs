@@ -896,10 +896,33 @@ impl<'a> FnLowerer<'a> {
                 }
                 let value = match bin.op {
                     BinaryOp::In => {
+                        let right_type = self.infer_expr_type(&rhs)?;
+                        if right_type == HirType::Json {
+                            let lhs = self.coerce_primitive_to_string(lhs)?;
+                            let left_name = format!("__thaw_in_key_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(left_name.clone(), HirType::Str);
+                            let right_name = format!("__thaw_in_object_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(right_name.clone(), HirType::Json);
+                            self.wrap_call_argument_bindings(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+                                    vec![
+                                        HirExpr::Var(right_name.clone()),
+                                        HirExpr::Var(left_name.clone()),
+                                    ],
+                                ),
+                                &[
+                                    (left_name, HirType::Str, lhs),
+                                    (right_name, HirType::Json, rhs),
+                                ],
+                            )?
+                        } else {
                         let HirExpr::Lit(HirLit::Str(key)) = &lhs else {
                             return Err("fixed object `in` keys must be string literals".into());
                         };
-                        let HirType::Object(fields) = self.infer_expr_type(&rhs)? else {
+                        let HirType::Object(fields) = right_type else {
                             return Err("`in` currently requires a fixed-shape object".into());
                         };
                         let exists = fields.iter().any(|(name, _)| name == key);
@@ -917,6 +940,7 @@ impl<'a> FnLowerer<'a> {
                                 (right_name, right_type, rhs),
                             ],
                         )?
+                        }
                     }
                     BinaryOp::LogicalAnd | BinaryOp::LogicalOr => {
                         self.lower_logical_expr(
