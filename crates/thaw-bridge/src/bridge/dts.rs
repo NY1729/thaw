@@ -616,6 +616,45 @@ fn keyword_name(kind: TsKeywordTypeKind) -> &'static str {
     }
 }
 
+fn classify_indexed_access(object: DtsType, index: &TsType) -> DtsType {
+    let index = match index {
+        TsType::TsParenthesizedType(parenthesized) => parenthesized.type_ann.as_ref(),
+        other => other,
+    };
+    let key = match index {
+        TsType::TsLitType(literal) => match &literal.lit {
+            TsLit::Str(value) => value.value.to_string_lossy().into_owned(),
+            TsLit::Number(value) => value.value.to_string(),
+            _ => {
+                return DtsType::Unsupported(
+                    "indexed access requires a string or number literal key".into(),
+                )
+            }
+        },
+        _ => {
+            return DtsType::Unsupported(
+                "indexed access requires one statically known property key".into(),
+            )
+        }
+    };
+
+    match object {
+        DtsType::Native(HirType::Object(fields)) => fields
+            .into_iter()
+            .find_map(|(name, ty)| (name == key).then_some(DtsType::Native(ty)))
+            .unwrap_or_else(|| {
+                DtsType::Unsupported(format!(
+                    "indexed access key `{key}` does not exist on the object type"
+                ))
+            }),
+        DtsType::Native(HirType::Dictionary(element)) => DtsType::Native(*element),
+        DtsType::Native(other) => DtsType::Unsupported(format!(
+            "indexed access requires an object type, found {other:?}"
+        )),
+        unsupported => unsupported,
+    }
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -657,6 +696,11 @@ fn classify_ts_type(
             TsLit::Bool(_) => DtsType::Native(HirType::Bool),
             _ => DtsType::Unsupported("unsupported literal type".into()),
         },
+
+        TsType::TsIndexedAccessType(indexed) => classify_indexed_access(
+            classify_ts_type(&indexed.obj_type, interfaces, generic_interfaces),
+            &indexed.index_type,
+        ),
 
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
             let mut native = None;
@@ -1165,6 +1209,16 @@ fn resolve_ts_type_with_substitution(
                 unsupported => unsupported,
             }
         }
+        TsType::TsIndexedAccessType(indexed) => classify_indexed_access(
+            resolve_ts_type_with_substitution(
+                &indexed.obj_type,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ),
+            &indexed.index_type,
+        ),
         TsType::TsArrayType(arr) => {
             match resolve_ts_type_with_substitution(
                 &arr.elem_type,
