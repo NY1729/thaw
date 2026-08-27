@@ -354,6 +354,28 @@ fn classifies_js_value_array_as_fast_path() {
 }
 
 #[test]
+fn classifies_tuples_as_fast_path() {
+    let funcs =
+        parse_dts("export declare function f(value: [number, string, boolean]): [string, number];")
+            .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("tuples should use the native fixed-element ABI");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Tuple(vec![
+            HirType::F64,
+            HirType::Str,
+            HirType::Bool,
+        ])]
+    );
+    assert_eq!(
+        signature.ret,
+        HirType::Tuple(vec![HirType::Str, HirType::F64])
+    );
+}
+
+#[test]
 fn classifies_typed_callback_parameter_as_fast_path() {
     let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
     let Classification::FastPath(signature) = classify(&funcs[0]) else {

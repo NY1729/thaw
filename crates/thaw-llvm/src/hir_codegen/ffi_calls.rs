@@ -310,6 +310,88 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    fn marshal_ffi_tuple_return(
+        &mut self,
+        native: StructValue<'ctx>,
+        elements: &[HirType],
+        ownership: &FfiOwnership,
+        aggregate_abi: FfiAggregateAbi,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let element_bytes = elements
+            .iter()
+            .map(array_element_storage_bytes)
+            .max()
+            .unwrap_or(ARRAY_ELEM_BYTES);
+        let size = ARRAY_HEADER_BYTES + element_bytes * elements.len() as u64;
+        let tuple = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    i64_type.const_int(size, false).into(),
+                    i64_type.const_int(element_bytes.min(8), false).into(),
+                ],
+                "ffi_tuple_result",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc returned no tuple result")?
+            .into_pointer_value();
+        self.builder
+            .build_store(tuple, i64_type.const_int(elements.len() as u64, false))
+            .map_err(|error| error.to_string())?;
+        for (index, element) in elements.iter().enumerate() {
+            let mut value = self
+                .builder
+                .build_extract_value(native, index as u32, "ffi_tuple_return_element")
+                .map_err(|error| error.to_string())?;
+            value = match element {
+                HirType::Str if *ownership != FfiOwnership::Borrowed => self
+                    .apply_ffi_string_ownership(
+                        value.into_pointer_value(),
+                        ownership,
+                        "ffi_tuple_return_string",
+                    )?
+                    .into(),
+                HirType::Array(_)
+                | HirType::Tuple(_)
+                | HirType::Object(_)
+                | HirType::Optional(_)
+                | HirType::Nullable(_)
+                | HirType::Nullish(_)
+                    if value.is_struct_value() => self.marshal_ffi_return(
+                    value,
+                    element,
+                    FfiStringAbi::NullTerminated,
+                    ownership,
+                    aggregate_abi,
+                    None,
+                )?,
+                _ => value,
+            };
+            let offset = i64_type.const_int(
+                ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                false,
+            );
+            let pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        tuple,
+                        &[offset],
+                        "ffi_tuple_result_slot",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(pointer, value)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(tuple.into())
+    }
+
     fn marshal_ffi_return(
         &mut self,
         value: BasicValueEnum<'ctx>,
@@ -490,6 +572,16 @@ impl<'ctx> HirCompiler<'ctx> {
                     value.into_struct_value(),
                     ty,
                     payload,
+                    ownership,
+                    aggregate_abi,
+                )
+            }
+            HirType::Tuple(elements)
+                if value.is_struct_value() && aggregate_abi != FfiAggregateAbi::Internal =>
+            {
+                self.marshal_ffi_tuple_return(
+                    value.into_struct_value(),
+                    elements,
                     ownership,
                     aggregate_abi,
                 )
@@ -911,6 +1003,43 @@ impl<'ctx> HirCompiler<'ctx> {
                 };
                 output.push(data.into());
                 output.push(length.into());
+            }
+            HirType::Tuple(elements) => {
+                let base = value.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                let element_bytes = elements
+                    .iter()
+                    .map(array_element_storage_bytes)
+                    .max()
+                    .unwrap_or(ARRAY_ELEM_BYTES);
+                for (index, element) in elements.iter().enumerate() {
+                    let offset = i64_type.const_int(
+                        ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                        false,
+                    );
+                    let pointer = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(
+                                self.context.i8_type(),
+                                base,
+                                &[offset],
+                                "ffi_tuple_element_pointer",
+                            )
+                            .map_err(|error| error.to_string())?
+                    };
+                    let element_value = self
+                        .builder
+                        .build_load(
+                            self.basic_type(element).map_err(|error| {
+                                format!("FFI tuple element {index}: {error}")
+                            })?,
+                            pointer,
+                            "ffi_tuple_element",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    self.append_ffi_fixed_argument(element_value, element, output)
+                        .map_err(|error| format!("FFI tuple element {index}: {error}"))?;
+                }
             }
             HirType::Object(fields) => {
                 let base = value.into_pointer_value();
