@@ -609,7 +609,8 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 }
 
-include!("hir_codegen/async_frames.rs");
+include!("hir_codegen/async_frames/planning.rs");
+include!("hir_codegen/async_frames/codegen.rs");
 
 include!("hir_codegen/statements.rs");
 
