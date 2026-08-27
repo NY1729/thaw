@@ -384,6 +384,11 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
                 }
             };
         }
+        function tuples(): Record<string, [string, number, Item]> {
+            return {
+                selected: ["tuple", 17, { value: 18, label: "eighteen" }]
+            };
+        }
         function main(): void {
             const direct: Item = items().selected;
             const {
@@ -399,17 +404,19 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
             let selectedMatrix: number[][] = [];
             ({ selected: selectedMatrix } = matrices());
             const rich: RichItem = richItems().selected;
+            const tuple: [string, number, Item] = tuples().selected;
             console.log(direct.value, direct.label, value, label, itemRest);
             console.log(selected, arrayRest);
             console.log(selectedLabels, selectedFlags);
             console.log(selectedItems[0].value, selectedItems[1].label, selectedMatrix);
             console.log(rich.tags, rich.matrix, rich.metadata.score);
+            console.log(tuple[0], tuple[1], tuple[2].label);
         }
     "#;
 
     assert_eq!(
         compile_and_run(source, "structured_dictionary_destructuring"),
-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\n"
+        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\ntuple 17 eighteen\n"
     );
 }
 

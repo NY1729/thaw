@@ -676,7 +676,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirType::Str => self.compile_json_as_value(field_json, "thaw_json_as_string")?,
                 HirType::Bool => self.compile_json_as_bool_value(field_json)?,
                 HirType::Json | HirType::Dictionary(_) => field_json,
-                HirType::Array(_) | HirType::Object(_) => {
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                     self.compile_json_to_native(field_json, field_ty)?
                 }
                 other => return Err(format!("unsupported dynamic result field {other:?}")),
@@ -704,6 +704,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match ty {
             HirType::Array(element) => self.compile_json_to_native_array(json, element),
+            HirType::Tuple(elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, ty),
             other => Err(format!(
                 "JSON-backed dictionary value cannot be restored as {other:?}"
@@ -820,7 +821,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Str => self.compile_json_as_value(element_json, "thaw_json_as_string")?,
             HirType::Bool => self.compile_json_as_bool_value(element_json)?,
             HirType::Json | HirType::Dictionary(_) => element_json,
-            HirType::Array(_) | HirType::Object(_) => {
+            HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
                 self.compile_json_to_native(element_json, element)?
             }
             other => return Err(format!("unsupported JSON array element {other:?}")),
@@ -868,5 +869,87 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(done);
         Ok(array.into())
+    }
+
+    fn compile_json_to_native_tuple(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        elements: &[HirType],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let element_bytes = elements
+            .iter()
+            .map(array_element_storage_bytes)
+            .max()
+            .unwrap_or(ARRAY_ELEM_BYTES);
+        let size = ARRAY_HEADER_BYTES + element_bytes * elements.len() as u64;
+        let tuple = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    i64_type.const_int(size, false).into(),
+                    i64_type.const_int(element_bytes.min(8), false).into(),
+                ],
+                "json_native_tuple",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc returned no tuple")?
+            .into_pointer_value();
+        self.builder
+            .build_store(tuple, i64_type.const_int(elements.len() as u64, false))
+            .map_err(|error| error.to_string())?;
+
+        for (index, element) in elements.iter().enumerate() {
+            let element_json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_index").unwrap(),
+                    &[
+                        json.into(),
+                        self.context.f64_type().const_float(index as f64).into(),
+                        self.context.ptr_type(AddressSpace::default()).const_null().into(),
+                    ],
+                    "json_tuple_element",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_index returned no tuple element")?;
+            let value = match element {
+                HirType::F64 => {
+                    self.compile_json_as_value(element_json, "thaw_json_as_number")?
+                }
+                HirType::Str => {
+                    self.compile_json_as_value(element_json, "thaw_json_as_string")?
+                }
+                HirType::Bool => self.compile_json_as_bool_value(element_json)?,
+                HirType::Json | HirType::Dictionary(_) => element_json,
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) => {
+                    self.compile_json_to_native(element_json, element)?
+                }
+                other => return Err(format!("unsupported JSON tuple element {other:?}")),
+            };
+            let offset = i64_type.const_int(
+                ARRAY_HEADER_BYTES + element_bytes * index as u64,
+                false,
+            );
+            let pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        tuple,
+                        &[offset],
+                        "json_tuple_slot",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(pointer, value)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(tuple.into())
     }
 }
