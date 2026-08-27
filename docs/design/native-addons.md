@@ -44,6 +44,8 @@ accessor宣言が同名propertyより優先される。
 propertyだけから成る場合は再帰分類し、local・assertion・function戻り値で利用する。
 number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<number>`も
 同じnative array型へ正規化する。
+式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、
+`typeof`も結果が一意なためoverload選択に利用する。
 派生classにはbase classのpublic instance/static methodとpropertyを展開し、派生側の
 同名宣言を優先する。private／protected memberはshimへ公開せず、private constructor
 だけを持つclassも既定0引数constructorとして誤認しない。abstract classも同様に
