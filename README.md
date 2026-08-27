@@ -1155,6 +1155,14 @@ The workspace crates have narrow responsibilities:
   `String(number)` use the same native conversions. Number formatting follows
   JavaScript's `NaN`, infinity, signed-zero, fixed/exponential boundary and
   shortest-round-trip rules
+- Tagged template literals (`` tag`...${value}...` ``) call the tag expression
+  with the cooked quasi strings as a native `string[]` first argument followed
+  by each interpolated value's own typed result (not coerced to string),
+  preserving left-to-right evaluation across the tag lookup, arguments and
+  `await`. The built-in `` String.raw`...` `` tag is special-cased to
+  concatenate the unescaped quasi text instead, with interpolated values still
+  coerced to string. Accessing `.raw` on a general tag's `strings` parameter
+  is not supported
 - Binary `+` and `+=` concatenate when either operand is a native string,
   converting number/boolean operands with the same JavaScript formatting and
   preserving reference evaluation plus synchronous/awaited operand order
