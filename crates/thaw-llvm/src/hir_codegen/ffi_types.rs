@@ -46,7 +46,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn uses_indirect_ffi_return(sig: &FfiSignature) -> bool {
-        if !matches!(sig.ret, HirType::Array(_) | HirType::Object(_)) {
+        if !matches!(sig.ret, HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)) {
             return false;
         }
         if let Some(layout) = &sig.aggregate_return_layout {
@@ -104,6 +104,25 @@ impl<'ctx> HirCompiler<'ctx> {
                             Self::ffi_object_field_layout(ty, aggregate_abi);
                         size = Self::align_to(size, field_alignment) + field_size;
                         alignment = alignment.max(field_alignment);
+                    }
+                    (Self::align_to(size, alignment), alignment)
+                }
+            }
+            HirType::Tuple(elements) if aggregate_abi != FfiAggregateAbi::Internal => {
+                if aggregate_abi == FfiAggregateAbi::Packed {
+                    let size = elements
+                        .iter()
+                        .map(|element| Self::ffi_object_field_layout(element, aggregate_abi).0)
+                        .sum();
+                    (size, 1)
+                } else {
+                    let mut size = 0;
+                    let mut alignment = 1;
+                    for element in elements {
+                        let (element_size, element_alignment) =
+                            Self::ffi_object_field_layout(element, aggregate_abi);
+                        size = Self::align_to(size, element_alignment) + element_size;
+                        alignment = alignment.max(element_alignment);
                     }
                     (Self::align_to(size, alignment), alignment)
                 }
@@ -254,6 +273,25 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(self
                     .context
                     .struct_type(&fields, aggregate_abi == FfiAggregateAbi::Packed)
+                    .into())
+            }
+            HirType::Tuple(elements) if aggregate_abi != FfiAggregateAbi::Internal => {
+                let elements = elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, element)| {
+                        self.ffi_return_type(
+                            element,
+                            FfiStringAbi::NullTerminated,
+                            aggregate_abi,
+                            None,
+                        )
+                        .map_err(|error| format!("FFI tuple element {index}: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(self
+                    .context
+                    .struct_type(&elements, aggregate_abi == FfiAggregateAbi::Packed)
                     .into())
             }
             HirType::Optional(payload) | HirType::Nullable(payload)
@@ -475,6 +513,12 @@ impl<'ctx> HirCompiler<'ctx> {
             {
                 out.push(self.context.ptr_type(AddressSpace::default()).into());
                 out.push(self.context.i64_type().into());
+            }
+            HirType::Tuple(elements) => {
+                for (index, element) in elements.iter().enumerate() {
+                    self.append_ffi_param_type(element, out)
+                        .map_err(|error| format!("FFI tuple element {index}: {error}"))?;
+                }
             }
             HirType::Object(fields) => {
                 for (name, field) in fields {
