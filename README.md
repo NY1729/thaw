@@ -2091,8 +2091,10 @@ parameters are expanded only for the argument counts observed at compiled call
 sites, so they do not impose an arbitrary maximum arity. User-function calls
 participate in overload selection through explicit return annotations or a
 uniformly inferred return type; repeated collection resolves forward call
-chains. Parameter-dependent/conflicting returns and rest element types beyond
-the currently native-representable surface remain explicit gaps. Object
+chains. Single-parameter passthrough results retain the selected argument's type
+through declarations, arrows, function expressions and transitive forward call
+chains. Branch-dependent/conflicting returns and rest element types beyond the
+currently native-representable surface remain explicit gaps. Object
 literals, including shorthand properties such as `{ value }`, retain
 recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
