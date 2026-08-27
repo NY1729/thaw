@@ -2075,7 +2075,8 @@ Registry class shims now retain every supported overload under a distinct
 internal symbol. Calls select an overload by exact argument count and whether
 the final argument is an inline or locally-bound callback. Non-callback
 overloads with the same arity are also selected from number, string, boolean,
-number-array, and object literals, explicitly annotated local variables, or
+number-array (including `number[]`, `Array<number>` and `ReadonlyArray<number>`
+annotations), and object literals, explicitly annotated local variables, or
 locals initialized from those values. The local inference also follows arithmetic, string concatenation,
 comparisons, conditional expressions, templates, parentheses/type assertions,
 primitive conversion calls, and `.length`. Trailing optional method parameters
