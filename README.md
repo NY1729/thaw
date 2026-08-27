@@ -1526,7 +1526,11 @@ The workspace crates have narrow responsibilities:
   the object machinery like `RegExp` does. All calendar math is UTC only --
   there is no host timezone database, so "local" methods are simply their
   UTC counterparts renamed. `new Date()` uses the current time, `new
-  Date(ms)` an explicit timestamp, and `new Date(text)`/`Date.parse(text)`
+  Date(ms)` an explicit timestamp, `new Date(year, month, date?, hours?,
+  minutes?, seconds?, ms?)` (two or more arguments) builds one from
+  explicit fields the same way `Date.UTC` does (just wrapped as a `Date`
+  instead of returned as a number, since "local" time is UTC here too),
+  and `new Date(text)`/`Date.parse(text)`
   parse the ECMA-262 "Date Time String Format" -- a restricted ISO 8601
   profile (`YYYY`, `YYYY-MM`, or `YYYY-MM-DD`, optionally followed by
   `THH:mm`, `THH:mm:ss`, or `THH:mm:ss.sss`, and then an optional `Z` or
