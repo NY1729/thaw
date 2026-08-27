@@ -542,3 +542,21 @@ pub extern "C" fn thaw_string_from_char_code(code: f64) -> *const c_char {
     let text = String::from_utf16_lossy(&[unit]);
     arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
 }
+
+#[no_mangle]
+/// Converts a full Unicode code point into its one-character string,
+/// matching one argument of `String.fromCodePoint`. Returns a null pointer
+/// for a non-integer, negative, or out-of-range/surrogate code point,
+/// letting the caller detect the failure with `thaw_string_is_null` and
+/// throw a `RangeError` as the specification requires.
+pub extern "C" fn thaw_string_from_code_point(point: f64) -> *const c_char {
+    if !point.is_finite() || point.fract() != 0.0 || point < 0.0 {
+        return std::ptr::null();
+    }
+    let Some(character) = char::from_u32(point as u32) else {
+        return std::ptr::null();
+    };
+    let mut buffer = [0u8; 4];
+    let text = character.encode_utf8(&mut buffer);
+    arena_c_string(text).map_or(std::ptr::null(), |value| value.cast())
+}

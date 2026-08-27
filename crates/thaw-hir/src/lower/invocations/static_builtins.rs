@@ -7,7 +7,7 @@ impl<'a> FnLowerer<'a> {
                 | ("JSON", "stringify")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
-                | ("String", "fromCharCode")
+                | ("String", "fromCharCode" | "fromCodePoint")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
         )
     }
@@ -847,6 +847,78 @@ impl<'a> FnLowerer<'a> {
                                 vec![result, unit],
                             );
                         }
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"String" && property.sym == *"fromCodePoint" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "String.fromCodePoint")?;
+                        let mut points = Vec::with_capacity(arguments.len());
+                        for argument in &arguments {
+                            points.push(self.coerce_primitive_to_number(argument.clone())?);
+                        }
+                        let result_name =
+                            format!("__thaw_from_code_point_result_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(result_name.clone(), HirType::Str);
+                        let var = |name: &str| HirExpr::Var(name.into());
+                        let mut stmts = vec![HirStmt::Let(
+                            result_name.clone(),
+                            HirType::Str,
+                            HirExpr::Lit(HirLit::Str(String::new())),
+                        )];
+                        for point in points {
+                            let raw_name =
+                                format!("__thaw_from_code_point_raw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(raw_name.clone(), HirType::Str);
+                            stmts.push(HirStmt::Let(
+                                raw_name.clone(),
+                                HirType::Str,
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_from_code_point".into())),
+                                    vec![point],
+                                ),
+                            ));
+                            stmts.push(HirStmt::If(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                    vec![var(&raw_name)],
+                                ),
+                                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                    "Invalid code point".into(),
+                                )))],
+                                Vec::new(),
+                            ));
+                            stmts.push(HirStmt::Expr(HirExpr::Assign(
+                                result_name.clone(),
+                                Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                                    vec![var(&result_name), var(&raw_name)],
+                                )),
+                            )));
+                        }
+                        stmts.push(HirStmt::Return(Some(var(&result_name))));
+                        let body = HirExpr::Block(stmts);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|captured| {
+                                self.scope
+                                    .get(&captured)
+                                    .cloned()
+                                    .map(|ty| HirParam { name: captured, ty })
+                            })
+                            .collect();
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                HirType::Str,
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        );
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
         unreachable!("static builtin dispatch was checked before lowering")

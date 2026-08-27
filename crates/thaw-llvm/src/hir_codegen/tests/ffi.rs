@@ -1440,6 +1440,58 @@ fn compiles_string_from_char_code() {
 }
 
 #[test]
+fn compiles_string_from_code_point() {
+    let source = r#"
+        function first(): number {
+            console.log("first");
+            return 65;
+        }
+        function second(): number {
+            console.log("second");
+            return 128512;
+        }
+        async function delayedPoint(): Promise<number> {
+            console.log("awaited point");
+            await sleep(1);
+            return 128512;
+        }
+        async function main(): Promise<void> {
+            console.log(String.fromCodePoint());
+            console.log(String.fromCodePoint(65));
+            console.log(String.fromCodePoint(72, 101, 108, 108, 111));
+            console.log(String.fromCodePoint(128512));
+            console.log(String.fromCodePoint(65, 128512));
+            console.log(String.fromCodePoint(first(), second()));
+            console.log(String.fromCodePoint(await delayedPoint()));
+            try {
+                String.fromCodePoint(-1);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                String.fromCodePoint(1114112);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                String.fromCodePoint(65.5);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                String.fromCodePoint(55296);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_from_code_point"),
+        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\nInvalid code point\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

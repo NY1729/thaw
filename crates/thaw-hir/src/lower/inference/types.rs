@@ -270,6 +270,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, argument, "String.fromCharCode")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_string_from_code_point" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("String.fromCodePoint expects one operand".into());
+                        };
+                        self.expect_type(&HirType::F64, argument, "String.fromCodePoint")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_bool_to_string" => {
                         let [argument] = args.as_slice() else {
                             return Err("boolean string conversion expects one operand".into());
