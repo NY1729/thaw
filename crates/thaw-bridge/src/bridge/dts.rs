@@ -770,6 +770,33 @@ fn apply_pick_or_omit(object: DtsType, keys: Result<Vec<String>, String>, omit: 
     ))
 }
 
+fn apply_partial_or_required(object: DtsType, required: bool) -> DtsType {
+    match object {
+        DtsType::Native(HirType::Object(fields)) => DtsType::Native(HirType::Object(
+            fields
+                .into_iter()
+                .map(|(name, ty)| {
+                    let ty = if required {
+                        match ty {
+                            HirType::Optional(value) => *value,
+                            HirType::Nullish(value) => HirType::Nullable(value),
+                            other => other,
+                        }
+                    } else {
+                        optional_hir_type(ty)
+                    };
+                    (name, ty)
+                })
+                .collect(),
+        )),
+        DtsType::Native(_) => DtsType::Unsupported(format!(
+            "{}<T> requires a fixed object type",
+            if required { "Required" } else { "Partial" }
+        )),
+        unsupported => unsupported,
+    }
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -1102,6 +1129,22 @@ fn classify_ts_type(
                 };
                 return classify_ts_type(inner, interfaces, generic_interfaces);
             }
+            if matches!(ref_name.as_str(), "Partial" | "Required") {
+                let [inner] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return DtsType::Unsupported(format!(
+                        "{ref_name}<T> requires exactly one type argument"
+                    ));
+                };
+                return apply_partial_or_required(
+                    classify_ts_type(inner, interfaces, generic_interfaces),
+                    ref_name == "Required",
+                );
+            }
             if matches!(ref_name.as_str(), "Pick" | "Omit") {
                 let [object, keys] = ty_ref
                     .type_params
@@ -1329,6 +1372,12 @@ fn resolve_ts_type_with_substitution(
                     );
                     match (ref_name, resolved_elem) {
                         ("Readonly", resolved) => return resolved,
+                        ("Partial", resolved) => {
+                            return apply_partial_or_required(resolved, false)
+                        }
+                        ("Required", resolved) => {
+                            return apply_partial_or_required(resolved, true)
+                        }
                         ("Array" | "ReadonlyArray", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue))) => {
                             return DtsType::Native(HirType::Array(Box::new(element)))
                         }
