@@ -108,15 +108,20 @@ fn boolean_string_and_handle_rest_signatures_classify_as_variadic_fast_paths() {
 }
 
 #[test]
-fn object_rest_signature_falls_back() {
+fn tagged_object_rest_signature_uses_the_native_variadic_abi() {
     let funcs = parse_dts(
         "export declare function merge(...values: { value: number | undefined }[]): number;",
     )
     .unwrap();
-    let classification = classify(&funcs[0]);
-    assert!(
-        matches!(classification, Classification::Fallback { .. }),
-        "{classification:?}"
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("tagged object rest values should use the native variadic ABI");
+    };
+    assert_eq!(
+        signature.variadic,
+        Some(HirType::Object(vec![(
+            "value".into(),
+            HirType::Optional(Box::new(HirType::F64)),
+        )]))
     );
 }
 
@@ -195,6 +200,65 @@ fn tagged_rest_signatures_classify_as_variadic_fast_paths() {
             };
             assert_eq!(signature.variadic, Some(expected));
         }
+}
+
+#[test]
+fn tagged_regular_signatures_classify_as_fast_paths() {
+    let funcs = parse_dts(
+        r#"export declare function inspect(
+                count: number | undefined,
+                label: string | null
+            ): boolean | null | undefined;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("regular nullable unions should use the tagged native ABI");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Optional(Box::new(HirType::F64)),
+            HirType::Nullable(Box::new(HirType::Str)),
+        ]
+    );
+    assert_eq!(signature.ret, HirType::Nullish(Box::new(HirType::Bool)));
+
+    let shim = generate_shim(&funcs, true, &[]);
+    let module = thaw_parser::parse_typescript(&shim)
+        .unwrap_or_else(|error| panic!("tagged bridge shim did not parse: {error}\n{shim}"));
+    let program = thaw_hir::lower_module(&module)
+        .unwrap_or_else(|error| panic!("tagged bridge shim did not lower: {error}\n{shim}"));
+    assert_eq!(program.extern_functions.len(), 1);
+    assert_eq!(
+        program.extern_functions[0].params,
+        vec![
+            HirType::Optional(Box::new(HirType::F64)),
+            HirType::Nullable(Box::new(HirType::Str)),
+        ]
+    );
+    assert_eq!(
+        program.extern_functions[0].ret,
+        HirType::Nullish(Box::new(HirType::Bool))
+    );
+}
+
+#[test]
+fn resolves_tagged_unions_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export interface Maybe<T> { value: T | null; }
+            export declare function inspect(value: Maybe<number>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("nullable generic fields should resolve after substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "value".into(),
+            HirType::Nullable(Box::new(HirType::F64)),
+        )])]
+    );
 }
 
 #[test]
