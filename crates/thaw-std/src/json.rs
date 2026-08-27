@@ -690,6 +690,11 @@ pub extern "C" fn thaw_json_array_push_json(array: *mut Value, value: *mut Value
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_json_null() -> *mut Value {
+    leak(Value::Null)
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
     if array.is_null() {
         return leak(Value::Array(Vec::new()));
