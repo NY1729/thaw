@@ -257,7 +257,9 @@ pub fn lower_module_with_source_map(
 
 include!("lower/normalize.rs");
 
-include!("lower/classes.rs");
+include!("lower/classes/normalization.rs");
+include!("lower/classes/generic_classes.rs");
+include!("lower/classes/generic_methods.rs");
 
 fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
     struct Collector(Vec<String>);
