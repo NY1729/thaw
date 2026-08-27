@@ -848,6 +848,37 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| format!("FFI object field `{name}`: {error}"))?;
                 }
             }
+            HirType::Optional(payload) | HirType::Nullable(payload) => {
+                let tagged = value.into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(tagged, 0, "ffi_optional_tag")
+                    .map_err(|error| error.to_string())?
+                    .into_int_value();
+                let tag = self
+                    .builder
+                    .build_int_z_extend(tag, self.context.i8_type(), "ffi_optional_tag_i8")
+                    .map_err(|error| error.to_string())?;
+                output.push(tag.into());
+                let payload_value = self
+                    .builder
+                    .build_extract_value(tagged, 1, "ffi_optional_payload")
+                    .map_err(|error| error.to_string())?;
+                self.append_ffi_fixed_argument(payload_value, payload, output)?;
+            }
+            HirType::Nullish(payload) => {
+                let tagged = value.into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(tagged, 0, "ffi_nullish_tag")
+                    .map_err(|error| error.to_string())?;
+                output.push(tag.into());
+                let payload_value = self
+                    .builder
+                    .build_extract_value(tagged, 1, "ffi_nullish_payload")
+                    .map_err(|error| error.to_string())?;
+                self.append_ffi_fixed_argument(payload_value, payload, output)?;
+            }
             _ => output.push(value.into()),
         }
         Ok(())
