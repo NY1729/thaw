@@ -30,44 +30,86 @@ impl<'a> FnLowerer<'a> {
                                 "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
                             ));
                         }
+                        let mut replacer_array = None;
                         if let Some(replacer) = arguments.get(1) {
                             let replacer_type = self.infer_expr_type(replacer)?;
-                            if !matches!(replacer_type, HirType::Null | HirType::Undefined) {
-                                return Err(
-                                    "`JSON.stringify` replacer functions and arrays are not supported"
-                                        .into(),
-                                );
-                            }
-                            if !matches!(replacer, HirExpr::Lit(_)) {
-                                let name = format!(
-                                    "__thaw_json_stringify_replacer_{}",
-                                    self.next_binding
-                                );
-                                self.next_binding += 1;
-                                self.scope.insert(name.clone(), replacer_type.clone());
-                                bindings.push((name, replacer_type, replacer.clone()));
+                            match &replacer_type {
+                                HirType::Array(element) if element.as_ref() == &HirType::Str => {
+                                    replacer_array = Some(replacer.clone());
+                                }
+                                HirType::Null | HirType::Undefined => {
+                                    if !matches!(replacer, HirExpr::Lit(_)) {
+                                        let name = format!(
+                                            "__thaw_json_stringify_replacer_{}",
+                                            self.next_binding
+                                        );
+                                        self.next_binding += 1;
+                                        self.scope.insert(name.clone(), replacer_type.clone());
+                                        bindings.push((name, replacer_type, replacer.clone()));
+                                    }
+                                }
+                                _ => {
+                                    return Err(
+                                        "`JSON.stringify` replacer must be null, undefined, or string[]; function replacers are not supported"
+                                            .into(),
+                                    )
+                                }
                             }
                         }
-                        let result = match arguments.get(2) {
-                            None | Some(HirExpr::Lit(HirLit::Null | HirLit::Undefined)) => {
-                                HirExpr::Call(
-                                    Box::new(HirExpr::Var("JSON.stringify".into())),
-                                    vec![value],
-                                )
-                            }
-                            Some(space) => {
-                                let runtime = match self.infer_expr_type(space)? {
-                                    HirType::F64 => "__thaw_json_stringify_number_space",
-                                    HirType::Str => "__thaw_json_stringify_string_space",
-                                    other => {
-                                        return Err(format!(
-                                            "`JSON.stringify` space must be number, string, null or undefined, got {other:?}"
-                                        ))
+                        let space = match arguments.get(2) {
+                            None => None,
+                            Some(space) => match self.infer_expr_type(space)? {
+                                HirType::Null | HirType::Undefined => {
+                                    if !matches!(space, HirExpr::Lit(_)) {
+                                        let ty = self.infer_expr_type(space)?;
+                                        let name = format!(
+                                            "__thaw_json_stringify_space_{}",
+                                            self.next_binding
+                                        );
+                                        self.next_binding += 1;
+                                        self.scope.insert(name.clone(), ty.clone());
+                                        bindings.push((name, ty, space.clone()));
                                     }
+                                    None
+                                }
+                                HirType::F64 => Some((space.clone(), false)),
+                                HirType::Str => Some((space.clone(), true)),
+                                other => {
+                                    return Err(format!(
+                                        "`JSON.stringify` space must be number, string, null or undefined, got {other:?}"
+                                    ))
+                                }
+                            },
+                        };
+                        let result = match (replacer_array, space) {
+                            (None, None) => HirExpr::Call(
+                                Box::new(HirExpr::Var("JSON.stringify".into())),
+                                vec![value],
+                            ),
+                            (Some(replacer), None) => HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_stringify_keys".into())),
+                                vec![value, replacer],
+                            ),
+                            (None, Some((space, string_space))) => {
+                                let runtime = if string_space {
+                                    "__thaw_json_stringify_string_space"
+                                } else {
+                                    "__thaw_json_stringify_number_space"
                                 };
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var(runtime.into())),
-                                    vec![value, space.clone()],
+                                    vec![value, space],
+                                )
+                            }
+                            (Some(replacer), Some((space, string_space))) => {
+                                let runtime = if string_space {
+                                    "__thaw_json_stringify_keys_string_space"
+                                } else {
+                                    "__thaw_json_stringify_keys_number_space"
+                                };
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(runtime.into())),
+                                    vec![value, replacer, space],
                                 )
                             }
                         };
