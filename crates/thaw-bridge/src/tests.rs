@@ -2301,6 +2301,23 @@ fn extracts_quoted_and_numeric_class_property_keys() {
     assert_eq!(classes[0].properties[1].name, "200");
 }
 
+#[test]
+fn records_optional_and_default_constructor_arities() {
+    let classes = parse_dts_classes(
+        r#"export class Client {
+                constructor(url: string, timeout?: number, retries?: number);
+            }
+            export class Cache {
+                constructor(size: number, enabled = true);
+            }"#,
+    )
+    .unwrap();
+    assert_eq!(classes[0].constructors[0].required_params, 1);
+    assert_eq!(classes[0].constructors[0].params.len(), 3);
+    assert_eq!(classes[1].constructors[0].required_params, 1);
+    assert_eq!(classes[1].constructors[0].params.len(), 2);
+}
+
 /// The actual regression this was validated against: a real date-fns
 /// function (`milliseconds({ years, months, ... }: Duration)`) uses a
 /// destructured parameter, which `parse_dts` used to reject by

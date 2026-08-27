@@ -1,3 +1,12 @@
+fn napi_constructor_export_name(symbol: &str) -> Option<&str> {
+    let constructor = symbol.strip_prefix("$new$")?;
+    Some(
+        constructor
+            .rsplit_once("$arity")
+            .map_or(constructor, |(name, _)| name),
+    )
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     /// `loadScript(source): boolean`, via thaw-quickjs's `thaw_js_load`.
     /// Same `i8` -> `i1` conversion as `compile_json_as_bool` and for the
@@ -587,7 +596,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_global_string_ptr(&signature.symbol, "dynamic_symbol")
             .map_err(|error| error.to_string())?;
         if signature.backend == DynamicBackend::Napi && signature.ret == HirType::JsValue {
-            let constructor_name = signature.symbol.strip_prefix("$new$").ok_or_else(|| {
+            let constructor_name = napi_constructor_export_name(&signature.symbol).ok_or_else(|| {
                 "N-API JsValue return is reserved for class constructors".to_string()
             })?;
             let constructor_name = self
