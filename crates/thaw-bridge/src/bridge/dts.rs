@@ -263,6 +263,17 @@ fn extract_interface_decl(item: &ModuleItem) -> Option<&TsInterfaceDecl> {
     }
 }
 
+fn extract_type_alias_decl(item: &ModuleItem) -> Option<&swc_ecma_ast::TsTypeAliasDecl> {
+    match item {
+        ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(Decl::TsTypeAlias(alias))) => Some(alias),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            Decl::TsTypeAlias(alias) => Some(alias),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 type GenericInterfaces<'a> = HashMap<String, &'a TsInterfaceDecl>;
 
 /// Resolves every top-level *non-generic* `interface` into a `DtsType`
@@ -290,6 +301,24 @@ fn resolve_interfaces(module: &Module) -> (HashMap<String, DtsType>, GenericInte
     let mut resolved = HashMap::new();
     for name in raw.keys().cloned().collect::<Vec<_>>() {
         resolve_interface(&name, &raw, &mut resolved, &mut Vec::new());
+    }
+    let aliases = module
+        .body
+        .iter()
+        .filter_map(extract_type_alias_decl)
+        .filter(|alias| alias.type_params.is_none())
+        .collect::<Vec<_>>();
+    for _ in 0..raw.len() + aliases.len() {
+        for name in raw.keys() {
+            resolved.remove(name);
+        }
+        for name in raw.keys() {
+            resolve_interface(name, &raw, &mut resolved, &mut Vec::new());
+        }
+        for alias in &aliases {
+            let ty = classify_ts_type(&alias.type_ann, &resolved, &generic);
+            resolved.insert(alias.id.sym.to_string(), ty);
+        }
     }
     (resolved, generic)
 }
