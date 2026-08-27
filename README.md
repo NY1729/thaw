@@ -1328,7 +1328,8 @@ The workspace crates have narrow responsibilities:
   properties, including array indices and `length`
 - The `in` operator accepts dynamic primitive keys for fixed objects and checks
   runtime JSON own properties with left-before-right single evaluation;
-  `for...in` iterates JSON object keys or array indices in JavaScript key order
+  `for...in` iterates `Record`/JSON object keys or JSON array indices in
+  JavaScript key order
 - `delete` removes named or computed properties from runtime-keyed
   `Record<string, T>`/JSON objects, returns `true` for present and missing keys,
   evaluates the receiver and key once in source order, and supports awaited keys
@@ -2051,8 +2052,9 @@ break/continue across synchronous and async bodies. Its loop head may declare
 an identifier or assign each element to an existing same-typed variable.
 `for await...of` additionally unwraps typed Promise-array elements in order,
 accepts synchronous typed arrays, and routes rejection to async `try/catch`.
-`for...in` evaluates a fixed-shape object once and enumerates its statically
-known keys in layout order, with declaration/assignment heads and async bodies.
+`for...in` evaluates a fixed-shape object, runtime-keyed `Record`, or JSON value
+once and enumerates its keys in layout or JavaScript runtime order, with
+declaration/assignment heads and async bodies.
 Dynamic indexed reads such as `object[key]` work for uniform fixed-shape
 objects and return a flattened optional/nullish value. Heterogeneous untagged
 fields produce a tagged union of the distinct field types plus `undefined`;
