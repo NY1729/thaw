@@ -3,7 +3,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
-                | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "hasOwn" | "is")
+                | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
@@ -455,6 +455,33 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var(runtime.to_string())),
                             vec![entries],
                         );
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Object" && property.sym == *"assign" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.assign")?;
+                        let Some((target, sources)) = arguments.split_first() else {
+                            return Err("`Object.assign` expects at least one argument".into());
+                        };
+                        let target_type = self.infer_expr_type(target)?;
+                        if !matches!(target_type, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "`Object.assign` requires a JSON or dictionary target, got {target_type:?}"
+                            ));
+                        }
+                        let mut result = target.clone();
+                        for source in sources {
+                            let source_type = self.infer_expr_type(source)?;
+                            if source_type != target_type {
+                                return Err(format!(
+                                    "`Object.assign` source type {source_type:?} does not match target {target_type:?}"
+                                ));
+                            }
+                            result = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
+                                vec![result, source.clone()],
+                            );
+                        }
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"hasOwn" {
