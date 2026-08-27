@@ -262,6 +262,83 @@ fn resolves_tagged_unions_after_generic_substitution() {
 }
 
 #[test]
+fn resolves_forward_non_generic_type_aliases() {
+    let funcs = parse_dts(
+        r#"export type Request = Later;
+            export type Later = {
+                id: number;
+                label: Label;
+            };
+            export type Label = string;
+            export declare function inspect(value: Request): Label;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("forward non-generic aliases should resolve");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            ("id".into(), HirType::F64),
+            ("label".into(), HirType::Str),
+        ])]
+    );
+    assert_eq!(signature.ret, HirType::Str);
+}
+
+#[test]
+fn resolves_utility_types_inside_non_generic_aliases() {
+    let funcs = parse_dts(
+        r#"export interface Config { host: string; port: number; }
+            export type HostOnly = Pick<Config, "host">;
+            export declare function inspect(value: HostOnly): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("utility types inside aliases should resolve");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![("host".into(), HirType::Str)])]
+    );
+}
+
+#[test]
+fn resolves_interfaces_and_aliases_across_forward_references() {
+    let funcs = parse_dts(
+        r#"export type Request = Envelope;
+            export interface Envelope { payload: Payload; }
+            export type Payload = { value: number };
+            export declare function inspect(value: Request): number;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("interfaces and aliases should resolve each other's forward references");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "payload".into(),
+            HirType::Object(vec![("value".into(), HirType::F64)]),
+        )])]
+    );
+}
+
+#[test]
+fn cyclic_non_generic_aliases_fall_back() {
+    let funcs = parse_dts(
+        r#"export type Left = Right;
+            export type Right = Left;
+            export declare function inspect(value: Left): string;"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn generates_native_addon_wrapper_and_module_initializer() {
     let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
     let shim = generate_native_addon_shim(&funcs, &[]);
