@@ -508,6 +508,11 @@ fn deletes_runtime_keyed_dictionary_properties() {
         async function main(): Promise<void> {
             const values: Record<string, number> = { answer: 42, other: 7 };
             const parsed: Json = JSON.parse("{\"answer\":42}");
+            values[1] = 9;
+            values[true] = 5;
+            console.log(values[1]);
+            console.log(values[true]);
+            console.log(delete values[1]);
             console.log(delete values.answer);
             console.log(values["answer"]);
             console.log(delete values["missing"]);
@@ -520,7 +525,7 @@ fn deletes_runtime_keyed_dictionary_properties() {
     "#;
     assert_eq!(
         compile_and_run(source, "delete_dictionary_properties"),
-        "true\n0\ntrue\nkey\ntrue\n0\nobject\ntrue\ntrue\n{}\n"
+        "9\n5\ntrue\ntrue\n0\ntrue\nkey\ntrue\n0\nobject\ntrue\ntrue\n{}\n"
     );
 }
 
@@ -546,7 +551,9 @@ fn reads_and_writes_json_with_runtime_string_keys() {
             return 1;
         }
         async function main(): Promise<void> {
-            const data: Json = JSON.parse("{\"value\":1}");
+            const data: Json = JSON.parse("{\"value\":1,\"1\":\"one\"}");
+            console.log(String(data[1]));
+            data[2] = JSON.parse("\"two\"");
             console.log(Number(data[key()]));
             data[key()] = JSON.parse("2");
             data.extra = JSON.parse("\"text\"");
@@ -566,7 +573,7 @@ fn reads_and_writes_json_with_runtime_string_keys() {
     "#;
     assert_eq!(
         compile_and_run(source, "runtime_json_keys"),
-        "key\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"value\":2,\"extra\":\"text\",\"other\":true}\nasync-index\n11\n30\n[11,30,null,40]\n"
+        "one\nkey\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"1\":\"one\",\"2\":\"two\",\"value\":2,\"extra\":\"text\",\"other\":true}\nasync-index\n11\n30\n[11,30,null,40]\n"
     );
 }
 

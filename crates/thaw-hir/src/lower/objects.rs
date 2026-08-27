@@ -580,7 +580,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     HirType::Dictionary(element) => {
                         let key = self.lower_expr(&computed.expr)?;
-                        self.expect_type(&HirType::Str, &key, "dictionary key")?;
+                        let key = self.coerce_primitive_to_string(key)?;
                         Self::typed_dictionary_read(
                             HirExpr::JsonKey(Box::new(obj), Box::new(key)),
                             element.as_ref(),
@@ -773,8 +773,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     MemberProp::Computed(computed) => {
                         let key = self.lower_expr(&computed.expr)?;
-                        self.expect_type(&HirType::Str, &key, "optional dictionary key")?;
-                        key
+                        self.coerce_primitive_to_string(key)?
                     }
                     _ => return Err("unsupported optional dictionary member".into()),
                 };
