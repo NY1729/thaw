@@ -131,7 +131,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 Ok(None)
             }
-            HirExpr::JsonSet(object, key, value, _) => {
+            HirExpr::JsonSet(object, key, value, _)
+            | HirExpr::JsonIndexSet(object, key, value) => {
                 for value in [object, key, value] {
                     if let Some(found) = self.extract_first_frame_await(value, temporary)? {
                         return Ok(Some(found));

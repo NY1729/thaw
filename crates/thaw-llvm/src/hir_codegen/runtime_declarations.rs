@@ -148,6 +148,13 @@ impl<'ctx> HirCompiler<'ctx> {
         let json_index_type = i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false);
         self.module
             .add_function("thaw_json_index", json_index_type, Some(Linkage::External));
+        let json_index_set_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_index_set",
+            json_index_set_type,
+            Some(Linkage::External),
+        );
 
         let json_as_number_type = f64_type.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(

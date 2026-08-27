@@ -71,6 +71,31 @@ pub extern "C" fn thaw_json_index(value: *mut Value, index: i64) -> *mut Value {
 }
 
 #[no_mangle]
+/// # Safety
+///
+/// `array` and `value` must be null or point to valid JSON values.
+pub unsafe extern "C" fn thaw_json_index_set(
+    array: *mut Value,
+    index: i64,
+    value: *mut Value,
+) -> *mut Value {
+    if index < 0 {
+        return value;
+    }
+    if let (Some(items), Some(value)) = (
+        (unsafe { array.as_mut() }).and_then(Value::as_array_mut),
+        unsafe { value.as_ref() },
+    ) {
+        let index = index as usize;
+        if items.len() <= index {
+            items.resize(index + 1, Value::Null);
+        }
+        items[index] = value.clone();
+    }
+    value
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_json_as_number(value: *mut Value) -> f64 {
     let value = unsafe { &*value };
     value.as_f64().unwrap_or(0.0)

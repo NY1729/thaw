@@ -1344,7 +1344,8 @@ The workspace crates have narrow responsibilities:
   evaluates the receiver and key once in source order, and supports awaited keys
 - Runtime JSON objects support named and computed string-key reads and writes,
   including awaited keys and single left-to-right receiver/key evaluation;
-  numeric computed keys continue to index JSON arrays
+  numeric computed keys read and write JSON arrays, return the assigned JSON
+  value, and extend sparse positions with `null`
 - Optional chaining reads named or computed `Record`/JSON properties through
   nullable or undefined receivers and skips computed-key evaluation when the
   receiver is absent

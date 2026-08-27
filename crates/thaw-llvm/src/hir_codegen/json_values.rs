@@ -185,6 +185,31 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| "thaw_json_index did not return a value".to_string())
     }
 
+    fn compile_json_index_set(
+        &mut self,
+        object: &HirExpr,
+        index: &HirExpr,
+        value: &HirExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let object = self.compile_expr(object)?;
+        let index = self.compile_expr(index)?.into_float_value();
+        let index = self
+            .builder
+            .build_float_to_signed_int(index, self.context.i64_type(), "json_set_index")
+            .map_err(|error| error.to_string())?;
+        let value = self.compile_expr(value)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_index_set").unwrap(),
+                &[object.into(), index.into(), value.into()],
+                "json_index_set",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_index_set did not return a value".to_string())
+    }
+
     /// `Number(json)`/`String(json)`/`Boolean(json)`.
     fn compile_json_as(
         &mut self,
