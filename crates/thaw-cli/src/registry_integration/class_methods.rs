@@ -210,6 +210,7 @@ fn rewrite_external_class_methods_with_static(
             | thaw_hir::HirType::Str
             | thaw_hir::HirType::Bool
             | thaw_hir::HirType::Json => true,
+            thaw_hir::HirType::Nullable(payload) => source_collection_element_supported(payload),
             thaw_hir::HirType::Array(element) => source_collection_element_supported(element),
             thaw_hir::HirType::Tuple(elements) => {
                 elements.iter().all(source_collection_element_supported)
@@ -231,6 +232,7 @@ fn rewrite_external_class_methods_with_static(
             Expr::Lit(Lit::Num(_)) => Some(thaw_hir::HirType::F64),
             Expr::Lit(Lit::Str(_)) => Some(thaw_hir::HirType::Str),
             Expr::Lit(Lit::Bool(_)) => Some(thaw_hir::HirType::Bool),
+            Expr::Lit(Lit::Null(_)) => Some(thaw_hir::HirType::Null),
             Expr::Array(array) => {
                 let mut elements = array.elems.iter().map(|element| {
                     source_expr_type(
@@ -541,12 +543,37 @@ fn rewrite_external_class_methods_with_static(
                 _ => None,
             },
             TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
-                let mut types = union
-                    .types
-                    .iter()
-                    .map(|element| source_ts_type(element, named));
-                let first = types.next()??;
-                types.all(|candidate| candidate.as_ref() == Some(&first)).then_some(first)
+                let mut payload = None;
+                let mut has_null = false;
+                let mut has_undefined = false;
+                for element in &union.types {
+                    match element.as_ref() {
+                        TsType::TsKeywordType(keyword)
+                            if keyword.kind == TsKeywordTypeKind::TsNullKeyword =>
+                        {
+                            has_null = true;
+                        }
+                        TsType::TsKeywordType(keyword)
+                            if keyword.kind == TsKeywordTypeKind::TsUndefinedKeyword =>
+                        {
+                            has_undefined = true;
+                        }
+                        element => {
+                            let candidate = source_ts_type(element, named)?;
+                            if payload.as_ref().is_some_and(|payload| payload != &candidate) {
+                                return None;
+                            }
+                            payload = Some(candidate);
+                        }
+                    }
+                }
+                let payload = payload?;
+                Some(match (has_null, has_undefined) {
+                    (true, true) => thaw_hir::HirType::Nullish(Box::new(payload)),
+                    (true, false) => thaw_hir::HirType::Nullable(Box::new(payload)),
+                    (false, true) => thaw_hir::HirType::Optional(Box::new(payload)),
+                    (false, false) => payload,
+                })
             }
             TsType::TsUnionOrIntersectionType(
                 TsUnionOrIntersectionType::TsIntersectionType(intersection),
@@ -1290,6 +1317,10 @@ fn rewrite_external_class_methods_with_static(
     fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
         match (declared, actual) {
             (thaw_hir::HirType::Json, _) => Some(0),
+            (thaw_hir::HirType::Nullable(payload), thaw_hir::HirType::Null) => {
+                source_collection_element_supported(payload).then_some(2)
+            }
+            (thaw_hir::HirType::Nullable(payload), actual) if payload.as_ref() == actual => Some(2),
             (thaw_hir::HirType::Object(declared), thaw_hir::HirType::Object(actual)) => {
                 if declared.is_empty() || actual.is_empty() {
                     return Some(1);

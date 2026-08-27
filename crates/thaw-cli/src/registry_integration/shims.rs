@@ -33,6 +33,9 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
         thaw_hir::HirType::Void => Some("void".into()),
         thaw_hir::HirType::Json => Some("Json".into()),
         thaw_hir::HirType::JsValue => Some("JsValue".into()),
+        thaw_hir::HirType::Nullable(payload) => {
+            render_dynamic_type(payload).map(|payload| format!("{payload} | null"))
+        }
         thaw_hir::HirType::Array(element) => {
             render_dynamic_type(element).map(|element| format!("{element}[]"))
         }
@@ -65,6 +68,7 @@ fn supported_json_collection_element(ty: &thaw_hir::HirType) -> bool {
         | thaw_hir::HirType::Str
         | thaw_hir::HirType::Bool
         | thaw_hir::HirType::Json => true,
+        thaw_hir::HirType::Nullable(payload) => supported_json_collection_element(payload),
         thaw_hir::HirType::Array(element) => supported_json_collection_element(element),
         thaw_hir::HirType::Tuple(elements) => {
             elements.iter().all(supported_json_collection_element)
@@ -159,6 +163,10 @@ fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: us
         )
     ) || matches!(
         ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Nullable(payload))
+            if supported_json_collection_element(payload)
+    ) || matches!(
+        ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
             if supported_json_collection_element(element)
     ) || matches!(
@@ -186,6 +194,10 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
                 | thaw_hir::HirType::Void
                 | thaw_hir::HirType::Object(_)
         )
+    ) || matches!(
+        ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Nullable(payload))
+            if supported_json_collection_element(payload)
     ) || matches!(
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))

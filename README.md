@@ -2087,6 +2087,8 @@ mixed-primitive string concatenation, bitwise and same-typed logical operators,
 comparisons, `typeof`, conditional expressions, templates, parentheses/type assertions,
 primitive conversion calls, `.length`, fixed-result string/number/array methods,
 `Math` numeric calls, `Array.isArray`, and serializable-value `JSON.stringify`.
+Nullable `T | null` values and nullable collection elements use the same typed
+N-API constructor, method, and property path while preserving `null` in both directions.
 Trailing optional method parameters
 generate every callable arity from the required prefix through the complete
 signature. Number-typed rest
