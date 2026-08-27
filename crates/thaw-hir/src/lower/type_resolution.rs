@@ -265,6 +265,9 @@ fn lower_ts_type(
             // A name matching a resolved (non-generic) `interface` --
             // treated exactly like an inline `{ ... }` type literal.
             if let Some(name) = ref_name {
+                if name == "RegExp" {
+                    return Ok(regex_object_type());
+                }
                 if let Some(resolved) = interfaces.get(name) {
                     return Ok(resolved.clone());
                 }
