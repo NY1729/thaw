@@ -34,6 +34,10 @@ impl<'a> FnLowerer<'a> {
                 | "getMinutes" | "getSeconds" | "getMilliseconds"
                 | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay"
                 | "getUTCHours" | "getUTCMinutes" | "getUTCSeconds" | "getUTCMilliseconds"
+                | "setFullYear" | "setMonth" | "setDate" | "setHours" | "setMinutes"
+                | "setSeconds" | "setMilliseconds"
+                | "setUTCFullYear" | "setUTCMonth" | "setUTCDate" | "setUTCHours"
+                | "setUTCMinutes" | "setUTCSeconds" | "setUTCMilliseconds"
         )
     }
 
@@ -2356,6 +2360,112 @@ impl<'a> FnLowerer<'a> {
                     let mut bindings = vec![(receiver_name, date_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((value_name, HirType::F64, value));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                // Each entry pairs a setter's native intrinsic with, per
+                // parameter position, the getter intrinsic that supplies
+                // that position's default when the caller omits it -- `None`
+                // marks the one leading parameter every setter requires.
+                let date_setter = match property.sym.as_ref() {
+                    "setFullYear" | "setUTCFullYear" => Some((
+                        "__thaw_date_set_full_year",
+                        vec![None, Some("__thaw_date_get_month"), Some("__thaw_date_get_date")],
+                    )),
+                    "setMonth" | "setUTCMonth" => Some((
+                        "__thaw_date_set_month",
+                        vec![None, Some("__thaw_date_get_date")],
+                    )),
+                    "setDate" | "setUTCDate" => Some(("__thaw_date_set_date", vec![None])),
+                    "setHours" | "setUTCHours" => Some((
+                        "__thaw_date_set_hours",
+                        vec![
+                            None,
+                            Some("__thaw_date_get_minutes"),
+                            Some("__thaw_date_get_seconds"),
+                            Some("__thaw_date_get_milliseconds"),
+                        ],
+                    )),
+                    "setMinutes" | "setUTCMinutes" => Some((
+                        "__thaw_date_set_minutes",
+                        vec![
+                            None,
+                            Some("__thaw_date_get_seconds"),
+                            Some("__thaw_date_get_milliseconds"),
+                        ],
+                    )),
+                    "setSeconds" | "setUTCSeconds" => Some((
+                        "__thaw_date_set_seconds",
+                        vec![None, Some("__thaw_date_get_milliseconds")],
+                    )),
+                    "setMilliseconds" | "setUTCMilliseconds" => {
+                        Some(("__thaw_date_set_milliseconds", vec![None]))
+                    }
+                    _ => None,
+                };
+                if let Some((intrinsic, param_defaults)) = date_setter {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    let date_type = date_object_type();
+                    self.expect_type(
+                        &date_type,
+                        &receiver,
+                        &format!("Date.{} receiver", property.sym),
+                    )?;
+                    let (arguments, spread_bindings) = self.lower_native_spread_values(
+                        &call.args,
+                        &format!("Date.{}", property.sym),
+                    )?;
+                    if arguments.is_empty() || arguments.len() > param_defaults.len() {
+                        return Err(format!(
+                            "native `.{}()` expects one to {} argument(s)",
+                            property.sym,
+                            param_defaults.len()
+                        ));
+                    }
+                    let receiver_name =
+                        format!("__thaw_date_set_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), date_type.clone());
+                    let mut bindings = vec![(receiver_name.clone(), date_type.clone(), receiver)];
+                    bindings.extend(spread_bindings);
+                    let mut param_vars = Vec::new();
+                    for (index, getter) in param_defaults.iter().enumerate() {
+                        let value = if let Some(argument) = arguments.get(index) {
+                            self.coerce_primitive_to_number(argument.clone())?
+                        } else {
+                            let getter =
+                                getter.expect("the leading parameter is always required");
+                            let timestamp = HirExpr::PropAccess(
+                                Box::new(HirExpr::Var(receiver_name.clone())),
+                                date_type.clone(),
+                                "timestamp".to_string(),
+                            );
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(getter.to_string())),
+                                vec![timestamp],
+                            )
+                        };
+                        let param_name =
+                            format!("__thaw_date_set_arg_{index}_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(param_name.clone(), HirType::F64);
+                        bindings.push((param_name.clone(), HirType::F64, value));
+                        param_vars.push(HirExpr::Var(param_name));
+                    }
+                    let timestamp = HirExpr::PropAccess(
+                        Box::new(HirExpr::Var(receiver_name.clone())),
+                        date_type.clone(),
+                        "timestamp".to_string(),
+                    );
+                    let mut call_args = vec![timestamp];
+                    call_args.extend(param_vars);
+                    let new_timestamp =
+                        HirExpr::Call(Box::new(HirExpr::Var(intrinsic.to_string())), call_args);
+                    let result = HirExpr::PropAssign(
+                        Box::new(HirExpr::Var(receiver_name)),
+                        date_type,
+                        "timestamp".to_string(),
+                        Box::new(new_timestamp),
+                    );
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 let date_getter_intrinsic = match property.sym.as_ref() {
