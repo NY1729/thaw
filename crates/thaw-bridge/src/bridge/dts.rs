@@ -862,6 +862,60 @@ fn classify_non_nullable_type(
         .unwrap_or_else(|| DtsType::Unsupported("NonNullable<T> has no native value".into()))
 }
 
+fn classify_native_union(
+    union: &swc_ecma_ast::TsUnionType,
+    mut classify: impl FnMut(&TsType) -> DtsType,
+) -> DtsType {
+    let mut native = None;
+    let mut has_null = false;
+    let mut has_undefined = false;
+    for element in &union.types {
+        match element.as_ref() {
+            TsType::TsKeywordType(keyword) if keyword.kind == TsKeywordTypeKind::TsNullKeyword => {
+                has_null = true;
+            }
+            TsType::TsKeywordType(keyword)
+                if keyword.kind == TsKeywordTypeKind::TsUndefinedKeyword =>
+            {
+                has_undefined = true;
+            }
+            other => match classify(other) {
+                DtsType::Native(ty) if native.as_ref().is_none_or(|current| current == &ty) => {
+                    native = Some(ty)
+                }
+                DtsType::Native(_) => {
+                    return DtsType::Unsupported(format!(
+                        "unsupported type `{}`",
+                        union
+                            .types
+                            .iter()
+                            .map(|ty| describe_ts_type(ty))
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ))
+                }
+                unsupported => return unsupported,
+            },
+        }
+    }
+    let Some(payload) = native else {
+        return DtsType::Unsupported("union has no native value type".into());
+    };
+    let tagged = match (payload, has_null, has_undefined) {
+        (HirType::Nullish(inner), _, _) => HirType::Nullish(inner),
+        (HirType::Optional(inner), true, _) | (HirType::Nullable(inner), _, true) => {
+            HirType::Nullish(inner)
+        }
+        (payload @ HirType::Optional(_), false, _)
+        | (payload @ HirType::Nullable(_), _, false) => payload,
+        (payload, true, true) => HirType::Nullish(Box::new(payload)),
+        (payload, true, false) => HirType::Nullable(Box::new(payload)),
+        (payload, false, true) => HirType::Optional(Box::new(payload)),
+        (payload, false, false) => payload,
+    };
+    DtsType::Native(tagged)
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -910,24 +964,9 @@ fn classify_ts_type(
         ),
 
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
-            let mut native = None;
-            for element in &union.types {
-                match classify_ts_type(element, interfaces, generic_interfaces) {
-                    DtsType::Native(ty) if native.as_ref().is_none_or(|current| current == &ty) => {
-                        native = Some(ty);
-                    }
-                    DtsType::Native(_) => {
-                        return DtsType::Unsupported(format!(
-                            "unsupported type `{}`",
-                            describe_ts_type(ty)
-                        ))
-                    }
-                    unsupported => return unsupported,
-                }
-            }
-            native
-                .map(DtsType::Native)
-                .unwrap_or_else(|| DtsType::Unsupported("empty union type is not supported".into()))
+            classify_native_union(union, |element| {
+                classify_ts_type(element, interfaces, generic_interfaces)
+            })
         }
 
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
@@ -1563,6 +1602,17 @@ fn resolve_ts_type_with_substitution(
             ),
             &indexed.index_type,
         ),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            classify_native_union(union, |element| {
+                resolve_ts_type_with_substitution(
+                    element,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                )
+            })
+        }
         TsType::TsArrayType(arr) => {
             match resolve_ts_type_with_substitution(
                 &arr.elem_type,
