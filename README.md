@@ -1991,7 +1991,10 @@ CLI E2E now compiles `import { Database } from "sqlite3"` followed by
 standalone executable. Optional/default constructors generate one typed helper
 per supported arity, all resolving to the same addon export. Declared
 instance/static properties use the getter ABI and, unless `readonly`, the
-setter ABI; explicit accessor declarations take precedence. Automatic
+setter ABI; explicit accessor declarations take precedence. External-class
+metadata includes inherited public methods and properties,
+with derived declarations shadowing base members; private/protected members
+and private constructors are not exposed as callable shims. Automatic
 instance-method and callback syntax lowering
 now covers callback-free methods on variables initialized from an external
 constructor or aliases of a tracked instance; assignments propagate or safely

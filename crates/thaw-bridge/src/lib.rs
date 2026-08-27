@@ -22,8 +22,8 @@
 use std::collections::HashMap;
 
 use swc_ecma_ast::{
-    Class, ClassMember, Decl, DefaultDecl, Expr, Function, MethodKind, Module, ModuleDecl,
-    ModuleItem, ParamOrTsParamProp, Pat, PropName, TruePlusMinus, TsEntityName,
+    Accessibility, Class, ClassMember, Decl, DefaultDecl, Expr, Function, MethodKind, Module,
+    ModuleDecl, ModuleItem, ParamOrTsParamProp, Pat, PropName, TruePlusMinus, TsEntityName,
     TsFnOrConstructorType, TsFnParam, TsInterfaceDecl, TsKeywordTypeKind, TsLit, TsNamespaceBody,
     TsParamPropParam, TsType, TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType,
 };
@@ -46,6 +46,7 @@ pub struct DtsFunction {
 pub struct DtsClass {
     pub name: String,
     pub extends: Option<String>,
+    pub constructible: bool,
     pub constructors: Vec<DtsConstructor>,
     pub methods: Vec<DtsMethod>,
     pub properties: Vec<DtsProperty>,

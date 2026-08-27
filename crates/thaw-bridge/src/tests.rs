@@ -2323,6 +2323,104 @@ fn records_optional_and_default_constructor_arities() {
     assert_eq!(classes[1].constructors[0].params.len(), 2);
 }
 
+#[test]
+fn expands_inherited_external_class_members() {
+    let classes = parse_dts_classes(
+        r#"export class Base {
+                constructor(value: number);
+                base(value: number): number;
+                inherited(): string;
+                static version(): number;
+                readonly id: number;
+            }
+            export class Derived extends Base {
+                constructor(value: number, label?: string);
+                base(value: string): string;
+                own(): boolean;
+            }
+            export class GrandChild extends Derived {}"#,
+    )
+    .unwrap();
+    let derived = classes
+        .iter()
+        .find(|class| class.name == "Derived")
+        .unwrap();
+    assert_eq!(derived.constructors.len(), 1);
+    assert_eq!(
+        derived
+            .methods
+            .iter()
+            .filter(|method| method.name == "base")
+            .count(),
+        1
+    );
+    assert!(derived
+        .methods
+        .iter()
+        .any(|method| method.name == "inherited"));
+    assert!(derived
+        .methods
+        .iter()
+        .any(|method| method.name == "version" && method.is_static));
+    assert!(derived
+        .properties
+        .iter()
+        .any(|property| property.name == "id"));
+
+    let grand = classes
+        .iter()
+        .find(|class| class.name == "GrandChild")
+        .unwrap();
+    assert!(grand.constructors.is_empty());
+    assert!(grand.methods.iter().any(|method| method.name == "own"));
+    assert!(grand
+        .methods
+        .iter()
+        .any(|method| method.name == "inherited"));
+    assert!(grand
+        .properties
+        .iter()
+        .any(|property| property.name == "id"));
+}
+
+#[test]
+fn excludes_inaccessible_external_class_members_and_constructors() {
+    let classes = parse_dts_classes(
+        r#"export class Base {
+                protected hidden(): number;
+                private secret: string;
+                visible(): boolean;
+            }
+            export class Derived extends Base {}
+            export class Locked {
+                private constructor(value: number);
+                static create(): Locked;
+            }"#,
+    )
+    .unwrap();
+    let derived = classes
+        .iter()
+        .find(|class| class.name == "Derived")
+        .unwrap();
+    assert!(derived
+        .methods
+        .iter()
+        .any(|method| method.name == "visible"));
+    assert!(!derived.methods.iter().any(|method| method.name == "hidden"));
+    assert!(!derived
+        .properties
+        .iter()
+        .any(|property| property.name == "secret"));
+
+    let locked = classes.iter().find(|class| class.name == "Locked").unwrap();
+    assert!(!locked.constructible);
+    assert!(locked.constructors.is_empty());
+    assert!(locked
+        .methods
+        .iter()
+        .any(|method| method.name == "create" && method.is_static));
+}
+
 /// The actual regression this was validated against: a real date-fns
 /// function (`milliseconds({ years, months, ... }: Duration)`) uses a
 /// destructured parameter, which `parse_dts` used to reject by
