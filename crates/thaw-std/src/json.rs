@@ -110,6 +110,18 @@ pub unsafe extern "C" fn thaw_json_is_array(value: *const Value) -> u8 {
     (!value.is_null() && matches!(unsafe { &*value }, Value::Array(_))).into()
 }
 
+fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
+    let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
+    if output.is_null() {
+        return output;
+    }
+    unsafe { (output as *mut i64).write(values.len() as i64) };
+    for (index, value) in values.into_iter().enumerate() {
+        unsafe { (output.add(8 + index * 8) as *mut *mut u8).write(value) };
+    }
+    output
+}
+
 #[no_mangle]
 /// # Safety
 ///
@@ -120,16 +132,59 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
         Some(Value::Array(items)) => (0..items.len()).map(|index| index.to_string()).collect(),
         _ => Vec::new(),
     };
-    let output = thaw_arena::thaw_arena_alloc(8 + keys.len() * 8, 8);
-    if output.is_null() {
-        return output;
-    }
-    unsafe { (output as *mut i64).write(keys.len() as i64) };
-    for (index, key) in keys.into_iter().enumerate() {
-        let key = CString::new(key).unwrap_or_default().into_raw();
-        unsafe { (output.add(8 + index * 8) as *mut *mut c_char).write(key) };
-    }
-    output
+    alloc_pointer_array(
+        keys.into_iter()
+            .map(|key| CString::new(key).unwrap_or_default().into_raw().cast())
+            .collect(),
+    )
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
+    let values = match unsafe { value.as_ref() } {
+        Some(Value::Object(fields)) => fields.values().cloned().collect::<Vec<_>>(),
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    };
+    alloc_pointer_array(
+        values
+            .into_iter()
+            .map(|value| Box::into_raw(Box::new(value)).cast())
+            .collect(),
+    )
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
+    let entries = match unsafe { value.as_ref() } {
+        Some(Value::Object(fields)) => fields
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (index.to_string(), value.clone()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    alloc_pointer_array(
+        entries
+            .into_iter()
+            .map(|(key, value)| {
+                alloc_pointer_array(vec![
+                    CString::new(key).unwrap_or_default().into_raw().cast(),
+                    Box::into_raw(Box::new(value)).cast(),
+                ])
+            })
+            .collect(),
+    )
 }
 
 #[no_mangle]
@@ -326,6 +381,28 @@ mod tests {
             read_c_string(unsafe { (keys.add(16) as *const *const c_char).read() }),
             "1"
         );
+    }
+
+    #[test]
+    fn returns_json_values_and_entries_in_key_order() {
+        let object = parse(r#"{"second": 2, "first": "one"}"#);
+        let values = unsafe { thaw_json_values(object) };
+        assert_eq!(unsafe { (values as *const i64).read() }, 2);
+        let second = unsafe { (values.add(8) as *const *mut Value).read() };
+        let first = unsafe { (values.add(16) as *const *mut Value).read() };
+        assert_eq!(thaw_json_as_number(second), 2.0);
+        assert_eq!(read_c_string(thaw_json_as_string(first)), "one");
+
+        let entries = unsafe { thaw_json_entries(object) };
+        assert_eq!(unsafe { (entries as *const i64).read() }, 2);
+        let first_entry = unsafe { (entries.add(8) as *const *mut u8).read() };
+        assert_eq!(unsafe { (first_entry as *const i64).read() }, 2);
+        assert_eq!(
+            read_c_string(unsafe { (first_entry.add(8) as *const *const c_char).read() }),
+            "second"
+        );
+        let value = unsafe { (first_entry.add(16) as *const *mut Value).read() };
+        assert_eq!(thaw_json_as_number(value), 2.0);
     }
 
     #[test]

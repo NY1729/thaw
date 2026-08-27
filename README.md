@@ -1317,9 +1317,11 @@ The workspace crates have narrow responsibilities:
   numeric-index order and evaluating synchronous or awaited receivers exactly once;
   `Object.getOwnPropertyNames` and `Reflect.ownKeys` share this result because
   these native/JSON models have only string-named own fields
-- `Object.values` returns field values in the same order, retaining homogeneous
-  native arrays or heterogeneous typed tuples as appropriate, including empty
-  objects and synchronous/awaited receivers
+- `Object.values` returns fixed-object field values or dynamic JSON values in
+  key order, retaining homogeneous native arrays or heterogeneous typed tuples
+  as appropriate, including empty objects and synchronous/awaited receivers
+- `Object.entries` returns fixed-object typed entries or dynamic
+  `[string, Json][]` entries in the same key order
 - `Object.entries` returns ordered, explicitly typed `[string, value]` tuples;
   homogeneous entry shapes remain native arrays while heterogeneous field
   types retain a statically indexed outer tuple, including empty/awaited input

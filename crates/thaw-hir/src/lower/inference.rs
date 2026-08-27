@@ -1110,6 +1110,23 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Object.keys JSON operand")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
+                    "__thaw_json_values" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Object.values expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "Object.values JSON operand")?;
+                        return Ok(HirType::Array(Box::new(HirType::Json)));
+                    }
+                    "__thaw_json_entries" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Object.entries expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "Object.entries JSON operand")?;
+                        return Ok(HirType::Array(Box::new(HirType::Tuple(vec![
+                            HirType::Str,
+                            HirType::Json,
+                        ]))));
+                    }
                     "__thaw_number_is_nan"
                     | "__thaw_number_is_finite"
                     | "__thaw_number_is_integer"
