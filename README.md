@@ -1500,10 +1500,13 @@ The workspace crates have narrow responsibilities:
   is also supported, using a literal (non-interpolating) replacement text;
   `replace` requires the pattern to compile and `replaceAll` additionally
   requires the `g` flag, throwing otherwise
-- `String.prototype.match(regex)` returns `Array(Str) | undefined`: the
-  matched groups' cooked strings when the pattern matches (currently just
-  the whole match, since capture groups are not extracted), or `undefined`
-  when it does not match or the pattern fails to compile
+- `String.prototype.match(regex)` returns `Array(Str) | undefined`. Without
+  the `g` flag it returns the whole match followed by each capture group's
+  text, using an empty string (rather than `undefined`) for a group that
+  did not participate in the match, since the array's element type is a
+  plain `string`; with `g` it returns every whole match with no capture
+  groups, matching real `String.prototype.match`. Returns `undefined` when
+  it does not match or the pattern fails to compile
 - `String.prototype.search(regex)` returns the JavaScript UTF-16 code-unit
   index of the first match, or `-1` when it does not match or the pattern
   fails to compile (mirroring `RegExp.prototype.test`'s inability to
