@@ -253,7 +253,7 @@ impl<'a> FnLowerer<'a> {
                 };
                 match name.as_str() {
                     "console.log" | "console.info" | "console.debug" | "console.warn"
-                    | "console.error" => return Ok(HirType::Void),
+                    | "console.error" | "console.assert" => return Ok(HirType::Void),
                     "__thaw_string_concat" => {
                         if args.len() != 2 {
                             return Err("string concatenation expects two operands".into());
