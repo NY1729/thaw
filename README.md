@@ -1329,6 +1329,9 @@ The workspace crates have narrow responsibilities:
 - The `in` operator accepts dynamic primitive keys for fixed objects and checks
   runtime JSON own properties with left-before-right single evaluation;
   `for...in` iterates JSON object keys or array indices in JavaScript key order
+- `delete` removes named or computed properties from runtime-keyed
+  `Record<string, T>`/JSON objects, returns `true` for present and missing keys,
+  evaluates the receiver and key once in source order, and supports awaited keys
 - `for...of` iterates runtime JSON arrays as `Json` values alongside typed
   native arrays. Strings are iterated by Unicode code point in both
   `for...of` and `for await...of`

@@ -145,6 +145,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(HirType::Json)
             }
             HirExpr::JsonSet(_, _, _, element) => Some(element.clone()),
+            HirExpr::JsonDelete(_, _) => Some(HirType::Bool),
             HirExpr::EnumReverseLookup(_, _) => Some(HirType::Optional(Box::new(HirType::Str))),
             HirExpr::ArrayLit(elements) => Some(HirType::Array(Box::new(
                 elements
