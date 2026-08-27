@@ -477,6 +477,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     "encodeURIComponent",
                 )
             }
+            "__thaw_decode_uri_component" => {
+                return self.compile_single_arg_call(
+                    "thaw_decode_uri_component",
+                    args,
+                    "decodeURIComponent",
+                )
+            }
+            "__thaw_string_is_null" => {
+                let [value] = args else {
+                    return Err("string null check expects one operand".into());
+                };
+                let value = self.compile_expr(value)?.into_pointer_value();
+                return self
+                    .builder
+                    .build_is_null(value, "string_is_null")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_string_repeat" => {
                 let [value, count] = args else {
                     return Err("string repeat expects two operands".into());

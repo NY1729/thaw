@@ -473,6 +473,20 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "encodeURIComponent argument")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_decode_uri_component" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("decodeURIComponent expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "decodeURIComponent argument")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_string_is_null" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("string null check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "string null check")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_string_to_array" => {
                         let [value] = args.as_slice() else {
                             return Err("string iterator conversion expects one operand".into());
