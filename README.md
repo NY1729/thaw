@@ -249,6 +249,8 @@ The workspace crates have narrow responsibilities:
   from object rest, while evaluating each source and key expression once
 - Function-local `Record<string, T>` destructuring supports runtime-computed
   keys and non-mutating object rest with the same single-evaluation ordering
+- Dictionary destructuring assignments support computed keys, missing-property
+  defaults and rest assignment without mutating the right-hand-side object
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
 - `process.env`, JSON operations, and both legacy blocking and Promise-based
