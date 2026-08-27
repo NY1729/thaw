@@ -761,6 +761,32 @@ impl<'a> FnLowerer<'a> {
                     }
                     "JSON.parse" => return Ok(HirType::Json),
                     "JSON.stringify" => return Ok(HirType::Str),
+                    "__thaw_json_stringify_number_space" => {
+                        let [value, space] = args.as_slice() else {
+                            return Err("JSON.stringify expects value and number space".into());
+                        };
+                        let value_type = self.infer_expr_type(value)?;
+                        if !matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "JSON.stringify expected JSON or dictionary, got {value_type:?}"
+                            ));
+                        }
+                        self.expect_type(&HirType::F64, space, "JSON.stringify space")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_json_stringify_string_space" => {
+                        let [value, space] = args.as_slice() else {
+                            return Err("JSON.stringify expects value and string space".into());
+                        };
+                        let value_type = self.infer_expr_type(value)?;
+                        if !matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "JSON.stringify expected JSON or dictionary, got {value_type:?}"
+                            ));
+                        }
+                        self.expect_type(&HirType::Str, space, "JSON.stringify space")?;
+                        return Ok(HirType::Str);
+                    }
                     // QuickJS-NG fallback path (docs/design/bridge.md
                     // section 7): `loadScript` evaluates JS source into
                     // the global engine context; `callDynamic` calls a

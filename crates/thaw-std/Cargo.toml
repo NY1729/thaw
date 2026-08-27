@@ -9,6 +9,7 @@ edition.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+serde = "1.0"
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 thaw-arena = { version = "0.1.0", path = "../thaw-arena" }
 ureq = "3.4.0"

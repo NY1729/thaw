@@ -1346,6 +1346,10 @@ The workspace crates have narrow responsibilities:
   including awaited keys and single left-to-right receiver/key evaluation;
   numeric computed keys read and write JSON arrays, return the assigned JSON
   value, and extend sparse positions with `null`
+- `JSON.stringify` accepts runtime JSON or typed `Record` values plus a
+  `null`/`undefined` replacer and number/string `space`; numeric indentation is
+  truncated and clamped to ten spaces, string indentation to ten characters,
+  with left-to-right awaited argument evaluation
 - Computed `Record<string, T>` keys use JavaScript primitive-to-string
   conversion for reads, writes, deletion and optional chaining; numeric JSON
   keys address array indices or numeric object-property names by runtime kind
