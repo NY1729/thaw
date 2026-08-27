@@ -675,21 +675,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 HirType::F64 => self.compile_json_as_value(field_json, "thaw_json_as_number")?,
                 HirType::Str => self.compile_json_as_value(field_json, "thaw_json_as_string")?,
                 HirType::Bool => self.compile_json_as_bool_value(field_json)?,
-                HirType::Json => field_json,
-                HirType::Array(element) if **element == HirType::F64 => self
-                    .builder
-                    .build_call(
-                        self.module
-                            .get_function("thaw_json_to_number_array")
-                            .unwrap(),
-                        &[field_json.into()],
-                        "dynamic_result_array_field",
-                    )
-                    .map_err(|error| error.to_string())?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap(),
-                HirType::Object(_) => self.compile_json_to_native_object(field_json, field_ty)?,
+                HirType::Json | HirType::Dictionary(_) => field_json,
+                HirType::Array(_) | HirType::Object(_) => {
+                    self.compile_json_to_native(field_json, field_ty)?
+                }
                 other => return Err(format!("unsupported dynamic result field {other:?}")),
             };
             let offset = self

@@ -343,6 +343,11 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
 fn structured_dictionary_values_support_reads_and_destructuring() {
     let source = r#"
         interface Item { value: number; label: string; }
+        interface RichItem {
+            tags: string[];
+            matrix: number[][];
+            metadata: Record<string, number>;
+        }
         function items(): Record<string, Item> {
             return {
                 selected: { value: 1, label: "one" },
@@ -370,6 +375,15 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
         function matrices(): Record<string, number[][]> {
             return { selected: [[9, 10], [11]], kept: [[12]] };
         }
+        function richItems(): Record<string, RichItem> {
+            return {
+                selected: {
+                    tags: ["x", "y"],
+                    matrix: [[13], [14, 15]],
+                    metadata: { score: 16 }
+                }
+            };
+        }
         function main(): void {
             const direct: Item = items().selected;
             const {
@@ -384,16 +398,18 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
             const selectedItems: Item[] = itemArrays().selected;
             let selectedMatrix: number[][] = [];
             ({ selected: selectedMatrix } = matrices());
+            const rich: RichItem = richItems().selected;
             console.log(direct.value, direct.label, value, label, itemRest);
             console.log(selected, arrayRest);
             console.log(selectedLabels, selectedFlags);
             console.log(selectedItems[0].value, selectedItems[1].label, selectedMatrix);
+            console.log(rich.tags, rich.matrix, rich.metadata.score);
         }
     "#;
 
     assert_eq!(
         compile_and_run(source, "structured_dictionary_destructuring"),
-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n"
+        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\n"
     );
 }
 
