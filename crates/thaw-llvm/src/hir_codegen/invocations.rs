@@ -616,6 +616,34 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("charCodeAt returned no value".to_string());
             }
+            "__thaw_string_locale_compare" => {
+                let [receiver, other] = args else {
+                    return Err("string localeCompare expects two operands".to_string());
+                };
+                let receiver = self.compile_expr(receiver)?;
+                let other = self.compile_expr(other)?;
+                let compared = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_compare").unwrap(),
+                        &[receiver.into(), other.into()],
+                        "locale_compare",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("localeCompare returned no value")?
+                    .into_int_value();
+                return self
+                    .builder
+                    .build_signed_int_to_float(
+                        compared,
+                        self.context.f64_type(),
+                        "locale_compare_f64",
+                    )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_string_code_point_at" => {
                 let [value, index] = args else {
                     return Err("string codePointAt expects two operands".to_string());
