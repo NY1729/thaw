@@ -655,6 +655,106 @@ fn classify_indexed_access(object: DtsType, index: &TsType) -> DtsType {
     }
 }
 
+fn finite_utility_keys(ty: &TsType, keys: &mut Vec<String>) -> Result<(), String> {
+    match ty {
+        TsType::TsParenthesizedType(parenthesized) => {
+            finite_utility_keys(&parenthesized.type_ann, keys)
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+            for ty in &union.types {
+                finite_utility_keys(ty, keys)?;
+            }
+            Ok(())
+        }
+        TsType::TsLitType(literal) => {
+            let key = match &literal.lit {
+                TsLit::Str(value) => value.value.to_string_lossy().into_owned(),
+                TsLit::Number(value) => value.value.to_string(),
+                _ => return Err("utility keys must be string or number literals".into()),
+            };
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+            Ok(())
+        }
+        _ => Err("utility keys must be a finite literal union".into()),
+    }
+}
+
+fn utility_keys(
+    ty: &TsType,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+) -> Result<Vec<String>, String> {
+    if let TsType::TsTypeOperator(operator) = ty {
+        if operator.op == TsTypeOperatorOp::KeyOf {
+            return match classify_ts_type(&operator.type_ann, interfaces, generic_interfaces) {
+                DtsType::Native(HirType::Object(fields)) => {
+                    Ok(fields.into_iter().map(|(name, _)| name).collect())
+                }
+                DtsType::Native(_) => Err("keyof utility keys require an object type".into()),
+                DtsType::Unsupported(reason) => Err(reason),
+            };
+        }
+    }
+    let mut keys = Vec::new();
+    finite_utility_keys(ty, &mut keys)?;
+    Ok(keys)
+}
+
+fn substituted_utility_keys(
+    ty: &TsType,
+    substitution: &HashMap<String, HirType>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> Result<Vec<String>, String> {
+    if let TsType::TsTypeOperator(operator) = ty {
+        if operator.op == TsTypeOperatorOp::KeyOf {
+            return match resolve_ts_type_with_substitution(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ) {
+                DtsType::Native(HirType::Object(fields)) => {
+                    Ok(fields.into_iter().map(|(name, _)| name).collect())
+                }
+                DtsType::Native(_) => Err("keyof utility keys require an object type".into()),
+                DtsType::Unsupported(reason) => Err(reason),
+            };
+        }
+    }
+    let mut keys = Vec::new();
+    finite_utility_keys(ty, &mut keys)?;
+    Ok(keys)
+}
+
+fn apply_pick_or_omit(object: DtsType, keys: Result<Vec<String>, String>, omit: bool) -> DtsType {
+    let keys = match keys {
+        Ok(keys) => keys,
+        Err(reason) => return DtsType::Unsupported(reason),
+    };
+    let DtsType::Native(HirType::Object(fields)) = object else {
+        return DtsType::Unsupported("Pick/Omit require a fixed object type".into());
+    };
+    if let Some(key) = keys
+        .iter()
+        .find(|key| !fields.iter().any(|(name, _)| name == *key))
+    {
+        return DtsType::Unsupported(format!(
+            "Pick/Omit key `{key}` does not exist on the object type"
+        ));
+    }
+    DtsType::Native(HirType::Object(
+        fields
+            .into_iter()
+            .filter(|(name, _)| keys.contains(name) != omit)
+            .collect(),
+    ))
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -980,6 +1080,23 @@ fn classify_ts_type(
                 };
                 return classify_ts_type(inner, interfaces, generic_interfaces);
             }
+            if matches!(ref_name.as_str(), "Pick" | "Omit") {
+                let [object, keys] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return DtsType::Unsupported(format!(
+                        "{ref_name}<T, K> requires exactly two type arguments"
+                    ));
+                };
+                return apply_pick_or_omit(
+                    classify_ts_type(object, interfaces, generic_interfaces),
+                    utility_keys(keys, interfaces, generic_interfaces),
+                    ref_name == "Omit",
+                );
+            }
             if matches!(ref_name.as_str(), "Array" | "ReadonlyArray") {
                 let Some(element) = ty_ref
                     .type_params
@@ -1144,6 +1261,33 @@ fn resolve_ts_type_with_substitution(
                     generic_interfaces,
                     in_progress,
                 );
+            }
+            if ref_name == "Pick" || ref_name == "Omit" {
+                let [object, keys] = ty_ref
+                    .type_params
+                    .as_ref()
+                    .map(|params| params.params.as_slice())
+                    .unwrap_or_default()
+                else {
+                    return DtsType::Unsupported(format!(
+                        "{ref_name}<T, K> requires exactly two type arguments"
+                    ));
+                };
+                let object = resolve_ts_type_with_substitution(
+                    object,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+                let keys = substituted_utility_keys(
+                    keys,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                );
+                return apply_pick_or_omit(object, keys, ref_name == "Omit");
             }
             if let Some(params) = &ty_ref.type_params {
                 if let [elem] = params.params.as_slice() {
