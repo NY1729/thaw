@@ -587,6 +587,79 @@ fn preserves_optional_object_properties_in_native_layouts() {
 }
 
 #[test]
+fn classifies_partial_and_required_utility_types() {
+    let funcs = parse_dts(
+        r#"export interface Config {
+                host: string;
+                port?: number;
+            }
+            export declare function normalize(
+                patch: Partial<Config>
+            ): Required<Config>;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("Partial/Required object types should use tagged native fields");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            ("host".into(), HirType::Optional(Box::new(HirType::Str)),),
+            ("port".into(), HirType::Optional(Box::new(HirType::F64)),),
+        ])]
+    );
+    assert_eq!(
+        signature.ret,
+        HirType::Object(vec![
+            ("host".into(), HirType::Str),
+            ("port".into(), HirType::F64),
+        ])
+    );
+}
+
+#[test]
+fn resolves_partial_and_required_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export interface Config { host?: string; }
+            export interface Changes<T> {
+                patch: Partial<T>;
+                complete: Required<T>;
+            }
+            export declare function inspect(value: Changes<Config>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("Partial/Required should resolve after generic substitution");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            (
+                "patch".into(),
+                HirType::Object(vec![(
+                    "host".into(),
+                    HirType::Optional(Box::new(HirType::Str)),
+                )]),
+            ),
+            (
+                "complete".into(),
+                HirType::Object(vec![("host".into(), HirType::Str)]),
+            ),
+        ])]
+    );
+}
+
+#[test]
+fn rejects_partial_of_non_object_types() {
+    let funcs =
+        parse_dts("export declare function inspect(value: Partial<string>): string;").unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn resolves_pick_and_omit_after_generic_substitution() {
     let funcs = parse_dts(
         r#"export interface Config { host: string; port: number; }
