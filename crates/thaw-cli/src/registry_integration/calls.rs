@@ -10,29 +10,38 @@ fn rewrite_external_class_constructors(
         return Ok(source.to_string());
     }
     struct Finder<'a> {
-        classes: &'a [(String, String)],
-        removals: Vec<(u32, u32)>,
+        classes: &'a [ClassConstructorRewrite],
+        replacements: Vec<(u32, u32, String)>,
     }
     impl Visit for Finder<'_> {
         fn visit_new_expr(&mut self, expression: &NewExpr) {
-            let matches = match expression.callee.as_ref() {
+            let class = match expression.callee.as_ref() {
                 Expr::Ident(class) => self
                     .classes
                     .iter()
-                    .any(|(_, name)| name == class.sym.as_str()),
+                    .find(|(_, name, _)| name == class.sym.as_str()),
                 Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
                     (Expr::Ident(package), MemberProp::Ident(class)) => {
-                        self.classes.iter().any(|(qualifier, name)| {
+                        self.classes.iter().find(|(qualifier, name, _)| {
                             qualifier == package.sym.as_str() && name == class.sym.as_str()
                         })
                     }
-                    _ => false,
+                    _ => None,
                 },
-                _ => false,
+                _ => None,
             };
-            if matches {
-                self.removals
-                    .push((expression.span().lo.0, expression.callee.span().lo.0));
+            if let Some((_, _, helpers)) = class {
+                let argument_count = expression.args.as_ref().map_or(0, Vec::len);
+                if let Some((_, helper)) = helpers
+                    .iter()
+                    .find(|(arity, _)| *arity == argument_count)
+                {
+                    self.replacements.push((
+                        expression.span().lo.0,
+                        expression.callee.span().hi.0,
+                        helper.clone(),
+                    ));
+                }
             }
             expression.visit_children_with(self);
         }
@@ -40,12 +49,12 @@ fn rewrite_external_class_constructors(
     let module = thaw_parser::parse_typescript(source)?;
     let mut finder = Finder {
         classes,
-        removals: Vec::new(),
+        replacements: Vec::new(),
     };
     module.visit_with(&mut finder);
     let mut output = source.to_string();
-    for (start, end) in finder.removals.into_iter().rev() {
-        output.replace_range((start - 1) as usize..(end - 1) as usize, "");
+    for (start, end, helper) in finder.replacements.into_iter().rev() {
+        output.replace_range((start - 1) as usize..(end - 1) as usize, &helper);
     }
     Ok(output)
 }
@@ -134,4 +143,3 @@ fn rewrite_qualified_calls(
     out.push_str(&source[cursor..]);
     Ok(out)
 }
-

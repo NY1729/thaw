@@ -47,15 +47,15 @@ fn rewrite_external_class_methods_with_static(
         match new_expression.callee.as_ref() {
             Expr::Ident(class) => classes
                 .iter()
-                .find(|(_, name)| name == class.sym.as_str())
-                .map(|(_, name)| name.as_str()),
+                .find(|(_, name, _)| name == class.sym.as_str())
+                .map(|(_, name, _)| name.as_str()),
             Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
                 (Expr::Ident(package), MemberProp::Ident(class)) => classes
                     .iter()
-                    .find(|(qualifier, name)| {
+                    .find(|(qualifier, name, _)| {
                         qualifier == package.sym.as_str() && name == class.sym.as_str()
                     })
-                    .map(|(_, name)| name.as_str()),
+                    .map(|(_, name, _)| name.as_str()),
                 _ => None,
             },
             _ => None,
