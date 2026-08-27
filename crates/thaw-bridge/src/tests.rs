@@ -491,14 +491,39 @@ fn resolves_keyed_mapped_types_after_generic_substitution() {
 }
 
 #[test]
-fn mapped_key_remapping_falls_back() {
+fn resolves_static_mapped_key_remapping() {
     let funcs = parse_dts(
-        r#"export type Renamed = { [K in "value" as `get${K}`]: number };
+        r#"export type Renamed = { [K in "name" | "value" as `get_${K}`]: number };
             export declare function inspect(value: Renamed): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("static mapped template keys should resolve");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![
+            ("get_name".into(), HirType::F64),
+            ("get_value".into(), HirType::F64),
+        ])]
+    );
+}
+
+#[test]
+fn rejects_dynamic_or_duplicate_mapped_key_remapping() {
+    let funcs = parse_dts(
+        r#"export type Dynamic = { [K in "name" as `get${Uppercase<K>}`]: number };
+            export type Duplicate = { [K in "left" | "right" as "value"]: number };
+            export declare function dynamic(value: Dynamic): string;
+            export declare function duplicate(value: Duplicate): string;"#,
     )
     .unwrap();
     assert!(matches!(
         classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+    assert!(matches!(
+        classify(&funcs[1]),
         Classification::Fallback { .. }
     ));
 }
