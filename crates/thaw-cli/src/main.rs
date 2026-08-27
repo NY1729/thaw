@@ -286,7 +286,9 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
     Ok(shim)
 }
 
-include!("registry_integration.rs");
+include!("registry_integration/shims.rs");
+include!("registry_integration/class_methods.rs");
+include!("registry_integration/calls.rs");
 
 include!("ffi_metadata.rs");
 
