@@ -1232,6 +1232,33 @@ fn compiles_native_string_code_point_at() {
 }
 
 #[test]
+fn compiles_encode_uri_component() {
+    let source = r#"
+        function value(): string {
+            console.log("argument");
+            return "a=1&b=2";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited argument");
+            await sleep(1);
+            return "😀";
+        }
+        async function main(): Promise<void> {
+            console.log(encodeURIComponent("a b"));
+            console.log(encodeURIComponent("a=1&b=2"));
+            console.log(encodeURIComponent("abc-_.!~*'()123"));
+            console.log(encodeURIComponent("café"));
+            console.log(encodeURIComponent(value()));
+            console.log(encodeURIComponent(await delayedValue()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "encode_uri_component"),
+        "a%20b\na%3D1%26b%3D2\nabc-_.!~*'()123\ncaf%C3%A9\nargument\na%3D1%26b%3D2\nawaited argument\n%F0%9F%98%80\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

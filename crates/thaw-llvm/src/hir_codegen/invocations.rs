@@ -470,6 +470,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     "string iterator array",
                 )
             }
+            "__thaw_encode_uri_component" => {
+                return self.compile_single_arg_call(
+                    "thaw_encode_uri_component",
+                    args,
+                    "encodeURIComponent",
+                )
+            }
             "__thaw_string_repeat" => {
                 let [value, count] = args else {
                     return Err("string repeat expects two operands".into());

@@ -409,6 +409,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .add_function(name, string_transform_type, Some(Linkage::External));
         }
         self.module.add_function(
+            "thaw_encode_uri_component",
+            string_transform_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_string_to_array",
             string_transform_type,
             Some(Linkage::External),

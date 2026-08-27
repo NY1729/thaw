@@ -761,6 +761,20 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
+        if callee_name == "encodeURIComponent" {
+            let (arguments, bindings) =
+                self.lower_native_spread_values(&call.args, &callee_name)?;
+            let [value] = arguments.as_slice() else {
+                return Err(format!("`{callee_name}` expects exactly one argument"));
+            };
+            let value = self.coerce_primitive_to_string(value.clone())?;
+            let result = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_encode_uri_component".to_string())),
+                vec![value],
+            );
+            return self.wrap_call_argument_bindings(result, &bindings);
+        }
+
         if matches!(callee_name.as_str(), "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any") {
             return self.lower_promise_static_call(&callee_name, call);
         }
