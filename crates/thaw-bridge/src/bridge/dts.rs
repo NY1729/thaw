@@ -713,11 +713,13 @@ fn classify_ts_type(
 
         TsType::TsArrayType(arr) => {
             match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
-                DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool)) => {
+                DtsType::Native(
+                    element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue),
+                ) => {
                     DtsType::Native(HirType::Array(Box::new(element)))
                 }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
-                    "array element type {other:?} is not supported yet (supports number[], string[], and boolean[])"
+                    "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
                 )),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))
@@ -896,11 +898,13 @@ fn classify_ts_type(
                     return DtsType::Unsupported("Array<T> needs one type argument".to_string());
                 };
                 return match classify_ts_type(element, interfaces, generic_interfaces) {
-                    DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool)) => {
+                    DtsType::Native(
+                        element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue),
+                    ) => {
                         DtsType::Native(HirType::Array(Box::new(element)))
                     }
                     _ => DtsType::Unsupported(
-                        "only number[], string[], and boolean[] have native dynamic layouts".to_string(),
+                        "only number[], string[], boolean[], and JsValue[] have native dynamic layouts".to_string(),
                     ),
                 };
             }
@@ -1058,12 +1062,12 @@ fn resolve_ts_type_with_substitution(
                         in_progress,
                     );
                     match (ref_name, resolved_elem) {
-                        ("Array", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool))) => {
+                        ("Array", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue))) => {
                             return DtsType::Native(HirType::Array(Box::new(element)))
                         }
                         ("Array", DtsType::Native(other)) => {
                             return DtsType::Unsupported(format!(
-                                "array element type {other:?} is not supported yet (supports number[], string[], and boolean[])"
+                                "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
                             ))
                         }
                         ("Array", DtsType::Unsupported(reason)) => {
@@ -1086,11 +1090,13 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             ) {
-                DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool)) => {
+                DtsType::Native(
+                    element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue),
+                ) => {
                     DtsType::Native(HirType::Array(Box::new(element)))
                 }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
-                    "array element type {other:?} is not supported yet (supports number[], string[], and boolean[])"
+                    "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
                 )),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))

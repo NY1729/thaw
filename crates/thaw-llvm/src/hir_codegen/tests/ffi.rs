@@ -2914,6 +2914,78 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn ffi_call_marshals_js_value_arrays_in_both_directions() {
+    let source = r#"
+        declare function native_handle(value: number): JsValue;
+        declare function native_handles(values: JsValue[]): JsValue[];
+
+        function main(): void {
+            const input: JsValue[] = [native_handle(11), native_handle(22)];
+            console.log(native_handles(input).length);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let mut program = thaw_hir::lower_module(&module).unwrap();
+    thaw_hir::set_ffi_string_abi(
+        &mut program,
+        "native_handles",
+        vec![thaw_hir::FfiStringAbi::NullTerminated],
+        thaw_hir::FfiStringAbi::NullTerminated,
+        thaw_hir::FfiCallingConvention::C,
+        thaw_hir::FfiAggregateAbi::Portable,
+    )
+    .unwrap();
+
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "ffi_js_value_arrays");
+    compiler.compile_program(&program).unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-hir-codegen-test-ffi-js-value-arrays-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let obj_path = dir.join("out.o");
+    let exe_path = dir.join("out");
+    let native_c_path = dir.join("native.c");
+    let native_obj_path = dir.join("native.o");
+    compiler.write_object_file(&obj_path).unwrap();
+    std::fs::write(
+        &native_c_path,
+        "#include <stdint.h>\n\
+         typedef struct { const uint64_t *data; int64_t len; } ThawHandleArray;\n\
+         static const uint64_t result[] = {33, 44, 55};\n\
+         uint64_t native_handle(double value) { return (uint64_t)value; }\n\
+         ThawHandleArray native_handles(const uint64_t *values, int64_t len) {\n\
+           int valid = len == 2 && values[0] == 11 && values[1] == 22;\n\
+           return valid ? (ThawHandleArray){result, 3} : (ThawHandleArray){result, 0};\n\
+         }\n",
+    )
+    .unwrap();
+    assert!(Command::new("cc")
+        .arg("-c")
+        .arg(&native_c_path)
+        .arg("-o")
+        .arg(&native_obj_path)
+        .status()
+        .unwrap()
+        .success());
+    let arena_lib = build_staticlib("thaw-arena");
+    assert!(Command::new("cc")
+        .arg(&obj_path)
+        .arg(&native_obj_path)
+        .arg(&arena_lib)
+        .arg("-o")
+        .arg(&exe_path)
+        .status()
+        .unwrap()
+        .success());
+    let output = Command::new(&exe_path).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "3\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Same gap, for `Object` params: a real C function is far more
 /// likely to be a flat multi-argument function than to agree with
 /// Thaw's own arena struct layout, so an object-typed FFI parameter

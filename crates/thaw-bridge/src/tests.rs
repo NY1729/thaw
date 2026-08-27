@@ -343,6 +343,17 @@ fn classifies_boolean_array_as_fast_path() {
 }
 
 #[test]
+fn classifies_js_value_array_as_fast_path() {
+    let funcs = parse_dts("export declare function f(xs: JsValue[]): JsValue[];").unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("JsValue arrays should use the native pointer-length ABI");
+    };
+    let expected = HirType::Array(Box::new(HirType::JsValue));
+    assert_eq!(signature.params, vec![expected.clone()]);
+    assert_eq!(signature.ret, expected);
+}
+
+#[test]
 fn classifies_typed_callback_parameter_as_fast_path() {
     let funcs = parse_dts("export declare function f(cb: (err: string) => void): void;").unwrap();
     let Classification::FastPath(signature) = classify(&funcs[0]) else {
