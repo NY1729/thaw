@@ -209,6 +209,11 @@ impl<'ctx> HirCompiler<'ctx> {
             number_to_string_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_number_to_fixed",
+            i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
         let string_to_number_type = f64_type.fn_type(&[i8_ptr.into()], false);
         self.module.add_function(
             "thaw_string_to_number",

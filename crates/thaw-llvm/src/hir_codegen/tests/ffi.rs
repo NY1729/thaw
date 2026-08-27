@@ -1156,6 +1156,49 @@ fn compiles_native_string_pad_start_and_pad_end() {
 }
 
 #[test]
+fn compiles_native_number_to_fixed() {
+    let source = r#"
+        function value(): number {
+            console.log("receiver");
+            return 1.5;
+        }
+        function digits(): number {
+            console.log("digits");
+            return 2;
+        }
+        async function delayedValue(): Promise<number> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return 3.14159;
+        }
+        async function main(): Promise<void> {
+            console.log((1.5).toFixed(2));
+            console.log((3.7).toFixed());
+            console.log((5).toFixed());
+            console.log((-1.005).toFixed(2));
+            console.log((1e21).toFixed(2));
+            console.log((0 / 0).toFixed(2));
+            console.log(value().toFixed(digits()));
+            console.log((await delayedValue()).toFixed(3));
+            try {
+                (1).toFixed(-1);
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                (1).toFixed(101);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_to_fixed"),
+        "1.50\n4\n5\n-1.00\n1e+21\nNaN\nreceiver\ndigits\n1.50\nawaited receiver\n3.142\ntoFixed() digits argument must be between 0 and 100\ntoFixed() digits argument must be between 0 and 100\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
