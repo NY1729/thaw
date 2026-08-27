@@ -339,6 +339,110 @@ fn cyclic_non_generic_aliases_fall_back() {
 }
 
 #[test]
+fn resolves_generic_type_aliases_and_defaults() {
+    let funcs = parse_dts(
+        r#"export type Box<T> = { value: T };
+            export type Pair<T, U = T> = { left: T; right: U };
+            export declare function inspect(
+                value: Box<number>,
+                pair: Pair<string>
+            ): Box<boolean>;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("generic aliases and default arguments should resolve");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Object(vec![("value".into(), HirType::F64)]),
+            HirType::Object(vec![
+                ("left".into(), HirType::Str),
+                ("right".into(), HirType::Str),
+            ]),
+        ]
+    );
+    assert_eq!(
+        signature.ret,
+        HirType::Object(vec![("value".into(), HirType::Bool)])
+    );
+}
+
+#[test]
+fn resolves_generic_aliases_inside_generic_interfaces() {
+    let funcs = parse_dts(
+        r#"export type Selection<T> = Pick<T, keyof T>;
+            export interface Envelope<T> { payload: Selection<T>; }
+            export interface Config { host: string; port: number; }
+            export declare function inspect(value: Envelope<Config>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("generic aliases should resolve through outer substitutions");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "payload".into(),
+            HirType::Object(vec![
+                ("host".into(), HirType::Str),
+                ("port".into(), HirType::F64),
+            ]),
+        )])]
+    );
+}
+
+#[test]
+fn resolves_generic_aliases_inside_non_generic_interfaces() {
+    let funcs = parse_dts(
+        r#"export type Box<T> = { value: T };
+            export interface Request { payload: Box<number>; }
+            export declare function inspect(value: Request): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("non-generic interfaces should resolve concrete generic aliases");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "payload".into(),
+            HirType::Object(vec![("value".into(), HirType::F64)]),
+        )])]
+    );
+}
+
+#[test]
+fn enforces_generic_alias_constraints() {
+    let funcs = parse_dts(
+        r#"export type Identified<T extends { id: number }> = { value: T };
+            export interface Good { id: number; label: string; }
+            export interface Bad { label: string; }
+            export declare function good(value: Identified<Good>): string;
+            export declare function bad(value: Identified<Bad>): string;"#,
+    )
+    .unwrap();
+    assert!(matches!(classify(&funcs[0]), Classification::FastPath(_)));
+    assert!(matches!(
+        classify(&funcs[1]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
+fn cyclic_generic_aliases_fall_back() {
+    let funcs = parse_dts(
+        r#"export type Loop<T> = Loop<T>;
+            export declare function inspect(value: Loop<number>): string;"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn generates_native_addon_wrapper_and_module_initializer() {
     let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
     let shim = generate_native_addon_shim(&funcs, &[]);
