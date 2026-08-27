@@ -515,6 +515,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "string null check")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_array_is_null" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("array null check expects one operand".into());
+                        };
+                        if !matches!(self.infer_expr_type(argument)?, HirType::Array(_)) {
+                            return Err("array null check requires an array operand".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_string_to_array" => {
                         let [value] = args.as_slice() else {
                             return Err("string iterator conversion expects one operand".into());
@@ -612,6 +621,34 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, flags, "RegExp.test flags")?;
                         self.expect_type(&HirType::Str, value, "RegExp.test value")?;
                         return Ok(HirType::Bool);
+                    }
+                    "__thaw_regex_match" => {
+                        let [value, source, flags] = args.as_slice() else {
+                            return Err("String.match expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "match receiver")?;
+                        self.expect_type(&HirType::Str, source, "match source")?;
+                        self.expect_type(&HirType::Str, flags, "match flags")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
+                    "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
+                        let [value, source, flags, replacement] = args.as_slice() else {
+                            return Err("RegExp replace expects four operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "replace receiver")?;
+                        self.expect_type(&HirType::Str, source, "replace source")?;
+                        self.expect_type(&HirType::Str, flags, "replace flags")?;
+                        self.expect_type(&HirType::Str, replacement, "replace value")?;
+                        return Ok(HirType::Str);
+                    }
+                    "__thaw_regex_split" => {
+                        let [value, source, flags] = args.as_slice() else {
+                            return Err("String.split expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, value, "split receiver")?;
+                        self.expect_type(&HirType::Str, source, "split source")?;
+                        self.expect_type(&HirType::Str, flags, "split flags")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {

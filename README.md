@@ -1489,13 +1489,21 @@ The workspace crates have narrow responsibilities:
   `decodeURIComponent` uses. This links Unicode normalization data into
   every generated binary unconditionally (about 0.6MB stripped), since
   `thaw-runtime` did not previously depend on `icu_normalizer`
-- `String.prototype.split` supports a string separator (not `RegExp`), an
-  empty separator splitting into Unicode scalar values, an omitted separator
-  returning the receiver as a single-element array, and a truncating limit,
-  returning a dynamically sized native `string[]`
-- `String.prototype.replace`/`replaceAll` support a string search value (not
-  `RegExp`), replacing the first or every occurrence respectively, including
-  the JavaScript empty-search-value insertion behavior
+- `String.prototype.split` supports a string separator, an empty separator
+  splitting into Unicode scalar values, an omitted separator returning the
+  receiver as a single-element array, and a truncating limit, returning a
+  dynamically sized native `string[]`. A `RegExp` separator is also
+  supported (without a limit); it throws if the pattern fails to compile
+- `String.prototype.replace`/`replaceAll` support a string search value,
+  replacing the first or every occurrence respectively, including the
+  JavaScript empty-search-value insertion behavior. A `RegExp` search value
+  is also supported, using a literal (non-interpolating) replacement text;
+  `replace` requires the pattern to compile and `replaceAll` additionally
+  requires the `g` flag, throwing otherwise
+- `String.prototype.match(regex)` returns `Array(Str) | undefined`: the
+  matched groups' cooked strings when the pattern matches (currently just
+  the whole match, since capture groups are not extracted), or `undefined`
+  when it does not match or the pattern fails to compile
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`
