@@ -1522,6 +1522,42 @@ fn compiles_string_locale_compare() {
 }
 
 #[test]
+fn compiles_string_normalize() {
+    let source = r#"
+        function value(): string {
+            console.log("receiver");
+            return "é";
+        }
+        function form(): string {
+            console.log("form");
+            return "NFC";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return "é";
+        }
+        async function main(): Promise<void> {
+            console.log("é".normalize("NFC"));
+            console.log("é".normalize());
+            console.log("é".normalize("NFD"));
+            console.log("ﬁ".normalize("NFKD"));
+            console.log(value().normalize(form()));
+            console.log((await delayedValue()).normalize("NFC"));
+            try {
+                "abc".normalize("bogus");
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_normalize"),
+        "é\né\ne\u{301}\nfi\nreceiver\nform\né\nawaited receiver\né\nThe normalization form should be one of NFC, NFD, NFKC, NFKD.\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

@@ -644,6 +644,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_string_normalize" => {
+                let [value, form] = args else {
+                    return Err("string normalize expects two operands".to_string());
+                };
+                let value = self.compile_expr(value)?;
+                let form = self.compile_expr(form)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_string_normalize").unwrap(),
+                        &[value.into(), form.into()],
+                        "string_normalize",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("normalize returned no value".into());
+            }
             "__thaw_string_code_point_at" => {
                 let [value, index] = args else {
                     return Err("string codePointAt expects two operands".to_string());

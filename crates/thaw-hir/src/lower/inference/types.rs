@@ -578,6 +578,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, other, "localeCompare argument")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_string_normalize" => {
+                        let [receiver, form] = args.as_slice() else {
+                            return Err("string normalize expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, receiver, "normalize receiver")?;
+                        self.expect_type(&HirType::Str, form, "normalize form")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string codePointAt expects two operands".into());
