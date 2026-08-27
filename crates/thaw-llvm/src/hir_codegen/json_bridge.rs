@@ -155,21 +155,12 @@ impl<'ctx> HirCompiler<'ctx> {
                         .into();
                     "thaw_json_object_set_bool"
                 }
-                HirType::Json => "thaw_json_object_set_json",
-                HirType::Array(element) if **element == HirType::F64 => {
-                    value = self
-                        .builder
-                        .build_call(
-                            self.module
-                                .get_function("thaw_json_from_number_array")
-                                .unwrap(),
-                            &[value.into()],
-                            "marshal_object_array",
-                        )
-                        .map_err(|error| error.to_string())?
-                        .try_as_basic_value()
-                        .basic()
-                        .unwrap();
+                HirType::Json | HirType::Dictionary(_) => "thaw_json_object_set_json",
+                HirType::Array(element) => {
+                    value = self.compile_native_array_to_json(
+                        value.into_pointer_value(),
+                        element,
+                    )?;
                     "thaw_json_object_set_json"
                 }
                 HirType::Object(_) => {
@@ -191,6 +182,148 @@ impl<'ctx> HirCompiler<'ctx> {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        Ok(json)
+    }
+
+    fn compile_native_array_to_json(
+        &mut self,
+        array: PointerValue<'ctx>,
+        element_type: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let json = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_array_new").unwrap(),
+                &[],
+                "console_array_json",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_array_new returned no value")?;
+        let i64_type = self.context.i64_type();
+        let length = self
+            .builder
+            .build_load(i64_type, array, "console_array_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let function = self.current_function();
+        let entry = self
+            .builder
+            .get_insert_block()
+            .ok_or("array conversion has no current block")?;
+        let condition = self.context.append_basic_block(function, "console_array_next");
+        let body = self.context.append_basic_block(function, "console_array_element");
+        let done = self.context.append_basic_block(function, "console_array_done");
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(condition);
+        let index = self
+            .builder
+            .build_phi(i64_type, "console_array_index")
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let has_element = self
+            .builder
+            .build_int_compare(
+                IntPredicate::ULT,
+                index.as_basic_value().into_int_value(),
+                length,
+                "console_array_has_element",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_element, body, done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(body);
+        let offset = self
+            .builder
+            .build_int_mul(
+                index.as_basic_value().into_int_value(),
+                i64_type.const_int(array_element_storage_bytes(element_type), false),
+                "console_array_element_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let offset = self
+            .builder
+            .build_int_add(
+                offset,
+                i64_type.const_int(ARRAY_HEADER_BYTES, false),
+                "console_array_payload_offset",
+            )
+            .map_err(|error| error.to_string())?;
+        let pointer = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    array,
+                    &[offset],
+                    "console_array_element_pointer",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let mut value = self
+            .builder
+            .build_load(
+                self.basic_type(element_type)?,
+                pointer,
+                "console_array_element_value",
+            )
+            .map_err(|error| error.to_string())?;
+        let push = match element_type {
+            HirType::F64 => "thaw_json_array_push_number",
+            HirType::Str => "thaw_json_array_push_string",
+            HirType::Bool => {
+                value = self
+                    .builder
+                    .build_int_z_extend(
+                        value.into_int_value(),
+                        self.context.i8_type(),
+                        "console_array_bool",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .into();
+                "thaw_json_array_push_bool"
+            }
+            HirType::Json | HirType::Dictionary(_) => "thaw_json_array_push_json",
+            HirType::Array(nested) => {
+                value = self.compile_native_array_to_json(value.into_pointer_value(), nested)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::Object(_) => {
+                value = self.compile_native_object_to_json(value.into_pointer_value(), element_type)?;
+                "thaw_json_array_push_json"
+            }
+            other => return Err(format!("console.log cannot serialize array element {other:?}")),
+        };
+        self.builder
+            .build_call(
+                self.module.get_function(push).unwrap(),
+                &[json.into(), value.into()],
+                "console_array_push",
+            )
+            .map_err(|error| error.to_string())?;
+        let next = self
+            .builder
+            .build_int_add(
+                index.as_basic_value().into_int_value(),
+                i64_type.const_int(1, false),
+                "console_array_increment",
+            )
+            .map_err(|error| error.to_string())?;
+        let body_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("array conversion lost its body block")?;
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(|error| error.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+
+        self.builder.position_at_end(done);
         Ok(json)
     }
 

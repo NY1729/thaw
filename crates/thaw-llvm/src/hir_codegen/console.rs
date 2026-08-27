@@ -48,6 +48,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.compile_console_nullish(value.into_struct_value(), &payload, newline)?;
         } else if let Some(HirType::Union(elements)) = hir_type {
             self.compile_console_union(value.into_struct_value(), &elements, newline)?;
+        } else if let Some(
+            ty @ (HirType::Json
+            | HirType::Dictionary(_)
+            | HirType::Array(_)
+            | HirType::Object(_)),
+        ) = hir_type
+        {
+            self.compile_console_structured(value.into_pointer_value(), &ty, newline)?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
@@ -143,6 +151,33 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    fn compile_console_structured(
+        &mut self,
+        value: PointerValue<'ctx>,
+        ty: &HirType,
+        newline: bool,
+    ) -> Result<(), String> {
+        let json = match ty {
+            HirType::Json | HirType::Dictionary(_) => value.into(),
+            HirType::Array(element) => self.compile_native_array_to_json(value, element)?,
+            HirType::Object(_) => self.compile_native_object_to_json(value, ty)?,
+            _ => return Err(format!("console.log cannot serialize {ty:?}")),
+        };
+        let text = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_stringify").unwrap(),
+                &[json.into()],
+                "console_json_stringify",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_stringify returned no value")?
+            .into_pointer_value();
+        self.compile_console_text(text, newline, "console_structured")
     }
 
     fn compile_console_union(
@@ -276,7 +311,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     "console_union_null",
                 )?;
             }
-            HirType::Object(_) | HirType::Json | HirType::Array(_) | HirType::Function(_, _) => {
+            HirType::Object(_)
+            | HirType::Json
+            | HirType::Dictionary(_)
+            | HirType::Array(_) => {
+                self.compile_console_structured(value.into_pointer_value(), member, newline)?;
+            }
+            HirType::Function(_, _) => {
                 let object = self
                     .builder
                     .build_global_string_ptr("[object Object]", "union_object")
@@ -381,15 +422,14 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Nullable(inner) => {
                 self.compile_console_tagged(payload.into_struct_value(), inner, "null", newline)?;
             }
-            HirType::Object(_) => {
-                let object = self
-                    .builder
-                    .build_global_string_ptr("[object Object]", "optional_object")
-                    .map_err(|error| error.to_string())?;
-                self.compile_console_text(
-                    object.as_pointer_value(),
+            HirType::Object(_)
+            | HirType::Json
+            | HirType::Dictionary(_)
+            | HirType::Array(_) => {
+                self.compile_console_structured(
+                    payload.into_pointer_value(),
+                    payload_type,
                     newline,
-                    "console_optional_object",
                 )?;
             }
             other => {

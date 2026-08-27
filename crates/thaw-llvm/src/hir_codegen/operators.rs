@@ -171,6 +171,17 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::Call(callee, arguments) => {
                 if let HirExpr::Var(name) = callee.as_ref() {
+                    match name.as_str() {
+                        "JSON.parse" => return Some(HirType::Json),
+                        "JSON.stringify"
+                        | "__thaw_json_stringify_number_space"
+                        | "__thaw_json_stringify_string_space"
+                        | "__thaw_json_stringify_keys"
+                        | "__thaw_json_stringify_keys_number_space"
+                        | "__thaw_json_stringify_keys_string_space"
+                        | "fetch" => return Some(HirType::Str),
+                        _ => {}
+                    }
                     if name == "__thaw_string_to_array" {
                         return Some(HirType::Array(Box::new(HirType::Str)));
                     }
