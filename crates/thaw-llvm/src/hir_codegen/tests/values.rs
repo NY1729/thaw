@@ -1401,14 +1401,21 @@ fn compiles_fixed_object_in_checks_in_operand_order() {
         async function object(label: string): Promise<{ value: number; flag: boolean }> {
             await sleep(1); console.log(label); return { value: 1, flag: true };
         }
+        function key(): string { console.log("key"); return "value"; }
+        async function json(): Promise<Json> {
+            await sleep(1); console.log("json"); return JSON.parse("{\"value\":1}");
+        }
         async function main(): Promise<void> {
             console.log("value" in (await object("first")));
             console.log("missing" in (await object("second")));
+            console.log(key() in (await json()));
+            console.log("missing" in JSON.parse("[10,20]"));
+            console.log("length" in JSON.parse("[10,20]"));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "fixed_object_in"),
-        "first\ntrue\nsecond\nfalse\n"
+        "first\ntrue\nsecond\nfalse\nkey\njson\ntrue\nfalse\ntrue\n"
     );
 }
 
@@ -2650,10 +2657,13 @@ fn frame_split_supports_fixed_object_for_in() {
             let retained = "";
             for (retained in { alpha: 1, omega: 2 }) {}
             console.log(retained);
+            const dynamic: Json = JSON.parse("{\"second\":2,\"first\":1}");
+            for (const key in dynamic) console.log(key);
+            for (const index in JSON.parse("[10,20]")) console.log(index);
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_for_in"),
-        "source\nfirst\nlast\nomega\n"
+        "source\nfirst\nlast\nomega\nsecond\nfirst\n0\n1\n"
     );
 }
