@@ -719,6 +719,48 @@ fn rejects_dynamic_record_keys_without_a_foreign_dictionary_abi() {
 }
 
 #[test]
+fn classifies_non_nullable_utility_types() {
+    let funcs = parse_dts(
+        "export declare function normalize(value: NonNullable<string | null | undefined>): NonNullable<number | undefined>;",
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("NonNullable should remove null and undefined branches");
+    };
+    assert_eq!(signature.params, vec![HirType::Str]);
+    assert_eq!(signature.ret, HirType::F64);
+}
+
+#[test]
+fn resolves_non_nullable_after_generic_substitution() {
+    let funcs = parse_dts(
+        r#"export interface Config { host?: string; }
+            export interface Present<T> { value: NonNullable<T>; }
+            export declare function inspect(value: Present<Config["host"]>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("NonNullable should strip a substituted optional wrapper");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![("value".into(), HirType::Str)])]
+    );
+}
+
+#[test]
+fn rejects_non_nullable_without_a_value_branch() {
+    let funcs = parse_dts(
+        "export declare function impossible(value: NonNullable<null | undefined>): string;",
+    )
+    .unwrap();
+    assert!(matches!(
+        classify(&funcs[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn resolves_pick_and_omit_after_generic_substitution() {
     let funcs = parse_dts(
         r#"export interface Config { host: string; port: number; }
