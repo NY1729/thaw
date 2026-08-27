@@ -39,6 +39,9 @@ optional／default constructorは対応する各arityのtyped helperを生成し
 arity suffixを除去して同じaddon exportへ接続する。通常のclass property宣言も
 instance／static getterへ接続し、`readonly`でなければsetterも生成する。明示的な
 accessor宣言が同名propertyより優先される。
+派生classにはbase classのpublic instance/static methodとpropertyを展開し、派生側の
+同名宣言を優先する。private／protected memberはshimへ公開せず、private constructor
+だけを持つclassも既定0引数constructorとして誤認しない。
 parentの上書きは全descendantの追跡を破棄する。static methodはclass export自体を
 N-API receiverにし、instance methodと同じarity、overload、callback、native value
 marshal規則でnamed・namespace callを書き換える。自作addonの`NativeBox.twice(21)`を

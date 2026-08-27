@@ -167,6 +167,9 @@ fn generate_napi_class_constructors(
     class: &thaw_bridge::DtsClass,
     shim: &mut String,
 ) -> Vec<(usize, String)> {
+    if !class.constructible {
+        return Vec::new();
+    }
     let mut arities = std::collections::BTreeMap::new();
     for constructor in &class.constructors {
         if !constructor.params.iter().all(|(_, ty)| {

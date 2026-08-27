@@ -28,6 +28,15 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
         .filter_map(extract_class_decl)
         .map(|(name, class)| lower_dts_class(name, class, &interfaces, &generic_interfaces))
         .collect::<Vec<_>>();
+    let declared = classes
+        .iter()
+        .map(|class| (class.name.clone(), class.clone()))
+        .collect::<HashMap<_, _>>();
+    for class in &mut classes {
+        let (methods, properties) = inherited_class_members(class, &declared, &mut Vec::new());
+        class.methods = methods;
+        class.properties = properties;
+    }
     for class in &mut classes {
         let constructor_overloaded = class.constructors.len() > 1;
         for constructor in &mut class.constructors {
@@ -44,6 +53,40 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
         }
     }
     Ok(classes)
+}
+
+fn inherited_class_members(
+    class: &DtsClass,
+    declared: &HashMap<String, DtsClass>,
+    in_progress: &mut Vec<String>,
+) -> (Vec<DtsMethod>, Vec<DtsProperty>) {
+    if in_progress.contains(&class.name) {
+        return (class.methods.clone(), class.properties.clone());
+    }
+    in_progress.push(class.name.clone());
+    let (mut methods, mut properties) = class
+        .extends
+        .as_ref()
+        .and_then(|base| declared.get(base))
+        .map(|base| inherited_class_members(base, declared, in_progress))
+        .unwrap_or_default();
+    in_progress.pop();
+
+    let shadows = |name: &str, is_static: bool| {
+        class
+            .methods
+            .iter()
+            .any(|member| member.name == name && member.is_static == is_static)
+            || class
+                .properties
+                .iter()
+                .any(|member| member.name == name && member.is_static == is_static)
+    };
+    methods.retain(|member| !shadows(&member.name, member.is_static));
+    properties.retain(|member| !shadows(&member.name, member.is_static));
+    methods.extend(class.methods.clone());
+    properties.extend(class.properties.clone());
+    (methods, properties)
 }
 
 fn extract_class_decl(item: &ModuleItem) -> Option<(&str, &Class)> {
@@ -144,6 +187,10 @@ fn class_param_is_required(param: &ParamOrTsParamProp) -> bool {
     }
 }
 
+fn is_public_member(accessibility: Option<Accessibility>) -> bool {
+    accessibility.is_none_or(|accessibility| accessibility == Accessibility::Public)
+}
+
 fn lower_dts_class(
     name: &str,
     class: &Class,
@@ -160,9 +207,22 @@ fn lower_dts_class(
     let mut constructors = Vec::new();
     let mut methods = Vec::new();
     let mut properties = Vec::new();
+    let has_constructor = class
+        .body
+        .iter()
+        .any(|member| matches!(member, ClassMember::Constructor(_)));
+    let constructible = !has_constructor
+        || class.body.iter().any(|member| {
+            matches!(
+                member,
+                ClassMember::Constructor(constructor)
+                    if is_public_member(constructor.accessibility)
+            )
+        });
     for member in &class.body {
         match member {
-            ClassMember::Constructor(constructor) => constructors.push(DtsConstructor {
+            ClassMember::Constructor(constructor)
+                if is_public_member(constructor.accessibility) => constructors.push(DtsConstructor {
                 params: lower_class_params(&constructor.params, interfaces, generic_interfaces),
                 required_params: constructor
                     .params
@@ -171,7 +231,7 @@ fn lower_dts_class(
                     .count(),
                 overloaded: false,
             }),
-            ClassMember::Method(method) => {
+            ClassMember::Method(method) if is_public_member(method.accessibility) => {
                 let Some(method_name) = property_name(&method.key) else {
                     continue;
                 };
@@ -207,7 +267,7 @@ fn lower_dts_class(
                     overloaded: false,
                 });
             }
-            ClassMember::ClassProp(property) => {
+            ClassMember::ClassProp(property) if is_public_member(property.accessibility) => {
                 let Some(property_name) = property_name(&property.key) else {
                     continue;
                 };
@@ -237,6 +297,7 @@ fn lower_dts_class(
     DtsClass {
         name: name.to_string(),
         extends,
+        constructible,
         constructors,
         methods,
         properties,
