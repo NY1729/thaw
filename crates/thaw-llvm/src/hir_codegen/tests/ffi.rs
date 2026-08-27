@@ -1345,6 +1345,32 @@ fn compiles_native_number_to_precision() {
 }
 
 #[test]
+fn compiles_encode_uri() {
+    let source = r#"
+        function value(): string {
+            console.log("argument");
+            return "http://a.com/a b";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited argument");
+            await sleep(1);
+            return "😀";
+        }
+        async function main(): Promise<void> {
+            console.log(encodeURI("http://a.com/a b?x=1&y=2#frag"));
+            console.log(encodeURI(";/?:@&=+$,#"));
+            console.log(encodeURI("café"));
+            console.log(encodeURI(value()));
+            console.log(encodeURI(await delayedValue()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "encode_uri"),
+        "http://a.com/a%20b?x=1&y=2#frag\n;/?:@&=+$,#\ncaf%C3%A9\nargument\nhttp://a.com/a%20b\nawaited argument\n%F0%9F%98%80\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

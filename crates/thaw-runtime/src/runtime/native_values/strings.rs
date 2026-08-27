@@ -65,6 +65,30 @@ pub unsafe extern "C" fn thaw_encode_uri_component(value: *const c_char) -> *con
 }
 
 #[no_mangle]
+/// Percent-encodes every byte of `value`'s UTF-8 representation other than
+/// the `encodeURIComponent` unreserved set plus the URI reserved characters
+/// `; / ? : @ & = + $ , #`, matching `encodeURI`.
+///
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_encode_uri(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let mut output = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
+            | b'\'' | b'(' | b')' | b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+'
+            | b'$' | b',' | b'#' => output.push(byte as char),
+            _ => output.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    arena_c_string(&output).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
 /// Percent-decodes `value`, matching `decodeURIComponent`. Returns a null
 /// pointer for a malformed percent-escape (missing/non-hex digits, or a
 /// decoded byte sequence that is not valid UTF-8), letting the caller detect
