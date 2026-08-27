@@ -324,7 +324,7 @@ impl<'a> FnLowerer<'a> {
         self.lower_unbound_this_error(property, &ty)
     }
 
-    fn typed_dictionary_read(value: HirExpr, element: &HirType) -> Result<HirExpr, String> {
+    fn dictionary_value_from_json(value: HirExpr, element: &HirType) -> Result<HirExpr, String> {
         match element {
             HirType::F64 => Ok(HirExpr::JsonAsNumber(Box::new(value))),
             HirType::Str => Ok(HirExpr::JsonAsString(Box::new(value))),
@@ -337,6 +337,121 @@ impl<'a> FnLowerer<'a> {
                 "dictionary reads do not yet support value type {other:?}"
             )),
         }
+    }
+
+    pub(super) fn typed_dictionary_read(
+        &mut self,
+        object: HirExpr,
+        key: HirExpr,
+        element: &HirType,
+    ) -> Result<HirExpr, String> {
+        let object_name = format!("__thaw_dictionary_object_{}", self.next_binding);
+        self.next_binding += 1;
+        let key_name = format!("__thaw_dictionary_key_{}", self.next_binding);
+        self.next_binding += 1;
+        let object_type = HirType::Dictionary(Box::new(element.clone()));
+        let raw = HirExpr::JsonKey(
+            Box::new(HirExpr::Var(object_name.clone())),
+            Box::new(HirExpr::Var(key_name.clone())),
+        );
+        let has_own = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_has_own".into())),
+            vec![
+                HirExpr::Var(object_name.clone()),
+                HirExpr::Var(key_name.clone()),
+            ],
+        );
+        let body = match element {
+            HirType::Optional(payload) => HirExpr::Block(vec![HirStmt::If(
+                has_own,
+                vec![HirStmt::Return(Some(HirExpr::OptionalSome(
+                    Box::new(Self::dictionary_value_from_json(raw, payload)?),
+                    payload.as_ref().clone(),
+                )))],
+                vec![HirStmt::Return(Some(HirExpr::OptionalNone(
+                    payload.as_ref().clone(),
+                )))],
+            )]),
+            HirType::Nullable(payload) => {
+                Self::lower_nullable_dictionary_value(raw, payload, false)?
+            }
+            HirType::Nullish(payload) => {
+                let present = Self::lower_nullable_dictionary_value(raw, payload, true)?;
+                HirExpr::Block(vec![HirStmt::If(
+                    has_own,
+                    vec![HirStmt::Return(Some(present))],
+                    vec![HirStmt::Return(Some(HirExpr::NullishUndefined(
+                        payload.as_ref().clone(),
+                    )))],
+                )])
+            }
+            _ => HirExpr::Block(vec![HirStmt::Return(Some(
+                Self::dictionary_value_from_json(raw, element)?,
+            ))]),
+        };
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![
+                    HirParam {
+                        name: object_name,
+                        ty: object_type,
+                    },
+                    HirParam {
+                        name: key_name,
+                        ty: HirType::Str,
+                    },
+                ],
+                element.clone(),
+                Box::new(body),
+            )),
+            vec![object, key],
+        ))
+    }
+
+    fn lower_nullable_dictionary_value(
+        raw: HirExpr,
+        payload: &HirType,
+        nullish: bool,
+    ) -> Result<HirExpr, String> {
+        let raw_name = "__thaw_dictionary_raw_value".to_string();
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_null".into())),
+            vec![HirExpr::Var(raw_name.clone())],
+        );
+        let value = Self::dictionary_value_from_json(HirExpr::Var(raw_name.clone()), payload)?;
+        let (none, some) = if nullish {
+            (
+                HirExpr::NullishNull(payload.clone()),
+                HirExpr::NullishSome(Box::new(value), payload.clone()),
+            )
+        } else {
+            (
+                HirExpr::NullableNone(payload.clone()),
+                HirExpr::NullableSome(Box::new(value), payload.clone()),
+            )
+        };
+        let result_type = if nullish {
+            HirType::Nullish(Box::new(payload.clone()))
+        } else {
+            HirType::Nullable(Box::new(payload.clone()))
+        };
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: raw_name,
+                    ty: HirType::Json,
+                }],
+                result_type,
+                Box::new(HirExpr::Block(vec![HirStmt::If(
+                    is_null,
+                    vec![HirStmt::Return(Some(none))],
+                    vec![HirStmt::Return(Some(some))],
+                )])),
+            )),
+            vec![raw],
+        ))
     }
 
     fn lower_member_read(&mut self, member: &MemberExpr) -> Result<HirExpr, String> {
@@ -584,10 +699,7 @@ impl<'a> FnLowerer<'a> {
                     HirType::Dictionary(element) => {
                         let key = self.lower_expr(&computed.expr)?;
                         let key = self.coerce_primitive_to_string(key)?;
-                        Self::typed_dictionary_read(
-                            HirExpr::JsonKey(Box::new(obj), Box::new(key)),
-                            element.as_ref(),
-                        )
+                        self.typed_dictionary_read(obj, key, element.as_ref())
                     }
                     HirType::Json => {
                         let key = self.lower_expr(&computed.expr)?;
@@ -664,8 +776,9 @@ impl<'a> FnLowerer<'a> {
                         self.lower_union_property_read(obj, elements, prop.sym.as_ref())
                     }
                     HirType::Json => Ok(HirExpr::JsonGet(Box::new(obj), prop.sym.to_string())),
-                    HirType::Dictionary(element) => Self::typed_dictionary_read(
-                        HirExpr::JsonGet(Box::new(obj), prop.sym.to_string()),
+                    HirType::Dictionary(element) => self.typed_dictionary_read(
+                        obj,
+                        HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
                         element.as_ref(),
                     ),
                     other => Err(format!(
@@ -781,10 +894,7 @@ impl<'a> FnLowerer<'a> {
                     _ => return Err("unsupported optional dictionary member".into()),
                 };
                 (
-                    Self::typed_dictionary_read(
-                        HirExpr::JsonKey(Box::new(unwrapped), Box::new(key)),
-                        element.as_ref(),
-                    )?,
+                    self.typed_dictionary_read(unwrapped, key, element.as_ref())?,
                     element.as_ref().clone(),
                 )
             }

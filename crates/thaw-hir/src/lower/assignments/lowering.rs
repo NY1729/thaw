@@ -890,9 +890,8 @@ impl<'a> FnLowerer<'a> {
                 ObjectPatProp::Assign(property) => {
                     let key = HirExpr::Lit(HirLit::Str(property.key.id.sym.to_string()));
                     used_keys.push(key.clone());
-                    let field_json =
-                        HirExpr::JsonKey(Box::new(value.clone()), Box::new(key.clone()));
-                    let mut field = Self::dictionary_element_from_json(field_json, element)?;
+                    let mut field =
+                        self.typed_dictionary_read(value.clone(), key.clone(), element)?;
                     if let Some(default) = &property.value {
                         let default = self.lower_expr(default)?;
                         let default = self.coerce_to_declared(element, default)?;
@@ -938,9 +937,8 @@ impl<'a> FnLowerer<'a> {
                         key
                     };
                     used_keys.push(key.clone());
-                    let field_json =
-                        HirExpr::JsonKey(Box::new(value.clone()), Box::new(key.clone()));
-                    let mut field = Self::dictionary_element_from_json(field_json, element)?;
+                    let mut field =
+                        self.typed_dictionary_read(value.clone(), key.clone(), element)?;
                     let target = if let Pat::Assign(assign) = property.value.as_ref() {
                         let default = self.lower_expr(&assign.right)?;
                         let default = self.coerce_to_declared(element, default)?;
