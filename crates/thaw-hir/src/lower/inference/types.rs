@@ -531,6 +531,24 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "Object.values JSON operand")?;
                         return Ok(HirType::Array(Box::new(HirType::Json)));
                     }
+                    "__thaw_json_number_values"
+                    | "__thaw_json_string_values"
+                    | "__thaw_json_bool_values" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Object.values expects one operand".into());
+                        };
+                        let element = match name.as_str() {
+                            "__thaw_json_number_values" => HirType::F64,
+                            "__thaw_json_string_values" => HirType::Str,
+                            _ => HirType::Bool,
+                        };
+                        self.expect_type(
+                            &HirType::Dictionary(Box::new(element.clone())),
+                            value,
+                            "Object.values dictionary operand",
+                        )?;
+                        return Ok(HirType::Array(Box::new(element)));
+                    }
                     "__thaw_json_entries" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.entries expects one operand".into());
@@ -539,6 +557,27 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::Array(Box::new(HirType::Tuple(vec![
                             HirType::Str,
                             HirType::Json,
+                        ]))));
+                    }
+                    "__thaw_json_number_entries"
+                    | "__thaw_json_string_entries"
+                    | "__thaw_json_bool_entries" => {
+                        let [value] = args.as_slice() else {
+                            return Err("Object.entries expects one operand".into());
+                        };
+                        let element = match name.as_str() {
+                            "__thaw_json_number_entries" => HirType::F64,
+                            "__thaw_json_string_entries" => HirType::Str,
+                            _ => HirType::Bool,
+                        };
+                        self.expect_type(
+                            &HirType::Dictionary(Box::new(element.clone())),
+                            value,
+                            "Object.entries dictionary operand",
+                        )?;
+                        return Ok(HirType::Array(Box::new(HirType::Tuple(vec![
+                            HirType::Str,
+                            element,
                         ]))));
                     }
                     "__thaw_json_has_own" => {

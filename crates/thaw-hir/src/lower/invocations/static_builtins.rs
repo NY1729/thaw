@@ -297,6 +297,24 @@ impl<'a> FnLowerer<'a> {
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
                         }
+                        if let HirType::Dictionary(element) = &ty {
+                            let runtime = match element.as_ref() {
+                                HirType::F64 => "__thaw_json_number_values",
+                                HirType::Str => "__thaw_json_string_values",
+                                HirType::Bool => "__thaw_json_bool_values",
+                                HirType::Json => "__thaw_json_values",
+                                other => {
+                                    return Err(format!(
+                                        "`Object.values` does not support dictionary value type {other:?}"
+                                    ))
+                                }
+                            };
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var(runtime.to_string())),
+                                vec![value],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
                         let HirType::Object(fields) = &ty else {
                             return Err(format!(
                                 "`Object.values` currently requires a fixed object, got {ty:?}"
@@ -335,6 +353,24 @@ impl<'a> FnLowerer<'a> {
                         if ty == HirType::Json {
                             let result = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_entries".to_string())),
+                                vec![value],
+                            );
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let HirType::Dictionary(element) = &ty {
+                            let runtime = match element.as_ref() {
+                                HirType::F64 => "__thaw_json_number_entries",
+                                HirType::Str => "__thaw_json_string_entries",
+                                HirType::Bool => "__thaw_json_bool_entries",
+                                HirType::Json => "__thaw_json_entries",
+                                other => {
+                                    return Err(format!(
+                                        "`Object.entries` does not support dictionary value type {other:?}"
+                                    ))
+                                }
+                            };
+                            let result = HirExpr::Call(
+                                Box::new(HirExpr::Var(runtime.to_string())),
                                 vec![value],
                             );
                             return self.wrap_call_argument_bindings(result, &bindings);
