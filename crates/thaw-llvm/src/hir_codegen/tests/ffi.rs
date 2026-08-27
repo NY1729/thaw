@@ -1492,6 +1492,36 @@ fn compiles_string_from_code_point() {
 }
 
 #[test]
+fn compiles_string_locale_compare() {
+    let source = r#"
+        function receiver(): string {
+            console.log("receiver");
+            return "a";
+        }
+        function other(): string {
+            console.log("other");
+            return "b";
+        }
+        async function delayedOther(): Promise<string> {
+            console.log("awaited other");
+            await sleep(1);
+            return "a";
+        }
+        async function main(): Promise<void> {
+            console.log("a".localeCompare("b"));
+            console.log("b".localeCompare("a"));
+            console.log("a".localeCompare("a"));
+            console.log(receiver().localeCompare(other()));
+            console.log((await delayedOther()).localeCompare("a"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_locale_compare"),
+        "-1\n1\n0\nreceiver\nother\n-1\nawaited other\n0\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

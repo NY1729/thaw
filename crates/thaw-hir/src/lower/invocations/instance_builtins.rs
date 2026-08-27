@@ -3,7 +3,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
-                | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision"
+                | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -53,6 +53,34 @@ impl<'a> FnLowerer<'a> {
                         result,
                         &bindings,
                     );
+                }
+                if property.sym == *"localeCompare" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "localeCompare receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.localeCompare")?;
+                    let [other] = arguments.as_slice() else {
+                        return Err("native `.localeCompare()` expects exactly one argument".into());
+                    };
+                    let other = self.coerce_primitive_to_string(other.clone())?;
+                    let receiver_name =
+                        format!("__thaw_locale_compare_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let other_name = format!("__thaw_locale_compare_other_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(other_name.clone(), HirType::Str);
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_locale_compare".to_string())),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(other_name.clone()),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((other_name, HirType::Str, other));
+                    return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"codePointAt" {
                     let receiver = self.lower_expr(&member.obj)?;
