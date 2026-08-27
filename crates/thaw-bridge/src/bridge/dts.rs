@@ -803,6 +803,18 @@ fn optional_hir_type(ty: HirType) -> HirType {
     }
 }
 
+fn supports_native_array_element(ty: &HirType) -> bool {
+    match ty {
+        HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue => true,
+        HirType::Array(element) => supports_native_array_element(element),
+        HirType::Tuple(elements) => elements.iter().all(supports_native_array_element),
+        HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, field)| supports_native_array_element(field)),
+        _ => false,
+    }
+}
+
 fn classify_indexed_access(object: DtsType, index: &TsType) -> DtsType {
     let index = match index {
         TsType::TsParenthesizedType(parenthesized) => parenthesized.type_ann.as_ref(),
@@ -1415,13 +1427,11 @@ fn classify_ts_type(
 
         TsType::TsArrayType(arr) => {
             match classify_ts_type(&arr.elem_type, interfaces, generic_interfaces) {
-                DtsType::Native(
-                    element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue),
-                ) => {
+                DtsType::Native(element) if supports_native_array_element(&element) => {
                     DtsType::Native(HirType::Array(Box::new(element)))
                 }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
-                    "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
+                    "array element type {other:?} does not have a native collection layout"
                 )),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))
@@ -1709,14 +1719,10 @@ fn classify_ts_type(
                     ));
                 };
                 return match classify_ts_type(element, interfaces, generic_interfaces) {
-                    DtsType::Native(
-                        element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue),
-                    ) => {
+                    DtsType::Native(element) if supports_native_array_element(&element) => {
                         DtsType::Native(HirType::Array(Box::new(element)))
                     }
-                    _ => DtsType::Unsupported(
-                        "only number[], string[], boolean[], and JsValue[] have native dynamic layouts".to_string(),
-                    ),
+                    _ => DtsType::Unsupported("array element has no native collection layout".into()),
                 };
             }
 
@@ -2071,12 +2077,13 @@ fn resolve_ts_type_with_substitution(
                             return apply_partial_or_required(resolved, true)
                         }
                         ("NonNullable", resolved) => return strip_non_nullable(resolved),
-                        ("Array" | "ReadonlyArray", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue))) => {
+                        ("Array" | "ReadonlyArray", DtsType::Native(element))
+                            if supports_native_array_element(&element) => {
                             return DtsType::Native(HirType::Array(Box::new(element)))
                         }
                         ("Array" | "ReadonlyArray", DtsType::Native(other)) => {
                             return DtsType::Unsupported(format!(
-                                "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
+                                "array element type {other:?} does not have a native collection layout"
                             ))
                         }
                         ("Array" | "ReadonlyArray", DtsType::Unsupported(reason)) => {
@@ -2194,13 +2201,11 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             ) {
-                DtsType::Native(
-                    element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue),
-                ) => {
+                DtsType::Native(element) if supports_native_array_element(&element) => {
                     DtsType::Native(HirType::Array(Box::new(element)))
                 }
                 DtsType::Native(other) => DtsType::Unsupported(format!(
-                    "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
+                    "array element type {other:?} does not have a native collection layout"
                 )),
                 DtsType::Unsupported(reason) => {
                     DtsType::Unsupported(format!("array element type: {reason}"))

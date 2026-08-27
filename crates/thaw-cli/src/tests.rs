@@ -304,12 +304,13 @@ fn generates_typed_napi_tuple_class_shims() {
 }
 
 #[test]
-fn generates_typed_napi_string_and_boolean_array_shims() {
+fn generates_typed_napi_recursive_array_shims() {
     let class = thaw_bridge::parse_dts_classes(
         r#"export class ArrayBox {
                 constructor(labels: string[]);
                 flags(values: boolean[]): string[];
-                labels: string[];
+                group(values: string[][]): string[][];
+                records: { name: string }[];
             }"#,
     )
     .unwrap()
@@ -326,6 +327,10 @@ fn generates_typed_napi_string_and_boolean_array_shims() {
         &mut shim,
     );
     assert_eq!(methods[0].4, vec![booleans]);
+    assert_eq!(
+        methods[1].4,
+        vec![thaw_hir::HirType::Array(Box::new(strings.clone()))]
+    );
     let property = &class.properties[0];
     assert!(generate_napi_class_property_getter(
         &class.name,
@@ -343,24 +348,36 @@ fn generates_typed_napi_string_and_boolean_array_shims() {
         &mut shim,
     )
     .is_some());
-    assert!(shim.contains("labels: string[]"));
+    assert!(shim.contains("value: { name: string }[]"));
     assert!(shim.contains("values: boolean[]"));
+    assert!(shim.contains("values: string[][]"));
 
     let rewritten = rewrite_external_class_methods(
-        "const box = new ArrayBox([\"a\"]); box.flags([true, false]);",
+        "const box = new ArrayBox([\"a\"]); box.flags([true, false]); box.group([[\"a\"]]);",
         &[("pkg".into(), "ArrayBox".into(), constructors)],
-        &[(
-            "ArrayBox".into(),
-            "flags".into(),
-            methods[0].1.clone(),
-            1,
-            false,
-            methods[0].4.clone(),
-        )],
+        &[
+            (
+                "ArrayBox".into(),
+                "flags".into(),
+                methods[0].1.clone(),
+                1,
+                false,
+                methods[0].4.clone(),
+            ),
+            (
+                "ArrayBox".into(),
+                "group".into(),
+                methods[1].1.clone(),
+                1,
+                false,
+                methods[1].4.clone(),
+            ),
+        ],
     )
     .unwrap();
     assert!(!rewritten.contains("new ArrayBox"));
     assert!(rewritten.contains(&methods[0].1));
+    assert!(rewritten.contains(&methods[1].1));
 }
 
 #[test]

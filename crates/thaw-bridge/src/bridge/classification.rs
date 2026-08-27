@@ -6,7 +6,17 @@ pub fn classify(func: &DtsFunction) -> Classification {
     let mut params = Vec::with_capacity(func.params.len());
     for (name, ty) in &func.params {
         match ty {
-            DtsType::Native(hir_ty) => params.push(hir_ty.clone()),
+            DtsType::Native(hir_ty) if supports_direct_ffi_collections(hir_ty) => {
+                params.push(hir_ty.clone())
+            }
+            DtsType::Native(hir_ty) => {
+                return Classification::Fallback {
+                    function: func.name.clone(),
+                    reason: format!(
+                        "parameter `{name}` has unsupported aggregate collection layout {hir_ty:?}"
+                    ),
+                }
+            }
             DtsType::Unsupported(reason) => {
                 return Classification::Fallback {
                     function: func.name.clone(),
@@ -17,7 +27,13 @@ pub fn classify(func: &DtsFunction) -> Classification {
     }
 
     let ret = match &func.ret {
-        DtsType::Native(hir_ty) => hir_ty.clone(),
+        DtsType::Native(hir_ty) if supports_direct_ffi_collections(hir_ty) => hir_ty.clone(),
+        DtsType::Native(hir_ty) => {
+            return Classification::Fallback {
+                function: func.name.clone(),
+                reason: format!("return type has unsupported aggregate collection layout {hir_ty:?}"),
+            }
+        }
         DtsType::Unsupported(reason) => {
             return Classification::Fallback {
                 function: func.name.clone(),
@@ -60,6 +76,23 @@ pub fn classify(func: &DtsFunction) -> Classification {
         aggregate_return_abi: FfiAggregateAbi::Internal,
         aggregate_return_layout: None,
     }))
+}
+
+fn supports_direct_ffi_collections(ty: &HirType) -> bool {
+    match ty {
+        HirType::Array(element) => matches!(
+            element.as_ref(),
+            HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
+        ),
+        HirType::Tuple(elements) => elements.iter().all(supports_direct_ffi_collections),
+        HirType::Object(fields) => fields
+            .iter()
+            .all(|(_, field)| supports_direct_ffi_collections(field)),
+        HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
+            supports_direct_ffi_collections(payload)
+        }
+        _ => true,
+    }
 }
 
 fn supports_variadic_element(ty: &HirType) -> bool {
@@ -254,4 +287,3 @@ fn render_ts_type(ty: &HirType) -> String {
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
 }
-

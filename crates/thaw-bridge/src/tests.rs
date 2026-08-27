@@ -812,6 +812,22 @@ fn classifies_js_value_array_as_fast_path() {
 }
 
 #[test]
+fn retains_recursive_arrays_for_napi_but_not_direct_ffi() {
+    let functions =
+        parse_dts("export declare function f(values: string[][]): { name: string }[];").unwrap();
+    assert_eq!(
+        functions[0].params[0].1,
+        DtsType::Native(HirType::Array(Box::new(HirType::Array(Box::new(
+            HirType::Str,
+        )))))
+    );
+    assert!(matches!(
+        classify(&functions[0]),
+        Classification::Fallback { .. }
+    ));
+}
+
+#[test]
 fn classifies_tuples_as_fast_path() {
     let funcs =
         parse_dts("export declare function f(value: [number, string, boolean]): [string, number];")
