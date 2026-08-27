@@ -926,13 +926,25 @@ fn classify_ts_type(
             if ref_name == "JsValue" && ty_ref.type_params.is_none() {
                 return DtsType::Native(HirType::JsValue);
             }
-            if ref_name == "Array" {
+            if ref_name == "Readonly" {
+                let Some(inner) = ty_ref
+                    .type_params
+                    .as_ref()
+                    .and_then(|params| params.params.first())
+                else {
+                    return DtsType::Unsupported("Readonly<T> needs one type argument".to_string());
+                };
+                return classify_ts_type(inner, interfaces, generic_interfaces);
+            }
+            if matches!(ref_name.as_str(), "Array" | "ReadonlyArray") {
                 let Some(element) = ty_ref
                     .type_params
                     .as_ref()
                     .and_then(|params| params.params.first())
                 else {
-                    return DtsType::Unsupported("Array<T> needs one type argument".to_string());
+                    return DtsType::Unsupported(format!(
+                        "{ref_name}<T> needs one type argument"
+                    ));
                 };
                 return match classify_ts_type(element, interfaces, generic_interfaces) {
                     DtsType::Native(
@@ -1099,15 +1111,16 @@ fn resolve_ts_type_with_substitution(
                         in_progress,
                     );
                     match (ref_name, resolved_elem) {
-                        ("Array", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue))) => {
+                        ("Readonly", resolved) => return resolved,
+                        ("Array" | "ReadonlyArray", DtsType::Native(element @ (HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue))) => {
                             return DtsType::Native(HirType::Array(Box::new(element)))
                         }
-                        ("Array", DtsType::Native(other)) => {
+                        ("Array" | "ReadonlyArray", DtsType::Native(other)) => {
                             return DtsType::Unsupported(format!(
                                 "array element type {other:?} is not supported yet (supports number[], string[], boolean[], and JsValue[])"
                             ))
                         }
-                        ("Array", DtsType::Unsupported(reason)) => {
+                        ("Array" | "ReadonlyArray", DtsType::Unsupported(reason)) => {
                             return DtsType::Unsupported(format!("array element type: {reason}"))
                         }
                         _ => {}
