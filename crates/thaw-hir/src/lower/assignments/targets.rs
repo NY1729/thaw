@@ -41,8 +41,15 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Json => {
                 let key = self.lower_expr(&computed.expr)?;
-                self.expect_type(&HirType::Str, &key, "JSON assignment key")?;
-                Ok(Target::Dictionary(object, Box::new(key), HirType::Json))
+                match self.infer_expr_type(&key)? {
+                    HirType::Str => {
+                        Ok(Target::Dictionary(object, Box::new(key), HirType::Json))
+                    }
+                    HirType::F64 => Ok(Target::JsonIndex(object, Box::new(key))),
+                    other => Err(format!(
+                        "JSON assignment key must be string or number, got {other:?}"
+                    )),
+                }
             }
             _ => Err(format!(
                 "cannot assign through a computed key on a value of type {object_type:?}"

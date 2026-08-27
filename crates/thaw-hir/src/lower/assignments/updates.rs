@@ -215,6 +215,21 @@ impl<'a> FnLowerer<'a> {
                     element,
                 )
             }
+            Target::JsonIndex(object, index) => {
+                let object_name = format!("__thaw_update_json_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(object_name.clone(), HirType::Json);
+                bindings.push((object_name.clone(), HirType::Json, object));
+
+                let index_name = format!("__thaw_update_index_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(index_name.clone(), HirType::F64);
+                bindings.push((index_name.clone(), HirType::F64, *index));
+                Target::JsonIndex(
+                    HirExpr::Var(object_name),
+                    Box::new(HirExpr::Var(index_name)),
+                )
+            }
         };
         let old_name = format!("__thaw_update_old_{}", self.next_binding);
         self.next_binding += 1;
