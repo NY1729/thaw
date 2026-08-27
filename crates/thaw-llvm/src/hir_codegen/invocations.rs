@@ -557,6 +557,55 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_regex_match" | "__thaw_regex_split" => {
+                let [value, source, flags] = args else {
+                    return Err("regex match/split expects three operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                let runtime = if name == "__thaw_regex_match" {
+                    "thaw_regex_match"
+                } else {
+                    "thaw_regex_split"
+                };
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[value.into(), source.into(), flags.into()],
+                        "regex_call",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("regex match/split returned no value".into());
+            }
+            "__thaw_regex_replace" | "__thaw_regex_replace_all" => {
+                let [value, source, flags, replacement] = args else {
+                    return Err("regex replace expects four operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                let replacement = self.compile_expr(replacement)?;
+                let runtime = if name == "__thaw_regex_replace" {
+                    "thaw_regex_replace"
+                } else {
+                    "thaw_regex_replace_all"
+                };
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[value.into(), source.into(), flags.into(), replacement.into()],
+                        "regex_replace",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("regex replace returned no value".into());
+            }
             "__thaw_encode_uri_component" => {
                 return self.compile_single_arg_call(
                     "thaw_encode_uri_component",
@@ -585,6 +634,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self
                     .builder
                     .build_is_null(value, "string_is_null")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_array_is_null" => {
+                let [value] = args else {
+                    return Err("array null check expects one operand".into());
+                };
+                let value = self.compile_expr(value)?.into_pointer_value();
+                return self
+                    .builder
+                    .build_is_null(value, "array_is_null")
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
