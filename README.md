@@ -1449,6 +1449,10 @@ The workspace crates have narrow responsibilities:
   receivers, falls back to the general native number-to-string algorithm at or
   above `1e21` magnitude, and otherwise produces a correctly rounded
   fixed-point string with sign handling
+- `String.prototype.codePointAt` defaults and coerces its index to a
+  truncated integer, measures in UTF-16 code units, combines a valid leading
+  and trailing surrogate pair into one astral code point, and returns a
+  tagged `number | undefined` that is absent for an out-of-range index
 - Nested `while` loops receive their own enabled/condition/body guards and
   back edges recursively; inactive parents skip the inner condition Promise
 - Labeled statements support `break label`, and labeled iteration statements
