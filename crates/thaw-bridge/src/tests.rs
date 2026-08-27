@@ -556,6 +556,37 @@ fn classifies_pick_and_omit_utility_types() {
 }
 
 #[test]
+fn preserves_optional_object_properties_in_native_layouts() {
+    let funcs = parse_dts(
+        r#"export interface Config<T> {
+                label?: string;
+                value?: T;
+            }
+            export declare function inspect(
+                config: Config<number>,
+                inline: { enabled?: boolean }
+            ): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("optional object properties should use tagged native fields");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Object(vec![
+                ("label".into(), HirType::Optional(Box::new(HirType::Str)),),
+                ("value".into(), HirType::Optional(Box::new(HirType::F64)),),
+            ]),
+            HirType::Object(vec![(
+                "enabled".into(),
+                HirType::Optional(Box::new(HirType::Bool)),
+            )]),
+        ]
+    );
+}
+
+#[test]
 fn resolves_pick_and_omit_after_generic_substitution() {
     let funcs = parse_dts(
         r#"export interface Config { host: string; port: number; }
