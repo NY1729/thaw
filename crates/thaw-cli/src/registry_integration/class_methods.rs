@@ -22,13 +22,14 @@ fn rewrite_external_class_methods_with_static(
     use thaw_parser::ast::{
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
-        Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt,
-        SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsType,
+        Lit, MemberProp, NewExpr, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget,
+        Stmt, SwitchStmt, TryStmt, TsEntityName, TsInterfaceDecl, TsKeywordTypeKind, TsType,
         TsTypeAliasDecl, TsTypeElement, UnaryOp, VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
-    if methods.is_empty()
+    if classes.is_empty()
+        && methods.is_empty()
         && static_methods.is_empty()
         && getters.is_empty()
         && setters.is_empty()
@@ -810,6 +811,60 @@ fn rewrite_external_class_methods_with_static(
     }
 
     impl Visit for Finder<'_> {
+        fn visit_new_expr(&mut self, expression: &NewExpr) {
+            let class = match expression.callee.as_ref() {
+                Expr::Ident(class) => self
+                    .classes
+                    .iter()
+                    .find(|(_, name, _)| name == class.sym.as_str()),
+                Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+                    (Expr::Ident(package), MemberProp::Ident(class)) => {
+                        self.classes.iter().find(|(qualifier, name, _)| {
+                            qualifier == package.sym.as_str() && name == class.sym.as_str()
+                        })
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some((_, _, helpers)) = class {
+                let arguments = expression.args.as_deref().unwrap_or_default();
+                let selected = helpers
+                    .iter()
+                    .filter(|(arity, _, _)| *arity == arguments.len())
+                    .filter_map(|candidate| {
+                        let mut score = 0u16;
+                        for (argument, declared) in arguments.iter().zip(&candidate.2) {
+                            if let Some(actual) = source_expr_type(
+                                argument.expr.as_ref(),
+                                &self.value_types,
+                                self.function_types,
+                                self.named_types,
+                            ) {
+                                score += u16::from(overload_type_score(declared, &actual)?);
+                            }
+                        }
+                        Some((score, candidate))
+                    })
+                    .reduce(|best, candidate| {
+                        if candidate.0 > best.0 {
+                            candidate
+                        } else {
+                            best
+                        }
+                    })
+                    .map(|(_, candidate)| candidate);
+                if let Some((_, helper, _)) = selected {
+                    self.edits.push((
+                        expression.span().lo.0,
+                        expression.callee.span().hi.0,
+                        helper.clone(),
+                    ));
+                }
+            }
+            expression.visit_children_with(self);
+        }
+
         fn visit_member_expr(&mut self, member: &thaw_parser::ast::MemberExpr) {
             if let (Some((qualifier, class)), MemberProp::Ident(property)) =
                 (static_class_receiver(&member.obj), &member.prop)

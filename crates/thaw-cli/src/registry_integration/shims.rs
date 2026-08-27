@@ -98,8 +98,12 @@ fn typed_dynamic_declaration(
 /// here is the *qualifier identifier* (`qualifier_identifier`), not
 /// necessarily the real package name.
 type QualifiedCallRewrite = (String, String, String);
-/// `(qualifier, class, [(argument_count, helper)])`.
-type ClassConstructorRewrite = (String, String, Vec<(usize, String)>);
+/// `(qualifier, class, [(argument_count, helper, parameter_types)])`.
+type ClassConstructorRewrite = (
+    String,
+    String,
+    Vec<(usize, String, Vec<thaw_hir::HirType>)>,
+);
 /// `(class, method, helper, argument_count, has_callback, parameter_types)`.
 type ClassMethodRewrite = (String, String, String, usize, bool, Vec<thaw_hir::HirType>);
 /// `(class, property, helper)` for an instance getter.
@@ -166,39 +170,61 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
 fn generate_napi_class_constructors(
     class: &thaw_bridge::DtsClass,
     shim: &mut String,
-) -> Vec<(usize, String)> {
+) -> Vec<(usize, String, Vec<thaw_hir::HirType>)> {
     if !class.constructible {
         return Vec::new();
     }
-    let mut arities = std::collections::BTreeMap::new();
-    for constructor in &class.constructors {
+    let mut helpers = Vec::new();
+    for (overload_index, constructor) in class.constructors.iter().enumerate() {
         if !constructor.params.iter().all(|(_, ty)| {
             matches!(ty, thaw_bridge::DtsType::Native(native) if render_dynamic_type(native).is_some())
         }) {
             continue;
         }
         for arity in constructor.required_params..=constructor.params.len() {
-            arities
-                .entry(arity)
-                .or_insert_with(|| &constructor.params[..arity]);
+            let params = &constructor.params[..arity];
+            let parameter_types = params
+                .iter()
+                .filter_map(|(_, ty)| match ty {
+                    thaw_bridge::DtsType::Native(ty) => Some(ty.clone()),
+                    thaw_bridge::DtsType::Unsupported(_) => None,
+                })
+                .collect::<Vec<_>>();
+            if helpers.iter().any(|(existing_arity, _, existing_types)| {
+                *existing_arity == arity && existing_types == &parameter_types
+            }) {
+                continue;
+            }
+            let rendered = params
+                .iter()
+                .map(|(name, ty)| match ty {
+                    thaw_bridge::DtsType::Native(ty) => {
+                        format!("{name}: {}", render_dynamic_type(ty).unwrap())
+                    }
+                    thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let overload = if class.constructors.len() > 1 {
+                format!("$overload{overload_index}")
+            } else {
+                String::new()
+            };
+            let runtime_key = format!("$new${}$arity{arity}{overload}", class.name);
+            let encoded = runtime_key
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let symbol = format!("__thaw_typed_napi_{encoded}");
+            shim.push_str(&format!(
+                "declare function {symbol}({rendered}): JsValue;\n"
+            ));
+            helpers.push((arity, symbol, parameter_types));
         }
     }
     if class.constructors.is_empty() {
-        arities.insert(0, &[]);
-    }
-    let mut helpers = Vec::with_capacity(arities.len());
-    for (arity, params) in arities {
-        let rendered = params
-            .iter()
-            .map(|(name, ty)| match ty {
-                thaw_bridge::DtsType::Native(ty) => {
-                    format!("{name}: {}", render_dynamic_type(ty).unwrap())
-                }
-                thaw_bridge::DtsType::Unsupported(_) => unreachable!(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let runtime_key = format!("$new${}$arity{arity}", class.name);
+        let runtime_key = format!("$new${}$arity0", class.name);
         let encoded = runtime_key
             .as_bytes()
             .iter()
@@ -206,9 +232,9 @@ fn generate_napi_class_constructors(
             .collect::<String>();
         let symbol = format!("__thaw_typed_napi_{encoded}");
         shim.push_str(&format!(
-            "declare function {symbol}({rendered}): JsValue;\n"
+            "declare function {symbol}(): JsValue;\n"
         ));
-        helpers.push((arity, symbol));
+        helpers.push((0, symbol, Vec::new()));
     }
     helpers
 }
