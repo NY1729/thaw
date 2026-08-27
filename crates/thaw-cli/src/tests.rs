@@ -948,6 +948,45 @@ fn propagates_argument_types_through_passthrough_functions() {
 }
 
 #[test]
+fn propagates_common_argument_types_through_conditional_functions() {
+    let source = r#"function forward(flag, first, second) { return choose(flag, first, second); } function choose(flag, first, second) { return flag ? first : second; } const logical = (first, second) => first ?? second; const numberBox = new NativeBox(forward(true, 1, 2)); const stringBox = new NativeBox(logical("a", "b")); numberBox.set(choose(false, 3, 4)); stringBox.set(forward(false, "x", "y"));"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![
+                (1, "__ctor_string".into(), vec![thaw_hir::HirType::Str]),
+                (1, "__ctor_number".into(), vec![thaw_hir::HirType::F64]),
+            ],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::F64],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("const numberBox = __ctor_number(forward(true, 1, 2))"));
+    assert!(rewritten.contains("const stringBox = __ctor_string(logical(\"a\", \"b\"))"));
+    assert!(rewritten.contains("__set_number(numberBox, choose(false, 3, 4))"));
+    assert!(rewritten.contains("__set_string(stringBox, forward(false, \"x\", \"y\"))"));
+}
+
+#[test]
 fn selects_object_overloads_from_structural_property_types() {
     let source = r#"function makeNumeric(): { value: number } { return { value: 11 }; } const box = new NativeBox(1); const numeric = { value: 42 }; const textual = { value: "text" }; const choose = true; box.configure(numeric); box.configure(textual); box.configure({ value: 7 }); box.configure({ ["value"]: "computed" }); box.configure({ ...numeric }); box.configure({ ...numeric, value: "override" }); box.configure({ ...{ value: 9 } }); box.configure({ ...makeNumeric() }); box.configure({ ...(choose ? makeNumeric() : numeric) });"#;
     let rewritten = rewrite_external_class_methods(

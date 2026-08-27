@@ -2093,8 +2093,11 @@ participate in overload selection through explicit return annotations or a
 uniformly inferred return type; repeated collection resolves forward call
 chains. Single-parameter passthrough results retain the selected argument's type
 through declarations, arrows, function expressions and transitive forward call
-chains. Branch-dependent/conflicting returns and rest element types beyond the
-currently native-representable surface remain explicit gaps. Object
+chains. Conditional and same-type logical results likewise retain all candidate
+argument positions, including through forward calls, and resolve only when the
+corresponding call arguments agree. General control-flow-dependent/conflicting
+returns and rest element types beyond the currently native-representable surface
+remain explicit gaps. Object
 literals, including shorthand properties such as `{ value }`, retain
 recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
