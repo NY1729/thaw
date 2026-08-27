@@ -1511,6 +1511,12 @@ The workspace crates have narrow responsibilities:
   index of the first match, or `-1` when it does not match or the pattern
   fails to compile (mirroring `RegExp.prototype.test`'s inability to
   distinguish those two cases, rather than throwing like `split`/`replace`)
+- `RegExp.prototype.exec(value)` returns `Array(Str) | undefined`: the
+  whole match followed by each capture group's text (same shape and
+  empty-string-for-non-participating-group behavior as non-global
+  `.match()`), or `undefined` when it does not match or the pattern fails
+  to compile. Like `.test()`, it ignores `g`/`y` and always searches from
+  the start of `value` -- there is no `lastIndex` state to advance
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`

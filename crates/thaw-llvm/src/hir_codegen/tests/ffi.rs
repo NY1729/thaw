@@ -1752,6 +1752,39 @@ fn compiles_string_search() {
 }
 
 #[test]
+fn compiles_regex_exec() {
+    let source = r#"
+        function printMatch(result: string[] | undefined): void {
+            if (result !== undefined) {
+                for (const part of result) {
+                    console.log(part);
+                }
+            } else {
+                console.log("no match");
+            }
+        }
+        function pattern(): RegExp {
+            console.log("pattern");
+            return /(\d+)-(\d+)/;
+        }
+        function value(): string {
+            console.log("value");
+            return "12-34";
+        }
+        async function main(): Promise<void> {
+            printMatch(/(\d+)-(\d+)/.exec("12-34"));
+            printMatch(/(\d+)-(\d+)/.exec("abc"));
+            printMatch(pattern().exec(value()));
+            printMatch(/(\d+)-(\d+)/g.exec("12-34"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_exec"),
+        "12-34\n12\n34\nno match\npattern\nvalue\n12-34\n12\n34\n12-34\n12\n34\n"
+    );
+}
+
+#[test]
 fn compiles_string_match() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
