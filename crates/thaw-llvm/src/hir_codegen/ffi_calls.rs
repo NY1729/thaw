@@ -106,6 +106,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn unpack_ffi_bool_array(
         &mut self,
         native: StructValue<'ctx>,
+        ownership: &FfiOwnership,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let data = self
             .builder
@@ -238,6 +239,19 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         index.add_incoming(&[(&next, body_end)]);
         self.builder.position_at_end(done);
+        let destroy = match ownership {
+            FfiOwnership::Owned { destroy } => Some(destroy),
+            FfiOwnership::ArenaCopy { destroy } => destroy.as_ref(),
+            FfiOwnership::Borrowed => None,
+        };
+        if let Some(destroy) = destroy {
+            let destroy_fn = self.module.get_function(destroy).ok_or_else(|| {
+                format!("FFI ownership destructor `{destroy}` was not declared")
+            })?;
+            self.builder
+                .build_call(destroy_fn, &[data.into()], "ffi_bool_array_destroy")
+                .map_err(|error| error.to_string())?;
+        }
         Ok(result.into())
     }
 
@@ -471,7 +485,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Array(element)
                 if **element == HirType::Bool && value.is_struct_value() =>
             {
-                self.unpack_ffi_bool_array(value.into_struct_value())
+                self.unpack_ffi_bool_array(value.into_struct_value(), ownership)
             }
             HirType::Array(element)
                 if matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::JsValue)
