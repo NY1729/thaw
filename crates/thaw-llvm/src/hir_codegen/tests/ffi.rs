@@ -1259,6 +1259,48 @@ fn compiles_encode_uri_component() {
 }
 
 #[test]
+fn compiles_decode_uri_component() {
+    let source = r#"
+        function value(): string {
+            console.log("argument");
+            return "a%3D1%26b%3D2";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited argument");
+            await sleep(1);
+            return "%F0%9F%98%80";
+        }
+        async function main(): Promise<void> {
+            console.log(decodeURIComponent("a%20b"));
+            console.log(decodeURIComponent("a%3D1%26b%3D2"));
+            console.log(decodeURIComponent("abc-_.!~*'()123"));
+            console.log(decodeURIComponent("caf%C3%A9"));
+            console.log(decodeURIComponent(value()));
+            console.log(decodeURIComponent(await delayedValue()));
+            try {
+                decodeURIComponent("%");
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                decodeURIComponent("%zz");
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                decodeURIComponent("%C3");
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "decode_uri_component"),
+        "a b\na=1&b=2\nabc-_.!~*'()123\ncafé\nargument\na=1&b=2\nawaited argument\n😀\nURI malformed\nURI malformed\nURI malformed\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

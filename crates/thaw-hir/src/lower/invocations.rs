@@ -775,6 +775,60 @@ impl<'a> FnLowerer<'a> {
             return self.wrap_call_argument_bindings(result, &bindings);
         }
 
+        if callee_name == "decodeURIComponent" {
+            let (arguments, bindings) =
+                self.lower_native_spread_values(&call.args, &callee_name)?;
+            let [value] = arguments.as_slice() else {
+                return Err(format!("`{callee_name}` expects exactly one argument"));
+            };
+            let value = self.coerce_primitive_to_string(value.clone())?;
+            let raw_name = format!("__thaw_decode_uri_raw_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(raw_name.clone(), HirType::Str);
+            let body = HirExpr::Block(vec![
+                HirStmt::Let(
+                    raw_name.clone(),
+                    HirType::Str,
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_decode_uri_component".to_string())),
+                        vec![value],
+                    ),
+                ),
+                HirStmt::If(
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_is_null".to_string())),
+                        vec![HirExpr::Var(raw_name.clone())],
+                    ),
+                    vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "URI malformed".into(),
+                    )))],
+                    Vec::new(),
+                ),
+                HirStmt::Return(Some(HirExpr::Var(raw_name))),
+            ]);
+            let mut referenced = BTreeSet::new();
+            collect_referenced_bindings(&body, &mut referenced);
+            let captures = referenced
+                .into_iter()
+                .filter_map(|captured| {
+                    self.scope
+                        .get(&captured)
+                        .cloned()
+                        .map(|ty| HirParam { name: captured, ty })
+                })
+                .collect();
+            let result = HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    captures,
+                    Vec::new(),
+                    HirType::Str,
+                    Box::new(body),
+                )),
+                Vec::new(),
+            );
+            return self.wrap_call_argument_bindings(result, &bindings);
+        }
+
         if matches!(callee_name.as_str(), "Promise.all" | "Promise.allSettled" | "Promise.race" | "Promise.any") {
             return self.lower_promise_static_call(&callee_name, call);
         }
