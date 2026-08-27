@@ -700,6 +700,10 @@ fn classify_indexed_access(object: DtsType, index: &TsType) -> DtsType {
         }
     };
 
+    select_object_key(object, &key)
+}
+
+fn select_object_key(object: DtsType, key: &str) -> DtsType {
     match object {
         DtsType::Native(HirType::Object(fields)) => fields
             .into_iter()
@@ -963,6 +967,97 @@ fn classify_native_union(
     DtsType::Native(tagged)
 }
 
+fn classify_mapped_type(
+    mapped: &swc_ecma_ast::TsMappedType,
+    outer_substitution: Option<&HashMap<String, HirType>>,
+    interfaces: &HashMap<String, DtsType>,
+    generic_interfaces: &GenericInterfaces,
+    in_progress: &mut Vec<String>,
+) -> DtsType {
+    if mapped.name_type.is_some() {
+        return DtsType::Unsupported("mapped key remapping is not classified yet".into());
+    }
+    let Some(constraint) = &mapped.type_param.constraint else {
+        return DtsType::Unsupported("mapped type key needs a finite constraint".into());
+    };
+    let keys = match outer_substitution {
+        Some(substitution) => substituted_utility_keys(
+            constraint,
+            substitution,
+            interfaces,
+            generic_interfaces,
+            in_progress,
+        ),
+        None => utility_keys(constraint, interfaces, generic_interfaces),
+    };
+    let keys = match keys {
+        Ok(keys) => keys,
+        Err(reason) => return DtsType::Unsupported(reason),
+    };
+    let Some(value_type) = &mapped.type_ann else {
+        return DtsType::Unsupported("mapped type needs a value annotation".into());
+    };
+    let parameter = mapped.type_param.name.sym.as_str();
+    let indexed_object = match value_type.as_ref() {
+        TsType::TsIndexedAccessType(indexed)
+            if matches!(
+                indexed.index_type.as_ref(),
+                TsType::TsTypeRef(reference)
+                    if matches!(
+                        &reference.type_name,
+                        TsEntityName::Ident(name) if name.sym == parameter
+                    )
+            ) => Some(indexed.obj_type.as_ref()),
+        _ => None,
+    };
+
+    let mut fields = Vec::with_capacity(keys.len());
+    for key in keys {
+        let value = if let Some(object) = indexed_object {
+            let object = match outer_substitution {
+                Some(substitution) => resolve_ts_type_with_substitution(
+                    object,
+                    substitution,
+                    interfaces,
+                    generic_interfaces,
+                    in_progress,
+                ),
+                None => classify_ts_type(object, interfaces, generic_interfaces),
+            };
+            select_object_key(object, &key)
+        } else {
+            let mut substitution = outer_substitution.cloned().unwrap_or_default();
+            substitution.insert(parameter.to_string(), HirType::Str);
+            resolve_ts_type_with_substitution(
+                value_type,
+                &substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            )
+        };
+        let mut value = match value {
+            DtsType::Native(value) => value,
+            unsupported => return unsupported,
+        };
+        match mapped.optional {
+            Some(TruePlusMinus::True | TruePlusMinus::Plus) => {
+                value = optional_hir_type(value)
+            }
+            Some(TruePlusMinus::Minus) => {
+                value = match value {
+                    HirType::Optional(inner) => *inner,
+                    HirType::Nullish(inner) => HirType::Nullable(inner),
+                    other => other,
+                }
+            }
+            None => {}
+        }
+        fields.push((key, value));
+    }
+    DtsType::Native(HirType::Object(fields))
+}
+
 /// Mirrors `thaw_hir::lower::lower_ts_type`'s mapping rules, but never
 /// fails: anything it can't map becomes `DtsType::Unsupported` with a
 /// reason, for `classify` to report per-parameter/return instead of
@@ -1008,6 +1103,14 @@ fn classify_ts_type(
         TsType::TsIndexedAccessType(indexed) => classify_indexed_access(
             classify_ts_type(&indexed.obj_type, interfaces, generic_interfaces),
             &indexed.index_type,
+        ),
+
+        TsType::TsMappedType(mapped) => classify_mapped_type(
+            mapped,
+            None,
+            interfaces,
+            generic_interfaces,
+            &mut Vec::new(),
         ),
 
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
@@ -1791,6 +1894,13 @@ fn resolve_ts_type_with_substitution(
                 in_progress,
             ),
             &indexed.index_type,
+        ),
+        TsType::TsMappedType(mapped) => classify_mapped_type(
+            mapped,
+            Some(substitution),
+            interfaces,
+            generic_interfaces,
+            in_progress,
         ),
         TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
             classify_native_union(union, |element| {
