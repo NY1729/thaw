@@ -1324,6 +1324,9 @@ The workspace crates have narrow responsibilities:
   `[string, Json][]` entries in the same key order
 - `Object.hasOwn` checks fixed-object fields and runtime JSON object/array own
   properties, including array indices and `length`
+- `Object.is` applies SameValue comparison to native and runtime JSON
+  primitives, preserves JSON object/array identity, and compares JSON
+  primitives directly with native numbers, strings and booleans
 - `Object.entries` returns ordered, explicitly typed `[string, value]` tuples;
   homogeneous entry shapes remain native arrays while heterogeneous field
   types retain a statically indexed outer tuple, including empty/awaited input

@@ -206,6 +206,67 @@ pub unsafe extern "C" fn thaw_json_has_own(value: *const Value, key: *const c_ch
     .into()
 }
 
+fn json_number_is(left: f64, right: f64) -> bool {
+    (left.is_nan() && right.is_nan()) || (left == right && left.to_bits() == right.to_bits())
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// Both operands must be null or point to valid JSON `Value`s.
+pub unsafe extern "C" fn thaw_json_object_is(left: *const Value, right: *const Value) -> u8 {
+    let result = match (unsafe { left.as_ref() }, unsafe { right.as_ref() }) {
+        (Some(Value::Null), Some(Value::Null)) => true,
+        (Some(Value::Bool(left)), Some(Value::Bool(right))) => left == right,
+        (Some(Value::String(left)), Some(Value::String(right))) => left == right,
+        (Some(Value::Number(left)), Some(Value::Number(right))) => left
+            .as_f64()
+            .zip(right.as_f64())
+            .is_some_and(|(left, right)| json_number_is(left, right)),
+        (Some(Value::Array(_)), Some(Value::Array(_)))
+        | (Some(Value::Object(_)), Some(Value::Object(_))) => left == right,
+        _ => false,
+    };
+    result.into()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_object_is_number(value: *const Value, other: f64) -> u8 {
+    unsafe { value.as_ref() }
+        .and_then(Value::as_f64)
+        .is_some_and(|value| json_number_is(value, other))
+        .into()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`; `other` must point
+/// to a valid NUL-terminated string.
+pub unsafe extern "C" fn thaw_json_object_is_string(
+    value: *const Value,
+    other: *const c_char,
+) -> u8 {
+    unsafe { value.as_ref() }
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == to_str(other))
+        .into()
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_object_is_bool(value: *const Value, other: bool) -> u8 {
+    unsafe { value.as_ref() }
+        .and_then(Value::as_bool)
+        .is_some_and(|value| value == other)
+        .into()
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
     if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
@@ -442,6 +503,26 @@ mod tests {
             0
         );
         assert_eq!(unsafe { thaw_json_has_own(array, length.as_ptr()) }, 1);
+    }
+
+    #[test]
+    fn compares_json_values_with_same_value_semantics() {
+        let number = parse("1");
+        let same_number = parse("1");
+        let text = parse(r#""thaw""#);
+        let object = parse(r#"{"value": 1}"#);
+        let equal_object = parse(r#"{"value": 1}"#);
+        assert_eq!(unsafe { thaw_json_object_is(number, same_number) }, 1);
+        assert_eq!(unsafe { thaw_json_object_is(object, object) }, 1);
+        assert_eq!(unsafe { thaw_json_object_is(object, equal_object) }, 0);
+        assert_eq!(unsafe { thaw_json_object_is_number(number, 1.0) }, 1);
+        assert_eq!(unsafe { thaw_json_object_is_number(number, -0.0) }, 0);
+        let thaw = CString::new("thaw").unwrap();
+        assert_eq!(
+            unsafe { thaw_json_object_is_string(text, thaw.as_ptr()) },
+            1
+        );
+        assert_eq!(unsafe { thaw_json_object_is_bool(parse("true"), true) }, 1);
     }
 
     #[test]
