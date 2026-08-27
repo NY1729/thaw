@@ -730,7 +730,14 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
         let connection = ServerConnection::new(config).unwrap();
         let mut stream = StreamOwned::new(connection, socket);
         let mut request = Vec::new();
-        stream.read_to_end(&mut request).unwrap();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
         let request = String::from_utf8(request).unwrap();
         assert!(request.starts_with("GET /secure HTTP/1.1\r\n"));
         stream
@@ -889,4 +896,3 @@ fn net_server_accepts_and_replies_to_a_real_tcp_client() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
-
