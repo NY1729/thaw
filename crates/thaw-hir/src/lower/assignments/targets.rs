@@ -27,7 +27,7 @@ impl<'a> FnLowerer<'a> {
             }
             HirType::Dictionary(element) => {
                 let key = self.lower_expr(&computed.expr)?;
-                self.expect_type(&HirType::Str, &key, "dictionary assignment key")?;
+                let key = self.coerce_primitive_to_string(key)?;
                 if !matches!(
                     element.as_ref(),
                     HirType::F64 | HirType::Str | HirType::Bool | HirType::Json
