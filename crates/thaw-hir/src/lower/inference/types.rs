@@ -570,6 +570,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, index, "charCodeAt index")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_string_locale_compare" => {
+                        let [receiver, other] = args.as_slice() else {
+                            return Err("string localeCompare expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Str, receiver, "localeCompare receiver")?;
+                        self.expect_type(&HirType::Str, other, "localeCompare argument")?;
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string codePointAt expects two operands".into());
