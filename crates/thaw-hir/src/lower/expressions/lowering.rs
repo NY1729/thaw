@@ -1042,12 +1042,13 @@ impl<'a> FnLowerer<'a> {
                         let timestamp = if let Some(argument) = args.first() {
                             let value = self.lower_expr(&argument.expr)?;
                             if self.infer_expr_type(&value)? == HirType::Str {
-                                return Err(
-                                    "`new Date()` does not support parsing a date string; pass a millisecond timestamp instead"
-                                        .into(),
-                                );
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_date_parse".to_string())),
+                                    vec![value],
+                                )
+                            } else {
+                                self.coerce_primitive_to_number(value)?
                             }
-                            self.coerce_primitive_to_number(value)?
                         } else {
                             HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_date_now".to_string())),

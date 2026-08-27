@@ -9,7 +9,7 @@ impl<'a> FnLowerer<'a> {
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("String", "fromCharCode" | "fromCodePoint")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
-                | ("Date", "now")
+                | ("Date", "now" | "UTC" | "parse")
         )
     }
 
@@ -709,6 +709,53 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_date_now".to_string())),
                             Vec::new(),
                         ));
+                    }
+                    if object.sym == *"Date" && property.sym == *"UTC" {
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Date.UTC")?;
+                        if arguments.is_empty() || arguments.len() > 7 {
+                            return Err("`Date.UTC` expects one to seven arguments".into());
+                        }
+                        // year has no meaningful default (it's always
+                        // required), so its slot is unused below.
+                        const DEFAULTS: [f64; 7] = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+                        let mut bindings = spread_bindings;
+                        let mut call_vars = Vec::new();
+                        for (index, default) in DEFAULTS.iter().enumerate() {
+                            let value = if let Some(argument) = arguments.get(index) {
+                                self.coerce_primitive_to_number(argument.clone())?
+                            } else {
+                                HirExpr::Lit(HirLit::F64(*default))
+                            };
+                            let name = format!("__thaw_date_utc_arg_{index}_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), HirType::F64);
+                            bindings.push((name.clone(), HirType::F64, value));
+                            call_vars.push(HirExpr::Var(name));
+                        }
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_utc".to_string())),
+                            call_vars,
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
+                    if object.sym == *"Date" && property.sym == *"parse" {
+                        let (arguments, spread_bindings) =
+                            self.lower_native_spread_values(&call.args, "Date.parse")?;
+                        let [text] = arguments.as_slice() else {
+                            return Err("`Date.parse` expects exactly one argument".into());
+                        };
+                        let text = self.coerce_primitive_to_string(text.clone())?;
+                        let text_name = format!("__thaw_date_parse_text_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(text_name.clone(), HirType::Str);
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_parse".to_string())),
+                            vec![HirExpr::Var(text_name.clone())],
+                        );
+                        let mut bindings = spread_bindings;
+                        bindings.push((text_name, HirType::Str, text));
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Math" && property.sym == *"random" {
                         if !call.args.is_empty() {

@@ -1827,6 +1827,32 @@ fn compiles_date_setters() {
 }
 
 #[test]
+fn compiles_date_utc_and_parse() {
+    let source = r#"
+        function isoText(): string {
+            console.log("isoText");
+            return "2024-01-01T00:00:00.500Z";
+        }
+        async function main(): Promise<void> {
+            console.log(Date.UTC(2024, 0, 1, 0, 0, 0, 500));
+            console.log(Date.UTC(2024));
+            console.log(Date.UTC(70));
+            console.log(Date.parse("2024-01-01T00:00:00.500Z"));
+            console.log(Date.parse("2024-01-01"));
+            console.log(Date.parse("not a date"));
+            const d: Date = new Date("2024-01-01T00:00:00.500Z");
+            console.log(d.toISOString());
+            const e: Date = new Date(isoText());
+            console.log(e.getTime());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_utc_parse"),
+        "1.70407e+12\n1.70407e+12\n0\n1.70407e+12\n1.70407e+12\nnan\n2024-01-01T00:00:00.500Z\nisoText\n1.70407e+12\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {

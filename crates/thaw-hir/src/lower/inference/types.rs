@@ -655,7 +655,8 @@ impl<'a> FnLowerer<'a> {
                     | "__thaw_date_set_hours"
                     | "__thaw_date_set_minutes"
                     | "__thaw_date_set_seconds"
-                    | "__thaw_date_set_milliseconds" => {
+                    | "__thaw_date_set_milliseconds"
+                    | "__thaw_date_utc" => {
                         for (index, argument) in args.iter().enumerate() {
                             self.expect_type(
                                 &HirType::F64,
@@ -663,6 +664,13 @@ impl<'a> FnLowerer<'a> {
                                 &format!("{name} operand {index}"),
                             )?;
                         }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_date_parse" => {
+                        let [text] = args.as_slice() else {
+                            return Err("Date.parse expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, text, "Date.parse argument")?;
                         return Ok(HirType::F64);
                     }
                     "__thaw_regex_search" => {

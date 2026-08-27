@@ -1526,11 +1526,24 @@ The workspace crates have narrow responsibilities:
   the object machinery like `RegExp` does. All calendar math is UTC only --
   there is no host timezone database, so "local" methods are simply their
   UTC counterparts renamed. `new Date()` uses the current time, `new
-  Date(ms)` an explicit timestamp; parsing a date string is not supported
-  and is a compile-time error. `toISOString` throws `Invalid time value`
-  for a non-finite timestamp (for example from `new Date(NaN)`), matching
-  the specification, and does not support the extended `+/-YYYYYY` year
-  format outside `[0, 9999]`
+  Date(ms)` an explicit timestamp, and `new Date(text)`/`Date.parse(text)`
+  parse the ECMA-262 "Date Time String Format" -- a restricted ISO 8601
+  profile (`YYYY`, `YYYY-MM`, or `YYYY-MM-DD`, optionally followed by
+  `THH:mm`, `THH:mm:ss`, or `THH:mm:ss.sss`, and then an optional `Z` or
+  `+HH:mm`/`-HH:mm` offset). Other date string formats are
+  implementation-defined by the specification and are not supported here;
+  like an out-of-range calendar field (an invalid day for the given month
+  including leap years, or an hour/minute/second outside `0-23`/`0-59`,
+  neither of which roll over here the way the setters do), they parse as
+  `NaN` (`Invalid Date`) rather than a compile-time error. `Date.UTC(year,
+  month?, date?, hours?, minutes?, seconds?, ms?)` returns a timestamp
+  number (not a `Date`) from explicit fields, defaulting an omitted
+  trailing one to month 0/date 1/zero for the rest; both it and the
+  `Date(...)` constructor apply the specification's legacy two-digit-year
+  rule (a `year` in `[0, 99]` means `1900 + year`). `toISOString` throws
+  `Invalid time value` for a non-finite timestamp (for example from `new
+  Date(NaN)`), matching the specification, and does not support the
+  extended `+/-YYYYYY` year format outside `[0, 9999]`
 - The `setFullYear`/`setMonth`/`setDate`/`setHours`/`setMinutes`/
   `setSeconds`/`setMilliseconds` family (each `setUTC*` variant is a plain
   alias) mutates a `Date`'s `timestamp` field in place and returns the new
