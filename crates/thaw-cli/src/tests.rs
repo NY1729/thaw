@@ -667,6 +667,40 @@ fn selects_external_overloads_from_annotations_and_assertions() {
 }
 
 #[test]
+fn selects_number_array_overloads_from_generic_array_annotations() {
+    let source = r#"const box = new NativeBox(1); let mutable: Array<number>; const readonly = unknown as ReadonlyArray<number>; box.set(mutable); box.set(readonly);"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into())],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_numbers".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64))],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__set_numbers(box, mutable)"));
+    assert!(rewritten.contains("__set_numbers(box, readonly)"));
+}
+
+#[test]
 fn infers_external_overload_types_from_composed_expressions() {
     let source = r#"const box = new NativeBox(1); const n = 20 + 22; const s = "hel" + "lo"; const b = n > 0; const config = { n, nested: { text: s }, enabled: b }; box.set(n); box.set(s); box.set(b); box.set(Number("7")); box.set(`value-${s}`); box.set(true ? "yes" : "no"); box.set(config.n); box.set(config.nested.text); box.set(config.enabled); box.set(({ value: 7 }).value);"#;
     let rewritten = rewrite_external_class_methods(

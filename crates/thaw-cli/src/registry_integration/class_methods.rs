@@ -23,8 +23,8 @@ fn rewrite_external_class_methods_with_static(
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
         Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt,
-        SwitchStmt, TryStmt, TsKeywordTypeKind, TsType, TsTypeElement, UnaryOp, VarDeclarator,
-        WhileStmt,
+        SwitchStmt, TryStmt, TsEntityName, TsKeywordTypeKind, TsType, TsTypeElement, UnaryOp,
+        VarDeclarator, WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -374,6 +374,25 @@ fn rewrite_external_class_methods_with_static(
                 }
                 _ => None,
             },
+            TsType::TsTypeRef(reference) => {
+                let TsEntityName::Ident(name) = &reference.type_name else {
+                    return None;
+                };
+                if name.sym != *"Array" && name.sym != *"ReadonlyArray" {
+                    return None;
+                }
+                let parameters = &reference.type_params.as_ref()?.params;
+                match parameters.as_slice() {
+                    [element]
+                        if source_ts_type(element) == Some(thaw_hir::HirType::F64) =>
+                    {
+                        Some(thaw_hir::HirType::Array(Box::new(
+                            thaw_hir::HirType::F64,
+                        )))
+                    }
+                    _ => None,
+                }
+            }
             TsType::TsTypeLit(literal) => {
                 let mut fields = Vec::with_capacity(literal.members.len());
                 for member in &literal.members {
