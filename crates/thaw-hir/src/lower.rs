@@ -2573,7 +2573,10 @@ include!("lower/calls.rs");
 
 impl<'a> FnLowerer<'a> {}
 
-include!("lower/statements.rs");
+include!("lower/statements/context.rs");
+include!("lower/statements/narrowing.rs");
+include!("lower/statements/lowering.rs");
+include!("lower/statements/declarations.rs");
 
 impl<'a> FnLowerer<'a> {}
 
