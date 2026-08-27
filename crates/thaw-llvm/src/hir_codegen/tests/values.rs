@@ -540,6 +540,11 @@ fn reads_and_writes_json_with_runtime_string_keys() {
             console.log("async-key");
             return "other";
         }
+        async function asyncIndex(): Promise<number> {
+            await sleep(1);
+            console.log("async-index");
+            return 1;
+        }
         async function main(): Promise<void> {
             const data: Json = JSON.parse("{\"value\":1}");
             console.log(Number(data[key()]));
@@ -552,12 +557,16 @@ fn reads_and_writes_json_with_runtime_string_keys() {
             console.log(String(objectSource()[key()]));
             console.log(JSON.stringify(data));
             const array: Json = JSON.parse("[10,20]");
+            array[await asyncIndex()] = JSON.parse("30");
+            array[3] = JSON.parse("40");
+            console.log(String(array[0] = JSON.parse("11")));
             console.log(Number(array[1]));
+            console.log(JSON.stringify(array));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "runtime_json_keys"),
-        "key\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"value\":2,\"extra\":\"text\",\"other\":true}\n20\n"
+        "key\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"value\":2,\"extra\":\"text\",\"other\":true}\nasync-index\n11\n30\n[11,30,null,40]\n"
     );
 }
 

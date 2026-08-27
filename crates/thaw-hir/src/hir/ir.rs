@@ -165,6 +165,7 @@ pub enum HirExpr {
     JsonKey(Box<HirExpr>, Box<HirExpr>),
     /// Mutates a homogeneous runtime-keyed object and evaluates to the assigned value.
     JsonSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>, HirType),
+    JsonIndexSet(Box<HirExpr>, Box<HirExpr>, Box<HirExpr>),
     /// Deletes a runtime-keyed JSON/dictionary property and returns `true`.
     JsonDelete(Box<HirExpr>, Box<HirExpr>),
     /// `json[index]` where `json: HirType::Json`. Same story as

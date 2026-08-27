@@ -380,6 +380,21 @@ impl<'a> FnLowerer<'a> {
                         element,
                     )
                 }
+                Target::JsonIndex(object, index) => {
+                    let object_name = format!("__thaw_assign_json_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(object_name.clone(), HirType::Json);
+                    bindings.push((object_name.clone(), HirType::Json, object));
+
+                    let index_name = format!("__thaw_assign_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    bindings.push((index_name.clone(), HirType::F64, *index));
+                    Target::JsonIndex(
+                        HirExpr::Var(object_name),
+                        Box::new(HirExpr::Var(index_name)),
+                    )
+                }
             };
         }
 
@@ -515,6 +530,10 @@ impl<'a> FnLowerer<'a> {
                 self.coerce_to_declared(&element, value)?
             }
             Target::Dictionary(_, _, element) => self.coerce_to_declared(element, value)?,
+            Target::JsonIndex(_, index) => {
+                self.expect_type(&HirType::F64, index, "JSON array index")?;
+                self.coerce_to_declared(&HirType::Json, value)?
+            }
             Target::Prop(_, other, field) => {
                 return Err(format!(
                     "cannot assign to field `{field}` on value of type {other:?}"

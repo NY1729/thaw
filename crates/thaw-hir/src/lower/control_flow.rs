@@ -5,6 +5,7 @@ enum Target {
     Index(HirExpr, Box<HirExpr>),
     Prop(HirExpr, HirType, Symbol),
     Dictionary(HirExpr, Box<HirExpr>, HirType),
+    JsonIndex(HirExpr, Box<HirExpr>),
 }
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,9 @@ fn target_to_read_expr(target: &Target) -> Result<HirExpr, String> {
             HirType::Json => HirExpr::JsonKey(Box::new(object.clone()), key.clone()),
             other => return Err(format!("unsupported dictionary value type {other:?}")),
         },
+        Target::JsonIndex(object, index) => {
+            HirExpr::JsonIndex(Box::new(object.clone()), index.clone())
+        }
     })
 }
 
@@ -52,6 +56,9 @@ fn build_assign(target: Target, value: HirExpr) -> HirExpr {
         }
         Target::Dictionary(object, key, element) => {
             HirExpr::JsonSet(Box::new(object), key, Box::new(value), element)
+        }
+        Target::JsonIndex(object, index) => {
+            HirExpr::JsonIndexSet(Box::new(object), index, Box::new(value))
         }
     }
 }
@@ -77,7 +84,8 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_referenced_bindings(left, names);
             collect_referenced_bindings(right, names);
         }
-        HirExpr::JsonSet(object, key, value, _) => {
+        HirExpr::JsonSet(object, key, value, _)
+        | HirExpr::JsonIndexSet(object, key, value) => {
             collect_referenced_bindings(object, names);
             collect_referenced_bindings(key, names);
             collect_referenced_bindings(value, names);
@@ -207,7 +215,8 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::JsonIndex(left, right)
         | HirExpr::JsonKey(left, right)
         | HirExpr::JsonDelete(left, right) => contains_await(left) || contains_await(right),
-        HirExpr::JsonSet(object, key, value, _) => {
+        HirExpr::JsonSet(object, key, value, _)
+        | HirExpr::JsonIndexSet(object, key, value) => {
             contains_await(object) || contains_await(key) || contains_await(value)
         }
         HirExpr::Call(callee, args) => contains_await(callee) || args.iter().any(contains_await),

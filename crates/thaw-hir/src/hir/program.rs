@@ -53,7 +53,7 @@ pub fn set_ffi_error_abi(
                 visit_expr(left, symbol, abi, found);
                 visit_expr(right, symbol, abi, found);
             }
-            HirExpr::JsonSet(object, key, value, _) => {
+            HirExpr::JsonSet(object, key, value, _) | HirExpr::JsonIndexSet(object, key, value) => {
                 visit_expr(object, symbol, abi, found);
                 visit_expr(key, symbol, abi, found);
                 visit_expr(value, symbol, abi, found);
@@ -284,7 +284,7 @@ pub fn set_ffi_ownership(
                 update_expr(left, symbol, returns, errors, found);
                 update_expr(right, symbol, returns, errors, found);
             }
-            HirExpr::JsonSet(object, key, value, _) => {
+            HirExpr::JsonSet(object, key, value, _) | HirExpr::JsonIndexSet(object, key, value) => {
                 update_expr(object, symbol, returns, errors, found);
                 update_expr(key, symbol, returns, errors, found);
                 update_expr(value, symbol, returns, errors, found);
@@ -607,7 +607,7 @@ pub fn set_ffi_string_abi(
                     found,
                 );
             }
-            HirExpr::JsonSet(object, key, value, _) => {
+            HirExpr::JsonSet(object, key, value, _) | HirExpr::JsonIndexSet(object, key, value) => {
                 update_expr(
                     object,
                     symbol,
