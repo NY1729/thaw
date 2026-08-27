@@ -269,10 +269,10 @@ fn rewrite_external_class_methods_with_static(
             Expr::Paren(parenthesized) => {
                 source_expr_type(&parenthesized.expr, variables, functions)
             }
-            Expr::TsAs(assertion) => source_expr_type(&assertion.expr, variables, functions),
-            Expr::TsTypeAssertion(assertion) => {
-                source_expr_type(&assertion.expr, variables, functions)
-            }
+            Expr::TsAs(assertion) => source_ts_type(&assertion.type_ann)
+                .or_else(|| source_expr_type(&assertion.expr, variables, functions)),
+            Expr::TsTypeAssertion(assertion) => source_ts_type(&assertion.type_ann)
+                .or_else(|| source_expr_type(&assertion.expr, variables, functions)),
             Expr::Tpl(_) => Some(thaw_hir::HirType::Str),
             Expr::Unary(unary) => match unary.op {
                 UnaryOp::Plus | UnaryOp::Minus
@@ -853,6 +853,15 @@ fn rewrite_external_class_methods_with_static(
         }
 
         fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
+            if let Pat::Ident(binding) = &declaration.name {
+                if let Some(ty) = binding
+                    .type_ann
+                    .as_ref()
+                    .and_then(|annotation| source_ts_type(&annotation.type_ann))
+                {
+                    self.value_types.insert(binding.id.sym.to_string(), ty);
+                }
+            }
             if let (Pat::Ident(binding), Some(initializer)) = (&declaration.name, &declaration.init)
             {
                 invalidate_instance_path(&mut self.variables, binding.id.sym.as_str());
@@ -873,10 +882,12 @@ fn rewrite_external_class_methods_with_static(
                 if matches!(initializer.as_ref(), Expr::Arrow(_) | Expr::Fn(_)) {
                     self.callbacks.insert(binding.id.sym.to_string());
                 }
-                if let Some(ty) =
-                    source_expr_type(initializer, &self.value_types, self.function_types)
-                {
-                    self.value_types.insert(binding.id.sym.to_string(), ty);
+                if binding.type_ann.is_none() {
+                    if let Some(ty) =
+                        source_expr_type(initializer, &self.value_types, self.function_types)
+                    {
+                        self.value_types.insert(binding.id.sym.to_string(), ty);
+                    }
                 }
             }
             declaration.visit_children_with(self);
