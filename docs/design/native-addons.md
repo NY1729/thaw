@@ -55,6 +55,8 @@ number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<numb
 同じnative array型へ正規化する。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、
 `typeof`も結果が一意なためoverload選択に利用する。
+単一parameterをそのまま返すfunction／arrow／function expressionはargument位置を保持し、
+forward call chainも反復収集して実引数型をmethod／constructor選択へ伝播する。
 派生classにはbase classのpublic instance/static methodとpropertyを展開し、派生側の
 同名宣言を優先する。private／protected memberはshimへ公開せず、private constructor
 だけを持つclassも既定0引数constructorとして誤認しない。abstract classも同様に
