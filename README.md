@@ -250,7 +250,8 @@ The workspace crates have narrow responsibilities:
   non-blocking HTTP GET
 - `console.log` with zero or multiple arguments, left-to-right argument
   evaluation, space-separated output, optional/nullable/union values, and
-  JSON serialization of typed arrays, fixed objects, dictionaries and JSON values
+  JSON serialization of typed arrays, heterogeneous tuples, fixed objects,
+  dictionaries and JSON values
 - `console.info` and `console.debug` on standard output plus `console.warn` and
   `console.error` on standard error, sharing the same variadic value formatting
 - `console.assert` with JavaScript truthiness, eager left-to-right argument

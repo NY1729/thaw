@@ -77,6 +77,32 @@ fn console_log_serializes_arrays_objects_and_json_values() {
 }
 
 #[test]
+fn console_log_serializes_typed_tuples_in_all_tagged_positions() {
+    let source = r#"
+        interface Point { x: number; label: string; }
+        function main(): void {
+            const tuple: [number, string, boolean, Point, number[]] =
+                [1, "two", true, { x: 3, label: "p" }, [4, 5]];
+            const nested: [[number, string], [boolean, Point]] =
+                [[6, "seven"], [false, { x: 8, label: "q" }]];
+            const maybe: [string, number] | undefined = ["nine", 10];
+            const missing: [string, number] | undefined = undefined;
+            const mixed: [number, string] | string = [11, "twelve"];
+            console.log(tuple);
+            console.log(nested);
+            console.log(maybe);
+            console.log(missing);
+            console.log(mixed);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "tuple_console_log"),
+        "[1,\"two\",true,{\"x\":3,\"label\":\"p\"},[4,5]]\n[[6,\"seven\"],[false,{\"x\":8,\"label\":\"q\"}]]\n[\"nine\",10]\nundefined\n[11,\"twelve\"]\n"
+    );
+}
+
+#[test]
 fn console_methods_use_their_node_compatible_output_streams() {
     let source = r#"
         interface Detail { code: number; }
