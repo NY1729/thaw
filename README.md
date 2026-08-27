@@ -2090,7 +2090,8 @@ the currently native-representable surface remain explicit gaps. Object
 literals, including shorthand properties such as `{ value }`, retain
 recursively inferred field types, so
 property reads and same-arity structural object overloads are selected by field
-name and type. Straight-line `=` assignments update local and nested property
+name and type. Object type-literal annotations on locals, assertions and function
+returns participate in the same structural selection. Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
 compound assignments invalidate the affected fact. String-literal computed
 object keys such as `{ ["value"]: 1 }` are supported. Object spreads from a
