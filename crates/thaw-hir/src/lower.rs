@@ -2584,7 +2584,10 @@ include!("lower/destructuring.rs");
 
 impl<'a> FnLowerer<'a> {}
 
-include!("lower/inference.rs");
+include!("lower/inference/coercions.rs");
+include!("lower/inference/properties.rs");
+include!("lower/inference/callables.rs");
+include!("lower/inference/types.rs");
 
 impl<'a> FnLowerer<'a> {}
 
