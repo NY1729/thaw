@@ -190,6 +190,59 @@ impl<'a> FnLowerer<'a> {
                 Ok(result)
             }
 
+            Expr::TaggedTpl(tagged) => {
+                if let Expr::Member(member) = tagged.tag.as_ref() {
+                    if let (Expr::Ident(object), MemberProp::Ident(property)) =
+                        (member.obj.as_ref(), &member.prop)
+                    {
+                        if object.sym == *"String" && property.sym == *"raw" {
+                            let template = &tagged.tpl;
+                            let mut parts = Vec::with_capacity(
+                                template.quasis.len() + template.exprs.len(),
+                            );
+                            for (index, quasi) in template.quasis.iter().enumerate() {
+                                let text = quasi.raw.to_string();
+                                if !text.is_empty() {
+                                    parts.push(HirExpr::Lit(HirLit::Str(text)));
+                                }
+                                if let Some(expression) = template.exprs.get(index) {
+                                    let mut value = self.lower_expr(expression)?;
+                                    value = self.coerce_primitive_to_string(value)?;
+                                    parts.push(value);
+                                }
+                            }
+                            let mut parts = parts.into_iter();
+                            let Some(mut result) = parts.next() else {
+                                return Ok(HirExpr::Lit(HirLit::Str(String::new())));
+                            };
+                            for part in parts {
+                                result = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+                                    vec![result, part],
+                                );
+                            }
+                            return Ok(result);
+                        }
+                    }
+                }
+                let template = &tagged.tpl;
+                let mut strings = Vec::with_capacity(template.quasis.len());
+                for quasi in &template.quasis {
+                    let text = quasi
+                        .cooked
+                        .as_ref()
+                        .map(|cooked| cooked.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| quasi.raw.to_string());
+                    strings.push(HirExpr::Lit(HirLit::Str(text)));
+                }
+                let mut args = vec![HirExpr::ArrayLit(strings)];
+                for expression in &template.exprs {
+                    args.push(self.lower_expr(expression)?);
+                }
+                let tag = self.lower_expr(&tagged.tag)?;
+                Ok(HirExpr::Call(Box::new(tag), args))
+            }
+
             Expr::Bin(bin) => {
                 if bin.op == BinaryOp::InstanceOf {
                     let Expr::Ident(class) = bin.right.as_ref() else {
