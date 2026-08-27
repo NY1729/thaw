@@ -246,8 +246,10 @@ The workspace crates have narrow responsibilities:
   ordinary, spread, and awaited arguments
 - `throw`, `try/catch` and `finally`, including propagation and rethrow across
   generated Thaw function calls and nested cleanup ordering
-- `process.env`, `console.log`, JSON operations, and both legacy blocking and
-  Promise-based non-blocking HTTP GET
+- `process.env`, JSON operations, and both legacy blocking and Promise-based
+  non-blocking HTTP GET
+- `console.log` with zero or multiple arguments, left-to-right argument
+  evaluation, space-separated output, and optional/nullable/union values
 - Synchronous lowering of `async` functions and `await`
 - Ambient declarations and C ABI calls; number-array parameters become
   `(pointer, length)`, object parameters become scalar fields, and metadata-
