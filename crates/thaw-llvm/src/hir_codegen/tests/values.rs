@@ -2399,6 +2399,43 @@ fn compiles_object_entries_for_fixed_objects() {
 }
 
 #[test]
+fn compiles_object_from_typed_entries() {
+    let source = r#"
+        function numberEntries(): [string, number][] {
+            console.log("entries");
+            return [["first", 1], ["second", 2], ["first", 3]];
+        }
+        async function stringEntries(): Promise<[string, string][]> {
+            await sleep(1);
+            console.log("awaited");
+            return [["left", "a"], ["right", "b"]];
+        }
+        async function main(): Promise<void> {
+            const numbers: Record<string, number> = Object.fromEntries(numberEntries());
+            console.log(Object.keys(numbers).join(","));
+            console.log(numbers.first);
+            console.log(numbers.second);
+            const strings: Record<string, string> = Object.fromEntries(await stringEntries());
+            console.log(strings.left + strings.right);
+            const booleans: Record<string, boolean> = Object.fromEntries([
+                ["yes", true], ["no", false]
+            ] as [string, boolean][]);
+            console.log(booleans.yes);
+            console.log(booleans.no);
+            const jsonEntries: [string, Json][] = [["value", JSON.parse("42")]];
+            const jsonValues: Record<string, Json> = Object.fromEntries(jsonEntries);
+            console.log(Number(jsonValues.value));
+            const roundTrip: Record<string, number> = Object.fromEntries(Object.entries(numbers));
+            console.log(roundTrip.first);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_from_entries"),
+        "entries\nfirst,second\n3\n2\nawaited\nab\ntrue\nfalse\n42\n3\n"
+    );
+}
+
+#[test]
 fn compiles_object_is_same_value_comparisons() {
     let source = r#"
         interface Item { value: number; }

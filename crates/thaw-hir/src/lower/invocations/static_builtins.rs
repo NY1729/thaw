@@ -3,7 +3,7 @@ impl<'a> FnLowerer<'a> {
         matches!(
             (object, property),
             ("Array", "of" | "from" | "isArray")
-                | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "hasOwn" | "is")
+                | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "hasOwn" | "is")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
@@ -416,6 +416,46 @@ impl<'a> FnLowerer<'a> {
                         );
                         bindings.push((name, ty, value));
                         return self.wrap_call_argument_bindings(entries, &bindings);
+                    }
+                    if object.sym == *"Object" && property.sym == *"fromEntries" {
+                        let (arguments, bindings) =
+                            self.lower_native_spread_values(&call.args, "Object.fromEntries")?;
+                        let [entries] = arguments.as_slice() else {
+                            return Err("`Object.fromEntries` expects exactly one argument".into());
+                        };
+                        let entries = entries.clone();
+                        let ty = self.infer_expr_type(&entries)?;
+                        let HirType::Array(entry) = &ty else {
+                            return Err(format!(
+                                "`Object.fromEntries` requires an entry array, got {ty:?}"
+                            ));
+                        };
+                        let HirType::Tuple(elements) = entry.as_ref() else {
+                            return Err(format!(
+                                "`Object.fromEntries` requires [string, value] tuples, got {entry:?}"
+                            ));
+                        };
+                        let [HirType::Str, element] = elements.as_slice() else {
+                            return Err(format!(
+                                "`Object.fromEntries` requires [string, value] tuples, got {elements:?}"
+                            ));
+                        };
+                        let runtime = match element {
+                            HirType::F64 => "__thaw_json_object_from_number_entries",
+                            HirType::Str => "__thaw_json_object_from_string_entries",
+                            HirType::Bool => "__thaw_json_object_from_bool_entries",
+                            HirType::Json => "__thaw_json_object_from_json_entries",
+                            other => {
+                                return Err(format!(
+                                    "`Object.fromEntries` does not support value type {other:?}"
+                                ))
+                            }
+                        };
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Var(runtime.to_string())),
+                            vec![entries],
+                        );
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"hasOwn" {
                         let (arguments, mut bindings) =
