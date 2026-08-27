@@ -497,6 +497,51 @@ impl<'a> FnLowerer<'a> {
             }
             let source = self.lower_expr(&call.args[0].expr)?;
             let source_type = self.infer_expr_type(&source)?;
+            if let HirType::Dictionary(element) = &source_type {
+                let omitted = call.args[1..]
+                    .iter()
+                    .map(|argument| {
+                        let key = self.lower_expr(&argument.expr)?;
+                        self.coerce_primitive_to_string(key)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let copy = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_object_assign".into())),
+                    vec![HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()), source],
+                );
+                let parameter = format!("__thaw_object_rest_copy_{}", self.next_binding);
+                self.next_binding += 1;
+                let mut parameters = vec![HirParam {
+                    name: parameter.clone(),
+                    ty: source_type.clone(),
+                }];
+                let mut arguments = vec![copy];
+                let mut body = Vec::with_capacity(omitted.len() + 1);
+                for key in omitted {
+                    let key_parameter =
+                        format!("__thaw_object_rest_key_{}", self.next_binding);
+                    self.next_binding += 1;
+                    parameters.push(HirParam {
+                        name: key_parameter.clone(),
+                        ty: HirType::Str,
+                    });
+                    arguments.push(key);
+                    body.push(HirStmt::Expr(HirExpr::JsonDelete(
+                        Box::new(HirExpr::Var(parameter.clone())),
+                        Box::new(HirExpr::Var(key_parameter)),
+                    )));
+                }
+                body.push(HirStmt::Return(Some(HirExpr::Var(parameter.clone()))));
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        parameters,
+                        source_type,
+                        Box::new(HirExpr::Block(body)),
+                    )),
+                    arguments,
+                ));
+            }
             let HirType::Object(fields) = &source_type else {
                 return Err(format!(
                     "object rest requires a fixed-shape object, got {source_type:?}"
