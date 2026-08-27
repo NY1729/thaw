@@ -17,6 +17,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+use serde::Serialize;
 use serde_json::Value;
 
 fn to_str(ptr: *const c_char) -> String {
@@ -27,6 +28,18 @@ fn to_str(ptr: *const c_char) -> String {
 
 fn leak(value: Value) -> *mut Value {
     Box::into_raw(Box::new(value))
+}
+
+fn number_value(value: f64) -> Value {
+    if value.is_finite() && value.fract() == 0.0 {
+        if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+            return Value::Number((value as i64).into());
+        }
+        if value >= 0.0 && value <= u64::MAX as f64 {
+            return Value::Number((value as u64).into());
+        }
+    }
+    serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
 
 fn array_index_key(key: &str) -> Option<u32> {
@@ -76,6 +89,41 @@ pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
     let text = serde_json::to_string(&ordered_json(value)).unwrap_or_else(|_| "null".to_string());
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
+}
+
+fn stringify_with_indent(value: *mut Value, indent: &[u8]) -> *const c_char {
+    if indent.is_empty() {
+        return thaw_json_stringify(value);
+    }
+    let value = unsafe { &*value };
+    let mut output = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
+    let mut serializer = serde_json::Serializer::with_formatter(&mut output, formatter);
+    let text = if ordered_json(value).serialize(&mut serializer).is_ok() {
+        String::from_utf8(output).unwrap_or_else(|_| "null".to_string())
+    } else {
+        "null".to_string()
+    };
+    CString::new(text).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_number_space(value: *mut Value, space: f64) -> *const c_char {
+    let width = if space.is_finite() {
+        space.trunc().clamp(0.0, 10.0) as usize
+    } else {
+        0
+    };
+    stringify_with_indent(value, &vec![b' '; width])
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_stringify_string_space(
+    value: *mut Value,
+    space: *const c_char,
+) -> *const c_char {
+    let indent = to_str(space).chars().take(10).collect::<String>();
+    stringify_with_indent(value, indent.as_bytes())
 }
 
 #[no_mangle]
@@ -420,7 +468,7 @@ fn object_from_typed_entries(entries: *const u8, read: impl Fn(*const u8) -> Val
 pub unsafe extern "C" fn thaw_json_object_from_number_entries(entries: *const u8) -> *mut Value {
     object_from_typed_entries(entries, |slot| {
         let value = unsafe { (slot as *const f64).read() };
-        serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
+        number_value(value)
     })
 }
 
@@ -537,7 +585,7 @@ pub unsafe extern "C" fn thaw_json_object_is_bool(value: *const Value, other: bo
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
     if let Some(items) = (unsafe { array.as_mut() }).and_then(Value::as_array_mut) {
-        items.push(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number));
+        items.push(number_value(value));
     }
 }
 
@@ -574,7 +622,7 @@ pub extern "C" fn thaw_json_from_number_array(array: *const u8) -> *mut Value {
     let values = (0..length)
         .map(|index| {
             let value = unsafe { (array.add(8 + index * 8) as *const f64).read() };
-            serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
+            number_value(value)
         })
         .collect();
     leak(Value::Array(values))
@@ -612,11 +660,7 @@ fn object_insert(object: *mut Value, key: *const c_char, value: Value) {
 
 #[no_mangle]
 pub extern "C" fn thaw_json_object_set_number(object: *mut Value, key: *const c_char, value: f64) {
-    object_insert(
-        object,
-        key,
-        serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number),
-    );
+    object_insert(object, key, number_value(value));
 }
 
 #[no_mangle]
@@ -889,7 +933,7 @@ mod tests {
         thaw_json_array_push_bool(arguments, 1);
         assert_eq!(
             read_c_string(thaw_json_stringify(arguments)),
-            r#"[42.0,"thaw",true]"#
+            r#"[42,"thaw",true]"#
         );
 
         let object = thaw_json_object_new();
@@ -901,7 +945,7 @@ mod tests {
             serde_json::from_str(&read_c_string(thaw_json_stringify(object))).unwrap();
         assert_eq!(
             decoded,
-            serde_json::json!({"answer": 42.0, "arguments": [42.0, "thaw", true]})
+            serde_json::json!({"answer": 42, "arguments": [42, "thaw", true]})
         );
     }
 
@@ -918,9 +962,6 @@ mod tests {
         }
 
         let round_trip = thaw_json_from_number_array(native);
-        assert_eq!(
-            read_c_string(thaw_json_stringify(round_trip)),
-            "[1.5,2.0,0.0]"
-        );
+        assert_eq!(read_c_string(thaw_json_stringify(round_trip)), "[1.5,2,0]");
     }
 }

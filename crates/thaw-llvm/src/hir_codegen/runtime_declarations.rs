@@ -140,6 +140,16 @@ impl<'ctx> HirCompiler<'ctx> {
             json_stringify_type,
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_json_stringify_number_space",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_string_space",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
 
         let json_get_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
         self.module
