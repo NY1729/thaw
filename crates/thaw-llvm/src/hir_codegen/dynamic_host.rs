@@ -572,6 +572,13 @@ impl<'ctx> HirCompiler<'ctx> {
                         .unwrap();
                     "thaw_json_array_push_json"
                 }
+                HirType::Tuple(elements) => {
+                    value = self.compile_native_tuple_to_json(
+                        value.into_pointer_value(),
+                        elements,
+                    )?;
+                    "thaw_json_array_push_json"
+                }
                 HirType::Object(_) => {
                     value = self.compile_native_object_to_json(value.into_pointer_value(), ty)?;
                     "thaw_json_array_push_json"
@@ -729,6 +736,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed dynamic return does not support {other:?} yet"
@@ -822,6 +830,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
+                "thaw_json_array_push_json"
+            }
+            HirType::Tuple(elements) => {
+                assigned_value = self.compile_native_tuple_to_json(
+                    assigned_value.into_pointer_value(),
+                    elements,
+                )?;
                 "thaw_json_array_push_json"
             }
             HirType::Object(_) => {
@@ -919,6 +934,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed N-API setter return does not support {other:?} yet"
@@ -1025,6 +1041,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed N-API getter return does not support {other:?} yet"
@@ -1125,6 +1142,13 @@ impl<'ctx> HirCompiler<'ctx> {
                         .try_as_basic_value()
                         .basic()
                         .unwrap();
+                    "thaw_json_array_push_json"
+                }
+                HirType::Tuple(elements) => {
+                    value = self.compile_native_tuple_to_json(
+                        value.into_pointer_value(),
+                        elements,
+                    )?;
                     "thaw_json_array_push_json"
                 }
                 HirType::Object(_) => {
@@ -1230,6 +1254,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string()),
+            HirType::Tuple(ref elements) => self.compile_json_to_native_tuple(json, elements),
             HirType::Object(_) => self.compile_json_to_native_object(json, &signature.ret),
             ref other => Err(format!(
                 "typed N-API method return does not support {other:?} yet"
