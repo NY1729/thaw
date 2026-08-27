@@ -425,8 +425,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         MemberProp::Computed(computed) => {
                             let key = self.lower_expr(&computed.expr)?;
-                            self.expect_type(&HirType::Str, &key, "delete property key")?;
-                            key
+                            self.coerce_primitive_to_string(key)?
                         }
                         MemberProp::PrivateName(_) => {
                             return Err("native `delete` does not support private properties".into())

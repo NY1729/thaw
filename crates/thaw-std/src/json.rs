@@ -29,6 +29,42 @@ fn leak(value: Value) -> *mut Value {
     Box::into_raw(Box::new(value))
 }
 
+fn array_index_key(key: &str) -> Option<u32> {
+    let index = key.parse::<u32>().ok()?;
+    (index != u32::MAX && index.to_string() == key).then_some(index)
+}
+
+fn ordered_object_fields(fields: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
+    let mut indices = Vec::new();
+    let mut names = Vec::new();
+    for (key, value) in fields {
+        if let Some(index) = array_index_key(key) {
+            indices.push((index, key, value));
+        } else {
+            names.push((key, value));
+        }
+    }
+    indices.sort_by_key(|(index, _, _)| *index);
+    indices
+        .into_iter()
+        .map(|(_, key, value)| (key, value))
+        .chain(names)
+        .collect()
+}
+
+fn ordered_json(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            ordered_object_fields(fields)
+                .into_iter()
+                .map(|(key, value)| (key.clone(), ordered_json(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(ordered_json).collect()),
+        other => other.clone(),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     let text = to_str(text);
@@ -38,7 +74,7 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
 #[no_mangle]
 pub extern "C" fn thaw_json_stringify(value: *mut Value) -> *const c_char {
     let value = unsafe { &*value };
-    let text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    let text = serde_json::to_string(&ordered_json(value)).unwrap_or_else(|_| "null".to_string());
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
 }
 
@@ -62,11 +98,15 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
 #[no_mangle]
 pub extern "C" fn thaw_json_index(value: *mut Value, index: i64) -> *mut Value {
     let value = unsafe { &*value };
-    let result = usize::try_from(index)
-        .ok()
-        .and_then(|i| value.get(i))
-        .cloned()
-        .unwrap_or(Value::Null);
+    let result = match value {
+        Value::Array(items) => usize::try_from(index)
+            .ok()
+            .and_then(|i| items.get(i))
+            .cloned(),
+        Value::Object(fields) => fields.get(&index.to_string()).cloned(),
+        _ => None,
+    }
+    .unwrap_or(Value::Null);
     leak(result)
 }
 
@@ -82,15 +122,20 @@ pub unsafe extern "C" fn thaw_json_index_set(
     if index < 0 {
         return value;
     }
-    if let (Some(items), Some(value)) = (
-        (unsafe { array.as_mut() }).and_then(Value::as_array_mut),
-        unsafe { value.as_ref() },
-    ) {
-        let index = index as usize;
-        if items.len() <= index {
-            items.resize(index + 1, Value::Null);
+    if let (Some(container), Some(value)) = (unsafe { array.as_mut() }, unsafe { value.as_ref() }) {
+        match container {
+            Value::Array(items) => {
+                let index = index as usize;
+                if items.len() <= index {
+                    items.resize(index + 1, Value::Null);
+                }
+                items[index] = value.clone();
+            }
+            Value::Object(fields) => {
+                fields.insert(index.to_string(), value.clone());
+            }
+            _ => {}
         }
-        items[index] = value.clone();
     }
     value
 }
@@ -153,7 +198,10 @@ fn alloc_pointer_array(values: Vec<*mut u8>) -> *mut u8 {
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
     let keys = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => fields.keys().cloned().collect::<Vec<_>>(),
+        Some(Value::Object(fields)) => ordered_object_fields(fields)
+            .into_iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>(),
         Some(Value::Array(items)) => (0..items.len()).map(|index| index.to_string()).collect(),
         _ => Vec::new(),
     };
@@ -170,7 +218,10 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
     let values = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => fields.values().cloned().collect::<Vec<_>>(),
+        Some(Value::Object(fields)) => ordered_object_fields(fields)
+            .into_iter()
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>(),
         Some(Value::Array(items)) => items.clone(),
         _ => Vec::new(),
     };
@@ -184,7 +235,10 @@ pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
 
 fn object_values(value: *const Value) -> Vec<Value> {
     match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => fields.values().cloned().collect(),
+        Some(Value::Object(fields)) => ordered_object_fields(fields)
+            .into_iter()
+            .map(|(_, value)| value.clone())
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -247,8 +301,8 @@ pub unsafe extern "C" fn thaw_json_bool_values(value: *const Value) -> *mut u8 {
 /// `value` must be null or point to a valid JSON `Value`.
 pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
     let entries = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => fields
-            .iter()
+        Some(Value::Object(fields)) => ordered_object_fields(fields)
+            .into_iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<Vec<_>>(),
         Some(Value::Array(items)) => items
@@ -273,7 +327,7 @@ pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
 
 fn alloc_typed_entries(value: *const Value, write: impl Fn(*mut u8, &Value)) -> *mut u8 {
     let entries = match unsafe { value.as_ref() } {
-        Some(Value::Object(fields)) => fields.iter().collect::<Vec<_>>(),
+        Some(Value::Object(fields)) => ordered_object_fields(fields),
         _ => Vec::new(),
     };
     alloc_pointer_array(
@@ -654,6 +708,22 @@ mod tests {
         let stable_key = CString::new("stable").unwrap();
         let stable = thaw_json_get(value, stable_key.as_ptr());
         assert_eq!(thaw_json_as_bool(stable), 0);
+    }
+
+    #[test]
+    fn orders_integer_object_keys_before_string_keys() {
+        let value = parse(r#"{"tail":0,"10":"ten","2":"two","01":"leading"}"#);
+        assert_eq!(
+            read_c_string(thaw_json_stringify(value)),
+            r#"{"2":"two","10":"ten","tail":0,"01":"leading"}"#
+        );
+        let keys = unsafe { thaw_json_keys(value) };
+        let names = (0..4)
+            .map(|index| {
+                read_c_string(unsafe { (keys.add(8 + index * 8) as *const *const c_char).read() })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["2", "10", "tail", "01"]);
     }
 
     #[test]

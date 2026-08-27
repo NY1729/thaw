@@ -1346,6 +1346,9 @@ The workspace crates have narrow responsibilities:
   including awaited keys and single left-to-right receiver/key evaluation;
   numeric computed keys read and write JSON arrays, return the assigned JSON
   value, and extend sparse positions with `null`
+- Computed `Record<string, T>` keys use JavaScript primitive-to-string
+  conversion for reads, writes, deletion and optional chaining; numeric JSON
+  keys address array indices or numeric object-property names by runtime kind
 - Optional chaining reads named or computed `Record`/JSON properties through
   nullable or undefined receivers and skips computed-key evaluation when the
   receiver is absent
