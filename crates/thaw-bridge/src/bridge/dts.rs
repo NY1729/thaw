@@ -70,6 +70,18 @@ fn property_name(key: &PropName) -> Option<String> {
     match key {
         PropName::Ident(name) => Some(name.sym.to_string()),
         PropName::Str(name) => Some(name.value.to_string_lossy().into_owned()),
+        PropName::Num(name) => Some(name.value.to_string()),
+        _ => None,
+    }
+}
+
+fn type_property_name(key: &Expr) -> Option<String> {
+    match key {
+        Expr::Ident(name) => Some(name.sym.to_string()),
+        Expr::Lit(swc_ecma_ast::Lit::Str(name)) => {
+            Some(name.value.to_string_lossy().into_owned())
+        }
+        Expr::Lit(swc_ecma_ast::Lit::Num(name)) => Some(name.value.to_string()),
         _ => None,
     }
 }
@@ -416,12 +428,9 @@ fn resolve_interface(
                 failure = Some("has a non-property member (method/index signature)".to_string());
                 break;
             };
-            let field_name = match prop.key.as_ref() {
-                Expr::Ident(ident) => ident.sym.to_string(),
-                _ => {
-                    failure = Some("has an unsupported property key".to_string());
-                    break;
-                }
+            let Some(field_name) = type_property_name(&prop.key) else {
+                failure = Some("has an unsupported property key".to_string());
+                break;
             };
             if fields.iter().any(|(n, _)| *n == field_name) {
                 failure = Some(format!(
@@ -1425,13 +1434,10 @@ fn classify_ts_type(
                             .to_string(),
                     );
                 };
-                let field_name = match prop.key.as_ref() {
-                    Expr::Ident(ident) => ident.sym.to_string(),
-                    _ => {
-                        return DtsType::Unsupported(
-                            "unsupported object type literal key".to_string(),
-                        )
-                    }
+                let Some(field_name) = type_property_name(&prop.key) else {
+                    return DtsType::Unsupported(
+                        "unsupported object type literal key".to_string(),
+                    );
                 };
                 let field_ty = match &prop.type_ann {
                     Some(ann) => classify_ts_type(&ann.type_ann, interfaces, generic_interfaces),
@@ -1680,12 +1686,9 @@ fn resolve_generic_interface(
             failure = Some("has a non-property member (method/index signature)".to_string());
             break;
         };
-        let field_name = match prop.key.as_ref() {
-            Expr::Ident(ident) => ident.sym.to_string(),
-            _ => {
-                failure = Some("has an unsupported property key".to_string());
-                break;
-            }
+        let Some(field_name) = type_property_name(&prop.key) else {
+            failure = Some("has an unsupported property key".to_string());
+            break;
         };
         let field_ty = match &prop.type_ann {
             Some(ann) => resolve_ts_type_with_substitution(
@@ -2122,13 +2125,10 @@ fn resolve_ts_type_with_substitution(
                             .to_string(),
                     );
                 };
-                let field_name = match prop.key.as_ref() {
-                    Expr::Ident(ident) => ident.sym.to_string(),
-                    _ => {
-                        return DtsType::Unsupported(
-                            "unsupported object type literal key".to_string(),
-                        )
-                    }
+                let Some(field_name) = type_property_name(&prop.key) else {
+                    return DtsType::Unsupported(
+                        "unsupported object type literal key".to_string(),
+                    );
                 };
                 let field_ty = match &prop.type_ann {
                     Some(ann) => resolve_ts_type_with_substitution(
