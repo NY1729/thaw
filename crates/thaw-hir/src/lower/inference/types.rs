@@ -473,6 +473,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "encodeURIComponent argument")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_encode_uri" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("encodeURI expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "encodeURI argument")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_decode_uri_component" => {
                         let [argument] = args.as_slice() else {
                             return Err("decodeURIComponent expects one operand".into());
