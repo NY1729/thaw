@@ -1183,6 +1183,7 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
                             .collect::<Vec<_>>(),
+                        HirType::Json => Vec::new(),
                         _ => {
                             return Err(
                                 "`for...in` currently requires a fixed-shape object".into(),
@@ -1199,6 +1200,14 @@ impl<'a> FnLowerer<'a> {
                         keys_name.clone(),
                         HirType::Array(Box::new(HirType::Str)),
                     );
+                    let keys = if object_type == HirType::Json {
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_keys".into())),
+                            vec![HirExpr::Var(object_name.clone())],
+                        )
+                    } else {
+                        HirExpr::ArrayLit(keys)
+                    };
                     let index_name = format!("__thaw_for_in_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
@@ -1288,7 +1297,7 @@ impl<'a> FnLowerer<'a> {
                         HirStmt::Let(
                             keys_name.clone(),
                             HirType::Array(Box::new(HirType::Str)),
-                            HirExpr::ArrayLit(keys),
+                            keys,
                         ),
                         HirStmt::Let(
                             index_name.clone(),
