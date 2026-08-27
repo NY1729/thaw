@@ -53,6 +53,8 @@ object intersectionは同型fieldを共有しながら統合し、field型が衝
 同じfield表とoptional wrapperを再利用して解決する。
 number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<number>`も
 同じnative array型へ正規化する。
+固定tupleは要素型を保持したままtyped constructor／method／property shimを生成し、
+LLVMで既存のnative tuple↔JSON変換を使って引数と戻り値をmarshalする。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、
 `typeof`も結果が一意なためoverload選択に利用する。
 単一parameterをそのまま返すfunction／arrow／function expressionはargument位置を保持し、

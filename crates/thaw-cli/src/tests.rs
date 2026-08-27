@@ -244,6 +244,66 @@ fn selects_same_arity_napi_constructors_by_argument_type() {
 }
 
 #[test]
+fn generates_typed_napi_tuple_class_shims() {
+    let class = thaw_bridge::parse_dts_classes(
+        r#"export class PairBox {
+                constructor(value: [number, string]);
+                swap(value: [number, string]): [string, number];
+                pair: [number, string];
+            }"#,
+    )
+    .unwrap()
+    .remove(0);
+    let tuple = thaw_hir::HirType::Tuple(vec![thaw_hir::HirType::F64, thaw_hir::HirType::Str]);
+    let mut shim = String::new();
+    let constructors = generate_napi_class_constructors(&class, &mut shim);
+    assert_eq!(constructors[0].2, vec![tuple.clone()]);
+    let methods = generate_napi_class_method_overloads(
+        &class,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+    );
+    assert_eq!(methods.len(), 1);
+    assert_eq!(methods[0].4, vec![tuple.clone()]);
+    let property = &class.properties[0];
+    assert!(generate_napi_class_property_getter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(generate_napi_class_property_setter(
+        &class.name,
+        &property.name,
+        &property.ty,
+        false,
+        &mut shim,
+    )
+    .is_some());
+    assert!(shim.contains("value: [number, string]"));
+    assert!(shim.contains("): [string, number]"));
+
+    let rewritten = rewrite_external_class_methods(
+        "const value = unknown as [number, string]; const box = new PairBox(value); box.swap(value);",
+        &[("pkg".into(), "PairBox".into(), constructors)],
+        &[(
+            "PairBox".into(),
+            "swap".into(),
+            methods[0].1.clone(),
+            1,
+            false,
+            vec![tuple],
+        )],
+    )
+    .unwrap();
+    assert!(!rewritten.contains("new PairBox"));
+    assert!(rewritten.contains(&methods[0].1));
+}
+
+#[test]
 fn generates_napi_class_property_accessor_helpers() {
     let mut shim = String::new();
     let ty = thaw_bridge::DtsType::Native(thaw_hir::HirType::Str);

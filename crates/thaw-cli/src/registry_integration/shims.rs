@@ -36,6 +36,11 @@ fn render_dynamic_type(ty: &thaw_hir::HirType) -> Option<String> {
         thaw_hir::HirType::Array(element) => {
             render_dynamic_type(element).map(|element| format!("{element}[]"))
         }
+        thaw_hir::HirType::Tuple(elements) => elements
+            .iter()
+            .map(render_dynamic_type)
+            .collect::<Option<Vec<_>>>()
+            .map(|elements| format!("[{}]", elements.join(", "))),
         thaw_hir::HirType::Object(fields) => fields
             .iter()
             .map(|(name, ty)| render_dynamic_type(ty).map(|ty| format!("{name}: {ty}")))
@@ -141,6 +146,10 @@ fn supported_class_method_param(ty: &thaw_bridge::DtsType, index: usize, len: us
             if **element == thaw_hir::HirType::F64
     ) || matches!(
         ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Tuple(elements))
+            if elements.iter().all(|element| render_dynamic_type(element).is_some())
+    ) || matches!(
+        ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Function(params, ret))
             if index + 1 == len
                 && params.len() <= 2
@@ -164,6 +173,10 @@ fn supported_class_method_return(ty: &thaw_bridge::DtsType) -> bool {
         ty,
         thaw_bridge::DtsType::Native(thaw_hir::HirType::Array(element))
             if **element == thaw_hir::HirType::F64
+    ) || matches!(
+        ty,
+        thaw_bridge::DtsType::Native(thaw_hir::HirType::Tuple(elements))
+            if elements.iter().all(|element| render_dynamic_type(element).is_some())
     )
 }
 
