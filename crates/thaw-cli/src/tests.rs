@@ -108,6 +108,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     let class = thaw_bridge::DtsClass {
         name: "Client".into(),
         extends: None,
+        constructible: true,
         constructors: vec![thaw_bridge::DtsConstructor {
             params: vec![
                 (
@@ -149,6 +150,7 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
         &thaw_bridge::DtsClass {
             name: "DefaultBox".into(),
             extends: None,
+            constructible: true,
             constructors: vec![],
             methods: vec![],
             properties: vec![],
@@ -158,6 +160,12 @@ fn generates_napi_constructor_helpers_for_each_supported_arity() {
     assert_eq!(default_helpers.len(), 1);
     assert_eq!(default_helpers[0].0, 0);
     assert!(default_shim.contains("(): JsValue;"));
+
+    let mut locked_shim = String::new();
+    let mut locked = class;
+    locked.constructible = false;
+    assert!(generate_napi_class_constructors(&locked, &mut locked_shim).is_empty());
+    assert!(locked_shim.is_empty());
 }
 
 #[test]
@@ -194,6 +202,48 @@ fn generates_napi_class_property_accessor_helpers() {
         &mut shim,
     )
     .is_none());
+}
+
+#[test]
+fn rewrites_inherited_external_class_methods() {
+    let classes = thaw_bridge::parse_dts_classes(
+        r#"export class Base { inherited(value: number): number; }
+            export class Derived extends Base { constructor(); }"#,
+    )
+    .unwrap();
+    let derived = classes
+        .iter()
+        .find(|class| class.name == "Derived")
+        .unwrap();
+    let mut shim = String::new();
+    let generated = generate_napi_class_method_overloads(
+        derived,
+        false,
+        &std::collections::HashMap::new(),
+        &mut shim,
+    );
+    let inherited = generated
+        .iter()
+        .find(|(method, _, _, _, _)| method == "inherited")
+        .unwrap();
+    let rewritten = rewrite_external_class_methods(
+        "const value = new Derived(); value.inherited(4);",
+        &[(
+            "pkg".into(),
+            "Derived".into(),
+            vec![(0, "Derived_ctor".into())],
+        )],
+        &[(
+            "Derived".into(),
+            inherited.0.clone(),
+            inherited.1.clone(),
+            inherited.2,
+            inherited.3,
+            inherited.4.clone(),
+        )],
+    )
+    .unwrap();
+    assert!(rewritten.contains(&format!("{}(value, 4)", inherited.1)));
 }
 
 #[test]
@@ -354,6 +404,7 @@ fn generates_typed_napi_static_method_shims_without_instance_receivers() {
     let class = thaw_bridge::DtsClass {
         name: "NativeBox".into(),
         extends: None,
+        constructible: true,
         constructors: vec![],
         methods: vec![thaw_bridge::DtsMethod {
             name: "create".into(),
