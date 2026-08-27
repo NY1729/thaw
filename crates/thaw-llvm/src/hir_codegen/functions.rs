@@ -247,7 +247,7 @@ impl<'ctx> HirCompiler<'ctx> {
             Self::supports_owned_ffi_return(&sig.ret, sig.aggregate_return_abi);
         if sig.return_ownership != FfiOwnership::Borrowed && !supports_owned_return {
             return Err(format!(
-                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string, number[], and portable/packed object returns containing supported string or number[] leaves",
+                "FFI function `{}` uses non-borrowed return ownership, which is currently supported only for string, primitive arrays, and portable/packed object returns containing supported string or primitive-array leaves",
                 sig.symbol
             ));
         }

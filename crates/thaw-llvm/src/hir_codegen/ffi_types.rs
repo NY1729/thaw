@@ -2,7 +2,10 @@ impl<'ctx> HirCompiler<'ctx> {
     fn supports_owned_ffi_return(ty: &HirType, aggregate_abi: FfiAggregateAbi) -> bool {
         match ty {
             HirType::Str => true,
-            HirType::Array(element) => **element == HirType::F64,
+            HirType::Array(element) => matches!(
+                element.as_ref(),
+                HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
+            ),
             HirType::Object(fields) if aggregate_abi != FfiAggregateAbi::Internal => {
                 fields
                     .iter()
@@ -18,7 +21,10 @@ impl<'ctx> HirCompiler<'ctx> {
     fn supports_ffi_aggregate_field(ty: &HirType) -> bool {
         match ty {
             HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str => true,
-            HirType::Array(element) => **element == HirType::F64,
+            HirType::Array(element) => matches!(
+                element.as_ref(),
+                HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
+            ),
             HirType::Object(fields) => fields
                 .iter()
                 .all(|(_, field)| Self::supports_ffi_aggregate_field(field)),
@@ -29,7 +35,10 @@ impl<'ctx> HirCompiler<'ctx> {
     fn ffi_aggregate_field_has_owned_leaf(ty: &HirType) -> bool {
         match ty {
             HirType::Str => true,
-            HirType::Array(element) => **element == HirType::F64,
+            HirType::Array(element) => matches!(
+                element.as_ref(),
+                HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
+            ),
             HirType::Object(fields) => fields
                 .iter()
                 .any(|(_, field)| Self::ffi_aggregate_field_has_owned_leaf(field)),
