@@ -1768,7 +1768,7 @@ The workspace crates have narrow responsibilities:
   from `.d.ts`; generated programs release all remaining handles at shutdown.
   Fine-grained escape-based early release remains future work
 - A fully general ABI-description format. Version 4 covers string layouts,
-  recursive object/string/primitive-array result ownership, common LLVM calling
+  recursive object/tuple/string/primitive-array result ownership, common LLVM calling
   conventions, ordinary or packed aggregate returns, and explicit scalar
   and recursively nested object-return field offsets/alignment, including
   boolean and signed/unsigned integer bitfields, explicit direct register

@@ -6,6 +6,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 element.as_ref(),
                 HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
             ),
+            HirType::Tuple(elements) => {
+                elements.iter().all(Self::supports_ffi_aggregate_field)
+                    && elements.iter().any(Self::ffi_aggregate_field_has_owned_leaf)
+            }
             HirType::Object(fields) if aggregate_abi != FfiAggregateAbi::Internal => {
                 fields
                     .iter()
@@ -25,6 +29,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 element.as_ref(),
                 HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
             ),
+            HirType::Tuple(elements) => {
+                elements.iter().all(Self::supports_ffi_aggregate_field)
+            }
             HirType::Object(fields) => fields
                 .iter()
                 .all(|(_, field)| Self::supports_ffi_aggregate_field(field)),
@@ -39,6 +46,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 element.as_ref(),
                 HirType::F64 | HirType::Str | HirType::Bool | HirType::JsValue
             ),
+            HirType::Tuple(elements) => {
+                elements.iter().any(Self::ffi_aggregate_field_has_owned_leaf)
+            }
             HirType::Object(fields) => fields
                 .iter()
                 .any(|(_, field)| Self::ffi_aggregate_field_has_owned_leaf(field)),
