@@ -4,7 +4,7 @@ impl<'a> FnLowerer<'a> {
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
-                | "normalize" | "split"
+                | "normalize" | "split" | "replace" | "replaceAll"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -200,6 +200,50 @@ impl<'a> FnLowerer<'a> {
                     bindings.extend(spread_bindings);
                     bindings.push((separator_name, HirType::Str, separator));
                     bindings.push((limit_name, HirType::F64, limit));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if matches!(property.sym.as_ref(), "replace" | "replaceAll") {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "replace receiver")?;
+                    let (arguments, spread_bindings) = self.lower_native_spread_values(
+                        &call.args,
+                        &format!("String.{}", property.sym),
+                    )?;
+                    let [search, replacement] = arguments.as_slice() else {
+                        return Err(format!(
+                            "native `.{}()` expects exactly two arguments",
+                            property.sym
+                        ));
+                    };
+                    let search = self.coerce_primitive_to_string(search.clone())?;
+                    let replacement = self.coerce_primitive_to_string(replacement.clone())?;
+                    let intrinsic = if property.sym == *"replace" {
+                        "__thaw_string_replace"
+                    } else {
+                        "__thaw_string_replace_all"
+                    };
+                    let receiver_name = format!("__thaw_replace_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let search_name = format!("__thaw_replace_search_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let replacement_name =
+                        format!("__thaw_replace_replacement_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(search_name.clone(), HirType::Str);
+                    self.scope.insert(replacement_name.clone(), HirType::Str);
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var(intrinsic.to_string())),
+                        vec![
+                            HirExpr::Var(receiver_name.clone()),
+                            HirExpr::Var(search_name.clone()),
+                            HirExpr::Var(replacement_name.clone()),
+                        ],
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((search_name, HirType::Str, search));
+                    bindings.push((replacement_name, HirType::Str, replacement));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"codePointAt" {

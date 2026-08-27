@@ -503,6 +503,30 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("string split returned no value".into());
             }
+            "__thaw_string_replace" | "__thaw_string_replace_all" => {
+                let [value, search, replacement] = args else {
+                    return Err("string replace expects three operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let search = self.compile_expr(search)?;
+                let replacement = self.compile_expr(replacement)?;
+                let runtime = if name == "__thaw_string_replace" {
+                    "thaw_string_replace"
+                } else {
+                    "thaw_string_replace_all"
+                };
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(runtime).unwrap(),
+                        &[value.into(), search.into(), replacement.into()],
+                        "string_replace",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("string replace returned no value".into());
+            }
             "__thaw_encode_uri_component" => {
                 return self.compile_single_arg_call(
                     "thaw_encode_uri_component",
