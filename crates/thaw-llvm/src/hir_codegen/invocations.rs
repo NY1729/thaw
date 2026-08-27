@@ -635,6 +635,31 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("Date.toISOString returned no value".into());
             }
+            "__thaw_date_set_full_year"
+            | "__thaw_date_set_month"
+            | "__thaw_date_set_date"
+            | "__thaw_date_set_hours"
+            | "__thaw_date_set_minutes"
+            | "__thaw_date_set_seconds"
+            | "__thaw_date_set_milliseconds" => {
+                let mut compiled = Vec::with_capacity(args.len());
+                for argument in args {
+                    compiled.push(self.compile_expr(argument)?.into());
+                }
+                let runtime = name.trim_start_matches("__thaw_").to_string();
+                let runtime = format!("thaw_{runtime}");
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function(&runtime).unwrap(),
+                        &compiled,
+                        "date_set",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Date setter returned no value".into());
+            }
             "__thaw_regex_exec" => {
                 let [source, flags, value] = args else {
                     return Err("RegExp.exec expects three operands".into());

@@ -649,6 +649,22 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, timestamp, "Date.toISOString timestamp")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_date_set_full_year"
+                    | "__thaw_date_set_month"
+                    | "__thaw_date_set_date"
+                    | "__thaw_date_set_hours"
+                    | "__thaw_date_set_minutes"
+                    | "__thaw_date_set_seconds"
+                    | "__thaw_date_set_milliseconds" => {
+                        for (index, argument) in args.iter().enumerate() {
+                            self.expect_type(
+                                &HirType::F64,
+                                argument,
+                                &format!("{name} operand {index}"),
+                            )?;
+                        }
+                        return Ok(HirType::F64);
+                    }
                     "__thaw_regex_search" => {
                         let [value, source, flags] = args.as_slice() else {
                             return Err("String.search expects three operands".into());
