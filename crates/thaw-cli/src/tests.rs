@@ -812,6 +812,47 @@ fn selects_object_overloads_from_structural_property_types() {
 }
 
 #[test]
+fn selects_object_overloads_from_explicit_object_types() {
+    let source = r#"function makeText(): { value: string } { return unknown; } const box = new NativeBox(1); let numeric: { value: number }; const asserted = unknown as { value: string }; box.configure(numeric); box.configure(makeText()); box.configure(asserted);"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into())],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::F64,
+                )])],
+            ),
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::Str,
+                )])],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__configure_number(box, numeric)"));
+    assert!(rewritten.contains("__configure_string(box, makeText())"));
+    assert!(rewritten.contains("__configure_string(box, asserted)"));
+}
+
+#[test]
 fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
     let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
     let rewritten = rewrite_external_class_methods(

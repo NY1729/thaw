@@ -40,7 +40,8 @@ arity suffixを除去して同じaddon exportへ接続する。通常のclass pr
 instance／static getterへ接続し、`readonly`でなければsetterも生成する。明示的な
 accessor宣言が同名propertyより優先される。
 同一arityのmethod overload選択では初期化式だけでなくlocal変数の明示型注釈と
-`as`／山括弧type assertionも既存のnative型分類へ渡す。
+`as`／山括弧type assertionも既存のnative型分類へ渡す。object type literalも
+propertyだけから成る場合は再帰分類し、local・assertion・function戻り値で利用する。
 派生classにはbase classのpublic instance/static methodとpropertyを展開し、派生側の
 同名宣言を優先する。private／protected memberはshimへ公開せず、private constructor
 だけを持つclassも既定0引数constructorとして誤認しない。abstract classも同様に

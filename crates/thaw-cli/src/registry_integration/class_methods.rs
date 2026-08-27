@@ -23,7 +23,8 @@ fn rewrite_external_class_methods_with_static(
         ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BreakStmt, CallExpr,
         Callee, DoWhileStmt, Expr, FnDecl, ForInStmt, ForOfStmt, ForStmt, FunctionBody, IfStmt,
         Lit, MemberProp, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SimpleAssignTarget, Stmt,
-        SwitchStmt, TryStmt, TsKeywordTypeKind, TsType, UnaryOp, VarDeclarator, WhileStmt,
+        SwitchStmt, TryStmt, TsKeywordTypeKind, TsType, TsTypeElement, UnaryOp, VarDeclarator,
+        WhileStmt,
     };
     use thaw_parser::common::Spanned;
 
@@ -373,6 +374,28 @@ fn rewrite_external_class_methods_with_static(
                 }
                 _ => None,
             },
+            TsType::TsTypeLit(literal) => {
+                let mut fields = Vec::with_capacity(literal.members.len());
+                for member in &literal.members {
+                    let TsTypeElement::TsPropertySignature(property) = member else {
+                        return None;
+                    };
+                    let name = match property.key.as_ref() {
+                        Expr::Ident(identifier) => identifier.sym.to_string(),
+                        Expr::Lit(Lit::Str(value)) => {
+                            value.value.to_string_lossy().into_owned()
+                        }
+                        Expr::Lit(Lit::Num(value)) => value.value.to_string(),
+                        _ => return None,
+                    };
+                    let mut ty = source_ts_type(&property.type_ann.as_ref()?.type_ann)?;
+                    if property.optional {
+                        ty = thaw_hir::HirType::Optional(Box::new(ty));
+                    }
+                    fields.push((name, ty));
+                }
+                Some(thaw_hir::HirType::Object(fields))
+            }
             TsType::TsParenthesizedType(parenthesized) => source_ts_type(&parenthesized.type_ann),
             _ => None,
         }
