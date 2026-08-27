@@ -33,6 +33,9 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
         .map(|class| (class.name.clone(), class.clone()))
         .collect::<HashMap<_, _>>();
     for class in &mut classes {
+        if class.constructors.is_empty() {
+            class.constructors = inherited_class_constructors(class, &declared, &mut Vec::new());
+        }
         let (methods, properties) = inherited_class_members(class, &declared, &mut Vec::new());
         class.methods = methods;
         class.properties = properties;
@@ -53,6 +56,25 @@ pub fn parse_dts_classes(source: &str) -> Result<Vec<DtsClass>, String> {
         }
     }
     Ok(classes)
+}
+
+fn inherited_class_constructors(
+    class: &DtsClass,
+    declared: &HashMap<String, DtsClass>,
+    in_progress: &mut Vec<String>,
+) -> Vec<DtsConstructor> {
+    if !class.constructors.is_empty() || in_progress.contains(&class.name) {
+        return class.constructors.clone();
+    }
+    in_progress.push(class.name.clone());
+    let constructors = class
+        .extends
+        .as_ref()
+        .and_then(|base| declared.get(base))
+        .map(|base| inherited_class_constructors(base, declared, in_progress))
+        .unwrap_or_default();
+    in_progress.pop();
+    constructors
 }
 
 fn inherited_class_members(

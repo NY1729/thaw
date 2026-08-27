@@ -207,8 +207,11 @@ fn generates_napi_class_property_accessor_helpers() {
 #[test]
 fn rewrites_inherited_external_class_methods() {
     let classes = thaw_bridge::parse_dts_classes(
-        r#"export class Base { inherited(value: number): number; }
-            export class Derived extends Base { constructor(); }"#,
+        r#"export class Base {
+                constructor(value: number);
+                inherited(value: number): number;
+            }
+            export class Derived extends Base {}"#,
     )
     .unwrap();
     let derived = classes
@@ -216,6 +219,9 @@ fn rewrites_inherited_external_class_methods() {
         .find(|class| class.name == "Derived")
         .unwrap();
     let mut shim = String::new();
+    let constructors = generate_napi_class_constructors(derived, &mut shim);
+    assert_eq!(constructors.len(), 1);
+    assert_eq!(constructors[0].0, 1);
     let generated = generate_napi_class_method_overloads(
         derived,
         false,
@@ -227,11 +233,11 @@ fn rewrites_inherited_external_class_methods() {
         .find(|(method, _, _, _, _)| method == "inherited")
         .unwrap();
     let rewritten = rewrite_external_class_methods(
-        "const value = new Derived(); value.inherited(4);",
+        "const value = new Derived(4); value.inherited(4);",
         &[(
             "pkg".into(),
             "Derived".into(),
-            vec![(0, "Derived_ctor".into())],
+            vec![(1, "Derived_ctor".into())],
         )],
         &[(
             "Derived".into(),

@@ -1996,7 +1996,8 @@ metadata includes inherited public methods and properties,
 with derived declarations shadowing base members; private/protected members
 and private constructors are not exposed as callable shims. Abstract external
 classes likewise expose their static and inherited type surface without generating
-a typed constructor shim. Automatic
+a typed constructor shim. Concrete derived classes without an explicit constructor
+inherit the base constructor arities, matching JavaScript's implicit argument forwarding. Automatic
 instance-method and callback syntax lowering
 now covers callback-free methods on variables initialized from an external
 constructor or aliases of a tracked instance; assignments propagate or safely

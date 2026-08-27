@@ -43,6 +43,8 @@ accessor宣言が同名propertyより優先される。
 同名宣言を優先する。private／protected memberはshimへ公開せず、private constructor
 だけを持つclassも既定0引数constructorとして誤認しない。abstract classも同様に
 constructor shimを生成せず、公開memberの継承情報だけを具象派生classへ渡す。
+具象派生classがconstructorを省略した場合は、基底classの公開constructor署名を継承し、
+JavaScriptの暗黙constructorと同じ引数転送をtyped shimでも維持する。
 parentの上書きは全descendantの追跡を破棄する。static methodはclass export自体を
 N-API receiverにし、instance methodと同じarity、overload、callback、native value
 marshal規則でnamed・namespace callを書き換える。自作addonの`NativeBox.twice(21)`を
