@@ -551,9 +551,11 @@ fn reads_and_writes_json_with_runtime_string_keys() {
             return 1;
         }
         async function main(): Promise<void> {
-            const data: Json = JSON.parse("{\"value\":1,\"1\":\"one\"}");
+            const data: Json = JSON.parse("{\"value\":1,\"1\":\"one\",\"1.5\":\"fraction\"}");
             console.log(String(data[1]));
+            console.log(String(data[1.5]));
             data[2] = JSON.parse("\"two\"");
+            data[-1] = JSON.parse("\"negative\"");
             console.log(Number(data[key()]));
             data[key()] = JSON.parse("2");
             data.extra = JSON.parse("\"text\"");
@@ -564,6 +566,7 @@ fn reads_and_writes_json_with_runtime_string_keys() {
             console.log(String(objectSource()[key()]));
             console.log(JSON.stringify(data));
             const array: Json = JSON.parse("[10,20]");
+            console.log(Number(array[1.5]));
             array[await asyncIndex()] = JSON.parse("30");
             array[3] = JSON.parse("40");
             console.log(String(array[0] = JSON.parse("11")));
@@ -573,7 +576,7 @@ fn reads_and_writes_json_with_runtime_string_keys() {
     "#;
     assert_eq!(
         compile_and_run(source, "runtime_json_keys"),
-        "one\nkey\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"1\":\"one\",\"2\":\"two\",\"value\":2,\"extra\":\"text\",\"other\":true}\nasync-index\n11\n30\n[11,30,null,40]\n"
+        "one\nfraction\nkey\n1\nkey\nasync-key\n2\ntext\ntrue\nobject\nkey\n1\n{\"1\":\"one\",\"2\":\"two\",\"value\":2,\"1.5\":\"fraction\",\"-1\":\"negative\",\"extra\":\"text\",\"other\":true}\n0\nasync-index\n11\n30\n[11,30,null,40]\n"
     );
 }
 
