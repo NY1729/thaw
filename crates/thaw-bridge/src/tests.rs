@@ -493,7 +493,9 @@ fn resolves_keyed_mapped_types_after_generic_substitution() {
 #[test]
 fn resolves_static_mapped_key_remapping() {
     let funcs = parse_dts(
-        r#"export type Renamed = { [K in "name" | "value" as `get_${K}`]: number };
+        r#"export type Renamed = {
+                [K in "userName" | "value" as `get${Capitalize<string & K>}`]: number
+            };
             export declare function inspect(value: Renamed): string;"#,
     )
     .unwrap();
@@ -503,16 +505,37 @@ fn resolves_static_mapped_key_remapping() {
     assert_eq!(
         signature.params,
         vec![HirType::Object(vec![
-            ("get_name".into(), HirType::F64),
-            ("get_value".into(), HirType::F64),
+            ("getUserName".into(), HirType::F64),
+            ("getValue".into(), HirType::F64),
         ])]
+    );
+}
+
+#[test]
+fn resolves_intrinsic_mapped_key_transforms() {
+    let funcs = parse_dts(
+        r#"export type Names = {
+                [K in "Hello" as `${Uppercase<K>}_${Lowercase<K>}_${Uncapitalize<K>}`]: boolean
+            };
+            export declare function inspect(value: Names): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("intrinsic mapped key transforms should resolve");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "HELLO_hello_hello".into(),
+            HirType::Bool,
+        )])]
     );
 }
 
 #[test]
 fn rejects_dynamic_or_duplicate_mapped_key_remapping() {
     let funcs = parse_dts(
-        r#"export type Dynamic = { [K in "name" as `get${Uppercase<K>}`]: number };
+        r#"export type Dynamic = { [K in "name" as `get${Custom<K>}`]: number };
             export type Duplicate = { [K in "left" | "right" as "value"]: number };
             export declare function dynamic(value: Dynamic): string;
             export declare function duplicate(value: Duplicate): string;"#,
