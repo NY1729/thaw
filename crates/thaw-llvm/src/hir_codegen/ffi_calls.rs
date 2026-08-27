@@ -323,7 +323,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.unpack_ffi_bool_array(value.into_struct_value())
             }
             HirType::Array(element)
-                if matches!(element.as_ref(), HirType::F64 | HirType::Str)
+                if matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::JsValue)
                     && value.is_struct_value() =>
             {
                 let native = value.into_struct_value();
@@ -960,7 +960,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     compiled_args.push(length.into());
                 }
                 HirType::Array(elem)
-                    if matches!(elem.as_ref(), HirType::F64 | HirType::Str) =>
+                    if matches!(elem.as_ref(), HirType::F64 | HirType::Str | HirType::JsValue) =>
                 {
                     let base_ptr = value.into_pointer_value();
                     let i64_type = self.context.i64_type();
