@@ -1033,13 +1033,33 @@ impl<'a> FnLowerer<'a> {
                     }
                     if class.sym == *"Date" {
                         let args = new_expr.args.clone().unwrap_or_default();
-                        if args.len() > 1 {
-                            return Err("`new Date()` expects zero or one argument".into());
-                        }
                         if args.iter().any(|argument| argument.spread.is_some()) {
                             return Err("`new Date()` does not support spread arguments".into());
                         }
-                        let timestamp = if let Some(argument) = args.first() {
+                        if args.len() > 7 {
+                            return Err("`new Date()` expects zero to seven arguments".into());
+                        }
+                        let timestamp = if args.len() >= 2 {
+                            // `new Date(year, month, date?, hours?, minutes?,
+                            // seconds?, ms?)`: identical to `Date.UTC` since
+                            // "local" time is UTC here too, just wrapped as
+                            // a `Date` instead of returned as a bare number.
+                            const DEFAULTS: [f64; 7] = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+                            let mut call_args = Vec::with_capacity(7);
+                            for (index, default) in DEFAULTS.iter().enumerate() {
+                                let value = if let Some(argument) = args.get(index) {
+                                    let value = self.lower_expr(&argument.expr)?;
+                                    self.coerce_primitive_to_number(value)?
+                                } else {
+                                    HirExpr::Lit(HirLit::F64(*default))
+                                };
+                                call_args.push(value);
+                            }
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_date_utc".to_string())),
+                                call_args,
+                            )
+                        } else if let Some(argument) = args.first() {
                             let value = self.lower_expr(&argument.expr)?;
                             if self.infer_expr_type(&value)? == HirType::Str {
                                 HirExpr::Call(
