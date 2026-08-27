@@ -592,33 +592,47 @@ fn stringifies_json_with_number_and_string_spacing() {
             console.log("space");
             return 2.9;
         }
+        async function keys(): Promise<string[]> {
+            await sleep(1);
+            console.log("replacer");
+            return ["a", "x", "a"];
+        }
         async function main(): Promise<void> {
             console.log(JSON.stringify(value(), null, await spacing()));
             console.log(JSON.stringify(JSON.parse("[1]"), undefined, "--"));
             console.log(JSON.stringify(JSON.parse("{\"x\":1}"), null, "abcdefghijkl"));
             console.log(JSON.stringify(JSON.parse("[1]"), null, 20));
             console.log(JSON.stringify(JSON.parse("{\"x\":1}"), null, -1));
+            console.log(JSON.stringify(
+                JSON.parse("{\"a\":{\"x\":1,\"y\":2},\"b\":3}"),
+                ["b", "a", "x", "b"]
+            ));
+            console.log(JSON.stringify(value(), await keys(), "--"));
+            console.log(JSON.stringify(JSON.parse("[{\"a\":1,\"b\":2}]"), ["a"]));
             const record: Record<string, number> = { answer: 42 };
             console.log(JSON.stringify(record));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "json_stringify_spacing"),
-        "value\nspace\n{\n  \"b\": 2,\n  \"a\": {\n    \"x\": 1\n  }\n}\n[\n--1\n]\n{\nabcdefghij\"x\": 1\n}\n[\n          1\n]\n{\"x\":1}\n{\"answer\":42}\n"
+        "value\nspace\n{\n  \"b\": 2,\n  \"a\": {\n    \"x\": 1\n  }\n}\n[\n--1\n]\n{\nabcdefghij\"x\": 1\n}\n[\n          1\n]\n{\"x\":1}\n{\"b\":3,\"a\":{\"x\":1}}\nvalue\nreplacer\n{\n--\"a\": {\n----\"x\": 1\n--}\n}\n[{\"a\":1}]\n{\"answer\":42}\n"
     );
 }
 
 #[test]
-fn rejects_unsupported_json_stringify_replacers() {
+fn rejects_json_stringify_function_replacers() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): void {
             const value: Json = JSON.parse("{}");
-            console.log(JSON.stringify(value, ["x"]));
+            console.log(JSON.stringify(
+                value,
+                (key: string, current: Json): Json => current
+            ));
         }"#,
     )
     .unwrap();
     let error = thaw_hir::lower_module(&module).unwrap_err();
-    assert!(error.contains("replacer functions and arrays"), "{error}");
+    assert!(error.contains("function replacers"), "{error}");
 }
 
 #[test]

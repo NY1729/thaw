@@ -715,6 +715,46 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("JSON.stringify returned no value".into());
             }
+            "__thaw_json_stringify_keys" => {
+                let [value, keys] = args else {
+                    return Err("JSON.stringify expects value and replacer keys".into());
+                };
+                let value = self.compile_expr(value)?;
+                let keys = self.compile_expr(keys)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_stringify_keys").unwrap(),
+                        &[value.into(), keys.into()],
+                        "json_stringify_keys",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("JSON.stringify returned no value".into());
+            }
+            "__thaw_json_stringify_keys_number_space"
+            | "__thaw_json_stringify_keys_string_space" => {
+                let [value, keys, space] = args else {
+                    return Err("JSON.stringify expects value, replacer keys and space".into());
+                };
+                let value = self.compile_expr(value)?;
+                let keys = self.compile_expr(keys)?;
+                let space = self.compile_expr(space)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module
+                            .get_function(name.trim_start_matches("__"))
+                            .unwrap(),
+                        &[value.into(), keys.into(), space.into()],
+                        "json_stringify_keys_space",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("JSON.stringify returned no value".into());
+            }
             "__thaw_json_is_array" => {
                 let [value] = args else {
                     return Err("Array.isArray expects one operand".to_string());
