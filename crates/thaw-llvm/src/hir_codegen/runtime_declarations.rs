@@ -535,18 +535,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(Linkage::External),
             );
         }
-        for name in [
-            "thaw_json_from_number_array",
-            "thaw_json_to_number_array",
-            "thaw_json_to_string_array",
-            "thaw_json_to_bool_array",
-        ] {
+        for name in ["thaw_json_from_number_array", "thaw_json_to_number_array"] {
             self.module.add_function(
                 name,
                 i8_ptr.fn_type(&[i8_ptr.into()], false),
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "thaw_json_array_length",
+            self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_json_object_new",
             i8_ptr.fn_type(&[], false),

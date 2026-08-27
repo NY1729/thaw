@@ -729,47 +729,10 @@ pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
 }
 
 #[no_mangle]
-pub extern "C" fn thaw_json_to_string_array(value: *mut Value) -> *mut u8 {
-    let values = unsafe { value.as_ref() }
+pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
+    unsafe { value.as_ref() }
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
-    if output.is_null() {
-        return output;
-    }
-    unsafe { (output as *mut i64).write(values.len() as i64) };
-    for (index, value) in values.iter().enumerate() {
-        let text = match value {
-            Value::String(text) => text.clone(),
-            Value::Null => String::new(),
-            other => other.to_string(),
-        };
-        let text = CString::new(text).unwrap_or_default().into_raw();
-        unsafe { (output.add(8 + index * 8) as *mut *mut c_char).write(text) };
-    }
-    output
-}
-
-#[no_mangle]
-pub extern "C" fn thaw_json_to_bool_array(value: *mut Value) -> *mut u8 {
-    let values = unsafe { value.as_ref() }
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
-    if output.is_null() {
-        return output;
-    }
-    unsafe { (output as *mut i64).write(values.len() as i64) };
-    for (index, value) in values.iter().enumerate() {
-        unsafe {
-            output
-                .add(8 + index * 8)
-                .write(value.as_bool().unwrap_or(false) as u8)
-        };
-    }
-    output
+        .map_or(0, |values| values.len() as i64)
 }
 
 #[no_mangle]
