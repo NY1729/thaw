@@ -1043,6 +1043,48 @@ fn selects_object_overloads_through_named_types_and_forward_references() {
 }
 
 #[test]
+fn selects_overloads_through_literal_unions_and_readonly_arrays() {
+    let source = r#"type Mode = "read" | "write"; type Numbers = readonly number[]; function mode(): Mode { return unknown; } function numbers(): Numbers { return unknown; } const box = new NativeBox(1); box.set(mode()); box.set(numbers());"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into(), vec![])],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::F64],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_numbers".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Array(Box::new(thaw_hir::HirType::F64))],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__set_string(box, mode())"));
+    assert!(rewritten.contains("__set_numbers(box, numbers())"));
+}
+
+#[test]
 fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
     let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
     let rewritten = rewrite_external_class_methods(
