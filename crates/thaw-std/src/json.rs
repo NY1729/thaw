@@ -96,14 +96,18 @@ pub extern "C" fn thaw_json_get(value: *mut Value, key: *const c_char) -> *mut V
 }
 
 #[no_mangle]
-pub extern "C" fn thaw_json_index(value: *mut Value, index: i64) -> *mut Value {
+pub extern "C" fn thaw_json_index(value: *mut Value, index: f64, key: *const c_char) -> *mut Value {
     let value = unsafe { &*value };
     let result = match value {
-        Value::Array(items) => usize::try_from(index)
-            .ok()
-            .and_then(|i| items.get(i))
-            .cloned(),
-        Value::Object(fields) => fields.get(&index.to_string()).cloned(),
+        Value::Array(items)
+            if index.is_finite()
+                && index >= 0.0
+                && index <= (u32::MAX - 1) as f64
+                && index.fract() == 0.0 =>
+        {
+            items.get(index as usize).cloned()
+        }
+        Value::Object(fields) => fields.get(&to_str(key)).cloned(),
         _ => None,
     }
     .unwrap_or(Value::Null);
@@ -116,15 +120,18 @@ pub extern "C" fn thaw_json_index(value: *mut Value, index: i64) -> *mut Value {
 /// `array` and `value` must be null or point to valid JSON values.
 pub unsafe extern "C" fn thaw_json_index_set(
     array: *mut Value,
-    index: i64,
+    index: f64,
+    key: *const c_char,
     value: *mut Value,
 ) -> *mut Value {
-    if index < 0 {
-        return value;
-    }
     if let (Some(container), Some(value)) = (unsafe { array.as_mut() }, unsafe { value.as_ref() }) {
         match container {
-            Value::Array(items) => {
+            Value::Array(items)
+                if index.is_finite()
+                    && index >= 0.0
+                    && index <= (u32::MAX - 1) as f64
+                    && index.fract() == 0.0 =>
+            {
                 let index = index as usize;
                 if items.len() <= index {
                     items.resize(index + 1, Value::Null);
@@ -132,7 +139,7 @@ pub unsafe extern "C" fn thaw_json_index_set(
                 items[index] = value.clone();
             }
             Value::Object(fields) => {
-                fields.insert(index.to_string(), value.clone());
+                fields.insert(to_str(key), value.clone());
             }
             _ => {}
         }
@@ -729,8 +736,14 @@ mod tests {
     #[test]
     fn indexes_into_arrays() {
         let value = parse("[10, 20, 30]");
-        assert_eq!(thaw_json_as_number(thaw_json_index(value, 0)), 10.0);
-        assert_eq!(thaw_json_as_number(thaw_json_index(value, 2)), 30.0);
+        assert_eq!(
+            thaw_json_as_number(thaw_json_index(value, 0.0, std::ptr::null())),
+            10.0
+        );
+        assert_eq!(
+            thaw_json_as_number(thaw_json_index(value, 2.0, std::ptr::null())),
+            30.0
+        );
     }
 
     #[test]
@@ -849,7 +862,7 @@ mod tests {
         assert_eq!(read_c_string(thaw_json_as_string(missing)), "");
 
         let arr = parse("[1, 2]");
-        let oob = thaw_json_index(arr, 99);
+        let oob = thaw_json_index(arr, 99.0, std::ptr::null());
         assert_eq!(thaw_json_as_number(oob), 0.0);
     }
 

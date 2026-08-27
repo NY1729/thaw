@@ -171,14 +171,25 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let obj_val = self.compile_expr(obj)?;
         let idx_val = self.compile_expr(index)?.into_float_value();
-        let idx_i64 = self
+        let key = self
             .builder
-            .build_float_to_signed_int(idx_val, self.context.i64_type(), "jsonidx")
-            .map_err(|e| e.to_string())?;
+            .build_call(
+                self.module.get_function("thaw_number_to_string").unwrap(),
+                &[idx_val.into()],
+                "json_index_key",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_number_to_string returned no value")?;
         let index_fn = self.module.get_function("thaw_json_index").unwrap();
         let call = self
             .builder
-            .build_call(index_fn, &[obj_val.into(), idx_i64.into()], "json_index")
+            .build_call(
+                index_fn,
+                &[obj_val.into(), idx_val.into(), key.into()],
+                "json_index",
+            )
             .map_err(|e| e.to_string())?;
         call.try_as_basic_value()
             .basic()
@@ -193,15 +204,22 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let object = self.compile_expr(object)?;
         let index = self.compile_expr(index)?.into_float_value();
-        let index = self
+        let key = self
             .builder
-            .build_float_to_signed_int(index, self.context.i64_type(), "json_set_index")
-            .map_err(|error| error.to_string())?;
+            .build_call(
+                self.module.get_function("thaw_number_to_string").unwrap(),
+                &[index.into()],
+                "json_set_key",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_number_to_string returned no value")?;
         let value = self.compile_expr(value)?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_json_index_set").unwrap(),
-                &[object.into(), index.into(), value.into()],
+                &[object.into(), index.into(), key.into(), value.into()],
                 "json_index_set",
             )
             .map_err(|error| error.to_string())?
