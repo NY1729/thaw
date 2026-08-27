@@ -54,7 +54,9 @@ object intersectionは同型fieldを共有しながら統合し、field型が衝
 primitive配列注釈は`number[]`／`string[]`／`boolean[]`に加えて
 `Array<T>`と`ReadonlyArray<T>`も同じnative array型へ正規化する。
 typed N-API constructor／method／propertyでは既存のnative array↔JSON変換を
-再利用し、これらの配列を引数と戻り値の両方向でmarshalする。
+再利用し、これらの配列に加えてネスト配列と固定object配列を引数と戻り値の
+両方向でmarshalする。直接C ABIは従来のprimitive配列layoutだけをFast Pathへ
+分類し、再帰collectionをABI互換性のない経路へ流さない。
 固定tupleは要素型を保持したままtyped constructor／method／property shimを生成し、
 LLVMで既存のnative tuple↔JSON変換を使って引数と戻り値をmarshalする。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、
