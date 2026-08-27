@@ -1517,6 +1517,20 @@ The workspace crates have narrow responsibilities:
   `.match()`), or `undefined` when it does not match or the pattern fails
   to compile. Like `.test()`, it ignores `g`/`y` and always searches from
   the start of `value` -- there is no `lastIndex` state to advance
+- `Date` (construction, the `Date` type annotation, and `Date.now()`) and
+  instance methods `getTime`/`valueOf`/`setTime`, `toISOString`, and the
+  `getFullYear`/`getMonth`/`getDate`/`getDay`/`getHours`/`getMinutes`/
+  `getSeconds`/`getMilliseconds` family (each `getUTC*` variant is a plain
+  alias of its non-UTC counterpart) construct and read a fixed native
+  object with a single millisecond-since-epoch `timestamp` field, reusing
+  the object machinery like `RegExp` does. All calendar math is UTC only --
+  there is no host timezone database, so "local" methods are simply their
+  UTC counterparts renamed. `new Date()` uses the current time, `new
+  Date(ms)` an explicit timestamp; parsing a date string is not supported
+  and is a compile-time error. `toISOString` throws `Invalid time value`
+  for a non-finite timestamp (for example from `new Date(NaN)`), matching
+  the specification, and does not support the extended `+/-YYYYYY` year
+  format outside `[0, 9999]`
 - Regular expression literals (`/pattern/flags`) and `new RegExp(pattern,
   flags?)` construct a fixed native object with `source`/`flags` string
   fields (also the `RegExp` type annotation), backed by the Rust `regex`

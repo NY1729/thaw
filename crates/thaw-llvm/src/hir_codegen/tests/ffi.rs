@@ -1752,6 +1752,44 @@ fn compiles_string_search() {
 }
 
 #[test]
+fn compiles_date_getters_and_iso_string() {
+    let source = r#"
+        function fixed(): Date {
+            console.log("fixed");
+            return new Date(1704067200500);
+        }
+        async function main(): Promise<void> {
+            const d: Date = new Date(1704067200500);
+            console.log(d.getTime());
+            console.log(d.valueOf());
+            console.log(d.getFullYear());
+            console.log(d.getMonth());
+            console.log(d.getDate());
+            console.log(d.getDay());
+            console.log(d.getHours());
+            console.log(d.getMinutes());
+            console.log(d.getSeconds());
+            console.log(d.getMilliseconds());
+            console.log(d.getUTCFullYear());
+            console.log(d.toISOString());
+            console.log(fixed().toISOString());
+            d.setTime(0);
+            console.log(d.toISOString());
+            console.log(Date.now() > 0);
+            try {
+                new Date(NaN).toISOString();
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "date_getters"),
+        "1.70407e+12\n1.70407e+12\n2024\n0\n1\n1\n0\n0\n0\n500\n2024\n2024-01-01T00:00:00.500Z\nfixed\n2024-01-01T00:00:00.500Z\n1970-01-01T00:00:00.000Z\ntrue\nInvalid time value\n"
+    );
+}
+
+#[test]
 fn compiles_regex_exec() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {
