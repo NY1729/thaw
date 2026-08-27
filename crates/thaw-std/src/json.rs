@@ -310,6 +310,64 @@ pub unsafe extern "C" fn thaw_json_bool_entries(value: *const Value) -> *mut u8 
     })
 }
 
+fn object_from_typed_entries(entries: *const u8, read: impl Fn(*const u8) -> Value) -> *mut Value {
+    let mut object = serde_json::Map::new();
+    if entries.is_null() {
+        return leak(Value::Object(object));
+    }
+    let length = unsafe { (entries as *const i64).read() }.max(0) as usize;
+    for index in 0..length {
+        let entry = unsafe { (entries.add(8 + index * 8) as *const *const u8).read() };
+        if entry.is_null() {
+            continue;
+        }
+        let key = unsafe { (entry.add(8) as *const *const c_char).read() };
+        object.insert(to_str(key), read(unsafe { entry.add(16) }));
+    }
+    leak(Value::Object(object))
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `entries` must be null or point to a native `[string, number][]` array.
+pub unsafe extern "C" fn thaw_json_object_from_number_entries(entries: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, |slot| {
+        let value = unsafe { (slot as *const f64).read() };
+        serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `entries` must be null or point to a native `[string, string][]` array.
+pub unsafe extern "C" fn thaw_json_object_from_string_entries(entries: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, |slot| {
+        let value = unsafe { (slot as *const *const c_char).read() };
+        Value::String(to_str(value))
+    })
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `entries` must be null or point to a native `[string, boolean][]` array.
+pub unsafe extern "C" fn thaw_json_object_from_bool_entries(entries: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, |slot| Value::Bool(unsafe { slot.read() } != 0))
+}
+
+#[no_mangle]
+/// # Safety
+///
+/// `entries` must be null or point to a native `[string, Json][]` array.
+pub unsafe extern "C" fn thaw_json_object_from_json_entries(entries: *const u8) -> *mut Value {
+    object_from_typed_entries(entries, |slot| {
+        let value = unsafe { (slot as *const *const Value).read() };
+        unsafe { value.as_ref() }.cloned().unwrap_or(Value::Null)
+    })
+}
+
 #[no_mangle]
 /// # Safety
 ///
