@@ -949,7 +949,7 @@ fn propagates_argument_types_through_passthrough_functions() {
 
 #[test]
 fn propagates_common_argument_types_through_conditional_functions() {
-    let source = r#"function forward(flag, first, second) { return choose(flag, first, second); } function choose(flag, first, second) { return flag ? first : second; } const logical = (first, second) => first ?? second; const numberBox = new NativeBox(forward(true, 1, 2)); const stringBox = new NativeBox(logical("a", "b")); numberBox.set(choose(false, 3, 4)); stringBox.set(forward(false, "x", "y"));"#;
+    let source = r#"function forward(flag, first, second) { return choose(flag, first, second); } function choose(flag, first, second) { return flag ? first : second; } function branch(flag, first, second) { if (flag) { return first; } return second; } const arrowBranch = (flag, first, second) => { if (flag) { return first; } else { return second; } }; const logical = (first, second) => first ?? second; const numberBox = new NativeBox(forward(true, 1, 2)); const stringBox = new NativeBox(logical("a", "b")); numberBox.set(choose(false, 3, 4)); numberBox.set(branch(true, 5, 6)); stringBox.set(forward(false, "x", "y")); stringBox.set(arrowBranch(true, "m", "n"));"#;
     let rewritten = rewrite_external_class_methods(
         source,
         &[(
@@ -983,7 +983,9 @@ fn propagates_common_argument_types_through_conditional_functions() {
     assert!(rewritten.contains("const numberBox = __ctor_number(forward(true, 1, 2))"));
     assert!(rewritten.contains("const stringBox = __ctor_string(logical(\"a\", \"b\"))"));
     assert!(rewritten.contains("__set_number(numberBox, choose(false, 3, 4))"));
+    assert!(rewritten.contains("__set_number(numberBox, branch(true, 5, 6))"));
     assert!(rewritten.contains("__set_string(stringBox, forward(false, \"x\", \"y\"))"));
+    assert!(rewritten.contains("__set_string(stringBox, arrowBranch(true, \"m\", \"n\"))"));
 }
 
 #[test]
