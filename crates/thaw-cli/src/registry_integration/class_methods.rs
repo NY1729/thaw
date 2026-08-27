@@ -494,18 +494,87 @@ fn rewrite_external_class_methods_with_static(
                 let TsEntityName::Ident(name) = &reference.type_name else {
                     return None;
                 };
-                if name.sym != *"Array" && name.sym != *"ReadonlyArray" {
-                    return named.get(name.sym.as_str()).cloned();
-                }
-                let parameters = &reference.type_params.as_ref()?.params;
-                match parameters.as_slice() {
-                    [element]
-                        if source_ts_type(element, named) == Some(thaw_hir::HirType::F64) =>
-                    {
+                let parameters = reference
+                    .type_params
+                    .as_ref()
+                    .map(|parameters| parameters.params.as_slice())
+                    .unwrap_or_default();
+                match (name.sym.as_str(), parameters) {
+                    ("Array" | "ReadonlyArray", [element])
+                        if source_ts_type(element, named) == Some(thaw_hir::HirType::F64) => {
                         Some(thaw_hir::HirType::Array(Box::new(
                             thaw_hir::HirType::F64,
                         )))
                     }
+                    ("Readonly", [inner]) => source_ts_type(inner, named),
+                    ("Partial", [inner]) => {
+                        let thaw_hir::HirType::Object(fields) = source_ts_type(inner, named)? else {
+                            return None;
+                        };
+                        Some(thaw_hir::HirType::Object(
+                            fields
+                                .into_iter()
+                                .map(|(name, ty)| {
+                                    let ty = match ty {
+                                        thaw_hir::HirType::Optional(_)
+                                        | thaw_hir::HirType::Nullish(_) => ty,
+                                        thaw_hir::HirType::Nullable(inner) => {
+                                            thaw_hir::HirType::Nullish(inner)
+                                        }
+                                        other => thaw_hir::HirType::Optional(Box::new(other)),
+                                    };
+                                    (name, ty)
+                                })
+                                .collect(),
+                        ))
+                    }
+                    ("Required", [inner]) => {
+                        let thaw_hir::HirType::Object(fields) = source_ts_type(inner, named)? else {
+                            return None;
+                        };
+                        Some(thaw_hir::HirType::Object(
+                            fields
+                                .into_iter()
+                                .map(|(name, ty)| {
+                                    let ty = match ty {
+                                        thaw_hir::HirType::Optional(inner) => *inner,
+                                        thaw_hir::HirType::Nullish(inner) => {
+                                            thaw_hir::HirType::Nullable(inner)
+                                        }
+                                        other => other,
+                                    };
+                                    (name, ty)
+                                })
+                                .collect(),
+                        ))
+                    }
+                    ("Pick" | "Omit", [object, keys]) => {
+                        let thaw_hir::HirType::Object(fields) = source_ts_type(object, named)? else {
+                            return None;
+                        };
+                        let keys = source_utility_keys(keys, named)?;
+                        let omit = name.sym == *"Omit";
+                        Some(thaw_hir::HirType::Object(
+                            fields
+                                .into_iter()
+                                .filter(|(field, _)| keys.contains(field) != omit)
+                                .collect(),
+                        ))
+                    }
+                    ("Record", [keys, value]) => {
+                        let keys = source_utility_keys(keys, named)?;
+                        let value = source_ts_type(value, named)?;
+                        Some(thaw_hir::HirType::Object(
+                            keys.into_iter().map(|key| (key, value.clone())).collect(),
+                        ))
+                    }
+                    ("NonNullable", [inner]) => match source_ts_type(inner, named)? {
+                        thaw_hir::HirType::Optional(inner)
+                        | thaw_hir::HirType::Nullable(inner)
+                        | thaw_hir::HirType::Nullish(inner) => Some(*inner),
+                        other => Some(other),
+                    },
+                    (_, []) => named.get(name.sym.as_str()).cloned(),
                     _ => None,
                 }
             }
@@ -514,6 +583,38 @@ fn rewrite_external_class_methods_with_static(
             }
             TsType::TsParenthesizedType(parenthesized) => {
                 source_ts_type(&parenthesized.type_ann, named)
+            }
+            _ => None,
+        }
+    }
+
+    fn source_utility_keys(
+        ty: &TsType,
+        named: &std::collections::HashMap<String, thaw_hir::HirType>,
+    ) -> Option<Vec<String>> {
+        match ty {
+            TsType::TsLitType(literal) => match &literal.lit {
+                TsLit::Str(value) => Some(vec![value.value.to_string_lossy().into_owned()]),
+                TsLit::Number(value) => Some(vec![value.value.to_string()]),
+                _ => None,
+            },
+            TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsUnionType(union)) => {
+                let mut keys = Vec::new();
+                for element in &union.types {
+                    keys.extend(source_utility_keys(element, named)?);
+                }
+                Some(keys)
+            }
+            TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::KeyOf => {
+                let thaw_hir::HirType::Object(fields) =
+                    source_ts_type(&operator.type_ann, named)?
+                else {
+                    return None;
+                };
+                Some(fields.into_iter().map(|(name, _)| name).collect())
+            }
+            TsType::TsParenthesizedType(parenthesized) => {
+                source_utility_keys(&parenthesized.type_ann, named)
             }
             _ => None,
         }

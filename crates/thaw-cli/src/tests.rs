@@ -1166,6 +1166,49 @@ fn selects_overloads_through_keyof_and_indexed_access_types() {
 }
 
 #[test]
+fn selects_overloads_through_object_utility_types() {
+    let source = r#"type Full = { value: number; label: string }; type Optional = { value?: number; label: string }; function picked(): Readonly<Pick<Full, "value">> { return unknown; } function all(): Pick<Full, keyof Full> { return unknown; } function omitted(): Omit<Full, "label"> { return unknown; } function required(): Required<Optional> { return unknown; } function recorded(): Record<"value", string> { return unknown; } const box = new NativeBox(1); box.configure(picked()); box.configure(all()); box.configure(omitted()); box.configure(required()); box.configure(recorded());"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into(), vec![])],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::Str,
+                )])],
+            ),
+            (
+                "NativeBox".into(),
+                "configure".into(),
+                "__configure_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Object(vec![(
+                    "value".into(),
+                    thaw_hir::HirType::F64,
+                )])],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__configure_number(box, picked())"));
+    assert!(rewritten.contains("__configure_number(box, all())"));
+    assert!(rewritten.contains("__configure_number(box, omitted())"));
+    assert!(rewritten.contains("__configure_number(box, required())"));
+    assert!(rewritten.contains("__configure_string(box, recorded())"));
+}
+
+#[test]
 fn tracks_assignment_flow_for_variables_and_nested_object_properties() {
     let source = r#"const box = new NativeBox(1); let value = 42; box.set(value); value = "text"; box.set(value); const config = { nested: { value: 1 }, direct: true }; config.nested.value = "nested"; config["direct"] = 7; box.set(config.nested.value); box.set(config.direct);"#;
     let rewritten = rewrite_external_class_methods(
