@@ -385,14 +385,13 @@ optional destructor. For non-null C strings, LLVM copies `strlen(ptr) + 1`
 bytes into `thaw_arena_alloc` before invoking the destructor. The copy therefore
 survives native deallocation and remains valid through return and catch/finally
 paths. Null pointers are preserved and never passed to a destructor. Ownership
-metadata supports `string`, `number[]`, and portable/packed object returns
-whose recursively nested fields are scalars, strings, `number[]`, or other
+metadata supports `string`, all four primitive-array types, and portable/packed object returns
+whose recursively nested fields are scalars, strings, supported arrays, or other
 supported objects; unsupported ownership combinations are compilation errors.
 Nested objects are rebuilt into arena-owned Thaw layouts. Object ownership is
 applied independently to each string and array-data leaf, so every non-null
 pointer is copied and its optional destructor is called exactly once. A
-`number[]` return uses
-`struct { double *data; int64_t len; }`; the data is copied into the arena and
+An array return uses its element pointer plus `int64_t len`; the data is copied into the arena and
 its configured destructor is invoked exactly once.
 
 Version 3 adds `parameterStringAbis`, `returnStringAbi`,
