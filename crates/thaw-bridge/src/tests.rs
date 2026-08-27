@@ -320,13 +320,15 @@ fn classifies_compatible_object_intersections_as_fast_path() {
 }
 
 #[test]
-fn classifies_string_array_as_fallback() {
-    // Only number[] is supported today (Phase 1's own restriction).
+fn classifies_string_array_as_fast_path() {
     let funcs = parse_dts("export declare function f(xs: string[]): void;").unwrap();
-    assert!(matches!(
-        classify(&funcs[0]),
-        Classification::Fallback { .. }
-    ));
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("string arrays should use the native pointer-length ABI");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Array(Box::new(HirType::Str))]
+    );
 }
 
 #[test]

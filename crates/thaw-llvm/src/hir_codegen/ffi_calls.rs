@@ -179,7 +179,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 Ok(result.into())
             }
-            HirType::Array(element) if **element == HirType::F64 && value.is_struct_value() => {
+            HirType::Array(element)
+                if matches!(element.as_ref(), HirType::F64 | HirType::Str)
+                    && value.is_struct_value() =>
+            {
                 let native = value.into_struct_value();
                 let data = self
                     .builder
@@ -808,7 +811,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 // read the length back out of that header and pass
                 // `(elements pointer, len)` instead of the header
                 // pointer itself.
-                HirType::Array(elem) if **elem == HirType::F64 => {
+                HirType::Array(elem)
+                    if matches!(elem.as_ref(), HirType::F64 | HirType::Str) =>
+                {
                     let base_ptr = value.into_pointer_value();
                     let i64_type = self.context.i64_type();
                     let len_val = self

@@ -127,7 +127,8 @@ namespace 抽出とオブジェクトエクスポートのフックは、お互�
 | `number` | `F64` | |
 | `string` | `Str` | |
 | `boolean` | `Bool` | |
-| `number[]` / `Array<number>` | `Array(F64)` | 要素は number のみ（[[project_thaw_overview]] の既存制限を踏襲） |
+| `number[]` / `Array<number>` | `Array(F64)` | `(const double *, int64_t)` ABI |
+| `string[]` / `Array<string>` | `Array(Str)` | `(const char **, int64_t)` ABI |
 | `{ x: number; y: number }` | `Object([("x", F64), ("y", F64)])` | フィールドは number のみ |
 | `void` | `Void` | 戻り値のみ |
 
@@ -137,9 +138,7 @@ namespace 抽出とオブジェクトエクスポートのフックは、お互�
 - union / intersection 型（`string | number` など）
 - コールバック引数（`(cb: (err: Error) => void) => void` -- 関数型の
   マーシャリングは別の設計課題で、Bridge の最初のスコープには含めない）
-- `string[]` / オブジェクトの非 number フィールド（Phase 1/2 の
-  既存制限をそのまま継承。将来 Thaw 本体がこれらをサポートしたら
-  Bridge 側の分類も自動的に広がる）
+- `boolean[]`など、通常引数／戻り値の要素幅変換を必要とする配列
 - `interface` 宣言経由の型（`TsInterfaceDecl` は現状 thaw-hir 未対応 --
   `.d.ts` では `interface` が頻出するため、これは Fast path の実用上の
   カバレッジを大きく制限する。次の実装ステップの筆頭候補）
@@ -345,9 +344,9 @@ extern "C" fn thaw_dynamic_call(
   自動生成する npm パッケージが実質存在しないため -- registry.md
   18章参照）。Fallback 経路は実物パッケージで広く検証済み。
 - 5章で述べた、外部ライブラリの実際の C ABI 規約（`(ptr, len)` 分割
-  など）に合わせた Marshal アダプタ生成 -- **`number[]` パラメータの
-  `(const double*, int64_t len)` 展開と、object パラメータのフィールド
-  単位への展開に加え、`Array`/`Object`のportable struct戻り値、文字列の
+  など）に合わせた Marshal アダプタ生成 -- **`number[]`／`string[]`
+  パラメータの`(pointer, int64_t len)`展開と、object パラメータのフィールド
+  単位への展開に加え、両配列型と`Object`のportable struct戻り値、文字列の
   `(ptr, len)`引数／戻り値も実装済み**（`ffi_param_types`、
   `ffi_return_type`、`marshal_ffi_return`を手書きの実C関数とリンクして検証）。
   packed C struct戻り値も明示指定できる。任意のfield offset／alignmentと
