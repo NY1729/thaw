@@ -1408,6 +1408,38 @@ fn compiles_decode_uri() {
 }
 
 #[test]
+fn compiles_string_from_char_code() {
+    let source = r#"
+        function first(): number {
+            console.log("first");
+            return 72;
+        }
+        function second(): number {
+            console.log("second");
+            return 101;
+        }
+        async function delayedCode(): Promise<number> {
+            console.log("awaited code");
+            await sleep(1);
+            return 65;
+        }
+        async function main(): Promise<void> {
+            console.log(String.fromCharCode());
+            console.log(String.fromCharCode(65));
+            console.log(String.fromCharCode(72, 101, 108, 108, 111));
+            console.log(String.fromCharCode(65.9));
+            console.log(String.fromCharCode(65 + 65536));
+            console.log(String.fromCharCode(first(), second()));
+            console.log(String.fromCharCode(await delayedCode()));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_from_char_code"),
+        "\nA\nHello\nA\nA\nfirst\nsecond\nHe\nawaited code\nA\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
