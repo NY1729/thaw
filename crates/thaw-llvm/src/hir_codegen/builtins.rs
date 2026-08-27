@@ -22,6 +22,39 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or_else(|| format!("`{fn_name}` did not return a value"))
     }
 
+    fn compile_i8_predicate_call(
+        &mut self,
+        fn_name: &str,
+        args: &[HirExpr],
+        source_name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let arguments = args
+            .iter()
+            .map(|argument| self.compile_expr(argument).map(Into::into))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function(fn_name).unwrap(),
+                &arguments,
+                source_name,
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| format!("`{fn_name}` did not return a value"))?
+            .into_int_value();
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                result,
+                self.context.i8_type().const_zero(),
+                source_name,
+            )
+            .map(Into::into)
+            .map_err(|error| error.to_string())
+    }
+
     fn compile_string_concat(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let [left, right] = args else {
             return Err("string concatenation expects two operands".to_string());

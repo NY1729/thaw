@@ -946,9 +946,7 @@ impl<'a> FnLowerer<'a> {
                         let right_value = right_value.clone();
                         let left_type = self.infer_expr_type(&left_value)?;
                         let right_type = self.infer_expr_type(&right_value)?;
-                        if matches!(left_type, HirType::Json | HirType::Dynamic)
-                            || matches!(right_type, HirType::Json | HirType::Dynamic)
-                        {
+                        if left_type == HirType::Dynamic || right_type == HirType::Dynamic {
                             return Err("`Object.is` requires statically native operands".into());
                         }
                         let left_name = format!("__thaw_object_is_left_{}", self.next_binding);
@@ -957,7 +955,30 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         self.scope.insert(left_name.clone(), left_type.clone());
                         self.scope.insert(right_name.clone(), right_type.clone());
-                        let result = if left_type != right_type {
+                        let left = HirExpr::Var(left_name.clone());
+                        let right = HirExpr::Var(right_name.clone());
+                        let result = if left_type == HirType::Json || right_type == HirType::Json {
+                            let (json, native, native_type) = if left_type == HirType::Json {
+                                (left, right, &right_type)
+                            } else {
+                                (right, left, &left_type)
+                            };
+                            let runtime = match native_type {
+                                HirType::Json => "__thaw_json_object_is",
+                                HirType::F64 => "__thaw_json_object_is_number",
+                                HirType::Str => "__thaw_json_object_is_string",
+                                HirType::Bool => "__thaw_json_object_is_bool",
+                                _ => "",
+                            };
+                            if runtime.is_empty() {
+                                HirExpr::Lit(HirLit::Bool(false))
+                            } else {
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(runtime.into())),
+                                    vec![json, native],
+                                )
+                            }
+                        } else if left_type != right_type {
                             HirExpr::Lit(HirLit::Bool(false))
                         } else if left_type == HirType::F64 {
                             HirExpr::Call(

@@ -2366,11 +2366,19 @@ fn compiles_tuple_spreads_for_reflection_builtins() {
             console.log(Object.entries(...[{ first: 1, second: 2 }]).length);
             console.log(Object.hasOwn(...[{ first: 1 }, "first"]));
             console.log(Object.is(...[NaN, NaN]));
+            const jsonNumber: Json = JSON.parse("1");
+            const jsonObject: Json = JSON.parse("{\"value\":1}");
+            console.log(Object.is(jsonNumber, JSON.parse("1")));
+            console.log(Object.is(jsonNumber, 1));
+            console.log(Object.is("thaw", JSON.parse("\"thaw\"")));
+            console.log(Object.is(JSON.parse("true"), true));
+            console.log(Object.is(jsonObject, jsonObject));
+            console.log(Object.is(jsonObject, JSON.parse("{\"value\":1}")));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "reflection_builtin_tuple_spreads"),
-        "true\nfirst,second\nfirst\nfirst\n1,2\n2\ntrue\ntrue\n"
+        "true\nfirst,second\nfirst\nfirst\n1,2\n2\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\n"
     );
 }
 
