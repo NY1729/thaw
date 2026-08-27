@@ -606,6 +606,56 @@ fn unresolved_conditional_tests_fall_back() {
 }
 
 #[test]
+fn classifies_quoted_and_numeric_object_property_keys() {
+    let funcs = parse_dts(
+        r#"export interface Headers {
+                "content-type": string;
+                200: boolean;
+            }
+            export declare function inspect(
+                headers: Headers,
+                inline: { "x-request-id": string; 404: number }
+            ): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("quoted and numeric object keys should preserve fixed layouts");
+    };
+    assert_eq!(
+        signature.params,
+        vec![
+            HirType::Object(vec![
+                ("content-type".into(), HirType::Str),
+                ("200".into(), HirType::Bool),
+            ]),
+            HirType::Object(vec![
+                ("x-request-id".into(), HirType::Str),
+                ("404".into(), HirType::F64),
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn classifies_quoted_keys_inside_generic_interfaces() {
+    let funcs = parse_dts(
+        r#"export interface Entry<T> { "current-value": T; }
+            export declare function inspect(value: Entry<number>): string;"#,
+    )
+    .unwrap();
+    let Classification::FastPath(signature) = classify(&funcs[0]) else {
+        panic!("generic interfaces should preserve quoted keys");
+    };
+    assert_eq!(
+        signature.params,
+        vec![HirType::Object(vec![(
+            "current-value".into(),
+            HirType::F64,
+        )])]
+    );
+}
+
+#[test]
 fn generates_native_addon_wrapper_and_module_initializer() {
     let funcs = parse_dts("export declare function add(args: any): any;").unwrap();
     let shim = generate_native_addon_shim(&funcs, &[]);
@@ -2234,6 +2284,21 @@ fn extracts_class_constructors_methods_properties_and_overloads() {
     assert_eq!(database.properties.len(), 1);
     assert_eq!(database.properties[0].name, "open");
     assert!(database.properties[0].readonly);
+}
+
+#[test]
+fn extracts_quoted_and_numeric_class_property_keys() {
+    let classes = parse_dts_classes(
+        r#"export class Metadata {
+                "content-type": string;
+                200: boolean;
+            }"#,
+    )
+    .unwrap();
+    assert_eq!(classes.len(), 1);
+    assert_eq!(classes[0].properties.len(), 2);
+    assert_eq!(classes[0].properties[0].name, "content-type");
+    assert_eq!(classes[0].properties[1].name, "200");
 }
 
 /// The actual regression this was validated against: a real date-fns
