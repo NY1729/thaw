@@ -1613,6 +1613,45 @@ fn compiles_tagged_template_evaluation_order_and_async() {
 }
 
 #[test]
+fn compiles_native_string_split() {
+    let source = r#"
+        function printAll(parts: string[]): void {
+            console.log(parts.length);
+            for (const part of parts) {
+                console.log(part);
+            }
+        }
+        function value(): string {
+            console.log("receiver");
+            return "a,b,c";
+        }
+        function separator(): string {
+            console.log("separator");
+            return ",";
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited receiver");
+            await sleep(1);
+            return "x::y::z";
+        }
+        async function main(): Promise<void> {
+            printAll("a,b,c".split(","));
+            printAll("abc".split(""));
+            printAll("a,b,c".split(",", 2));
+            printAll("hello".split());
+            printAll("a::b::c".split("::"));
+            printAll("abc".split("x"));
+            printAll(value().split(separator()));
+            printAll((await delayedValue()).split("::"));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_string_split"),
+        "3\na\nb\nc\n3\na\nb\nc\n2\na\nb\n1\nhello\n3\na\nb\nc\n1\nabc\nreceiver\nseparator\n3\na\nb\nc\nawaited receiver\n3\nx\ny\nz\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {

@@ -586,6 +586,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, form, "normalize form")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_string_split" => {
+                        let [receiver, separator, limit] = args.as_slice() else {
+                            return Err("string split expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, receiver, "split receiver")?;
+                        self.expect_type(&HirType::Str, separator, "split separator")?;
+                        self.expect_type(&HirType::F64, limit, "split limit")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
                     "__thaw_string_code_point_at" => {
                         let [value, index] = args.as_slice() else {
                             return Err("string codePointAt expects two operands".into());
