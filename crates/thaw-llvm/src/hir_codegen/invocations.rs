@@ -576,6 +576,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("RegExp search returned no value".into());
             }
+            "__thaw_regex_exec" => {
+                let [source, flags, value] = args else {
+                    return Err("RegExp.exec expects three operands".into());
+                };
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                let value = self.compile_expr(value)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_exec").unwrap(),
+                        &[source.into(), flags.into(), value.into()],
+                        "regex_exec",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp.exec returned no value".into());
+            }
             "__thaw_regex_match" | "__thaw_regex_split" => {
                 let [value, source, flags] = args else {
                     return Err("regex match/split expects three operands".into());

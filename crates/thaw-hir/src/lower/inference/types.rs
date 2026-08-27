@@ -631,6 +631,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, flags, "search flags")?;
                         return Ok(HirType::F64);
                     }
+                    "__thaw_regex_exec" => {
+                        let [source, flags, value] = args.as_slice() else {
+                            return Err("RegExp.exec expects three operands".into());
+                        };
+                        self.expect_type(&HirType::Str, source, "RegExp.exec source")?;
+                        self.expect_type(&HirType::Str, flags, "RegExp.exec flags")?;
+                        self.expect_type(&HirType::Str, value, "RegExp.exec value")?;
+                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                    }
                     "__thaw_regex_match" => {
                         let [value, source, flags] = args.as_slice() else {
                             return Err("String.match expects three operands".into());
