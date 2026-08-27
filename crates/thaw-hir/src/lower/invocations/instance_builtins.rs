@@ -11,7 +11,7 @@ impl<'a> FnLowerer<'a> {
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
-                | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match"
+                | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match" | "search"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -534,6 +534,44 @@ impl<'a> FnLowerer<'a> {
                             Box::new(body),
                         )),
                         Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((pattern_name, regex_type, pattern));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"search" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "search receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.search")?;
+                    let [pattern] = arguments.as_slice() else {
+                        return Err("native `.search()` expects exactly one argument".into());
+                    };
+                    let regex_type = regex_object_type();
+                    if self.infer_expr_type(pattern)? != regex_type {
+                        return Err("native `.search()` requires a RegExp argument".into());
+                    }
+                    let pattern = pattern.clone();
+                    let receiver_name = format!("__thaw_search_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let pattern_name = format!("__thaw_search_pattern_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(pattern_name.clone(), regex_type.clone());
+                    let source = HirExpr::PropAccess(
+                        Box::new(HirExpr::Var(pattern_name.clone())),
+                        regex_type.clone(),
+                        "source".to_string(),
+                    );
+                    let flags = HirExpr::PropAccess(
+                        Box::new(HirExpr::Var(pattern_name.clone())),
+                        regex_type.clone(),
+                        "flags".to_string(),
+                    );
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_regex_search".to_string())),
+                        vec![HirExpr::Var(receiver_name.clone()), source, flags],
                     );
                     let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
                     bindings.extend(spread_bindings);

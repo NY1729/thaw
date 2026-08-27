@@ -469,6 +469,11 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_regex_search",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for name in ["thaw_regex_match", "thaw_regex_split"] {
             self.module
                 .add_function(name, string_replace_type, Some(Linkage::External));

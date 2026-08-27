@@ -1722,6 +1722,36 @@ fn compiles_regex_test() {
 }
 
 #[test]
+fn compiles_string_search() {
+    let source = r#"
+        function value(): string {
+            console.log("value");
+            return "xabcx";
+        }
+        function pattern(): RegExp {
+            console.log("pattern");
+            return /abc/i;
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited value");
+            await sleep(1);
+            return "xabcx";
+        }
+        async function main(): Promise<void> {
+            console.log("xabcx".search(/abc/));
+            console.log("xyz".search(/abc/));
+            console.log("xABCx".search(/abc/i));
+            console.log(value().search(pattern()));
+            console.log((await delayedValue()).search(/abc/));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_search"),
+        "1\n-1\n1\nvalue\npattern\n1\nawaited value\n1\n"
+    );
+}
+
+#[test]
 fn compiles_string_match() {
     let source = r#"
         function printMatch(result: string[] | undefined): void {

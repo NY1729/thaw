@@ -557,6 +557,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_regex_search" => {
+                let [value, source, flags] = args else {
+                    return Err("RegExp search expects three operands".into());
+                };
+                let value = self.compile_expr(value)?;
+                let source = self.compile_expr(source)?;
+                let flags = self.compile_expr(flags)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_regex_search").unwrap(),
+                        &[value.into(), source.into(), flags.into()],
+                        "regex_search",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("RegExp search returned no value".into());
+            }
             "__thaw_regex_match" | "__thaw_regex_split" => {
                 let [value, source, flags] = args else {
                     return Err("regex match/split expects three operands".into());
