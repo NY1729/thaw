@@ -487,6 +487,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     "decodeURIComponent",
                 )
             }
+            "__thaw_decode_uri" => {
+                return self.compile_single_arg_call("thaw_decode_uri", args, "decodeURI")
+            }
             "__thaw_string_is_null" => {
                 let [value] = args else {
                     return Err("string null check expects one operand".into());

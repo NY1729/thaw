@@ -130,6 +130,54 @@ pub unsafe extern "C" fn thaw_decode_uri_component(value: *const c_char) -> *con
 }
 
 #[no_mangle]
+/// Percent-decodes `value` like `thaw_decode_uri_component`, except an
+/// escape that would decode to one of the URI reserved characters
+/// `; / ? : @ & = + $ , #` is left as the original three-character escape,
+/// matching `decodeURI`. Returns a null pointer for a malformed
+/// percent-escape or a decoded byte sequence that is not valid UTF-8.
+///
+/// # Safety
+/// `value` must reference a valid NUL-terminated UTF-8 string.
+pub unsafe extern "C" fn thaw_decode_uri(value: *const c_char) -> *const c_char {
+    if value.is_null() {
+        return std::ptr::null();
+    }
+    let value = unsafe { CStr::from_ptr(value) }.to_string_lossy();
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some(hex) = bytes.get(index + 1..index + 3) else {
+                return std::ptr::null();
+            };
+            let Ok(hex_str) = std::str::from_utf8(hex) else {
+                return std::ptr::null();
+            };
+            let Ok(byte) = u8::from_str_radix(hex_str, 16) else {
+                return std::ptr::null();
+            };
+            if matches!(
+                byte,
+                b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b'#'
+            ) {
+                output.extend_from_slice(&bytes[index..index + 3]);
+            } else {
+                output.push(byte);
+            }
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let Ok(text) = String::from_utf8(output) else {
+        return std::ptr::null();
+    };
+    arena_c_string(&text).map_or(std::ptr::null(), |value| value.cast())
+}
+
+#[no_mangle]
 /// # Safety
 /// `value` must point to a valid NUL-terminated UTF-8 string. `count` must be
 /// finite, non-negative and already normalized to an integer.

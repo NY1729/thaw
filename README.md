@@ -1463,6 +1463,9 @@ The workspace crates have narrow responsibilities:
   malformed` for an incomplete or non-hexadecimal escape or a decoded byte
   sequence that is not valid UTF-8, via a native null-pointer failure signal
   checked by the generated code before returning
+- `decodeURI` decodes the same way, except an escape that would decode to
+  one of the URI reserved characters is left as its original three-character
+  escape rather than being unescaped, preserving whole-URI syntax
 - `Number.prototype.toPrecision` returns the general native number-to-string
   result when its argument is omitted; otherwise it truncates a coerced
   significant-digit count, throws for values outside `[1, 100]`, returns

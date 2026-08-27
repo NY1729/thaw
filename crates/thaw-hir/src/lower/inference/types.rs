@@ -487,6 +487,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "decodeURIComponent argument")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_decode_uri" => {
+                        let [argument] = args.as_slice() else {
+                            return Err("decodeURI expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Str, argument, "decodeURI argument")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_string_is_null" => {
                         let [argument] = args.as_slice() else {
                             return Err("string null check expects one operand".into());
