@@ -581,6 +581,47 @@ fn reads_and_writes_json_with_runtime_string_keys() {
 }
 
 #[test]
+fn stringifies_json_with_number_and_string_spacing() {
+    let source = r#"
+        function value(): Json {
+            console.log("value");
+            return JSON.parse("{\"b\":2,\"a\":{\"x\":1}}");
+        }
+        async function spacing(): Promise<number> {
+            await sleep(1);
+            console.log("space");
+            return 2.9;
+        }
+        async function main(): Promise<void> {
+            console.log(JSON.stringify(value(), null, await spacing()));
+            console.log(JSON.stringify(JSON.parse("[1]"), undefined, "--"));
+            console.log(JSON.stringify(JSON.parse("{\"x\":1}"), null, "abcdefghijkl"));
+            console.log(JSON.stringify(JSON.parse("[1]"), null, 20));
+            console.log(JSON.stringify(JSON.parse("{\"x\":1}"), null, -1));
+            const record: Record<string, number> = { answer: 42 };
+            console.log(JSON.stringify(record));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_spacing"),
+        "value\nspace\n{\n  \"b\": 2,\n  \"a\": {\n    \"x\": 1\n  }\n}\n[\n--1\n]\n{\nabcdefghij\"x\": 1\n}\n[\n          1\n]\n{\"x\":1}\n{\"answer\":42}\n"
+    );
+}
+
+#[test]
+fn rejects_unsupported_json_stringify_replacers() {
+    let module = thaw_parser::parse_typescript(
+        r#"function main(): void {
+            const value: Json = JSON.parse("{}");
+            console.log(JSON.stringify(value, ["x"]));
+        }"#,
+    )
+    .unwrap();
+    let error = thaw_hir::lower_module(&module).unwrap_err();
+    assert!(error.contains("replacer functions and arrays"), "{error}");
+}
+
+#[test]
 fn compiles_dynamic_heterogeneous_object_reads_as_unions() {
     let source = r#"
         function read(key: string): number | string | null | undefined {

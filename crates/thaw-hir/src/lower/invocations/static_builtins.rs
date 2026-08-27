@@ -4,6 +4,7 @@ impl<'a> FnLowerer<'a> {
             (object, property),
             ("Array", "of" | "from" | "isArray")
                 | ("Object", "keys" | "getOwnPropertyNames" | "values" | "entries" | "fromEntries" | "assign" | "hasOwn" | "is")
+                | ("JSON", "stringify")
                 | ("Reflect", "ownKeys")
                 | ("Number", "parseFloat" | "parseInt" | "isNaN" | "isFinite" | "isInteger" | "isSafeInteger")
                 | ("Math", "random" | "abs" | "floor" | "ceil" | "trunc" | "sqrt" | "exp" | "log" | "log2" | "log10" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "cbrt" | "acosh" | "asinh" | "atanh" | "expm1" | "log1p" | "fround" | "clz32" | "pow" | "min" | "max" | "sign" | "round" | "atan2" | "hypot" | "imul")
@@ -16,6 +17,62 @@ impl<'a> FnLowerer<'a> {
         property: &swc_ecma_ast::IdentName,
         call: &CallExpr,
     ) -> Result<HirExpr, String> {
+                    if object.sym == *"JSON" && property.sym == *"stringify" {
+                        let (arguments, mut bindings) =
+                            self.lower_native_spread_values(&call.args, "JSON.stringify")?;
+                        if !(1..=3).contains(&arguments.len()) {
+                            return Err("`JSON.stringify` expects one to three arguments".into());
+                        }
+                        let value = arguments[0].clone();
+                        let value_type = self.infer_expr_type(&value)?;
+                        if !matches!(value_type, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!(
+                                "`JSON.stringify` requires a JSON or dictionary value, got {value_type:?}"
+                            ));
+                        }
+                        if let Some(replacer) = arguments.get(1) {
+                            let replacer_type = self.infer_expr_type(replacer)?;
+                            if !matches!(replacer_type, HirType::Null | HirType::Undefined) {
+                                return Err(
+                                    "`JSON.stringify` replacer functions and arrays are not supported"
+                                        .into(),
+                                );
+                            }
+                            if !matches!(replacer, HirExpr::Lit(_)) {
+                                let name = format!(
+                                    "__thaw_json_stringify_replacer_{}",
+                                    self.next_binding
+                                );
+                                self.next_binding += 1;
+                                self.scope.insert(name.clone(), replacer_type.clone());
+                                bindings.push((name, replacer_type, replacer.clone()));
+                            }
+                        }
+                        let result = match arguments.get(2) {
+                            None | Some(HirExpr::Lit(HirLit::Null | HirLit::Undefined)) => {
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("JSON.stringify".into())),
+                                    vec![value],
+                                )
+                            }
+                            Some(space) => {
+                                let runtime = match self.infer_expr_type(space)? {
+                                    HirType::F64 => "__thaw_json_stringify_number_space",
+                                    HirType::Str => "__thaw_json_stringify_string_space",
+                                    other => {
+                                        return Err(format!(
+                                            "`JSON.stringify` space must be number, string, null or undefined, got {other:?}"
+                                        ))
+                                    }
+                                };
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(runtime.into())),
+                                    vec![value, space.clone()],
+                                )
+                            }
+                        };
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if object.sym == *"Array" && property.sym == *"of" {
                         let explicit_type = if let Some(type_args) = &call.type_args {
                             let [element] = type_args.params.as_slice() else {
