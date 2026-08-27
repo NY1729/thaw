@@ -980,6 +980,58 @@ fn remap_mapped_key(name_type: &TsType, parameter: &str, key: &str) -> Result<St
         {
             Ok(key.to_string())
         }
+        TsType::TsTypeRef(reference) => {
+            let TsEntityName::Ident(name) = &reference.type_name else {
+                return Err("qualified mapped key transforms are not supported".into());
+            };
+            let [argument] = reference
+                .type_params
+                .as_ref()
+                .map(|params| params.params.as_slice())
+                .unwrap_or_default()
+            else {
+                return Err("mapped key transform requires one type argument".into());
+            };
+            let value = remap_mapped_key(argument, parameter, key)?;
+            match name.sym.as_str() {
+                "Uppercase" => Ok(value.to_uppercase()),
+                "Lowercase" => Ok(value.to_lowercase()),
+                "Capitalize" => {
+                    let mut chars = value.chars();
+                    Ok(chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default())
+                }
+                "Uncapitalize" => {
+                    let mut chars = value.chars();
+                    Ok(chars
+                        .next()
+                        .map(|first| first.to_lowercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default())
+                }
+                _ => Err(format!("mapped key transform `{}` is not supported", name.sym)),
+            }
+        }
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(
+            intersection,
+        )) => {
+            let dynamic = intersection
+                .types
+                .iter()
+                .filter(|ty| {
+                    !matches!(
+                        ty.as_ref(),
+                        TsType::TsKeywordType(keyword)
+                            if keyword.kind == TsKeywordTypeKind::TsStringKeyword
+                    )
+                })
+                .collect::<Vec<_>>();
+            match dynamic.as_slice() {
+                [value] => remap_mapped_key(value, parameter, key),
+                _ => Err("mapped key intersection is not statically resolvable".into()),
+            }
+        }
         TsType::TsLitType(literal) => match &literal.lit {
             TsLit::Str(value) => Ok(value.value.to_string_lossy().into_owned()),
             TsLit::Tpl(template) => {
@@ -995,19 +1047,7 @@ fn remap_mapped_key(name_type: &TsType, parameter: &str, key: &str) -> Result<St
                         .unwrap_or_else(|| quasi.raw.to_string());
                     rendered.push_str(&text);
                     if let Some(interpolation) = template.types.get(index) {
-                        match interpolation.as_ref() {
-                            TsType::TsTypeRef(reference)
-                                if matches!(
-                                    &reference.type_name,
-                                    TsEntityName::Ident(name) if name.sym == parameter
-                                ) => rendered.push_str(key),
-                            _ => {
-                                return Err(
-                                    "mapped template keys only interpolate their key parameter"
-                                        .into(),
-                                )
-                            }
-                        }
+                        rendered.push_str(&remap_mapped_key(interpolation, parameter, key)?);
                     }
                 }
                 Ok(rendered)
