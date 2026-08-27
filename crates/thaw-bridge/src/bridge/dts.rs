@@ -632,6 +632,17 @@ fn classify_ts_type(
         TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::ReadOnly => {
             classify_ts_type(&operator.type_ann, interfaces, generic_interfaces)
         }
+        TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::KeyOf => {
+            match classify_ts_type(&operator.type_ann, interfaces, generic_interfaces) {
+                DtsType::Native(HirType::Object(_) | HirType::Dictionary(_)) => {
+                    DtsType::Native(HirType::Str)
+                }
+                DtsType::Native(other) => DtsType::Unsupported(format!(
+                    "keyof {other:?} does not have a string-only native ABI"
+                )),
+                unsupported => unsupported,
+            }
+        }
         TsType::TsKeywordType(kw) => match kw.kind {
             TsKeywordTypeKind::TsNumberKeyword => DtsType::Native(HirType::F64),
             TsKeywordTypeKind::TsStringKeyword => DtsType::Native(HirType::Str),
@@ -1123,6 +1134,23 @@ fn resolve_ts_type_with_substitution(
                 generic_interfaces,
                 in_progress,
             )
+        }
+        TsType::TsTypeOperator(operator) if operator.op == TsTypeOperatorOp::KeyOf => {
+            match resolve_ts_type_with_substitution(
+                &operator.type_ann,
+                substitution,
+                interfaces,
+                generic_interfaces,
+                in_progress,
+            ) {
+                DtsType::Native(HirType::Object(_) | HirType::Dictionary(_)) => {
+                    DtsType::Native(HirType::Str)
+                }
+                DtsType::Native(other) => DtsType::Unsupported(format!(
+                    "keyof {other:?} does not have a string-only native ABI"
+                )),
+                unsupported => unsupported,
+            }
         }
         TsType::TsArrayType(arr) => {
             match resolve_ts_type_with_substitution(
