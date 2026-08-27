@@ -2605,7 +2605,9 @@ include!("lower/objects.rs");
 
 impl<'a> FnLowerer<'a> {}
 
-include!("lower/assignments.rs");
+include!("lower/assignments/targets.rs");
+include!("lower/assignments/lowering.rs");
+include!("lower/assignments/updates.rs");
 
 impl<'a> FnLowerer<'a> {}
 
