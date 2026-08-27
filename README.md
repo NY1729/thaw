@@ -1327,6 +1327,8 @@ The workspace crates have narrow responsibilities:
 - The `in` operator checks runtime JSON own properties with left-before-right
   single evaluation, and `for...in` iterates JSON object keys or array indices
   in JavaScript key order
+- `for...of` iterates runtime JSON arrays as `Json` values alongside typed
+  native arrays
 - `Object.is` applies SameValue comparison to native and runtime JSON
   primitives, preserves JSON object/array identity, and compares JSON
   primitives directly with native numbers, strings and booleans

@@ -964,32 +964,43 @@ impl<'a> FnLowerer<'a> {
                     let item_discriminants =
                         self.expression_array_element_discriminants(&for_of.right);
                     let values = self.lower_expr(&for_of.right)?;
-                    let HirType::Array(element) = self.infer_expr_type(&values)? else {
-                        return Err("`for...of` currently requires a typed array".into());
+                    let values_type = self.infer_expr_type(&values)?;
+                    let (element, json_array) = match &values_type {
+                        HirType::Array(element) => (element.as_ref().clone(), false),
+                        HirType::Json if !for_of.is_await => (HirType::Json, true),
+                        HirType::Json => {
+                            return Err("`for await...of` cannot await dynamic JSON values".into())
+                        }
+                        _ => return Err("`for...of` currently requires a typed array".into()),
                     };
                     let (item_type, await_item) = if for_of.is_await {
-                        match element.as_ref() {
+                        match &element {
                             HirType::Promise(resolved) => (resolved.as_ref().clone(), true),
                             synchronous => (synchronous.clone(), false),
                         }
                     } else {
-                        (element.as_ref().clone(), false)
+                        (element.clone(), false)
                     };
                     let values_name = format!("__thaw_for_of_values_{}", self.next_binding);
                     self.next_binding += 1;
-                    self.scope.insert(
-                        values_name.clone(),
-                        HirType::Array(element.clone()),
-                    );
+                    self.scope
+                        .insert(values_name.clone(), values_type.clone());
                     let index_name = format!("__thaw_for_of_index_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(index_name.clone(), HirType::F64);
                     let item_value = || {
-                        let indexed = HirExpr::TypedIndex(
-                            Box::new(HirExpr::Var(values_name.clone())),
-                            Box::new(HirExpr::Var(index_name.clone())),
-                            element.as_ref().clone(),
-                        );
+                        let indexed = if json_array {
+                            HirExpr::JsonIndex(
+                                Box::new(HirExpr::Var(values_name.clone())),
+                                Box::new(HirExpr::Var(index_name.clone())),
+                            )
+                        } else {
+                            HirExpr::TypedIndex(
+                                Box::new(HirExpr::Var(values_name.clone())),
+                                Box::new(HirExpr::Var(index_name.clone())),
+                                element.clone(),
+                            )
+                        };
                         if await_item {
                             HirExpr::AwaitPromise(Box::new(indexed), item_type.clone())
                         } else {
@@ -1148,7 +1159,7 @@ impl<'a> FnLowerer<'a> {
                     Ok(vec![
                         HirStmt::Let(
                             values_name.clone(),
-                            HirType::Array(element),
+                            values_type,
                             values,
                         ),
                         HirStmt::Let(
@@ -1160,7 +1171,14 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::BinOp(
                                 BinOp::Lt,
                                 Box::new(HirExpr::Var(index_name)),
-                                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(values_name)))),
+                                Box::new(if json_array {
+                                    HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                                        Box::new(HirExpr::Var(values_name)),
+                                        "length".into(),
+                                    )))
+                                } else {
+                                    HirExpr::ArrayLen(Box::new(HirExpr::Var(values_name)))
+                                }),
                             ),
                             body,
                         ),
