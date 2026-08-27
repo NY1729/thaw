@@ -49,6 +49,8 @@ propertyだけから成る場合は再帰分類し、local・assertion・functio
 object intersectionは同型fieldを共有しながら統合し、field型が衝突すれば未解決にする。
 解決済みobjectへの`keyof`はstring、string／number literalのindexed accessは対応field型へ
 解決し、function戻り値を含むoverload選択へ渡す。
+`Pick`／`Omit`／`Record`／`Readonly`／`Partial`／`Required`／`NonNullable`も
+同じfield表とoptional wrapperを再利用して解決する。
 number配列注釈は`number[]`に加えて`Array<number>`と`ReadonlyArray<number>`も
 同じnative array型へ正規化する。
 式型は文字列とnumber／booleanの連結、numberのbit演算、同型同士の論理演算、

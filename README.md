@@ -2105,6 +2105,8 @@ primitive or array layout. Compatible object intersections merge their fields
 for the same structural selection, while conflicting fields remain unresolved.
 `keyof` over a resolved object produces a string layout, and literal indexed
 access such as `Config["value"]` selects the corresponding field layout.
+`Pick`, `Omit`, `Record`, `Readonly`, `Partial`, `Required` and `NonNullable`
+utility references reuse those resolved object fields and optional wrappers.
 Straight-line `=` assignments update local and nested property
 types; statically named computed properties are included, while unknown or
 compound assignments invalidate the affected fact. String-literal computed
