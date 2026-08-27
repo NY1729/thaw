@@ -623,6 +623,50 @@ fn selects_same_arity_external_method_overloads_by_argument_type() {
 }
 
 #[test]
+fn selects_external_overloads_from_annotations_and_assertions() {
+    let source = r#"const box = new NativeBox(1); let declared: string; const asserted = 42 as string; const angle = <number>unknown; box.set(declared); box.set(asserted); box.set(angle); box.set(unknown as boolean);"#;
+    let rewritten = rewrite_external_class_methods(
+        source,
+        &[(
+            "addon".into(),
+            "NativeBox".into(),
+            vec![(1, "NativeBox_ctor".into())],
+        )],
+        &[
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_number".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::F64],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_string".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Str],
+            ),
+            (
+                "NativeBox".into(),
+                "set".into(),
+                "__set_boolean".into(),
+                1,
+                false,
+                vec![thaw_hir::HirType::Bool],
+            ),
+        ],
+    )
+    .unwrap();
+    assert!(rewritten.contains("__set_string(box, declared)"));
+    assert!(rewritten.contains("__set_string(box, asserted)"));
+    assert!(rewritten.contains("__set_number(box, angle)"));
+    assert!(rewritten.contains("__set_boolean(box, unknown as boolean)"));
+}
+
+#[test]
 fn infers_external_overload_types_from_composed_expressions() {
     let source = r#"const box = new NativeBox(1); const n = 20 + 22; const s = "hel" + "lo"; const b = n > 0; const config = { n, nested: { text: s }, enabled: b }; box.set(n); box.set(s); box.set(b); box.set(Number("7")); box.set(`value-${s}`); box.set(true ? "yes" : "no"); box.set(config.n); box.set(config.nested.text); box.set(config.enabled); box.set(({ value: 7 }).value);"#;
     let rewritten = rewrite_external_class_methods(
