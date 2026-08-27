@@ -20,6 +20,34 @@ fn compiles_and_runs_a_native_hello_world_binary() {
 }
 
 #[test]
+fn console_log_accepts_multiple_arguments_after_evaluating_them_in_order() {
+    let source = r#"
+        function first(): string {
+            console.log("first");
+            return "A";
+        }
+        function second(): number {
+            console.log("second");
+            return 2;
+        }
+        function main(): void {
+            const missing: number | undefined = undefined;
+            const present: number | undefined = 3;
+            console.log();
+            console.log("value", 1, true, null, undefined);
+            console.log(first(), second(), "done");
+            console.log("optional", missing);
+            console.log("optional", present);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "variadic_console_log"),
+        "\nvalue 1 true null undefined\nfirst\nsecond\nA 2 done\noptional undefined\noptional 3\n"
+    );
+}
+
+#[test]
 fn compiles_and_calls_a_typed_non_capturing_arrow_function() {
     let source = r#"
         function main(): void {

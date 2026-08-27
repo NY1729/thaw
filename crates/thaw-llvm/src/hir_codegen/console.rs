@@ -1,67 +1,72 @@
 impl<'ctx> HirCompiler<'ctx> {
-    /// `console.log` is bridged straight to libc for Phase 0/1: strings go
-    /// to `puts`, numbers go through `printf("%g\n", ...)`. The real
-    /// `console` implementation belongs in `std/` once Phase 2 gets there.
     fn compile_console_log(&mut self, args: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
-        let [arg] = args else {
-            return Err("console.log expects exactly one argument in Phase 0/1".to_string());
-        };
-        let hir_type = self.expr_hir_type(arg);
-        let value = self.compile_expr(arg)?;
+        if args.is_empty() {
+            let empty = self
+                .builder
+                .build_global_string_ptr("", "console_empty")
+                .map_err(|error| error.to_string())?;
+            self.compile_console_text(empty.as_pointer_value(), true, "console_empty")?;
+        }
+        let values = args
+            .iter()
+            .map(|arg| Ok((self.expr_hir_type(arg), self.compile_expr(arg)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        for (index, (hir_type, value)) in values.into_iter().enumerate() {
+            self.compile_console_arg(hir_type, value, index + 1 == args.len())?;
+            if index + 1 != args.len() {
+                let separator = self
+                    .builder
+                    .build_global_string_ptr(" ", "console_separator")
+                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    separator.as_pointer_value(),
+                    false,
+                    "console_separator",
+                )?;
+            }
+        }
 
+        let fflush_fn = self.module.get_function("fflush").unwrap();
+        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder
+            .build_call(fflush_fn, &[null_ptr.into()], "fflush_call")
+            .map_err(|error| error.to_string())?;
+        Ok(self.context.i32_type().const_int(0, false).into())
+    }
+
+    fn compile_console_arg(
+        &mut self,
+        hir_type: Option<HirType>,
+        value: BasicValueEnum<'ctx>,
+        newline: bool,
+    ) -> Result<(), String> {
         if let Some(HirType::Optional(payload)) = hir_type {
-            self.compile_console_tagged(value.into_struct_value(), &payload, "undefined")?;
+            self.compile_console_tagged(value.into_struct_value(), &payload, "undefined", newline)?;
         } else if let Some(HirType::Nullable(payload)) = hir_type {
-            self.compile_console_tagged(value.into_struct_value(), &payload, "null")?;
+            self.compile_console_tagged(value.into_struct_value(), &payload, "null", newline)?;
         } else if let Some(HirType::Nullish(payload)) = hir_type {
-            self.compile_console_nullish(value.into_struct_value(), &payload)?;
+            self.compile_console_nullish(value.into_struct_value(), &payload, newline)?;
         } else if let Some(HirType::Union(elements)) = hir_type {
-            self.compile_console_union(value.into_struct_value(), &elements)?;
+            self.compile_console_union(value.into_struct_value(), &elements, newline)?;
         } else if hir_type == Some(HirType::Undefined) {
             let undefined = self
                 .builder
                 .build_global_string_ptr("undefined", "undefined_value")
                 .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function("puts").unwrap(),
-                    &[undefined.as_pointer_value().into()],
-                    "puts_undefined_value",
-                )
-                .map_err(|error| error.to_string())?;
+            self.compile_console_text(undefined.as_pointer_value(), newline, "undefined_value")?;
         } else if hir_type == Some(HirType::Null) {
             let null = self
                 .builder
                 .build_global_string_ptr("null", "null_value")
                 .map_err(|error| error.to_string())?;
-            self.builder
-                .build_call(
-                    self.module.get_function("puts").unwrap(),
-                    &[null.as_pointer_value().into()],
-                    "puts_null_value",
-                )
-                .map_err(|error| error.to_string())?;
+            self.compile_console_text(null.as_pointer_value(), newline, "null_value")?;
         } else {
             match value {
                 BasicValueEnum::PointerValue(ptr) => {
-                    let puts = self.module.get_function("puts").unwrap();
-                    self.builder
-                        .build_call(puts, &[ptr.into()], "putscall")
-                        .map_err(|e| e.to_string())?;
+                    self.compile_console_text(ptr, newline, "console_pointer")?;
                 }
                 BasicValueEnum::FloatValue(f) => {
-                    let format = self
-                        .builder
-                        .build_global_string_ptr("%g\n", "numfmt")
-                        .map_err(|e| e.to_string())?;
-                    let printf = self.module.get_function("printf").unwrap();
-                    self.builder
-                        .build_call(
-                            printf,
-                            &[format.as_pointer_value().into(), f.into()],
-                            "printfcall",
-                        )
-                        .map_err(|e| e.to_string())?;
+                    self.compile_console_number(f, newline, "console_number")?;
                 }
                 // Our only first-class `IntValue` is `i1` (`HirType::Bool`) --
                 // nothing else reaches console.log as a raw `IntValue`.
@@ -83,10 +88,11 @@ impl<'ctx> HirCompiler<'ctx> {
                             "bool_str",
                         )
                         .map_err(|e| e.to_string())?;
-                    let puts = self.module.get_function("puts").unwrap();
-                    self.builder
-                        .build_call(puts, &[selected.into()], "putscall")
-                        .map_err(|e| e.to_string())?;
+                    self.compile_console_text(
+                        selected.into_pointer_value(),
+                        newline,
+                        "console_bool",
+                    )?;
                 }
                 other => {
                     return Err(format!(
@@ -96,20 +102,54 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         }
 
-        // Flush immediately -- see the comment on `fflush`'s declaration.
-        let fflush_fn = self.module.get_function("fflush").unwrap();
-        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-        self.builder
-            .build_call(fflush_fn, &[null_ptr.into()], "fflush_call")
-            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 
-        Ok(self.context.i32_type().const_int(0, false).into())
+    fn compile_console_text(
+        &mut self,
+        value: PointerValue<'ctx>,
+        newline: bool,
+        name: &str,
+    ) -> Result<(), String> {
+        let format = self
+            .builder
+            .build_global_string_ptr(if newline { "%s\n" } else { "%s" }, &format!("{name}_fmt"))
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("printf").unwrap(),
+                &[format.as_pointer_value().into(), value.into()],
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn compile_console_number(
+        &mut self,
+        value: FloatValue<'ctx>,
+        newline: bool,
+        name: &str,
+    ) -> Result<(), String> {
+        let format = self
+            .builder
+            .build_global_string_ptr(if newline { "%g\n" } else { "%g" }, &format!("{name}_fmt"))
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("printf").unwrap(),
+                &[format.as_pointer_value().into(), value.into()],
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     fn compile_console_union(
         &mut self,
         value: StructValue<'ctx>,
         elements: &[HirType],
+        newline: bool,
     ) -> Result<(), String> {
         if elements.is_empty() {
             return Err("console.log cannot print an empty union".into());
@@ -154,7 +194,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             self.builder.position_at_end(matched);
             let member_value = self.unpack_union_payload(payload, member)?;
-            self.compile_console_union_member(member_value, member)?;
+            self.compile_console_union_member(member_value, member, newline)?;
             self.builder
                 .build_unconditional_branch(merge)
                 .map_err(|error| error.to_string())?;
@@ -173,23 +213,15 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         value: BasicValueEnum<'ctx>,
         member: &HirType,
+        newline: bool,
     ) -> Result<(), String> {
         match member {
             HirType::F64 => {
-                let format = self
-                    .builder
-                    .build_global_string_ptr("%g\n", "union_numfmt")
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("printf").unwrap(),
-                        &[
-                            format.as_pointer_value().into(),
-                            value.into_float_value().into(),
-                        ],
-                        "printf_union_number",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_number(
+                    value.into_float_value(),
+                    newline,
+                    "console_union_number",
+                )?;
             }
             HirType::Bool => {
                 let yes = self
@@ -209,61 +241,51 @@ impl<'ctx> HirCompiler<'ctx> {
                         "union_bool_string",
                     )
                     .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[selected.into()],
-                        "puts_union_bool",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    selected.into_pointer_value(),
+                    newline,
+                    "console_union_bool",
+                )?;
             }
             HirType::Str => {
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[value.into_pointer_value().into()],
-                        "puts_union_string",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    value.into_pointer_value(),
+                    newline,
+                    "console_union_string",
+                )?;
             }
             HirType::Undefined => {
                 let undefined = self
                     .builder
                     .build_global_string_ptr("undefined", "union_undefined")
                     .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[undefined.as_pointer_value().into()],
-                        "puts_union_undefined",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    undefined.as_pointer_value(),
+                    newline,
+                    "console_union_undefined",
+                )?;
             }
             HirType::Null => {
                 let null = self
                     .builder
                     .build_global_string_ptr("null", "union_null")
                     .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[null.as_pointer_value().into()],
-                        "puts_union_null",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    null.as_pointer_value(),
+                    newline,
+                    "console_union_null",
+                )?;
             }
             HirType::Object(_) | HirType::Json | HirType::Array(_) | HirType::Function(_, _) => {
                 let object = self
                     .builder
                     .build_global_string_ptr("[object Object]", "union_object")
                     .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[object.as_pointer_value().into()],
-                        "puts_union_object",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    object.as_pointer_value(),
+                    newline,
+                    "console_union_object",
+                )?;
             }
             other => return Err(format!("console.log cannot print union member {other:?}")),
         }
@@ -275,6 +297,7 @@ impl<'ctx> HirCompiler<'ctx> {
         value: StructValue<'ctx>,
         payload_type: &HirType,
         absent_text: &str,
+        newline: bool,
     ) -> Result<(), String> {
         let present = self
             .builder
@@ -302,13 +325,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_global_string_ptr(absent_text, "tagged_absent_string")
             .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("puts").unwrap(),
-                &[absent.as_pointer_value().into()],
-                "puts_tagged_absent",
-            )
-            .map_err(|error| error.to_string())?;
+        self.compile_console_text(absent.as_pointer_value(), newline, "console_tagged_absent")?;
         self.builder
             .build_unconditional_branch(merge_block)
             .map_err(|error| error.to_string())?;
@@ -316,20 +333,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(present_block);
         match payload_type {
             HirType::F64 => {
-                let format = self
-                    .builder
-                    .build_global_string_ptr("%g\n", "optional_numfmt")
-                    .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("printf").unwrap(),
-                        &[
-                            format.as_pointer_value().into(),
-                            payload.into_float_value().into(),
-                        ],
-                        "printf_optional_number",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_number(
+                    payload.into_float_value(),
+                    newline,
+                    "console_optional_number",
+                )?;
             }
             HirType::Bool => {
                 let true_string = self
@@ -349,41 +357,40 @@ impl<'ctx> HirCompiler<'ctx> {
                         "optional_bool_string",
                     )
                     .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[selected.into()],
-                        "puts_optional_bool",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    selected.into_pointer_value(),
+                    newline,
+                    "console_optional_bool",
+                )?;
             }
             HirType::Str => {
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[payload.into_pointer_value().into()],
-                        "puts_optional_string",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    payload.into_pointer_value(),
+                    newline,
+                    "console_optional_string",
+                )?;
             }
             HirType::Optional(inner) => {
-                self.compile_console_tagged(payload.into_struct_value(), inner, "undefined")?;
+                self.compile_console_tagged(
+                    payload.into_struct_value(),
+                    inner,
+                    "undefined",
+                    newline,
+                )?;
             }
             HirType::Nullable(inner) => {
-                self.compile_console_tagged(payload.into_struct_value(), inner, "null")?;
+                self.compile_console_tagged(payload.into_struct_value(), inner, "null", newline)?;
             }
             HirType::Object(_) => {
                 let object = self
                     .builder
                     .build_global_string_ptr("[object Object]", "optional_object")
                     .map_err(|error| error.to_string())?;
-                self.builder
-                    .build_call(
-                        self.module.get_function("puts").unwrap(),
-                        &[object.as_pointer_value().into()],
-                        "puts_optional_object",
-                    )
-                    .map_err(|error| error.to_string())?;
+                self.compile_console_text(
+                    object.as_pointer_value(),
+                    newline,
+                    "console_optional_object",
+                )?;
             }
             other => {
                 return Err(format!(
@@ -402,6 +409,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         value: StructValue<'ctx>,
         payload_type: &HirType,
+        newline: bool,
     ) -> Result<(), String> {
         let tag = self
             .builder
@@ -438,13 +446,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_global_string_ptr("undefined", "nullish_undefined_string")
             .map_err(|error| error.to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("puts").unwrap(),
-                &[undefined.as_pointer_value().into()],
-                "puts_nullish_undefined",
-            )
-            .map_err(|error| error.to_string())?;
+        self.compile_console_text(
+            undefined.as_pointer_value(),
+            newline,
+            "console_nullish_undefined",
+        )?;
         self.builder
             .build_unconditional_branch(merge_block)
             .map_err(|error| error.to_string())?;
@@ -472,7 +478,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_insert_value(tagged, payload, 1, "nullish_console_payload")
             .map_err(|error| error.to_string())?
             .into_struct_value();
-        self.compile_console_tagged(tagged, payload_type, "null")?;
+        self.compile_console_tagged(tagged, payload_type, "null", newline)?;
         self.builder
             .build_unconditional_branch(merge_block)
             .map_err(|error| error.to_string())?;
