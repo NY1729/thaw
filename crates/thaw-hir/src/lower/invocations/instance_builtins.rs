@@ -11,7 +11,7 @@ impl<'a> FnLowerer<'a> {
             property,
             "charCodeAt" | "codePointAt" | "concat" | "trim" | "trimStart" | "trimEnd"
                 | "repeat" | "padStart" | "padEnd" | "toFixed" | "toPrecision" | "localeCompare"
-                | "normalize" | "split" | "replace" | "replaceAll" | "test"
+                | "normalize" | "split" | "replace" | "replaceAll" | "test" | "match"
                 | "toLowerCase" | "toUpperCase" | "isWellFormed" | "toWellFormed"
                 | "toReversed" | "sort" | "toSorted" | "some" | "every" | "find"
                 | "findIndex" | "findLast" | "findLastIndex" | "reduce" | "reduceRight"
@@ -180,6 +180,83 @@ impl<'a> FnLowerer<'a> {
                             &[(receiver_name, HirType::Str, receiver)],
                         );
                     }
+                    let regex_type = regex_object_type();
+                    if self.infer_expr_type(&arguments[0])? == regex_type {
+                        if arguments.len() > 1 {
+                            return Err(
+                                "native `.split()` does not support a limit with a RegExp separator"
+                                    .into(),
+                            );
+                        }
+                        let pattern = arguments[0].clone();
+                        let receiver_name =
+                            format!("__thaw_regex_split_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let pattern_name =
+                            format!("__thaw_regex_split_pattern_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
+                        self.scope.insert(pattern_name.clone(), regex_type.clone());
+                        let source = HirExpr::PropAccess(
+                            Box::new(HirExpr::Var(pattern_name.clone())),
+                            regex_type.clone(),
+                            "source".to_string(),
+                        );
+                        let flags = HirExpr::PropAccess(
+                            Box::new(HirExpr::Var(pattern_name.clone())),
+                            regex_type.clone(),
+                            "flags".to_string(),
+                        );
+                        let array_type = HirType::Array(Box::new(HirType::Str));
+                        let raw_name = format!("__thaw_regex_split_raw_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(raw_name.clone(), array_type.clone());
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Let(
+                                raw_name.clone(),
+                                array_type.clone(),
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_regex_split".to_string())),
+                                    vec![HirExpr::Var(receiver_name.clone()), source, flags],
+                                ),
+                            ),
+                            HirStmt::If(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_is_null".into())),
+                                    vec![HirExpr::Var(raw_name.clone())],
+                                ),
+                                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                    "invalid regular expression".into(),
+                                )))],
+                                Vec::new(),
+                            ),
+                            HirStmt::Return(Some(HirExpr::Var(raw_name))),
+                        ]);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|captured| {
+                                self.scope
+                                    .get(&captured)
+                                    .cloned()
+                                    .map(|ty| HirParam { name: captured, ty })
+                            })
+                            .collect();
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                array_type,
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        );
+                        let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((pattern_name, regex_type, pattern));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     let separator = self.coerce_primitive_to_string(arguments[0].clone())?;
                     let limit = match arguments.get(1) {
                         Some(argument) => self.coerce_primitive_to_number(argument.clone())?,
@@ -222,6 +299,97 @@ impl<'a> FnLowerer<'a> {
                             property.sym
                         ));
                     };
+                    let regex_type = regex_object_type();
+                    if self.infer_expr_type(search)? == regex_type {
+                        let pattern = search.clone();
+                        let replacement = self.coerce_primitive_to_string(replacement.clone())?;
+                        let intrinsic = if property.sym == *"replace" {
+                            "__thaw_regex_replace"
+                        } else {
+                            "__thaw_regex_replace_all"
+                        };
+                        let receiver_name =
+                            format!("__thaw_regex_replace_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let pattern_name =
+                            format!("__thaw_regex_replace_pattern_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let replacement_name =
+                            format!("__thaw_regex_replace_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
+                        self.scope.insert(pattern_name.clone(), regex_type.clone());
+                        self.scope.insert(replacement_name.clone(), HirType::Str);
+                        let source = HirExpr::PropAccess(
+                            Box::new(HirExpr::Var(pattern_name.clone())),
+                            regex_type.clone(),
+                            "source".to_string(),
+                        );
+                        let flags = HirExpr::PropAccess(
+                            Box::new(HirExpr::Var(pattern_name.clone())),
+                            regex_type.clone(),
+                            "flags".to_string(),
+                        );
+                        let raw_name = format!("__thaw_regex_replace_raw_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(raw_name.clone(), HirType::Str);
+                        let error_message = if property.sym == *"replace" {
+                            "invalid regular expression"
+                        } else {
+                            "replaceAll must be called with a global RegExp"
+                        };
+                        let body = HirExpr::Block(vec![
+                            HirStmt::Let(
+                                raw_name.clone(),
+                                HirType::Str,
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var(intrinsic.to_string())),
+                                    vec![
+                                        HirExpr::Var(receiver_name.clone()),
+                                        source,
+                                        flags,
+                                        HirExpr::Var(replacement_name.clone()),
+                                    ],
+                                ),
+                            ),
+                            HirStmt::If(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                                    vec![HirExpr::Var(raw_name.clone())],
+                                ),
+                                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                    error_message.into(),
+                                )))],
+                                Vec::new(),
+                            ),
+                            HirStmt::Return(Some(HirExpr::Var(raw_name))),
+                        ]);
+                        let mut referenced = BTreeSet::new();
+                        collect_referenced_bindings(&body, &mut referenced);
+                        let captures = referenced
+                            .into_iter()
+                            .filter_map(|captured| {
+                                self.scope
+                                    .get(&captured)
+                                    .cloned()
+                                    .map(|ty| HirParam { name: captured, ty })
+                            })
+                            .collect();
+                        let result = HirExpr::Call(
+                            Box::new(HirExpr::Lambda(
+                                captures,
+                                Vec::new(),
+                                HirType::Str,
+                                Box::new(body),
+                            )),
+                            Vec::new(),
+                        );
+                        let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((pattern_name, regex_type, pattern));
+                        bindings.push((replacement_name, HirType::Str, replacement));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     let search = self.coerce_primitive_to_string(search.clone())?;
                     let replacement = self.coerce_primitive_to_string(replacement.clone())?;
                     let intrinsic = if property.sym == *"replace" {
@@ -286,6 +454,90 @@ impl<'a> FnLowerer<'a> {
                     let mut bindings = vec![(receiver_name, regex_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((value_name, HirType::Str, value));
+                    return self.wrap_call_argument_bindings(result, &bindings);
+                }
+                if property.sym == *"match" {
+                    let receiver = self.lower_expr(&member.obj)?;
+                    self.expect_type(&HirType::Str, &receiver, "match receiver")?;
+                    let (arguments, spread_bindings) =
+                        self.lower_native_spread_values(&call.args, "String.match")?;
+                    let [pattern] = arguments.as_slice() else {
+                        return Err("native `.match()` expects exactly one argument".into());
+                    };
+                    let regex_type = regex_object_type();
+                    if self.infer_expr_type(pattern)? != regex_type {
+                        return Err("native `.match()` requires a RegExp argument".into());
+                    }
+                    let pattern = pattern.clone();
+                    let receiver_name = format!("__thaw_match_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let pattern_name = format!("__thaw_match_pattern_{}", self.next_binding);
+                    self.next_binding += 1;
+                    let raw_name = format!("__thaw_match_raw_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(receiver_name.clone(), HirType::Str);
+                    self.scope.insert(pattern_name.clone(), regex_type.clone());
+                    let array_type = HirType::Array(Box::new(HirType::Str));
+                    self.scope.insert(raw_name.clone(), array_type.clone());
+                    let var = |name: &str| HirExpr::Var(name.into());
+                    let source = HirExpr::PropAccess(
+                        Box::new(var(&pattern_name)),
+                        regex_type.clone(),
+                        "source".to_string(),
+                    );
+                    let flags = HirExpr::PropAccess(
+                        Box::new(var(&pattern_name)),
+                        regex_type.clone(),
+                        "flags".to_string(),
+                    );
+                    let body = HirExpr::Block(vec![
+                        HirStmt::Let(
+                            raw_name.clone(),
+                            array_type.clone(),
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_regex_match".into())),
+                                vec![var(&receiver_name), source, flags],
+                            ),
+                        ),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_is_null".into())),
+                                vec![var(&raw_name)],
+                            ),
+                            vec![HirStmt::Return(Some(HirExpr::OptionalNone(
+                                array_type.clone(),
+                            )))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(HirExpr::OptionalSome(
+                            Box::new(var(&raw_name)),
+                            array_type.clone(),
+                        ))),
+                    ]);
+                    let result_type = HirType::Optional(Box::new(array_type));
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|captured| {
+                            self.scope
+                                .get(&captured)
+                                .cloned()
+                                .map(|ty| HirParam { name: captured, ty })
+                        })
+                        .collect();
+                    let result = HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            Vec::new(),
+                            result_type,
+                            Box::new(body),
+                        )),
+                        Vec::new(),
+                    );
+                    let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                    bindings.extend(spread_bindings);
+                    bindings.push((pattern_name, regex_type, pattern));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
                 if property.sym == *"codePointAt" {

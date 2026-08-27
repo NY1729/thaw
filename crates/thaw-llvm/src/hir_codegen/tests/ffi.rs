@@ -1722,6 +1722,77 @@ fn compiles_regex_test() {
 }
 
 #[test]
+fn compiles_string_match() {
+    let source = r#"
+        function printMatch(result: string[] | undefined): void {
+            if (result !== undefined) {
+                for (const part of result) {
+                    console.log(part);
+                }
+            } else {
+                console.log("no match");
+            }
+        }
+        function value(): string {
+            console.log("value");
+            return "a1b2c3";
+        }
+        function pattern(): RegExp {
+            console.log("pattern");
+            return /\d/g;
+        }
+        async function delayedValue(): Promise<string> {
+            console.log("awaited value");
+            await sleep(1);
+            return "abc123def";
+        }
+        async function main(): Promise<void> {
+            printMatch("abc123def".match(/\d+/));
+            printMatch("a1b2c3".match(/\d/g));
+            printMatch("abc".match(/\d+/));
+            printMatch(value().match(pattern()));
+            printMatch((await delayedValue()).match(/\d+/));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "string_match"),
+        "123\n1\n2\n3\nno match\nvalue\npattern\n1\n2\n3\nawaited value\n123\n"
+    );
+}
+
+#[test]
+fn compiles_regex_split_and_replace() {
+    let source = r#"
+        function printAll(parts: string[]): void {
+            for (const part of parts) {
+                console.log(part);
+            }
+        }
+        async function main(): Promise<void> {
+            printAll("a1b2c3".split(/\d/));
+            printAll("a b  c".split(/\s+/));
+            console.log("a1b2c3".replace(/\d/, "X"));
+            console.log("a1b2c3".replace(/\d/g, "X"));
+            console.log("a1b2c3".replaceAll(/\d/g, "X"));
+            try {
+                "a1b2c3".replaceAll(/\d/, "X");
+            } catch (error) {
+                console.log(error);
+            }
+            try {
+                "abc".split(/(?=x)/);
+            } catch (error) {
+                console.log(error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "regex_split_and_replace"),
+        "a\nb\nc\n\na\nb\nc\naXb2c3\naXbXcX\naXbXcX\nreplaceAll must be called with a global RegExp\ninvalid regular expression\n"
+    );
+}
+
+#[test]
 fn compiles_well_formed_native_strings() {
     let source = r#"
         function text(): string {
