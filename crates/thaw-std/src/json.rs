@@ -568,6 +568,25 @@ pub extern "C" fn thaw_json_object_delete(object: *mut Value, key: *const c_char
     1
 }
 
+#[no_mangle]
+/// # Safety
+///
+/// `target` and `source` must be null or point to valid JSON values.
+pub unsafe extern "C" fn thaw_json_object_assign(
+    target: *mut Value,
+    source: *const Value,
+) -> *mut Value {
+    let Some(target_fields) = (unsafe { target.as_mut() }).and_then(Value::as_object_mut) else {
+        return target;
+    };
+    if let Some(source_fields) = (unsafe { source.as_ref() }).and_then(Value::as_object) {
+        for (key, value) in source_fields {
+            target_fields.insert(key.clone(), value.clone());
+        }
+    }
+    target
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

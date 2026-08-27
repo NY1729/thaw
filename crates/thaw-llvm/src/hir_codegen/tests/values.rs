@@ -2436,6 +2436,42 @@ fn compiles_object_from_typed_entries() {
 }
 
 #[test]
+fn compiles_object_assign_for_runtime_keyed_objects() {
+    let source = r#"
+        function source(label: string, shared: number): Record<string, number> {
+            console.log(label);
+            return { shared, second: 2 };
+        }
+        async function delayed(): Promise<Record<string, number>> {
+            await sleep(1);
+            console.log("awaited");
+            return { shared: 3, third: 4 };
+        }
+        async function main(): Promise<void> {
+            const target: Record<string, number> = { first: 1, shared: 1 };
+            const result: Record<string, number> = Object.assign(
+                target, source("source", 2), await delayed()
+            );
+            console.log(Object.keys(result).join(","));
+            console.log(result.shared);
+            console.log(result.second);
+            console.log(result.third);
+            console.log(target.shared);
+            console.log(Object.assign(target).first);
+            const jsonTarget: Json = JSON.parse("{\"first\":1}");
+            const jsonResult: Json = Object.assign(
+                jsonTarget, JSON.parse("{\"second\":2}")
+            );
+            console.log(JSON.stringify(jsonResult));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "object_assign"),
+        "source\nawaited\nfirst,shared,second,third\n3\n2\n4\n3\n1\n{\"first\":1,\"second\":2}\n"
+    );
+}
+
+#[test]
 fn compiles_object_is_same_value_comparisons() {
     let source = r#"
         interface Item { value: number; }

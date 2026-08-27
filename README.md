@@ -1329,6 +1329,9 @@ The workspace crates have narrow responsibilities:
 - `Object.fromEntries` constructs typed `Record<string, T>` values from native
   `[string, T][]` arrays for number, string, boolean and JSON values; duplicate
   keys use the last entry and awaited entry arrays are evaluated once
+- `Object.assign` mutates and returns a runtime-keyed `Record` or JSON target,
+  applies matching sources left-to-right, and preserves source evaluation order
+  across awaited expressions
 - `Object.hasOwn` checks fixed-object, runtime-keyed `Record`, and runtime JSON
   object/array own properties, including array indices and `length`
 - The `in` operator accepts dynamic primitive keys for fixed objects and checks

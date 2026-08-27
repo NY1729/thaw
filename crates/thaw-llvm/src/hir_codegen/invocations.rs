@@ -743,6 +743,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     "Object.fromEntries",
                 )
             }
+            "__thaw_json_object_assign" => {
+                let [target, source] = args else {
+                    return Err("Object.assign expects two internal operands".into());
+                };
+                let target = self.compile_expr(target)?;
+                let source = self.compile_expr(source)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_json_object_assign").unwrap(),
+                        &[target.into(), source.into()],
+                        "object_assign",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Object.assign returned no value".into());
+            }
             "__thaw_json_has_own" => {
                 let [value, key] = args else {
                     return Err("Object.hasOwn expects two operands".to_string());

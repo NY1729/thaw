@@ -625,6 +625,21 @@ impl<'a> FnLowerer<'a> {
                         )?;
                         return Ok(HirType::Dictionary(Box::new(element)));
                     }
+                    "__thaw_json_object_assign" => {
+                        let [target, source] = args.as_slice() else {
+                            return Err("Object.assign expects two internal operands".into());
+                        };
+                        let target_type = self.infer_expr_type(target)?;
+                        let source_type = self.infer_expr_type(source)?;
+                        if target_type != source_type
+                            || !matches!(target_type, HirType::Json | HirType::Dictionary(_))
+                        {
+                            return Err(format!(
+                                "Object.assign requires matching JSON or dictionary operands, got {target_type:?} and {source_type:?}"
+                            ));
+                        }
+                        return Ok(target_type);
+                    }
                     "__thaw_json_has_own" => {
                         let [value, key] = args.as_slice() else {
                             return Err("Object.hasOwn expects two operands".into());
